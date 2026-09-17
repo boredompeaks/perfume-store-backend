@@ -18,13 +18,19 @@ See `.env.example`. Required in production: `DJANGO_SECRET_KEY`, `DJANGO_DEBUG=f
 
 ## Project layout
 
+This repository is a **monorepo**:
+
 ```
-config/     Django project (settings, urls, wsgi/asgi)
-accounts/   JWT auth, registration, email verification, password reset
-products/   Product catalog (CRUD, search, filter, pagination)
-cart/       Anonymous session-based cart
-orders/     Checkout, coupons, Razorpay payment creation/verification
-docs/       Audit, architecture, conventions, fix plan, changelog
+backend/    Django project (this app)
+  config/     settings, urls, wsgi/asgi
+  accounts/   JWT auth, registration, email verification, password reset
+  products/   Product catalog (CRUD, search, filter, pagination)
+  cart/       Anonymous session-based cart
+  orders/     Checkout, coupons, Razorpay payment creation/verification
+  docs/       Audit, architecture, conventions, fix plan, changelog
+  requirements.txt
+frontend/   Next.js 16 storefront (see frontend/PLAN.md)
+BACKEND_REQUESTS.md   cross-repo backend gaps logged by the frontend team
 ```
 
 ## API map

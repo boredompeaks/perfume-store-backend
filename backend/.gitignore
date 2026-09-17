@@ -1,11 +1,17 @@
-# Monorepo root gitignore (merged backend + frontend)
-
-# Python / Django
+# Python
 __pycache__/
 *.py[cod]
 *.egg-info/
+.eggs/
+build/
+dist/
+
+# Virtual environments
 venv/
 .venv/
+env/
+
+# Django
 db.sqlite3
 db.sqlite3-journal
 media/
@@ -15,23 +21,13 @@ staticfiles/
 .env
 .env.*
 !.env.example
-!.env.local.example
-
-# Node / Next.js
-node_modules/
-.next/
-out/
-*.tsbuildinfo
-next-env.d.ts
 
 # Testing / coverage
 .coverage
 .coverage.*
 htmlcov/
 .pytest_cache/
-test-results/
-playwright-report/
-e2e/artifacts/
+.tox/
 
 # Editors / OS
 .vscode/
@@ -40,6 +36,5 @@ e2e/artifacts/
 .DS_Store
 Thumbs.db
 
-# Tooling / local
-.opencode/
-.git-frontend-backup/
+# Git
+*.orig
