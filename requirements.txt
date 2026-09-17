@@ -1,0 +1,9 @@
+# Direct dependencies (pinned from venv install, Python 3.14.2)
+# Transitive deps are resolved by pip; regenerate with `pip freeze` if needed.
+Django==6.1.1
+djangorestframework==3.18.1
+djangorestframework-simplejwt==5.5.1
+django-cors-headers==4.9.0
+razorpay==2.0.1
+python-dotenv==1.2.3
+Pillow==12.3.0
