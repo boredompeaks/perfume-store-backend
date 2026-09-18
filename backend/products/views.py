@@ -2,15 +2,20 @@ from django.db.models import Q
 from django.core.paginator import Paginator
 from decimal import Decimal, InvalidOperation
 
-from rest_framework.decorators import api_view
+from rest_framework.decorators import api_view, permission_classes
 from rest_framework.response import Response
 from rest_framework import status
+
+from common.permissions import IsAdminUserOrReadOnly
 
 from .models import products
 from .serializers import ProductSerializer
 
 
+# Staff-gated writes via permission_classes (conventions.md: never inline
+# is_staff); catalogue reads stay public, so the class is method-aware.
 @api_view(['GET', 'POST'])
+@permission_classes([IsAdminUserOrReadOnly])
 def product_list(request):
 
     # =========================
@@ -110,12 +115,6 @@ def product_list(request):
 
     elif request.method == 'POST':
 
-        if not request.user.is_staff:
-            return Response(
-                {'detail': 'Administrator access is required.'},
-                status=status.HTTP_403_FORBIDDEN
-            )
-
         serializer = ProductSerializer(
             data=request.data
         )
@@ -139,6 +138,7 @@ def product_list(request):
 # ==================================
 
 @api_view(['GET', 'PUT', 'PATCH', 'DELETE'])
+@permission_classes([IsAdminUserOrReadOnly])
 def product_detail(request, slug):
 
     # Find product
@@ -169,9 +169,6 @@ def product_detail(request, slug):
 
     elif request.method == 'PUT':
 
-        if not request.user.is_staff:
-            return Response({'detail': 'Administrator access is required.'}, status=status.HTTP_403_FORBIDDEN)
-
         serializer = ProductSerializer(
             product,
             data=request.data
@@ -194,9 +191,6 @@ def product_detail(request, slug):
     # =========================
 
     elif request.method == 'PATCH':
-
-        if not request.user.is_staff:
-            return Response({'detail': 'Administrator access is required.'}, status=status.HTTP_403_FORBIDDEN)
 
         serializer = ProductSerializer(
             product,
@@ -221,9 +215,6 @@ def product_detail(request, slug):
     # =========================
 
     elif request.method == 'DELETE':
-
-        if not request.user.is_staff:
-            return Response({'detail': 'Administrator access is required.'}, status=status.HTTP_403_FORBIDDEN)
 
         product.delete()
 

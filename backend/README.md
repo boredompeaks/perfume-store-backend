@@ -41,6 +41,8 @@ BACKEND_REQUESTS.md   cross-repo backend gaps logged by the frontend team
 | `api/products/` | list (search/category/price/ordering/pagination), detail by slug |
 | `api/cart/` | get/add items (session), item patch/delete |
 | `api/orders/` | list (JWT), checkout, apply-coupon, payment, payment/verify |
+| `api/settings/` | store contact channels (admin-editable via Site settings) |
+| `health/` | health monitor — DB, media writability, SMTP config, Razorpay mode, pending/low-stock counts |
 
 ## Docs
 

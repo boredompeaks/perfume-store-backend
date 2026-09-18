@@ -1,0 +1,61 @@
+name: backend-tests
+
+on:
+  push:
+    branches: [spec-comp, feat/add-frontend, master]
+    paths: ["backend/**", ".github/workflows/backend-tests.yml"]
+  pull_request:
+    branches: [spec-comp, feat/add-frontend, master]
+    paths: ["backend/**", ".github/workflows/backend-tests.yml"]
+
+# Least privilege: the suite only needs to read the checkout.
+permissions:
+  contents: read
+
+# One run per ref; a new push to the same ref cancels the stale run.
+concurrency:
+  group: backend-tests-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: backend
+    env:
+      # CI never reads a real .env; dummy Razorpay values prove the suite
+      # never depends on live credentials (V-01 containment).
+      DJANGO_DEBUG: "true"
+      RAZORPAY_KEY_ID: rzp_test_CI_DUMMY
+      RAZORPAY_KEY_SECRET: ci-dummy-secret
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.14"
+          cache: pip
+          cache-dependency-path: backend/requirements.txt
+
+      - name: Install pinned dependencies
+        run: pip install -r requirements.txt
+
+      - name: Django system check
+        run: python manage.py check
+
+      - name: Migration drift check
+        run: python manage.py makemigrations --check --dry-run
+
+      - name: Test suite with coverage gate (fail under 90%)
+        run: |
+          python -m coverage run manage.py test
+          python -m coverage report
+
+      - name: Upload coverage HTML report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-html
+          path: backend/htmlcov/
+          retention-days: 7

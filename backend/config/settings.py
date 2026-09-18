@@ -11,6 +11,7 @@ https://docs.djangoproject.com/en/6.1/ref/settings/
 """
 
 from pathlib import Path
+from urllib.parse import unquote, urlparse
 import os
 from dotenv import load_dotenv
 
@@ -51,6 +52,7 @@ INSTALLED_APPS = [
     'cart',
     'orders',
     'accounts',
+    'ops',
     'corsheaders',
 ]
 
@@ -70,7 +72,7 @@ ROOT_URLCONF = 'config.urls'
 TEMPLATES = [
     {
         'BACKEND': 'django.template.backends.django.DjangoTemplates',
-        'DIRS': [],
+        'DIRS': [BASE_DIR / 'templates'],
         'APP_DIRS': True,
         'OPTIONS': {
             'context_processors': [
@@ -88,12 +90,73 @@ WSGI_APPLICATION = 'config.wsgi.application'
 # Database
 # https://docs.djangoproject.com/en/6.1/ref/settings/#databases
 
-DATABASES = {
-    'default': {
+
+def _database_from_url(url):
+    """Return a DATABASES['default'] entry for a DATABASE_URL, fail-safely.
+
+    Parsed with stdlib urllib.parse rather than dj-database-url because that
+    dependency (with psycopg) is deliberately deferred to the S22 deployment
+    work, and the supported surface is only the two schemes this project
+    needs. A missing, malformed, or unsupported URL falls back to the sqlite
+    dev database instead of crashing startup — the same fail-safe pattern
+    as _env_int below.
+    """
+    fallback = {
         'ENGINE': 'django.db.backends.sqlite3',
         'NAME': BASE_DIR / 'db.sqlite3',
     }
-}
+    if not url:
+        return fallback
+    try:
+        parsed = urlparse(url)
+        # Accessing .port validates it: a malformed port raises ValueError.
+        port = parsed.port
+    except ValueError:
+        return fallback
+    scheme = parsed.scheme.lower()
+    if scheme in ('postgres', 'postgresql'):
+        # The db name is never a filesystem path, so stripping all leading
+        # slashes is safe here and accepts both /name and name forms.
+        name = parsed.path.lstrip('/')
+        if not name:
+            return fallback
+        config = {
+            'ENGINE': 'django.db.backends.postgresql',
+            'NAME': name,
+        }
+        if parsed.username:
+            config['USER'] = unquote(parsed.username)
+        if parsed.password is not None:
+            config['PASSWORD'] = unquote(parsed.password)
+        if parsed.hostname:
+            config['HOST'] = parsed.hostname
+        if port is not None:
+            config['PORT'] = str(port)
+        # Extra query params (sslmode, ...) are deliberately ignored until
+        # the S22 deployment work wires SSL options through.
+        return config
+    if scheme == 'sqlite':
+        # Exactly one leading slash is stripped so that sqlite:///db.sqlite3
+        # names a file relative to BASE_DIR while the four-slash form
+        # (sqlite:////abs/path) and a drive prefix (sqlite:///C:/...) name
+        # an absolute one. Path.isabs() is platform-dependent, so the
+        # absolute check is done on the raw string instead.
+        raw = parsed.path
+        if raw.startswith('/'):
+            raw = raw[1:]
+        if not raw:
+            return fallback
+        name = Path(raw)
+        is_absolute = raw.startswith('/') or (len(raw) > 1 and raw[1] == ':')
+        return {
+            'ENGINE': 'django.db.backends.sqlite3',
+            'NAME': name if is_absolute else BASE_DIR / name,
+        }
+    # Unsupported scheme (mysql://, ...): fall back rather than crash.
+    return fallback
+
+
+DATABASES = {'default': _database_from_url(os.getenv('DATABASE_URL'))}
 
 
 # Password validation
@@ -147,10 +210,43 @@ FRONTEND_URL = os.getenv('FRONTEND_URL', 'http://localhost:3000').rstrip('/')
 MEDIA_URL = '/media/'
 MEDIA_ROOT = BASE_DIR / 'media'
 
+
+def _env_int(name, default):
+    # Env-driven ints must never take the app down at startup: a malformed
+    # value falls back to the documented default instead of raising.
+    try:
+        return int(os.getenv(name, str(default)))
+    except ValueError:
+        return default
+
+
+# Ops dashboard / /health/: a product with stock at or below this many units
+# counts as "low stock". Tunable per deployment without a code change.
+LOW_STOCK_THRESHOLD = _env_int('LOW_STOCK_THRESHOLD', 5)
+
+# Ops dashboard: the "Sales over time" chart covers this many calendar days
+# ending today. Tunable per deployment without a code change.
+DASHBOARD_SALES_WINDOW_DAYS = _env_int('DASHBOARD_SALES_WINDOW_DAYS', 30)
+
 REST_FRAMEWORK = {
     'DEFAULT_AUTHENTICATION_CLASSES': (
         'rest_framework_simplejwt.authentication.JWTAuthentication',
     ),
+    # Scoped throttling: every public mutating endpoint opts in by declaring
+    # a `throttle_scope`; views without a scope are left unthrottled by this
+    # class (conventions.md "Every public mutating endpoint gets a throttle
+    # scope", V-04). Rates are deployment-tunable via environment variables.
+    'DEFAULT_THROTTLE_CLASSES': (
+        'rest_framework.throttling.ScopedRateThrottle',
+    ),
+    'DEFAULT_THROTTLE_RATES': {
+        'coupon': os.getenv('THROTTLE_COUPON_RATE', '10/min'),
+        'cart': os.getenv('THROTTLE_CART_RATE', '60/min'),
+        'auth': os.getenv('THROTTLE_AUTH_RATE', '10/min'),
+        # Tighter than 'auth': the recovery views each send an email per
+        # accepted request, so this budget is the outbound-mail-bomb bound.
+        'recovery': os.getenv('THROTTLE_RECOVERY_RATE', '5/min'),
+    },
 }
 CORS_ALLOWED_ORIGINS = [origin for origin in os.getenv(
     'CORS_ALLOWED_ORIGINS', 'http://localhost:3000'

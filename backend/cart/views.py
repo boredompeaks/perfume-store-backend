@@ -1,13 +1,29 @@
-from rest_framework.decorators import api_view
+from rest_framework.decorators import api_view, throttle_classes, throttle_scope
 from rest_framework.response import Response
 from rest_framework import status
+from rest_framework.throttling import ScopedRateThrottle
 
 from .models import Cart, CartItem
 from .serializers import CartSerializer
 from products.models import products
 
 
+class CartMutationRateThrottle(ScopedRateThrottle):
+    """Applies the 'cart' scope to mutating methods only.
+
+    The cart view mixes GET (read) and POST (add) in one endpoint; reads
+    must not consume the mutation budget that guards write abuse, so safe
+    methods bypass the throttle."""
+
+    def allow_request(self, request, view):
+        if request.method in ('GET', 'HEAD', 'OPTIONS'):
+            return True
+        return super().allow_request(request, view)
+
+
 @api_view(['GET', 'POST'])
+@throttle_classes([CartMutationRateThrottle])
+@throttle_scope('cart')
 def cart_detail(request):
 
     # Get or create session
@@ -55,7 +71,8 @@ def cart_detail(request):
                 id=product_id
             )
 
-        except products.DoesNotExist:
+        except (products.DoesNotExist, ValueError, TypeError):
+            # ValueError/TypeError: non-numeric product_id must 404, not 500
             return Response(
                 {"error": "Product not found"},
                 status=status.HTTP_404_NOT_FOUND
@@ -115,6 +132,7 @@ def cart_detail(request):
             status=status.HTTP_201_CREATED
         )
 @api_view(['PATCH', 'DELETE'])
+@throttle_scope('cart')
 def cart_item_detail(request, item_id):
 
     # =========================
