@@ -4,11 +4,20 @@ from django.urls import path, include
 from django.conf import settings
 from django.conf.urls.static import static
 
+from ops.views import api_settings, dashboard, health
+
 
 urlpatterns = [
 
+    # Store dashboard (staff-only) — must be registered BEFORE the admin
+    # include, or the admin's URLconf swallows it and returns 404.
+    path('admin/dashboard/', dashboard, name='admin-dashboard'),
+
     path('admin/', 
         admin.site.urls),
+
+    path('health/', health, name='health'),
+    path('api/settings/', api_settings, name='api-settings'),
 
     path('api/products/', 
         include('products.urls')),

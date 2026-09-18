@@ -7,3 +7,4 @@ django-cors-headers==4.9.0
 razorpay==2.0.1
 python-dotenv==1.2.3
 Pillow==12.3.0
+coverage==7.16.1

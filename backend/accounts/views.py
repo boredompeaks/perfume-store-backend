@@ -18,6 +18,10 @@ def _encoded_user_id(user):
 
 
 def _get_user(uid):
+    # Guard against None/empty uid: urlsafe_base64_decode(None) would raise
+    # AttributeError (500) instead of the documented 400 (test-gaps #8).
+    if not uid:
+        return None
     try:
         return User.objects.get(pk=force_str(urlsafe_base64_decode(uid)))
     except (TypeError, ValueError, OverflowError, User.DoesNotExist):

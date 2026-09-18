@@ -55,7 +55,8 @@ def cart_detail(request):
                 id=product_id
             )
 
-        except products.DoesNotExist:
+        except (products.DoesNotExist, ValueError, TypeError):
+            # ValueError/TypeError: non-numeric product_id must 404, not 500
             return Response(
                 {"error": "Product not found"},
                 status=status.HTTP_404_NOT_FOUND

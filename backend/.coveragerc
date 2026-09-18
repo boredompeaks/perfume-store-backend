@@ -1,0 +1,28 @@
+# Coverage configuration for the backend test suite (docs/fix-plan.md Phase 5).
+# Run: venv\Scripts\python -m coverage run manage.py test && venv\Scripts\python -m coverage report
+# The gate: coverage report fails (exit != 0) below fail_under.
+[run]
+source = .
+omit =
+    venv/*
+    manage.py
+    config/wsgi.py
+    config/asgi.py
+    */migrations/*
+    common/*
+    tests/*
+    */tests.py
+
+[report]
+fail_under = 90
+precision = 2
+show_missing = true
+exclude_lines =
+    pragma: no cover
+    if TYPE_CHECKING:
+    # the DEBUG/SECRET_KEY guard below is exercised in a subprocess
+    # (tests/test_settings_security.py); in-process coverage cannot see it
+    if not DEBUG and not os.getenv\('DJANGO_SECRET_KEY'\)
+
+[html]
+directory = htmlcov

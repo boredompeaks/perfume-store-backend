@@ -1,0 +1,104 @@
+"""Shared logic for the admin dashboard and the /health/ endpoint."""
+from django.conf import settings
+from django.db.models import Count, Sum
+
+LOW_STOCK_THRESHOLD = 5
+
+REVENUE_STATUSES = ("confirmed", "shipped", "delivered")
+
+
+def _media_writable() -> bool:
+    try:
+        settings.MEDIA_ROOT.mkdir(parents=True, exist_ok=True)
+        probe = settings.MEDIA_ROOT / "health_probe.txt"
+        probe.write_text("ok", encoding="utf-8")
+        probe.unlink()
+        return True
+    except Exception:
+        return False
+
+
+def _razorpay_mode() -> str:
+    key = getattr(settings, "RAZORPAY_KEY_ID", "") or ""
+    if key.startswith("rzp_test_"):
+        return "test"
+    if key.startswith("rzp_live_"):
+        return "live"
+    return "unset"
+
+
+def get_health() -> dict:
+    """Cheap checks only — no network calls, safe to poll."""
+    from cart.models import Cart
+    from orders.models import Order
+    from products.models import products
+
+    checks = {}
+    try:
+        pending_orders = Order.objects.filter(status="pending").count()
+        carts = Cart.objects.count()
+        checks["database"] = True
+    except Exception:
+        pending_orders = None
+        carts = None
+        checks["database"] = False
+
+    checks["media_writable"] = _media_writable()
+    checks["smtp_configured"] = bool(
+        settings.EMAIL_HOST_USER and settings.EMAIL_HOST_PASSWORD
+    )
+    checks["razorpay_mode"] = _razorpay_mode()
+
+    low_stock = 0
+    out_of_stock = 0
+    if checks["database"]:
+        low_stock = products.objects.filter(
+            stock__gt=0, stock__lte=LOW_STOCK_THRESHOLD
+        ).count()
+        out_of_stock = products.objects.filter(stock=0).count()
+
+    status = "ok" if checks["database"] and checks["media_writable"] else "degraded"
+    return {
+        "status": status,
+        "checks": checks,
+        "pending_orders": pending_orders,
+        "carts": carts,
+        "low_stock": low_stock,
+        "out_of_stock": out_of_stock,
+        "low_stock_threshold": LOW_STOCK_THRESHOLD,
+    }
+
+
+def get_stats() -> dict:
+    from django.contrib.auth.models import User
+
+    from orders.models import Order
+    from products.models import products
+
+    from .models import SiteSettings
+
+    by_status = {status: 0 for status, _ in Order.STATUS_CHOICES}
+    for row in Order.objects.values("status").annotate(n=Count("id")):
+        by_status[row["status"]] = row["n"]
+
+    revenue = (
+        Order.objects.filter(status__in=REVENUE_STATUSES).aggregate(
+            total=Sum("total_amount")
+        )["total"]
+        or 0
+    )
+
+    settings_row = SiteSettings.load()
+    return {
+        "users": User.objects.count(),
+        "products": products.objects.count(),
+        "orders_total": sum(by_status.values()),
+        "orders_by_status": by_status,
+        "revenue": str(revenue),
+        "recent_orders": list(
+            Order.objects.order_by("-created_at").values(
+                "id", "status", "total_amount", "created_at", "user_id"
+            )[:10]
+        ),
+        "support_email": settings_row.support_email,
+    }

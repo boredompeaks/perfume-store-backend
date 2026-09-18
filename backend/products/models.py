@@ -40,5 +40,72 @@ class products(models.Model):
 
         super().save(*args, **kwargs)
 
+    def adjust_stock(self, user, delta: int, reason: str, note: str = "") -> None:
+        """Admin-side inventory adjustment. Raises ValueError if the change
+        would push stock below zero. Payment-time decrements (orders flow)
+        deliberately do NOT create movements — this ledger tracks manual
+        admin adjustments only."""
+        new_stock = self.stock + delta
+        if new_stock < 0:
+            raise ValueError(
+                f"{self.name}: adjustment of {delta:+d} would push stock below zero "
+                f"(current: {self.stock})."
+            )
+        self.stock = new_stock
+        self.save(update_fields=["stock"])
+        StockMovement.objects.create(
+            product=self,
+            delta=delta,
+            reason=reason,
+            note=note,
+            stock_after=self.stock,
+            created_by=user if getattr(user, "is_authenticated", False) else None,
+        )
+
+    @property
+    def stock_health(self) -> str:
+        if self.stock == 0:
+            return "out"
+        if self.stock <= 5:
+            return "low"
+        return "ok"
+
     def __str__(self):
         return self.name
+
+
+class StockMovement(models.Model):
+    """Audit ledger for manual inventory adjustments made in the admin."""
+
+    class Reason(models.TextChoices):
+        RESTOCK = "restock", "Restock"
+        CORRECTION = "correction", "Stock correction"
+        DAMAGE = "damage", "Damaged / write-off"
+        RETURNED = "returned", "Customer return"
+        OTHER = "other", "Other"
+
+    product = models.ForeignKey(
+        products,
+        on_delete=models.CASCADE,
+        related_name="stock_movements",
+    )
+    delta = models.IntegerField()
+    stock_after = models.PositiveBigIntegerField()
+    reason = models.CharField(max_length=20, choices=Reason.choices)
+    note = models.CharField(max_length=200, blank=True, default="")
+    created_by = models.ForeignKey(
+        "auth.User",
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="stock_movements",
+    )
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ("-created_at",)
+        verbose_name = "Stock movement"
+        verbose_name_plural = "Stock movements"
+
+    def __str__(self):
+        return f"{self.product.name}: {self.delta:+d} ({self.reason})"

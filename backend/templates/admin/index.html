@@ -1,0 +1,7 @@
+{% extends "admin/index.html" %}
+{% load ops_dashboard %}
+
+{% block content %}
+  {% ops_dashboard_cards %}
+  {{ block.super }}
+{% endblock %}

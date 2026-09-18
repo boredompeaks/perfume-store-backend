@@ -1,15 +1,22 @@
-# Test gaps — FLAGGED
+# Test gaps — FLAGGED → IMPLEMENTED (2026-09-18)
 
-Runtime-confirmed: `manage.py test` → **Found 0 test(s)**.
+The enumerated backlog below has been implemented: `manage.py test` → **178 tests, 0 failures, 8 expected failures (documented flip tests)**; `coverage report` → **100.00%** with a `fail_under = 90` gate. Run it with:
+
+```bash
+venv\Scripts\python -m coverage run manage.py test
+venv\Scripts\python -m coverage report
+```
+
+Unit tests live in each app's `tests.py`; e2e/integration tests in the top-level `tests/` package. Razorpay is always mocked; the shared base class (`common/testing.py`) forces locmem email, dummy Razorpay keys and a temp media root.
 
 ## Current state
 
 | Metric | Count |
 |---|---|
 | Endpoints (API routes) | 18 |
-| Unit tests written | **0** |
-| E2E / integration tests written | **0** |
-| Code under automated test | **0%** |
+| Unit tests written | **150+ (accounts 35, products 35, cart 18, orders 45, ops 17)** |
+| E2E / integration tests written | **28 (`tests/` package)** |
+| Code under automated test | **100%** (gate: 90%) |
 
 An ad-hoc 20-step e2e smoke run (manual, not committed, in-memory DB) passed 20/20 — but it is throwaway and not repeatable in CI. Everything below must become permanent tests.
 

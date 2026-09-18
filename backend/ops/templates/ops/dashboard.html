@@ -1,0 +1,117 @@
+{% extends "admin/base_site.html" %}
+
+{% block title %}Store dashboard — {{ site_title|default:_("Django site admin") }}{% endblock %}
+
+{% block breadcrumbs %}
+  <div class="breadcrumbs">
+    <a href="/admin/">Home</a>
+    &rsaquo; Store dashboard
+  </div>
+{% endblock %}
+
+{% block content %}
+  <div id="content-main">
+    <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 12px; margin-bottom: 24px;">
+      <div class="module" style="padding: 14px;">
+        <div style="font-size: 11px; color: #666; text-transform: uppercase;">Revenue (paid)</div>
+        <div style="font-size: 26px; font-weight: 600;">₹{{ stats.revenue }}</div>
+        <div style="font-size: 11px; color: #666;">confirmed + shipped + delivered</div>
+      </div>
+      {% for status, n in stats.orders_by_status.items %}
+        <div class="module" style="padding: 14px;">
+          <div style="font-size: 11px; color: #666; text-transform: uppercase;">Orders · {{ status }}</div>
+          <div style="font-size: 26px; font-weight: 600;">{{ n }}</div>
+        </div>
+      {% endfor %}
+    </div>
+
+    <div class="module" style="padding: 14px; margin-bottom: 24px;">
+      <h2 style="margin: 0 0 8px 0; font-size: 14px;">Health monitor</h2>
+      <table>
+        <tr><th style="width: 220px;">Database</th><td>{% if health.checks.database %}<strong style="color:#2e7d32;">OK</strong>{% else %}<strong style="color:#c62828;">DOWN</strong>{% endif %}</td></tr>
+        <tr><th>Media directory writable</th><td>{% if health.checks.media_writable %}<strong style="color:#2e7d32;">OK</strong> (product images can upload){% else %}<strong style="color:#c62828;">FAILING</strong> (image uploads will break){% endif %}</td></tr>
+        <tr><th>SMTP</th><td>{% if health.checks.smtp_configured %}<strong style="color:#2e7d32;">Configured</strong> (verification / reset emails can send){% else %}<strong style="color:#e6a700;">Not configured</strong> — set EMAIL_HOST_PASSWORD in .env and restart{% endif %}</td></tr>
+        <tr><th>Razorpay key mode</th><td>{{ health.checks.razorpay_mode }}</td></tr>
+        <tr><th>Open carts</th><td>{{ health.carts }}</td></tr>
+        <tr><th>Orders pending payment</th><td>{{ health.pending_orders }}</td></tr>
+        <tr><th>Low stock (≤ {{ health.low_stock_threshold }})</th><td>{{ health.low_stock }}</td></tr>
+        <tr><th>Out of stock</th><td>{{ health.out_of_stock }}</td></tr>
+        <tr><th>Health JSON</th><td><a href="/health/">/health/</a> (public, pollable)</td></tr>
+      </table>
+    </div>
+
+    <div class="module" style="margin-bottom: 24px;">
+      <h2 style="padding: 8px 10px; margin: 0;">Recent orders</h2>
+      <table>
+        <thead>
+          <tr><th>Order</th><th>Customer</th><th>Status</th><th>Total</th><th>Created</th></tr>
+        </thead>
+        <tbody>
+          {% for order in recent_orders %}
+            <tr>
+              <td><a href="/admin/orders/order/{{ order.id }}/change/">#{{ order.id }}</a></td>
+              <td>{{ order.username }}</td>
+              <td>{{ order.status }}</td>
+              <td>₹{{ order.total_amount }}</td>
+              <td>{{ order.created_at|date:"d M Y H:i" }}</td>
+            </tr>
+          {% empty %}
+            <tr><td colspan="5">No orders yet.</td></tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+
+    <div class="module" style="margin-bottom: 24px;">
+      <h2 style="padding: 8px 10px; margin: 0;">Recent inventory adjustments</h2>
+      <table>
+        <thead>
+          <tr><th>Product</th><th>Change</th><th>Stock after</th><th>Reason</th><th>By</th><th>When</th></tr>
+        </thead>
+        <tbody>
+          {% for m in recent_movements %}
+            <tr>
+              <td>{{ m.product.name }}</td>
+              <td>{% if m.delta > 0 %}<strong style="color:#2e7d32;">{{ m.delta|add:"0" }}</strong>{% else %}<strong style="color:#c62828;">{{ m.delta }}</strong>{% endif %}</td>
+              <td>{{ m.stock_after }}</td>
+              <td>{{ m.get_reason_display }}{% if m.note %} — {{ m.note }}{% endif %}</td>
+              <td>{{ m.created_by.username|default:"system" }}</td>
+              <td>{{ m.created_at|date:"d M H:i" }}</td>
+            </tr>
+          {% empty %}
+            <tr><td colspan="6">No manual adjustments yet.</td></tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+
+    <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(320px, 1fr)); gap: 16px;">
+      <div class="module">
+        <h2 style="padding: 8px 10px; margin: 0;">Low stock (≤ {{ health.low_stock_threshold }})</h2>
+        <table>
+          <thead><tr><th>Product</th><th>Stock</th><th></th></tr></thead>
+          <tbody>
+            {% for p in low_stock_items %}
+              <tr><td>{{ p.name }}</td><td>{{ p.stock }}</td><td><a href="/admin/products/products/{{ p.pk }}/change/">edit</a></td></tr>
+            {% empty %}
+              <tr><td colspan="3">Nothing running low.</td></tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      </div>
+      <div class="module">
+        <h2 style="padding: 8px 10px; margin: 0;">Out of stock</h2>
+        <table>
+          <thead><tr><th>Product</th><th></th></tr></thead>
+          <tbody>
+            {% for p in out_of_stock_items %}
+              <tr><td>{{ p.name }}</td><td><a href="/admin/products/products/{{ p.pk }}/change/">edit</a></td></tr>
+            {% empty %}
+              <tr><td colspan="2">All products have stock.</td></tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  </div>
+{% endblock %}

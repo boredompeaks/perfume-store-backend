@@ -1,0 +1,41 @@
+<div style="margin-bottom: 20px;">
+  <div style="display: flex; align-items: baseline; justify-content: space-between; gap: 12px; flex-wrap: wrap;">
+    <h2 style="margin: 0 0 8px 0; font-size: 15px;">Store dashboard</h2>
+    <a href="/admin/dashboard/" class="button" style="margin-bottom: 8px;">Open full dashboard →</a>
+  </div>
+
+  <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); gap: 10px;">
+    <div class="module" style="padding: 12px;">
+      <div style="font-size: 11px; color: #666; text-transform: uppercase;">Revenue (paid)</div>
+      <div style="font-size: 22px; font-weight: 600;">₹{{ stats.revenue }}</div>
+    </div>
+    <div class="module" style="padding: 12px;">
+      <div style="font-size: 11px; color: #666; text-transform: uppercase;">Orders</div>
+      <div style="font-size: 22px; font-weight: 600;">{{ stats.orders_total }}</div>
+      <div style="font-size: 11px; color: #666;">
+        {% for status, n in stats.orders_by_status.items %}{{ status }}: {{ n }}{% if not forloop.last %} · {% endif %}{% endfor %}
+      </div>
+    </div>
+    <div class="module" style="padding: 12px;">
+      <div style="font-size: 11px; color: #666; text-transform: uppercase;">Pending payment</div>
+      <div style="font-size: 22px; font-weight: 600;">{{ health.pending_orders }}</div>
+    </div>
+    <div class="module" style="padding: 12px;">
+      <div style="font-size: 11px; color: #666; text-transform: uppercase;">Customers</div>
+      <div style="font-size: 22px; font-weight: 600;">{{ stats.users }}</div>
+    </div>
+    <div class="module" style="padding: 12px;">
+      <div style="font-size: 11px; color: #666; text-transform: uppercase;">Products</div>
+      <div style="font-size: 22px; font-weight: 600;">{{ stats.products }}</div>
+      <div style="font-size: 11px; color: #666;">low stock: {{ health.low_stock }} · out: {{ health.out_of_stock }}</div>
+    </div>
+  </div>
+
+  <div style="margin-top: 10px; font-size: 12px; color: #666;">
+    Health:
+    {% if health.checks.database %}<span style="color: #2e7d32;">● database ok</span>{% else %}<span style="color: #c62828;">● database down</span>{% endif %}
+    · {% if health.checks.media_writable %}<span style="color: #2e7d32;">● media writable</span>{% else %}<span style="color: #c62828;">● media not writable</span>{% endif %}
+    · {% if health.checks.smtp_configured %}<span style="color: #2e7d32;">● SMTP configured</span>{% else %}<span style="color: #e6a700;">● SMTP missing password</span>{% endif %}
+    · Razorpay: {{ health.checks.razorpay_mode }}
+  </div>
+</div>
