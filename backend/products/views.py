@@ -6,16 +6,18 @@ from rest_framework.decorators import api_view, permission_classes
 from rest_framework.response import Response
 from rest_framework import status
 
-from common.permissions import IsAdminUserOrReadOnly
+from common.permissions import HasProductsWriteOrReadOnly
 
 from .models import products
 from .serializers import ProductSerializer
 
 
 # Staff-gated writes via permission_classes (conventions.md: never inline
-# is_staff); catalogue reads stay public, so the class is method-aware.
+# is_staff). SPEC-6-03c: write authority comes from the ``products.write``
+# capability (catalogue + admin roles) — at least as restricted as the
+# legacy blanket is_staff gate — while catalogue reads stay public.
 @api_view(['GET', 'POST'])
-@permission_classes([IsAdminUserOrReadOnly])
+@permission_classes([HasProductsWriteOrReadOnly])
 def product_list(request):
 
     # =========================
@@ -138,7 +140,7 @@ def product_list(request):
 # ==================================
 
 @api_view(['GET', 'PUT', 'PATCH', 'DELETE'])
-@permission_classes([IsAdminUserOrReadOnly])
+@permission_classes([HasProductsWriteOrReadOnly])
 def product_detail(request, slug):
 
     # Find product

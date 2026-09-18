@@ -16,15 +16,24 @@ class IsAdminUserOrReadOnly(BasePermission):
     on the multi-method product views would also block anonymous catalogue
     GETs. Writes therefore mirror ``IsAdminUser`` (``is_staff``) while safe
     methods stay public — the exact legacy behaviour of the inline checks.
+
+    Subclasses may pin ``write_capability`` to source write authority from
+    the RBAC roles map instead of the blanket ``is_staff`` flag (see
+    ``capability_or_read_only``); the legacy flag remains the default so
+    existing deployments keep their contract.
     """
 
     # Keeps the 403 body byte-identical to the legacy inline gate.
     message = "Administrator access is required."
+    write_capability = None
 
     def has_permission(self, request, view):
         if request.method in SAFE_METHODS:
             return True
-        if request.user and request.user.is_staff:
+        if self.write_capability is not None:
+            if user_has_capability(request.user, self.write_capability):
+                return True
+        elif request.user and request.user.is_staff:
             return True
         # Raised directly rather than returning False: with a JWT
         # authenticator attached, DRF turns a plain failed check into
@@ -97,6 +106,23 @@ def capability_permission(capability):
     )
 
 
+def capability_or_read_only(capability):
+    """Factory: SAFE_METHODS stay public, writes need the pinned capability.
+
+    The product endpoints mix a public catalogue read with staff writes in
+    one view, so a plain ``CapabilityPermission`` (which denies safe methods
+    too) cannot express them. Pinning ``write_capability`` on the
+    ``IsAdminUserOrReadOnly`` seam reuses its public-read handling and legacy
+    403 body while write authority moves from the blanket ``is_staff`` flag
+    to ``CAPABILITY_ROLES`` — a tightening, never a downgrade.
+    """
+    return type(
+        _permission_class_name(capability) + "OrReadOnly",
+        (IsAdminUserOrReadOnly,),
+        {"write_capability": capability},
+    )
+
+
 # One named class per capability so views can declare e.g.
 # ``permission_classes = [HasOrdersFulfill]``. The set is pinned against
 # ``CAPABILITY_ROLES`` in tests/test_rbac_foundation.py so it cannot drift
@@ -115,3 +141,7 @@ HasDiscountsWrite = capability_permission("discounts.write")
 HasReportsRead = capability_permission("reports.read")
 HasStaffManage = capability_permission("staff.manage")
 HasSettingsManage = capability_permission("settings.manage")
+
+# SPEC-6-03c: the product views are the read/write split shape — public
+# catalogue reads, writes gated by ``products.write`` (catalogue + admin).
+HasProductsWriteOrReadOnly = capability_or_read_only("products.write")

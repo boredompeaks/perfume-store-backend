@@ -14,6 +14,13 @@ from rest_framework.request import Request
 from rest_framework.test import APIRequestFactory
 
 from common.permissions import IsAdminUserOrReadOnly
+from common.roles import (
+    ROLE_ADMIN,
+    ROLE_CATALOGUE,
+    ROLE_SUPPORT,
+    STAFF_ROLES,
+    sync_role_groups,
+)
 from common.testing import ApiTestCase
 from products.admin import ProductAdmin
 from products.models import StockMovement, products
@@ -684,6 +691,130 @@ class ProductPermissionClassesApiTests(ApiTestCase):
         self.assertEqual(res.status_code, 200, res.data)
         self.product.refresh_from_db()
         self.assertEqual(self.product.description, "Staff-edited description.")
+
+
+@tag("products")
+class ProductCapabilityGateRoleTests(ApiTestCase):
+    """SPEC-6-03c: view-level per-role allow/deny for the capability swap.
+
+    Reads stay public and the 403 body stays the legacy one; write authority
+    now flows from ``products.write`` (catalogue + admin roles), so a staff
+    account without a granting role is denied — a deliberate tightening
+    under the no-guard-downgrade rule, never a loosening.
+    """
+
+    def setUp(self):
+        self.product = self.make_product(name="Gate Rose")
+        groups = sync_role_groups()
+        # One is_staff user per role, holding exactly that role's group.
+        self.role_users = {}
+        for role in STAFF_ROLES:
+            user = User.objects.create_user(
+                username=f"gate-{role}",
+                email=f"gate-{role}@example.com",
+                password="S3cure-Passphrase!",
+                is_staff=True,
+            )
+            user.groups.add(groups[role])
+            self.role_users[role] = user
+        # The legacy gate granted every is_staff account write access; the
+        # capability gate must deny a role-less staff account (tightening).
+        self.roleless_staff = User.objects.create_user(
+            username="gate-roleless",
+            email="gate-roleless@example.com",
+            password="S3cure-Passphrase!",
+            is_staff=True,
+        )
+        self.customer = self.make_user("gate-customer")
+
+    def _writer_client(self, user):
+        client = self.fresh_client()
+        self.api_login(user.username, client=client)
+        return client
+
+    def _write_payload(self, name):
+        return {
+            "name": name,
+            "description": "Created through the gated API.",
+            "price": "10.00",
+            "size": 30,
+            "stock": 3,
+            "category": "Floral",
+        }
+
+    def test_anonymous_reads_public_writes_legacy_403(self):
+        client = self.fresh_client()
+        self.assertEqual(client.get("/api/products/").status_code, 200)
+        self.assertEqual(
+            client.get(f"/api/products/{self.product.slug}/").status_code, 200
+        )
+        res = client.post(
+            "/api/products/", self._write_payload("Sneak"), format="json"
+        )
+        self.assertEqual(res.status_code, 403, res.data)
+        self.assertEqual(res.data["detail"], "Administrator access is required.")
+        self.assertFalse(products.objects.filter(name="Sneak").exists())
+
+    def test_customer_write_is_denied(self):
+        client = self._writer_client(self.customer)
+        res = client.patch(
+            f"/api/products/{self.product.slug}/", {"price": "2.00"}, format="json"
+        )
+        self.assertEqual(res.status_code, 403, res.data)
+        self.assertEqual(res.data["detail"], "Administrator access is required.")
+
+    def test_roleless_staff_write_is_denied(self):
+        """The no-downgrade rule permits only tightenings: the blanket
+        is_staff write grant is replaced by the roles map, so a staff
+        account with no role loses product write access."""
+        client = self._writer_client(self.roleless_staff)
+        res = client.post(
+            "/api/products/", self._write_payload("Blocked"), format="json"
+        )
+        self.assertEqual(res.status_code, 403, res.data)
+        self.assertFalse(products.objects.filter(name="Blocked").exists())
+
+    def test_writes_follow_the_role_map(self):
+        for role, user in self.role_users.items():
+            with self.subTest(role=role):
+                client = self._writer_client(user)
+                res = client.post(
+                    "/api/products/",
+                    self._write_payload("Role Gate Rose"),
+                    format="json",
+                )
+                if role in (ROLE_CATALOGUE, ROLE_ADMIN):
+                    self.assertEqual(res.status_code, 201, res.data)
+                    self.assertTrue(
+                        products.objects.filter(name="Role Gate Rose").exists()
+                    )
+                else:
+                    self.assertEqual(res.status_code, 403, res.data)
+                products.objects.filter(name="Role Gate Rose").delete()
+
+    def test_catalogue_role_full_write_lifecycle_on_detail(self):
+        client = self._writer_client(self.role_users[ROLE_CATALOGUE])
+        res = client.patch(
+            f"/api/products/{self.product.slug}/",
+            {"description": "Catalogue-edited."},
+            format="json",
+        )
+        self.assertEqual(res.status_code, 200, res.data)
+        self.product.refresh_from_db()
+        self.assertEqual(self.product.description, "Catalogue-edited.")
+        res = client.delete(f"/api/products/{self.product.slug}/")
+        self.assertEqual(res.status_code, 204)
+        self.assertFalse(products.objects.filter(pk=self.product.pk).exists())
+
+    def test_non_granting_role_cannot_edit_or_delete(self):
+        client = self._writer_client(self.role_users[ROLE_SUPPORT])
+        res = client.patch(
+            f"/api/products/{self.product.slug}/", {"price": "2.00"}, format="json"
+        )
+        self.assertEqual(res.status_code, 403, res.data)
+        res = client.delete(f"/api/products/{self.product.slug}/")
+        self.assertEqual(res.status_code, 403, res.data)
+        self.assertTrue(products.objects.filter(pk=self.product.pk).exists())
 
 
 @tag("products")
