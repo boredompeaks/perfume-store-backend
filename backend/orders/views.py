@@ -13,6 +13,7 @@ from .serializers import OrderSerializer
 
 from cart.models import Cart
 from common.models import AuditEvent
+from common.money import quantize_money
 from products.models import StockMovement, products
 
 import logging
@@ -240,9 +241,13 @@ def create_order(request):
         # Calculate discount
         if coupon.discount_type == 'percentage':
 
-            discount_amount = (
-                subtotal_amount * coupon.discount_value
-            ) / Decimal('100')
+            # Quantize before any comparison or storage: the raw division
+            # carries extra decimal places, and an unquantized discount
+            # drifts the display, the audit trail and the stored 2-dp
+            # order amount apart (F-11).
+            discount_amount = quantize_money(
+                (subtotal_amount * coupon.discount_value) / Decimal('100')
+            )
 
             if coupon.maximum_discount is not None:
 
@@ -433,9 +438,11 @@ def apply_coupon(request):
     # Calculate discount
     if coupon.discount_type == 'percentage':
 
-        discount = (
-            subtotal * coupon.discount_value
-        ) / Decimal('100')
+        # Same quantize parity as checkout (F-11): the preview must show
+        # the exact 2-dp discount the order will store.
+        discount = quantize_money(
+            (subtotal * coupon.discount_value) / Decimal('100')
+        )
 
         if coupon.maximum_discount is not None:
             discount = min(

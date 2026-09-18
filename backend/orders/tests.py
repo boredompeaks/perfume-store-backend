@@ -3,7 +3,6 @@
 Razorpay is always mocked (``self.razorpay_mock``); no test touches the
 network or the real keys from ``.env`` (V-01 containment).
 """
-import unittest
 from datetime import timedelta
 from decimal import Decimal
 from unittest import mock
@@ -186,12 +185,12 @@ class CheckoutTests(OrderTestBase):
     """33-35. Server-owned pricing, snapshot math, validation."""
 
     # 33. rounding parity preview vs checkout (F-11) ----------------------------------------
-    @unittest.expectedFailure
     def test_f11_rounding_parity_between_preview_and_checkout(self):
-        """F-11: apply_coupon returns raw unquantized math (599.997) while
-        checkout persists a 2-dp amount (600.00). Asserts the FIXED behaviour
-        (shared quantized service); remove @expectedFailure when Phase 3.1
-        lands."""
+        """F-11 regression pin: preview and checkout must agree to the paisa
+        on fractional percentage math — 30% of 2999.99 is 899.997 raw, and
+        both paths quantize it to the same 2-dp amount (900.00). Marker
+        removed when quantize parity shipped (SPEC-7-03); the assertEqual
+        below is unchanged from the original pin."""
         self.make_product(name="Grand Cru", price="1999.99", stock=5)
         self.seed_session_cart([])  # keep buyer cart; add the expensive item
         product = products.objects.get(name="Grand Cru")
