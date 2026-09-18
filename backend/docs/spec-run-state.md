@@ -47,8 +47,8 @@ Deferral policy: gaps whose detailed requirements live in a later spec section a
 | Task ID | Section | Requirement summary | Spec lines | Status | Attempts |
 |---|---|---|---|---|---|
 | SPEC-1-01 | 1 | Staff-gated product writes must use DRF `permission_classes` (never inline `request.user.is_staff`, products/views.py:113,172,198,225); products serializer must declare explicit `fields` (no `'__all__'`, products/serializers.py:8) | 29–151 + conventions.md:14,18 | PR-OPENED (auditor SHIP cycle-1; commit 5b88c43; 186 pass, cov 100.00%; PR #2) | 1 |
-| SPEC-1-02 | 1 | Public mutating endpoints need throttle scopes (apply_coupon, cart mutations, login/register) and anonymous coupon errors must be uniform — no coupon existence/validation-state leaks (orders/views.py:284-285) | 29–151 + conventions.md:24,25 | BUILDING (attempt 2; first dispatch interrupted, no partial work landed — tree verified clean at 5b88c43) | 0 |
-| SPEC-1-03 | 1 | Registration must run `validate_password` (same policy as reset; accounts/serializers.py:7-10 only enforces min_length=8) | 29–151 + conventions.md:19 | PENDING | 0 |
+| SPEC-1-02 | 1 | Public mutating endpoints need throttle scopes (apply_coupon, cart mutations, login/register) and anonymous coupon errors must be uniform — no coupon existence/validation-state leaks (orders/views.py:284-285) | 29–151 + conventions.md:24,25 | BUGS-FOUND (audit cycle 1 FIX: changelog miscount changes.md:57 "+3 net" → "+4 net"; all functional checks passed) | 1 |
+| SPEC-1-03 | 1 | Registration must run `validate_password` (same policy as reset; accounts/serializers.py:7-10 only enforces min_length=8) | 29–151 + conventions.md:19 | IN-AUDIT (commit 2291d32; 198 pass, 6 expected failures — two V-05 xfails un-marked per docstrings as behaviour fixed; cov 100.00%) | 1 |
 | SPEC-1-04 | 1 | Product-compare feature absent (grep zero hits) — Owner: S3 | 29–151 [1.3] | PENDING | 0 |
 | SPEC-1-05 | 1 | Refunds absent — no Razorpay refund call, no refund model/status; paid orders irreversible — Owner: S11 | 29–151 [1.14] | PENDING | 0 |
 | SPEC-1-06 | 1 | Payment webhooks absent — payment truth only via client callback; dropped callback strands captured money — Owner: S11 | 29–151 [1.15] | PENDING | 0 |
@@ -67,6 +67,7 @@ Deferral policy: gaps whose detailed requirements live in a later spec section a
 | SPEC-1-19 | 1 | No roles management (Group/permission model+UI); admin cannot manage roles/operational access — Owner: S6 | 29–151 [1.32] | PENDING | 0 |
 | SPEC-1-20 | 1 | No superadmin tier — nothing distinguishes Admin vs Superadmin surfaces — Owner: S17 | 29–151 [1.33] | PENDING | 0 |
 | SPEC-1-21 | 1 | Role-separation invariant (line 150) unenforced — any staff user can edit coupons/orders/users/settings — Owner: S17 | 29–151 [1.34] | PENDING | 0 |
+| SPEC-1-22 | 1 | Throttle remaining public mutating endpoints: verify-email, resend-verification, forgot-username, password-reset(+confirm), token/refresh — prioritize email-sending endpoints (spam/bomb vectors) | conventions.md:24 + SPEC-1-02 auditor finding | PENDING | 0 |
 | SPEC-2-01 | 2 | DATABASES hardcoded sqlite3 (settings.py:92-97) — make env-driven (e.g. dj-database-url) with sqlite dev fallback; Postgres provisioning itself stays deferred — Owner: build now; deployment/FTS deferred to S22/S9 | 152–278 [2.4] | PENDING | 0 |
 | SPEC-2-02 | 2 | No component library — no accessible dialogs/data-table primitives alongside Tailwind — Owner: S15 | 152–278 [2.2] | PENDING | 0 |
 | SPEC-2-03 | 2 | No Redis cache/job queue/async email (no CACHES/CELERY config; sync emails) — Owner: S19 | 152–278 [2.5] | PENDING | 0 |
