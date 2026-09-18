@@ -23,3 +23,15 @@ class ProductSerializer(serializers.ModelSerializer):
             "image",
             "created_at",
         ]
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        # SPEC-6-02 [6.5.17]: a REST write of `stock` on an existing row
+        # would be a ledger-free inventory mutation (audit cycle-1 BUG-1),
+        # so updates expose the field read-only and every existing-row
+        # change is forced through products.products.adjust_stock(), which
+        # writes the StockMovement row. Creation keeps `stock` writable: it
+        # establishes the opening balance, which is not an edit. The field
+        # stays in the response payload either way.
+        if self.instance is not None:
+            self.fields["stock"].read_only = True

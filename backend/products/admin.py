@@ -47,9 +47,11 @@ class ProductAdmin(admin.ModelAdmin):
         "stock_flag",
         "created_at",
     )
-    # stock is display-only here: a changelist inline edit would bypass the
-    # StockMovement ledger ([6.5.17] forbids silent inventory edits), so the
-    # adjust-stock action is the only sanctioned mutation path for stock.
+    # stock is display-only on existing rows: a changelist inline edit or a
+    # change-page save would bypass the StockMovement ledger ([6.5.17]
+    # forbids silent inventory edits). The adjust-stock action is the only
+    # sanctioned way to change an existing row's inventory; creation is
+    # exempt — the initial stock is the opening balance, not an edit.
     list_editable = ("price",)
     list_filter = ("category", "created_at")
     search_fields = ("name", "slug", "description")
@@ -58,6 +60,19 @@ class ProductAdmin(admin.ModelAdmin):
     list_per_page = 25
     actions = ("adjust_stock", "export_csv")
     inlines = (StockMovementInline,)
+
+    def get_readonly_fields(self, request, obj=None):
+        # Admin twin of ProductSerializer's update-time read-only `stock`:
+        # a change-page save is a stock edit on an existing row, so it must
+        # not bypass the StockMovement ledger ([6.5.17] — fixing the
+        # changelist alone left this form writable, re-proven empirically).
+        # `stock` stays editable on the add form: creation sets the opening
+        # balance, which is not an edit.
+        fields = super().get_readonly_fields(request, obj)
+        if obj is None:
+            return fields
+        return fields + ("stock",)
+
     # slug stays out of prepopulated_fields: it is readonly (the model
     # generates it) and prepopulation on a readonly field crashes the template.
     fieldsets = (

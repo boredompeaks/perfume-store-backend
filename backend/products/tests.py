@@ -485,6 +485,44 @@ class ProductAdminTests(ApiTestCase):
         self.assertEqual(self.plain.stock, 3)                 # stock untouched
         self.assertEqual(StockMovement.objects.count(), 0)    # no mutation, no movement
 
+    def test_change_page_stock_is_display_only_add_page_keeps_input(self):
+        """SPEC-6-02 (audit cycle-2 probe): the change page's `stock` input
+        was a live ledger-free mutation path — a change-form POST silently
+        wrote stock. It is read-only once the row exists, while the add page
+        keeps the input because creation sets the opening balance, not an
+        edit."""
+        res = self.client.get(f"/admin/products/products/{self.plain.id}/change/")
+        self.assertEqual(res.status_code, 200)
+        self.assertNotContains(res, 'name="stock"')
+        res = self.client.get("/admin/products/products/add/")
+        self.assertEqual(res.status_code, 200)
+        self.assertContains(res, 'name="stock"')
+
+    def test_change_form_save_ignores_tampered_stock(self):
+        """A hand-crafted change-form POST must not move stock: sanctioned
+        edits (price) apply, stock is untouched and no movement row lands —
+        empirically reproduced pre-fix (POST stock=999 -> 200, stock 3->999,
+        zero rows)."""
+        res = self.client.post(
+            f"/admin/products/products/{self.plain.id}/change/",
+            {
+                "name": "Plain Oud",
+                "category": "Oriental",
+                "description": "d",
+                "price": "88.00",
+                "size": "30",
+                "stock": "999",  # the silent edit the old form allowed
+                "stock_movements-TOTAL_FORMS": "0",
+                "stock_movements-INITIAL_FORMS": "0",
+            },
+            follow=True,
+        )
+        self.assertEqual(res.status_code, 200)
+        self.plain.refresh_from_db()
+        self.assertEqual(self.plain.price, Decimal("88.00"))  # sanctioned edit applied
+        self.assertEqual(self.plain.stock, 3)                 # stock untouched
+        self.assertEqual(StockMovement.objects.count(), 0)    # no mutation, no movement
+
     def test_change_page_renders_with_movement_inline_and_preview(self):
         self.with_image.adjust_stock(None, 7, StockMovement.Reason.RESTOCK, "initial fill")
 
@@ -632,14 +670,20 @@ class ProductPermissionClassesApiTests(ApiTestCase):
         self.assertEqual(res.data["detail"], "Administrator access is required.")
 
     def test_staff_write_still_succeeds_end_to_end(self):
+        """SPEC-1-01 wiring: a staff PATCH succeeds end-to-end. The payload
+        uses a sanctioned field: since SPEC-6-02 `stock` is read-only on
+        updates (a REST stock edit would bypass the StockMovement ledger —
+        see ProductStockEditLedgerGuardTests for that contract)."""
         client = self.fresh_client()
         self.api_login("staff", client=client)
         res = client.patch(
-            f"/api/products/{self.product.slug}/", {"stock": 7}, format="json"
+            f"/api/products/{self.product.slug}/",
+            {"description": "Staff-edited description."},
+            format="json",
         )
         self.assertEqual(res.status_code, 200, res.data)
         self.product.refresh_from_db()
-        self.assertEqual(self.product.stock, 7)
+        self.assertEqual(self.product.description, "Staff-edited description.")
 
 
 @tag("products")
@@ -656,3 +700,97 @@ class ProductSerializerFieldsTests(ApiTestCase):
         column must force a conscious decision here, never auto-leak."""
         concrete = {field.name for field in products._meta.concrete_fields}
         self.assertEqual(set(ProductSerializer.Meta.fields), concrete)
+
+    def test_stock_writable_on_create_read_only_on_update(self):
+        """SPEC-6-02 (audit cycle-1 BUG-1): a REST stock write on an existing
+        row is a ledger-free inventory mutation, so updates expose `stock`
+        read-only while creation keeps it writable (opening balance, not an
+        edit). The field stays in the payload either way — pinned response
+        shape lives in test_serializer_field_set_is_pinned."""
+        self.assertFalse(ProductSerializer().fields["stock"].read_only)
+        product = self.make_product()
+        self.assertTrue(ProductSerializer(product).fields["stock"].read_only)
+        self.assertTrue(
+            ProductSerializer(
+                product, data={"name": "Renamed"}, partial=True
+            ).fields["stock"].read_only
+        )
+
+
+@tag("products")
+class ProductStockEditLedgerGuardTests(ApiTestCase):
+    """SPEC-6-02 (audit cycle-1 BUG-1): staff PATCH/PUT {"stock": N} used to
+    return 200, move stock and write ZERO StockMovement rows — a ledger-free
+    inventory mutation path. Updates now ignore `stock`, forcing every
+    existing-row change through the sanctioned adjust_stock ledger path."""
+
+    def setUp(self):
+        self.staff = self.make_staff()
+        self.api_login("staff")
+        self.product = self.make_product(name="Rose Water", stock=10)
+
+    def test_patch_with_stock_is_ignored_and_writes_no_movement(self):
+        res = self.client.patch(
+            f"/api/products/{self.product.slug}/", {"stock": 999}, format="json"
+        )
+        self.assertEqual(res.status_code, 200, res.data)
+        self.product.refresh_from_db()
+        self.assertEqual(self.product.stock, 10)             # edit ignored
+        self.assertEqual(StockMovement.objects.count(), 0)   # no mutation, no row
+
+    def test_put_with_stock_is_ignored_and_writes_no_movement(self):
+        res = self.client.put(
+            f"/api/products/{self.product.slug}/",
+            {
+                "name": "Rose Water", "description": "desc", "price": "499.99",
+                "size": 50, "stock": 999, "category": "Floral",
+            },
+            format="json",
+        )
+        self.assertEqual(res.status_code, 200, res.data)
+        self.product.refresh_from_db()
+        self.assertEqual(self.product.stock, 10)             # edit ignored
+        self.assertEqual(StockMovement.objects.count(), 0)   # no mutation, no row
+
+    def test_update_response_still_reports_stock(self):
+        """`stock` keeps its place in the public payload; only its
+        writability changed."""
+        res = self.client.patch(
+            f"/api/products/{self.product.slug}/", {"stock": 999}, format="json"
+        )
+        self.assertEqual(res.status_code, 200, res.data)
+        self.assertEqual(res.data["stock"], 10)
+
+    def test_create_still_sets_opening_stock_without_movement(self):
+        """Creation is exempt (auditor scope note): the requested stock is
+        the opening balance, not an edit — so no movement row is expected."""
+        res = self.client.post(
+            "/api/products/",
+            {
+                "name": "Opening Balance", "description": "desc",
+                "price": "10.00", "size": 30, "stock": 42, "category": "Floral",
+            },
+            format="json",
+        )
+        self.assertEqual(res.status_code, 201, res.data)
+        self.assertEqual(res.data["stock"], 42)
+        created = products.objects.get(slug="opening-balance")
+        self.assertEqual(created.stock, 42)
+        self.assertEqual(StockMovement.objects.count(), 0)
+
+    def test_adjust_stock_remains_the_sanctioned_edit_path(self):
+        """Anti-regression contrast: the same staff member who cannot PATCH
+        stock can still move inventory — and only via the ledgered path."""
+        res = self.client.patch(
+            f"/api/products/{self.product.slug}/", {"stock": 999}, format="json"
+        )
+        self.assertEqual(res.status_code, 200, res.data)
+        self.product.adjust_stock(
+            self.staff, 5, StockMovement.Reason.RESTOCK, "sanctioned path"
+        )
+        self.product.refresh_from_db()
+        self.assertEqual(self.product.stock, 15)  # 10 (PATCH ignored) + 5
+        movement = StockMovement.objects.get()
+        self.assertEqual(movement.delta, 5)
+        self.assertEqual(movement.stock_after, 15)
+        self.assertEqual(movement.created_by, self.staff)
