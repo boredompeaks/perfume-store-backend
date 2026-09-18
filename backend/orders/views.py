@@ -3,7 +3,7 @@ from decimal import Decimal
 from django.db import transaction
 from django.utils import timezone
 
-from rest_framework.decorators import api_view, permission_classes
+from rest_framework.decorators import api_view, permission_classes, throttle_scope
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
 from rest_framework import status
@@ -277,11 +277,26 @@ def create_order(request):
         serializer.data,
         status=status.HTTP_201_CREATED
     )
-    # =========================
-    # Coupon
-    # =========================
+
+
+# ==================================
+# Coupon preview (public)
+# ==================================
+
+def _uniform_coupon_rejection():
+    """Every coupon failure on the public preview returns this same body and
+    status, so the response never reveals whether a code exists or why it
+    was rejected (V-11 existence/validation-state leak). Differentiated
+    feedback stays on the authenticated checkout, where callers are not
+    brute-forcing the code space."""
+    return Response(
+        {"error": "Invalid coupon code"},
+        status=status.HTTP_400_BAD_REQUEST
+    )
+
 
 @api_view(['POST'])
+@throttle_scope('coupon')
 def apply_coupon(request):
 
     code = request.data.get('code')
@@ -292,51 +307,10 @@ def apply_coupon(request):
             status=status.HTTP_400_BAD_REQUEST
         )
 
-    # Find coupon
-    try:
-        coupon = Coupon.objects.get(
-            code__iexact=code
-        )
-
-    except Coupon.DoesNotExist:
-        return Response(
-            {"error": "Invalid coupon code"},
-            status=status.HTTP_400_BAD_REQUEST
-        )
-
-    # Check active
-    if not coupon.active:
-        return Response(
-            {"error": "This coupon is inactive"},
-            status=status.HTTP_400_BAD_REQUEST
-        )
-
-    # Check dates
-    now = timezone.now()
-
-    if now < coupon.valid_from:
-        return Response(
-            {"error": "This coupon is not active yet"},
-            status=status.HTTP_400_BAD_REQUEST
-        )
-
-    if now > coupon.valid_until:
-        return Response(
-            {"error": "This coupon has expired"},
-            status=status.HTTP_400_BAD_REQUEST
-        )
-
-    # Check usage limit
-    if (
-        coupon.usage_limit is not None
-        and coupon.used_count >= coupon.usage_limit
-    ):
-        return Response(
-            {"error": "This coupon has reached its usage limit"},
-            status=status.HTTP_400_BAD_REQUEST
-        )
-
-    # Get current cart
+    # Resolve the cart before the coupon: otherwise a caller with no cart
+    # could still probe code existence by watching for the coupon error
+    # instead of the cart error. With the cart first, every cartless caller
+    # gets the same answer for every code.
     if not request.session.session_key:
         return Response(
             {"error": "Cart not found"},
@@ -356,6 +330,36 @@ def apply_coupon(request):
             status=status.HTTP_404_NOT_FOUND
         )
 
+    # From here on every rejection shares one uniform response: unknown,
+    # inactive, not-yet-valid, expired, usage limit, and below minimum.
+    try:
+        coupon = Coupon.objects.get(
+            code__iexact=code
+        )
+
+    except Coupon.DoesNotExist:
+        return _uniform_coupon_rejection()
+
+    # Check active
+    if not coupon.active:
+        return _uniform_coupon_rejection()
+
+    # Check dates
+    now = timezone.now()
+
+    if now < coupon.valid_from:
+        return _uniform_coupon_rejection()
+
+    if now > coupon.valid_until:
+        return _uniform_coupon_rejection()
+
+    # Check usage limit
+    if (
+        coupon.usage_limit is not None
+        and coupon.used_count >= coupon.usage_limit
+    ):
+        return _uniform_coupon_rejection()
+
     # Calculate cart subtotal
     subtotal = Decimal('0.00')
 
@@ -366,13 +370,7 @@ def apply_coupon(request):
 
     # Check minimum order amount
     if subtotal < coupon.minimum_order_amount:
-        return Response(
-            {
-                "error": "Minimum order amount is required",
-                "minimum_order_amount": coupon.minimum_order_amount
-            },
-            status=status.HTTP_400_BAD_REQUEST
-        )
+        return _uniform_coupon_rejection()
 
     # Calculate discount
     if coupon.discount_type == 'percentage':

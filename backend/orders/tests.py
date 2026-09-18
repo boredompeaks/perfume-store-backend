@@ -6,13 +6,18 @@ network or the real keys from ``.env`` (V-01 containment).
 import unittest
 from datetime import timedelta
 from decimal import Decimal
+from unittest import mock
 
+from django.core.cache import cache
 from django.test import tag
 from django.utils import timezone
+from rest_framework.settings import api_settings
+from rest_framework.throttling import ScopedRateThrottle
 
 from cart.models import Cart, CartItem
 from common.testing import TEST_RAZORPAY_KEY_ID, ApiTestCase
 from orders.models import Coupon, Order, OrderItem
+from orders.views import apply_coupon
 from products.models import products
 
 
@@ -41,45 +46,58 @@ class ApplyCouponTests(OrderTestBase):
     def _preview(self, code):
         return self.client.post("/api/orders/apply-coupon/", {"code": code}, format="json")
 
-    # 30. rejections, parametrized ---------------------------------------------------------
-    def test_coupon_rejections(self):
+    # 30. every rejection shares one uniform body: unknown, inactive,
+    # not-yet-valid, expired, usage-limit and min-order must be
+    # indistinguishable so coupon existence/validation state never leaks
+    # to callers probing the code space (V-11) ----------------------------
+    def test_coupon_rejections_are_uniform(self):
         cases = [
-            ("unknown", "SAVE404", "Invalid coupon code"),
-            ("inactive", self.make_coupon(code="DEAD", active=False).code, "This coupon is inactive"),
+            ("unknown", "SAVE404"),
+            ("inactive", self.make_coupon(code="DEAD", active=False).code),
             (
                 "expired",
                 self.make_coupon(code="OLD", valid_until=timezone.now() - timedelta(minutes=1)).code,
-                "This coupon has expired",
             ),
             (
                 "not-yet-valid",
                 self.make_coupon(code="FUTURE", valid_from=timezone.now() + timedelta(days=1)).code,
-                "This coupon is not active yet",
             ),
             (
                 "usage-limit",
                 self.make_coupon(code="MAXED", usage_limit=5, used_count=5).code,
-                "This coupon has reached its usage limit",
             ),
             (
                 "min-order",
                 self.make_coupon(code="BIGSPEND", minimum_order_amount="5000").code,
-                "Minimum order amount is required",
             ),
         ]
-        for name, code, expected_error in cases:
+        for name, code in cases:
             with self.subTest(case=name):
                 res = self._preview(code)
                 self.assertEqual(res.status_code, 400, res.data)
-                self.assertEqual(res.data["error"], expected_error)
-        if True:
-            res = self._preview("BIGSPEND")
-            self.assertEqual(res.data["minimum_order_amount"], Decimal("5000.00"))
+                # one body for every failure reason; no configuration detail
+                # (e.g. minimum_order_amount) may ride along
+                self.assertEqual(res.data, {"error": "Invalid coupon code"})
 
     def test_missing_code_rejected(self):
         res = self.client.post("/api/orders/apply-coupon/", {}, format="json")
         self.assertEqual(res.status_code, 400, res.data)
         self.assertEqual(res.data["error"], "Coupon code is required")
+
+    def test_cartless_caller_learns_nothing_about_coupon_existence(self):
+        """With no cart, a known-valid and an unknown code must be
+        indistinguishable: the cart error comes first and is uniform."""
+        self.make_coupon(code="SAVE10", discount_value="10")
+        fresh = self.fresh_client()
+        known = fresh.post(
+            "/api/orders/apply-coupon/", {"code": "SAVE10"}, format="json"
+        )
+        unknown = fresh.post(
+            "/api/orders/apply-coupon/", {"code": "SAVE404"}, format="json"
+        )
+        self.assertEqual(known.status_code, unknown.status_code)
+        self.assertEqual(known.data, unknown.data)
+        self.assertEqual(known.data["error"], "Cart not found")
 
     def test_coupon_code_matched_case_insensitively(self):
         self.make_coupon(code="SAVE10", discount_value="10")
@@ -119,6 +137,48 @@ class ApplyCouponTests(OrderTestBase):
         res = self.fresh_client().post("/api/orders/apply-coupon/", {"code": "SAVE10"}, format="json")
         self.assertEqual(res.status_code, 404, res.data)
         self.assertEqual(res.data["error"], "Cart not found")
+
+
+@tag("orders")
+class ApplyCouponThrottleTests(OrderTestBase):
+    """Conventions: every public mutating endpoint gets a throttle scope.
+    The preview is the coupon brute-force surface (V-11/V-04)."""
+
+    def _preview(self, code):
+        return self.client.post(
+            "/api/orders/apply-coupon/", {"code": code}, format="json"
+        )
+
+    def test_coupon_scope_and_rate_are_configured(self):
+        self.assertEqual(apply_coupon.view_class.throttle_scope, "coupon")
+        self.assertIn(ScopedRateThrottle, apply_coupon.view_class.throttle_classes)
+        self.assertIn("coupon", api_settings.DEFAULT_THROTTLE_RATES)
+
+    def test_rate_limit_engages_when_budget_spent(self):
+        """The scope actually enforces: a third preview inside a 2/min budget
+        is 429'd. DRF binds THROTTLE_RATES at import, so the rate is patched
+        on the throttle class rather than via override_settings."""
+        self.make_coupon(code="SAVE10", discount_value="10")
+        rates = dict(api_settings.DEFAULT_THROTTLE_RATES)
+        rates["coupon"] = "2/min"
+        with mock.patch.object(ScopedRateThrottle, "THROTTLE_RATES", rates):
+            cache.clear()
+            self.assertEqual(self._preview("SAVE10").status_code, 200)
+            self.assertEqual(self._preview("SAVE10").status_code, 200)
+            throttled = self._preview("SAVE10")
+        self.assertEqual(throttled.status_code, 429, throttled.data)
+
+    def test_rejections_consume_the_same_budget_as_successes(self):
+        """Brute-forcing invalid codes hits the same bucket as valid ones:
+        failures cannot be used to probe indefinitely."""
+        rates = dict(api_settings.DEFAULT_THROTTLE_RATES)
+        rates["coupon"] = "2/min"
+        with mock.patch.object(ScopedRateThrottle, "THROTTLE_RATES", rates):
+            cache.clear()
+            self.assertEqual(self._preview("GHOST404").status_code, 400)
+            self.assertEqual(self._preview("GHOST404").status_code, 400)
+            throttled = self._preview("GHOST404")
+        self.assertEqual(throttled.status_code, 429, throttled.data)
 
 
 @tag("orders")

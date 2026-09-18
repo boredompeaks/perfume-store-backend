@@ -152,6 +152,18 @@ REST_FRAMEWORK = {
     'DEFAULT_AUTHENTICATION_CLASSES': (
         'rest_framework_simplejwt.authentication.JWTAuthentication',
     ),
+    # Scoped throttling: every public mutating endpoint opts in by declaring
+    # a `throttle_scope`; views without a scope are left unthrottled by this
+    # class (conventions.md "Every public mutating endpoint gets a throttle
+    # scope", V-04). Rates are deployment-tunable via environment variables.
+    'DEFAULT_THROTTLE_CLASSES': (
+        'rest_framework.throttling.ScopedRateThrottle',
+    ),
+    'DEFAULT_THROTTLE_RATES': {
+        'coupon': os.getenv('THROTTLE_COUPON_RATE', '10/min'),
+        'cart': os.getenv('THROTTLE_CART_RATE', '60/min'),
+        'auth': os.getenv('THROTTLE_AUTH_RATE', '10/min'),
+    },
 }
 CORS_ALLOWED_ORIGINS = [origin for origin in os.getenv(
     'CORS_ALLOWED_ORIGINS', 'http://localhost:3000'

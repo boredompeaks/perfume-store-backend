@@ -2,10 +2,9 @@ from django.urls import path
 
 from .views import (
     register, username_available, verify_email, resend_verification,
-    forgot_username, request_password_reset, reset_password,
+    forgot_username, request_password_reset, reset_password, LoginView,
 )
 from rest_framework_simplejwt.views import (
-    TokenObtainPairView,
     TokenRefreshView,
 )
 
@@ -32,7 +31,7 @@ urlpatterns = [
 
     path(
         'login/',
-        TokenObtainPairView.as_view(),
+        LoginView.as_view(),
         name='login'
     ),
 

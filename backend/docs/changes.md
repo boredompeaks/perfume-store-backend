@@ -46,6 +46,17 @@ Per conventions.md:14/:18 (audit F-20, F-24; serializer half of V-19). Product w
 - `products/tests.py` — +8 tests: unit contract of `IsAdminUserOrReadOnly` (message body, SAFE_METHODS anon, staff-only writes via `assertRaises(PermissionDenied)`), API wiring (anonymous reads incl. OPTIONS stay 200, staff PATCH e2e, unknown-slug write → 403), serializer whitelist + drift guard against `products._meta.concrete_fields`.
 - Suite: **186 passed** (8 `expectedFailure` flips unchanged), coverage **100.00%** (gate 90), `makemigrations --check` clean.
 
+## 2026-09-18 — SPEC-1-02 (Section 1) — builder: throttle scopes on public mutating endpoints + uniform anonymous coupon errors
+
+Per conventions.md "Every public mutating endpoint gets a throttle scope" / "Uniform responses on anonymous flows" (V-04, V-11). Public coupons/cart/auth mutations are now rate-limited and the coupon preview can no longer be used as a code-existence oracle. Coupon `apply_coupon` stays deliberately public (permission semantics unchanged).
+- `config/settings.py` — `DEFAULT_THROTTLE_CLASSES = (ScopedRateThrottle,)`: views opt in per endpoint via `throttle_scope`; scope-less views are untouched. `DEFAULT_THROTTLE_RATES` env-driven with defaults: `coupon` 10/min, `cart` 60/min, `auth` 10/min (`THROTTLE_*_RATE` keys documented in `.env.example`).
+- `orders/views.py` — `apply_coupon` decorated `@throttle_scope('coupon')`; **uniform anonymous message chosen: `{"error": "Invalid coupon code"}` (400)** for every failure reason (unknown / inactive / not-yet-valid / expired / usage limit / below minimum, replacing six distinct bodies incl. the `minimum_order_amount` detail — uniform for *everyone*, authenticated callers included, so the public preview never validates codes differentially). Cart resolution moved *before* coupon validation: a cartless caller now gets the same `404 {"error": "Cart not found"}` for every code instead of an existence oracle. Authenticated checkout keeps its differentiated messages (pinned contracts unchanged).
+- `cart/views.py` — `cart_detail` (POST add) + `cart_item_detail` (PATCH/DELETE) scoped `cart` via new `CartMutationRateThrottle` (ScopedRateThrottle subclass that exempts safe methods, so GET never consumes the mutation budget).
+- `accounts/views.py` / `accounts/urls.py` — `register` scoped `auth`; login moved to a thin `LoginView(TokenObtainPairView)` with `throttle_scope = 'auth'` (response contract = TokenObtainPairView's, unchanged). Token refresh left for a follow-up task.
+- `common/testing.py` — `ApiTestCase._pre_setup` clears the default cache: DRF throttle history lives in the shared cache for the whole run, so per-test reset makes throttles deterministic regardless of configured rates.
+- `orders/tests.py` (+3 net, incl. rewritten `test_coupon_rejections_are_uniform` pinning the exact uniform body), `cart/tests.py` (+3), `accounts/tests.py` (+3) — scope/rate wiring asserted on the view classes, engagement proven with tiny rates (`429` on coupon/cart-add/update, register, login), GET-exemption and rejection-consumes-budget proven. Engagement tests patch `ScopedRateThrottle.THROTTLE_RATES` (DRF binds rates at import, so `override_settings` cannot reach them) — no sleeps, no network.
+- Suite: **196 passed** (8 `expectedFailure` flips unchanged), coverage **100.00%** (gate 90), `makemigrations --check` clean.
+
 ## Next (per fix-plan.md)
 
 - Phase 0 remaining: rotate Razorpay keys, add CI.

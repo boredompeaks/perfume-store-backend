@@ -1,6 +1,7 @@
-from rest_framework.decorators import api_view
+from rest_framework.decorators import api_view, throttle_scope
 from rest_framework.response import Response
 from rest_framework import status
+from rest_framework_simplejwt.views import TokenObtainPairView
 from django.contrib.auth.models import User
 from django.conf import settings
 from django.contrib.auth.tokens import default_token_generator
@@ -11,6 +12,15 @@ from django.utils.encoding import force_bytes, force_str
 from django.utils.http import urlsafe_base64_encode, urlsafe_base64_decode
 
 from .serializers import RegisterSerializer
+
+
+class LoginView(TokenObtainPairView):
+    """JWT login behind the 'auth' throttle scope.
+
+    Throttling here bounds credential stuffing (V-04). The response contract
+    is TokenObtainPairView's, unchanged."""
+
+    throttle_scope = 'auth'
 
 
 def _encoded_user_id(user):
@@ -44,6 +54,7 @@ def _send_verification_email(user):
 
 
 @api_view(['POST'])
+@throttle_scope('auth')
 def register(request):
 
     serializer = RegisterSerializer(

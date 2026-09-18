@@ -16,8 +16,11 @@ from django.utils.encoding import force_bytes
 from django.utils.http import urlsafe_base64_encode
 
 from accounts.serializers import RegisterSerializer
-from accounts.views import _encoded_user_id, _get_user
+from accounts.views import LoginView, _encoded_user_id, _get_user, register
 from common.testing import ApiTestCase, extract_link_params
+from django.core.cache import cache
+from rest_framework.settings import api_settings
+from rest_framework.throttling import ScopedRateThrottle
 
 
 def make_inactive_user(username="pending", email=None):
@@ -430,3 +433,70 @@ class UsernameAvailableTests(ApiTestCase):
         res = self.client.get("/api/accounts/username-available/")
         self.assertEqual(res.status_code, 200, res.data)
         self.assertFalse(res.data["available"])
+
+
+@tag("accounts")
+class AuthThrottleTests(ApiTestCase):
+    """Conventions: every public mutating endpoint gets a throttle scope.
+    Register + login share the 'auth' scope (V-04: credential stuffing,
+    registration spam)."""
+
+    def _register(self, username):
+        return self.client.post(
+            "/api/accounts/register/",
+            {
+                "username": username,
+                "email": f"{username}@example.com",
+                "password": "S3cure-Passphrase!",
+            },
+            format="json",
+        )
+
+    def test_auth_scope_and_rate_are_configured(self):
+        self.assertEqual(register.view_class.throttle_scope, "auth")
+        self.assertEqual(LoginView.throttle_scope, "auth")
+        self.assertIn(ScopedRateThrottle, LoginView.throttle_classes)
+        self.assertIn("auth", api_settings.DEFAULT_THROTTLE_RATES)
+
+    def test_register_rate_limit_engages(self):
+        """A second registration inside a 1/min budget is 429'd and creates
+        no account. DRF binds THROTTLE_RATES at import, so the rate is
+        patched on the throttle class rather than via override_settings."""
+        rates = dict(api_settings.DEFAULT_THROTTLE_RATES)
+        rates["auth"] = "1/min"
+        with mock.patch.object(ScopedRateThrottle, "THROTTLE_RATES", rates):
+            cache.clear()
+            self.assertEqual(self._register("first").status_code, 201)
+            throttled = self._register("second")
+        self.assertEqual(throttled.status_code, 429, throttled.data)
+        self.assertFalse(User.objects.filter(username="second").exists())
+
+    def test_login_rate_limit_engages(self):
+        """The third login attempt inside a 2/min budget is 429'd — the
+        credential-stuffing bound. Success responses stay the pinned
+        TokenObtainPairView contract (access/refresh issued)."""
+        self.make_user("ratelimited")
+        rates = dict(api_settings.DEFAULT_THROTTLE_RATES)
+        rates["auth"] = "2/min"
+        with mock.patch.object(ScopedRateThrottle, "THROTTLE_RATES", rates):
+            cache.clear()
+            first = self.client.post(
+                "/api/accounts/login/",
+                {"username": "ratelimited", "password": "S3cure-Passphrase!"},
+                format="json",
+            )
+            second = self.client.post(
+                "/api/accounts/login/",
+                {"username": "ratelimited", "password": "S3cure-Passphrase!"},
+                format="json",
+            )
+            throttled = self.client.post(
+                "/api/accounts/login/",
+                {"username": "ratelimited", "password": "S3cure-Passphrase!"},
+                format="json",
+            )
+        self.assertEqual(first.status_code, 200, first.data)
+        self.assertIn("access", first.data)
+        self.assertIn("refresh", first.data)
+        self.assertEqual(second.status_code, 200, second.data)
+        self.assertEqual(throttled.status_code, 429, throttled.data)

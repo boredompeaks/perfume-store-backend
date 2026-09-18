@@ -19,6 +19,7 @@ from unittest.mock import patch
 
 from django.contrib.auth.models import User
 from django.core import mail
+from django.core.cache import cache
 from django.test import TestCase, override_settings
 from django.utils import timezone
 from rest_framework.test import APIClient
@@ -46,6 +47,14 @@ class ApiTestCase(TestCase):
     # DRF client: JSON payloads + credentials() support; sessions/cookies
     # keep working because APIClient extends django.test.Client.
     client_class = APIClient
+
+    def _pre_setup(self):
+        super()._pre_setup()
+        # Scoped throttles keep their request history in the default cache,
+        # which lives for the whole test run; reset it per test so a rate
+        # limit engaged in one test can never 429 another (deterministic
+        # suite, independent of throttle rates in settings).
+        cache.clear()
 
     # ------------------------------------------------------------------
     # Factories
