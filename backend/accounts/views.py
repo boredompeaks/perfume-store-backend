@@ -1,6 +1,7 @@
-from rest_framework.decorators import api_view
+from rest_framework.decorators import api_view, throttle_scope
 from rest_framework.response import Response
 from rest_framework import status
+from rest_framework_simplejwt.views import TokenObtainPairView
 from django.contrib.auth.models import User
 from django.conf import settings
 from django.contrib.auth.tokens import default_token_generator
@@ -11,6 +12,15 @@ from django.utils.encoding import force_bytes, force_str
 from django.utils.http import urlsafe_base64_encode, urlsafe_base64_decode
 
 from .serializers import RegisterSerializer
+
+
+class LoginView(TokenObtainPairView):
+    """JWT login behind the 'auth' throttle scope.
+
+    Throttling here bounds credential stuffing (V-04). The response contract
+    is TokenObtainPairView's, unchanged."""
+
+    throttle_scope = 'auth'
 
 
 def _encoded_user_id(user):
@@ -44,6 +54,7 @@ def _send_verification_email(user):
 
 
 @api_view(['POST'])
+@throttle_scope('auth')
 def register(request):
 
     serializer = RegisterSerializer(
@@ -81,7 +92,11 @@ def register(request):
 
 
 @api_view(['GET'])
+@throttle_scope('auth')
 def username_available(request):
+    """The scope also throttles GET (ScopedRateThrottle has no safe-method
+    exemption): this endpoint is a public username-existence oracle, so
+    without a rate limit it enables cheap username enumeration."""
     username = request.query_params.get('username', '').strip()
 
     if len(username) < 3:
@@ -97,7 +112,11 @@ def username_available(request):
     })
 
 
+# Token-carrying account mutations (no mail): the 'auth' budget already
+# bounds identity flows (register/login/refresh), and verify/confirm are
+# bounded further by the entropy of their one-time tokens.
 @api_view(['POST'])
+@throttle_scope('auth')
 def verify_email(request):
     user = _get_user(request.data.get('uid'))
     token = request.data.get('token', '')
@@ -110,7 +129,13 @@ def verify_email(request):
     return Response({'message': 'Email verified. You can now log in.'})
 
 
+# The three email-sending recovery endpoints get their own 'recovery'
+# scope, tighter than 'auth' (see THROTTLE_RECOVERY_RATE): every accepted
+# request triggers an outbound email, so the budget *is* the mail-bomb
+# bound. The uniform 200 bodies below are untouched by throttling — only
+# the extra 429 refusal is added.
 @api_view(['POST'])
+@throttle_scope('recovery')
 def resend_verification(request):
     email = request.data.get('email', '').strip()
     user = User.objects.filter(email__iexact=email, is_active=False).first()
@@ -123,6 +148,7 @@ def resend_verification(request):
 
 
 @api_view(['POST'])
+@throttle_scope('recovery')
 def forgot_username(request):
     email = request.data.get('email', '').strip()
     user = User.objects.filter(email__iexact=email).first()
@@ -135,6 +161,7 @@ def forgot_username(request):
 
 
 @api_view(['POST'])
+@throttle_scope('recovery')
 def request_password_reset(request):
     email = request.data.get('email', '').strip()
     user = User.objects.filter(email__iexact=email, is_active=True).first()
@@ -154,6 +181,7 @@ def request_password_reset(request):
 
 
 @api_view(['POST'])
+@throttle_scope('auth')
 def reset_password(request):
     user = _get_user(request.data.get('uid'))
     token = request.data.get('token', '')

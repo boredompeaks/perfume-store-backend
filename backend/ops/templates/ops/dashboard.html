@@ -17,12 +17,62 @@
         <div style="font-size: 26px; font-weight: 600;">₹{{ stats.revenue }}</div>
         <div style="font-size: 11px; color: #666;">confirmed + shipped + delivered</div>
       </div>
+      <div class="module" style="padding: 14px;">
+        <div style="font-size: 11px; color: #666; text-transform: uppercase;">Orders</div>
+        <div style="font-size: 26px; font-weight: 600;">{{ stats.orders_total }}</div>
+        <div style="font-size: 11px; color: #666;">all statuses</div>
+      </div>
+      <div class="module" style="padding: 14px;">
+        <div style="font-size: 11px; color: #666; text-transform: uppercase;">Average order value</div>
+        <div style="font-size: 26px; font-weight: 600;">₹{{ stats.average_order_value }}</div>
+        <div style="font-size: 11px; color: #666;">paid revenue ÷ paid orders</div>
+      </div>
+      <div class="module" style="padding: 14px;">
+        <div style="font-size: 11px; color: #666; text-transform: uppercase;">Pending fulfilment</div>
+        <div style="font-size: 26px; font-weight: 600;">{{ stats.orders_pending_fulfilment }}</div>
+        <div style="font-size: 11px; color: #666;">paid, awaiting shipment (confirmed)</div>
+      </div>
       {% for status, n in stats.orders_by_status.items %}
         <div class="module" style="padding: 14px;">
           <div style="font-size: 11px; color: #666; text-transform: uppercase;">Orders · {{ status }}</div>
           <div style="font-size: 26px; font-weight: 600;">{{ n }}</div>
+          {% if status == "pending" %}<div style="font-size: 11px; color: #666;">awaiting payment</div>{% endif %}
         </div>
       {% endfor %}
+    </div>
+
+    <div class="module" style="padding: 14px; margin-bottom: 24px;">
+      <h2 style="margin: 0 0 8px 0; font-size: 14px;">Sales over time — Last {{ sales_series|length }} days</h2>
+      {# Server-side chart: bars are plain divs sized from the real series. #}
+      {# No JS, no external assets — the admin must work offline. The figure #}
+      {# carries role="img" + a one-line aria summary; the data table below  #}
+      {# is the non-visual alternative with every day's exact figures.      #}
+      <figure role="img" aria-label="{{ sales_summary }}" style="margin: 0;">
+        <div style="display: flex; align-items: flex-end; gap: 2px; height: 120px; border-bottom: 1px solid #cccccc;">
+          {% for day in sales_series %}
+            <div
+              title="{{ day.date|date:'d M Y' }}: ₹{{ day.revenue }} ({{ day.orders }} order{{ day.orders|pluralize }})"
+              style="flex: 1; {% if day.revenue > 0 %}height: {% widthratio day.revenue sales_max_revenue 100 %}%; min-height: 2px; background: #417690;{% else %}height: 3px; background: #c8c8c8;{% endif %}"
+            ></div>
+          {% endfor %}
+        </div>
+        <figcaption style="display: flex; justify-content: space-between; gap: 8px; font-size: 11px; color: #666666; margin-top: 6px;">
+          <span>{{ sales_series.0.date|date:"d M Y" }}</span>
+          <span>paid orders per day (confirmed + shipped + delivered)</span>
+          <span>today</span>
+        </figcaption>
+      </figure>
+      <details style="margin-top: 8px;">
+        <summary style="cursor: pointer; font-size: 12px;">View as data table</summary>
+        <table>
+          <thead><tr><th>Date</th><th>Revenue</th><th>Orders</th></tr></thead>
+          <tbody>
+            {% for day in sales_series %}
+              <tr><td>{{ day.date|date:"d M Y" }}</td><td>₹{{ day.revenue }}</td><td>{{ day.orders }}</td></tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      </details>
     </div>
 
     <div class="module" style="padding: 14px; margin-bottom: 24px;">

@@ -2,12 +2,20 @@ from django.urls import path
 
 from .views import (
     register, username_available, verify_email, resend_verification,
-    forgot_username, request_password_reset, reset_password,
+    forgot_username, request_password_reset, reset_password, LoginView,
 )
 from rest_framework_simplejwt.views import (
-    TokenObtainPairView,
     TokenRefreshView,
 )
+
+
+class RefreshView(TokenRefreshView):
+    """JWT refresh behind the 'auth' throttle scope.
+
+    Throttling here bounds refresh-token brute forcing (V-04 family). The
+    response contract is TokenRefreshView's, unchanged."""
+
+    throttle_scope = 'auth'
 
 
 urlpatterns = [
@@ -32,13 +40,13 @@ urlpatterns = [
 
     path(
         'login/',
-        TokenObtainPairView.as_view(),
+        LoginView.as_view(),
         name='login'
     ),
 
     path(
         'token/refresh/',
-        TokenRefreshView.as_view(),
+        RefreshView.as_view(),
         name='token-refresh'
     ),
 

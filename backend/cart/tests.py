@@ -1,9 +1,14 @@
 """Cart unit tests - docs/test-gaps.md items 23-29."""
 import unittest
+from unittest import mock
 
+from django.core.cache import cache
 from django.test import tag
+from rest_framework.settings import api_settings
+from rest_framework.throttling import ScopedRateThrottle
 
 from cart.models import Cart, CartItem
+from cart.views import CartMutationRateThrottle, cart_detail, cart_item_detail
 from common.testing import ApiTestCase
 
 
@@ -217,3 +222,58 @@ class CrossSessionIsolationTests(ApiTestCase):
         self.seed_session_cart([(product, 2)])
         item = CartItem.objects.get()
         self.assertEqual(str(item), f"{product.name} x 2")
+
+
+@tag("cart")
+class CartThrottleTests(ApiTestCase):
+    """Conventions: every public mutating endpoint gets a throttle scope.
+    Cart add/update/remove share the 'cart' scope; GET is exempt so browsing
+    never consumes the mutation budget."""
+
+    def _add(self, product_id):
+        return self.client.post(
+            "/api/cart/",
+            {"product_id": product_id, "quantity": 1},
+            format="json",
+        )
+
+    def test_mutation_scopes_and_rates_are_configured(self):
+        self.assertEqual(cart_detail.view_class.throttle_scope, "cart")
+        self.assertEqual(
+            cart_detail.view_class.throttle_classes,
+            [CartMutationRateThrottle],
+        )
+        self.assertEqual(cart_item_detail.view_class.throttle_scope, "cart")
+        self.assertIn(ScopedRateThrottle, cart_item_detail.view_class.throttle_classes)
+        self.assertIn("cart", api_settings.DEFAULT_THROTTLE_RATES)
+
+    def test_add_and_update_share_the_mutation_budget(self):
+        """Third mutation inside a 2/min budget is 429'd — here the PATCH,
+        proving update is throttled under the same scope. DRF binds
+        THROTTLE_RATES at import, so the rate is patched on the throttle
+        class rather than via override_settings."""
+        product = self.make_product(stock=10)
+        rates = dict(api_settings.DEFAULT_THROTTLE_RATES)
+        rates["cart"] = "2/min"
+        with mock.patch.object(ScopedRateThrottle, "THROTTLE_RATES", rates):
+            cache.clear()
+            self.assertEqual(self._add(product.id).status_code, 201)
+            self.assertEqual(self._add(product.id).status_code, 201)
+            item = CartItem.objects.get()
+            throttled = self.client.patch(
+                f"/api/cart/{item.id}/", {"quantity": 1}, format="json"
+            )
+        self.assertEqual(throttled.status_code, 429, throttled.data)
+        item.refresh_from_db()
+        self.assertEqual(item.quantity, 2)  # the throttled PATCH never landed
+
+    def test_reads_do_not_consume_the_mutation_budget(self):
+        product = self.make_product(stock=10)
+        rates = dict(api_settings.DEFAULT_THROTTLE_RATES)
+        rates["cart"] = "1/min"
+        with mock.patch.object(ScopedRateThrottle, "THROTTLE_RATES", rates):
+            cache.clear()
+            self.assertEqual(self._add(product.id).status_code, 201)
+            self.assertEqual(self._add(product.id).status_code, 429)  # budget spent
+            # GET stays available even with the mutation bucket exhausted
+            self.assertEqual(self.client.get("/api/cart/").status_code, 200)

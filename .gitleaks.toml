@@ -1,0 +1,27 @@
+# Secret-scan configuration (gitleaks) for the perfume-store repo.
+# Extends the default gitleaks rule set. The allowlist below covers ONLY the
+# documented, intentional dummy credentials used by the hermetic test suite
+# and CI (see backend/common/testing.py, backend/.env.example,
+# .github/workflows/backend-tests.yml, frontend/e2e/helpers.ts). This file is
+# NOT an escape hatch for real secrets -- any new credential-looking value
+# must be investigated, never allowlisted.
+[extend]
+useDefault = true
+
+[allowlist]
+  description = "Documented dummy/test credentials (never real secrets)"
+  regexes = [
+    '''\brzp_test_CI_DUMMY\b''',
+    '''rzp_test_TESTINGONLYDO.?NOT.?USE''',
+    '''TESTINGONLY[A-Za-z]*-DO-NOT-USE''',
+    '''\bci-dummy-secret\b''',
+    '''\bchange-me-to-a-long-random-string\b''',
+    '''\bboss-pass-123\b''',
+    '''\be2e-(Customer|Staff)-9\b''',
+    # Legacy (pre-run) test-fixture passwords in backend tests; they exist
+    # only to create throwaway users inside the isolated test DB.
+    '''Ev1l-Passphrase-9\b''',
+    '''S3cure-Passphrase!''',
+    '''N3w-Passphrase-99\b''',
+    '''An0ther-Pass-77\b''',
+  ]

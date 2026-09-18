@@ -3,7 +3,7 @@ from decimal import Decimal
 from django.db import transaction
 from django.utils import timezone
 
-from rest_framework.decorators import api_view, permission_classes
+from rest_framework.decorators import api_view, permission_classes, throttle_scope
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
 from rest_framework import status
@@ -12,7 +12,7 @@ from .models import Order, OrderItem, Coupon
 from .serializers import OrderSerializer
 
 from cart.models import Cart
-from products.models import products
+from products.models import StockMovement, products
 
 import razorpay
 from django.conf import settings
@@ -115,14 +115,52 @@ def create_order(request):
     # Calculate cart subtotal
     # =========================
 
+    # SPEC-6-01 [6.2.22]: a cart line that outlasted its stock (stock can
+    # drop after the item was added) must not become an order the customer
+    # can pay for. This gate is advisory and read-only -- stock can still
+    # change between create and pay, so verify_payment re-checks under a
+    # row lock before decrementing; that remains the authoritative backstop.
+    unavailable = []
+
     subtotal_amount = Decimal('0.00')
 
     for cart_item in cart_items:
 
         product = cart_item.product
 
+        if cart_item.quantity > product.stock:
+
+            unavailable.append(
+                {
+                    "name": product.name,
+                    "requested": cart_item.quantity,
+                    "available": product.stock,
+                }
+            )
+
         subtotal_amount += (
             product.price * cart_item.quantity
+        )
+
+    if unavailable:
+
+        details = ", ".join(
+            f'"{item["name"]}" (requested {item["requested"]}, '
+            f'only {item["available"]} in stock)'
+            for item in unavailable
+        )
+
+        if len(unavailable) == 1:
+            action = "Reduce the quantity or remove the item to continue."
+        else:
+            action = "Reduce the quantity or remove these items to continue."
+
+        return Response(
+            {
+                "error": f"Not enough stock for {details}. {action}",
+                "products": unavailable,
+            },
+            status=status.HTTP_400_BAD_REQUEST
         )
 
     # =========================
@@ -277,11 +315,26 @@ def create_order(request):
         serializer.data,
         status=status.HTTP_201_CREATED
     )
-    # =========================
-    # Coupon
-    # =========================
+
+
+# ==================================
+# Coupon preview (public)
+# ==================================
+
+def _uniform_coupon_rejection():
+    """Every coupon failure on the public preview returns this same body and
+    status, so the response never reveals whether a code exists or why it
+    was rejected (V-11 existence/validation-state leak). Differentiated
+    feedback stays on the authenticated checkout, where callers are not
+    brute-forcing the code space."""
+    return Response(
+        {"error": "Invalid coupon code"},
+        status=status.HTTP_400_BAD_REQUEST
+    )
+
 
 @api_view(['POST'])
+@throttle_scope('coupon')
 def apply_coupon(request):
 
     code = request.data.get('code')
@@ -292,51 +345,10 @@ def apply_coupon(request):
             status=status.HTTP_400_BAD_REQUEST
         )
 
-    # Find coupon
-    try:
-        coupon = Coupon.objects.get(
-            code__iexact=code
-        )
-
-    except Coupon.DoesNotExist:
-        return Response(
-            {"error": "Invalid coupon code"},
-            status=status.HTTP_400_BAD_REQUEST
-        )
-
-    # Check active
-    if not coupon.active:
-        return Response(
-            {"error": "This coupon is inactive"},
-            status=status.HTTP_400_BAD_REQUEST
-        )
-
-    # Check dates
-    now = timezone.now()
-
-    if now < coupon.valid_from:
-        return Response(
-            {"error": "This coupon is not active yet"},
-            status=status.HTTP_400_BAD_REQUEST
-        )
-
-    if now > coupon.valid_until:
-        return Response(
-            {"error": "This coupon has expired"},
-            status=status.HTTP_400_BAD_REQUEST
-        )
-
-    # Check usage limit
-    if (
-        coupon.usage_limit is not None
-        and coupon.used_count >= coupon.usage_limit
-    ):
-        return Response(
-            {"error": "This coupon has reached its usage limit"},
-            status=status.HTTP_400_BAD_REQUEST
-        )
-
-    # Get current cart
+    # Resolve the cart before the coupon: otherwise a caller with no cart
+    # could still probe code existence by watching for the coupon error
+    # instead of the cart error. With the cart first, every cartless caller
+    # gets the same answer for every code.
     if not request.session.session_key:
         return Response(
             {"error": "Cart not found"},
@@ -356,6 +368,36 @@ def apply_coupon(request):
             status=status.HTTP_404_NOT_FOUND
         )
 
+    # From here on every rejection shares one uniform response: unknown,
+    # inactive, not-yet-valid, expired, usage limit, and below minimum.
+    try:
+        coupon = Coupon.objects.get(
+            code__iexact=code
+        )
+
+    except Coupon.DoesNotExist:
+        return _uniform_coupon_rejection()
+
+    # Check active
+    if not coupon.active:
+        return _uniform_coupon_rejection()
+
+    # Check dates
+    now = timezone.now()
+
+    if now < coupon.valid_from:
+        return _uniform_coupon_rejection()
+
+    if now > coupon.valid_until:
+        return _uniform_coupon_rejection()
+
+    # Check usage limit
+    if (
+        coupon.usage_limit is not None
+        and coupon.used_count >= coupon.usage_limit
+    ):
+        return _uniform_coupon_rejection()
+
     # Calculate cart subtotal
     subtotal = Decimal('0.00')
 
@@ -366,13 +408,7 @@ def apply_coupon(request):
 
     # Check minimum order amount
     if subtotal < coupon.minimum_order_amount:
-        return Response(
-            {
-                "error": "Minimum order amount is required",
-                "minimum_order_amount": coupon.minimum_order_amount
-            },
-            status=status.HTTP_400_BAD_REQUEST
-        )
+        return _uniform_coupon_rejection()
 
     # Calculate discount
     if coupon.discount_type == 'percentage':
@@ -592,6 +628,19 @@ def verify_payment(request):
             product = locked_products[item.product_id]
             product.stock -= item.quantity
             product.save(update_fields=['stock'])
+            # [6.5.17] No silent inventory edits: a paid sale is an inventory
+            # mutation like any other, so every decrement lands in the ledger
+            # with the order as its reference and no actor (system). The row
+            # is locked and the new value was just computed here, so
+            # stock_after is the real post-decrement quantity.
+            StockMovement.objects.create(
+                product=product,
+                delta=-item.quantity,
+                reason=StockMovement.Reason.SALE,
+                stock_after=product.stock,
+                note=f"Order #{order.id}",
+                created_by=None,
+            )
 
         if coupon:
             coupon.used_count += 1

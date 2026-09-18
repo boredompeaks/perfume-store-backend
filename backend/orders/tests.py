@@ -6,14 +6,19 @@ network or the real keys from ``.env`` (V-01 containment).
 import unittest
 from datetime import timedelta
 from decimal import Decimal
+from unittest import mock
 
+from django.core.cache import cache
 from django.test import tag
 from django.utils import timezone
+from rest_framework.settings import api_settings
+from rest_framework.throttling import ScopedRateThrottle
 
 from cart.models import Cart, CartItem
 from common.testing import TEST_RAZORPAY_KEY_ID, ApiTestCase
 from orders.models import Coupon, Order, OrderItem
-from products.models import products
+from orders.views import apply_coupon
+from products.models import StockMovement, products
 
 
 class OrderTestBase(ApiTestCase):
@@ -41,45 +46,58 @@ class ApplyCouponTests(OrderTestBase):
     def _preview(self, code):
         return self.client.post("/api/orders/apply-coupon/", {"code": code}, format="json")
 
-    # 30. rejections, parametrized ---------------------------------------------------------
-    def test_coupon_rejections(self):
+    # 30. every rejection shares one uniform body: unknown, inactive,
+    # not-yet-valid, expired, usage-limit and min-order must be
+    # indistinguishable so coupon existence/validation state never leaks
+    # to callers probing the code space (V-11) ----------------------------
+    def test_coupon_rejections_are_uniform(self):
         cases = [
-            ("unknown", "SAVE404", "Invalid coupon code"),
-            ("inactive", self.make_coupon(code="DEAD", active=False).code, "This coupon is inactive"),
+            ("unknown", "SAVE404"),
+            ("inactive", self.make_coupon(code="DEAD", active=False).code),
             (
                 "expired",
                 self.make_coupon(code="OLD", valid_until=timezone.now() - timedelta(minutes=1)).code,
-                "This coupon has expired",
             ),
             (
                 "not-yet-valid",
                 self.make_coupon(code="FUTURE", valid_from=timezone.now() + timedelta(days=1)).code,
-                "This coupon is not active yet",
             ),
             (
                 "usage-limit",
                 self.make_coupon(code="MAXED", usage_limit=5, used_count=5).code,
-                "This coupon has reached its usage limit",
             ),
             (
                 "min-order",
                 self.make_coupon(code="BIGSPEND", minimum_order_amount="5000").code,
-                "Minimum order amount is required",
             ),
         ]
-        for name, code, expected_error in cases:
+        for name, code in cases:
             with self.subTest(case=name):
                 res = self._preview(code)
                 self.assertEqual(res.status_code, 400, res.data)
-                self.assertEqual(res.data["error"], expected_error)
-        if True:
-            res = self._preview("BIGSPEND")
-            self.assertEqual(res.data["minimum_order_amount"], Decimal("5000.00"))
+                # one body for every failure reason; no configuration detail
+                # (e.g. minimum_order_amount) may ride along
+                self.assertEqual(res.data, {"error": "Invalid coupon code"})
 
     def test_missing_code_rejected(self):
         res = self.client.post("/api/orders/apply-coupon/", {}, format="json")
         self.assertEqual(res.status_code, 400, res.data)
         self.assertEqual(res.data["error"], "Coupon code is required")
+
+    def test_cartless_caller_learns_nothing_about_coupon_existence(self):
+        """With no cart, a known-valid and an unknown code must be
+        indistinguishable: the cart error comes first and is uniform."""
+        self.make_coupon(code="SAVE10", discount_value="10")
+        fresh = self.fresh_client()
+        known = fresh.post(
+            "/api/orders/apply-coupon/", {"code": "SAVE10"}, format="json"
+        )
+        unknown = fresh.post(
+            "/api/orders/apply-coupon/", {"code": "SAVE404"}, format="json"
+        )
+        self.assertEqual(known.status_code, unknown.status_code)
+        self.assertEqual(known.data, unknown.data)
+        self.assertEqual(known.data["error"], "Cart not found")
 
     def test_coupon_code_matched_case_insensitively(self):
         self.make_coupon(code="SAVE10", discount_value="10")
@@ -119,6 +137,48 @@ class ApplyCouponTests(OrderTestBase):
         res = self.fresh_client().post("/api/orders/apply-coupon/", {"code": "SAVE10"}, format="json")
         self.assertEqual(res.status_code, 404, res.data)
         self.assertEqual(res.data["error"], "Cart not found")
+
+
+@tag("orders")
+class ApplyCouponThrottleTests(OrderTestBase):
+    """Conventions: every public mutating endpoint gets a throttle scope.
+    The preview is the coupon brute-force surface (V-11/V-04)."""
+
+    def _preview(self, code):
+        return self.client.post(
+            "/api/orders/apply-coupon/", {"code": code}, format="json"
+        )
+
+    def test_coupon_scope_and_rate_are_configured(self):
+        self.assertEqual(apply_coupon.view_class.throttle_scope, "coupon")
+        self.assertIn(ScopedRateThrottle, apply_coupon.view_class.throttle_classes)
+        self.assertIn("coupon", api_settings.DEFAULT_THROTTLE_RATES)
+
+    def test_rate_limit_engages_when_budget_spent(self):
+        """The scope actually enforces: a third preview inside a 2/min budget
+        is 429'd. DRF binds THROTTLE_RATES at import, so the rate is patched
+        on the throttle class rather than via override_settings."""
+        self.make_coupon(code="SAVE10", discount_value="10")
+        rates = dict(api_settings.DEFAULT_THROTTLE_RATES)
+        rates["coupon"] = "2/min"
+        with mock.patch.object(ScopedRateThrottle, "THROTTLE_RATES", rates):
+            cache.clear()
+            self.assertEqual(self._preview("SAVE10").status_code, 200)
+            self.assertEqual(self._preview("SAVE10").status_code, 200)
+            throttled = self._preview("SAVE10")
+        self.assertEqual(throttled.status_code, 429, throttled.data)
+
+    def test_rejections_consume_the_same_budget_as_successes(self):
+        """Brute-forcing invalid codes hits the same bucket as valid ones:
+        failures cannot be used to probe indefinitely."""
+        rates = dict(api_settings.DEFAULT_THROTTLE_RATES)
+        rates["coupon"] = "2/min"
+        with mock.patch.object(ScopedRateThrottle, "THROTTLE_RATES", rates):
+            cache.clear()
+            self.assertEqual(self._preview("GHOST404").status_code, 400)
+            self.assertEqual(self._preview("GHOST404").status_code, 400)
+            throttled = self._preview("GHOST404")
+        self.assertEqual(throttled.status_code, 429, throttled.data)
 
 
 @tag("orders")
@@ -230,6 +290,98 @@ class CheckoutTests(OrderTestBase):
         res = self.checkout()
         self.assertEqual(res.status_code, 400, res.data)
         self.assertEqual(res.data["error"], "Cart is empty")
+
+
+@tag("orders")
+class CheckoutStockGateTests(OrderTestBase):
+    """SPEC-6-01 [6.2.22]: a cart line whose stock dropped after the add is
+    rejected at order creation with an actionable 400, so the customer never
+    pays for an unfulfillable order. The gate is advisory and read-only: the
+    authoritative stock check stays in verify_payment, because stock can
+    change again between create and pay."""
+
+    def test_insufficient_stock_at_creation_returns_400_without_side_effects(self):
+        # stock dropped after the item was added to the cart
+        products.objects.filter(pk=self.product.pk).update(stock=1)
+
+        res = self.checkout()
+
+        self.assertEqual(res.status_code, 400, res.data)
+        self.assertEqual(
+            res.data["error"],
+            'Not enough stock for "Rose Aurum" (requested 2, only 1 in stock). '
+            "Reduce the quantity or remove the item to continue.",
+        )
+        self.assertEqual(
+            res.data["products"],
+            [{"name": "Rose Aurum", "requested": 2, "available": 1}],
+        )
+        # nothing was created or mutated: the customer fixes the cart
+        # instead of paying for an order that cannot be fulfilled
+        self.assertEqual(Order.objects.count(), 0)
+        self.assertEqual(OrderItem.objects.count(), 0)
+        cart = Cart.objects.get(session_id=self.client.session.session_key)
+        self.assertEqual(cart.items.get().quantity, 2)  # cart line untouched
+        self.product.refresh_from_db()
+        self.assertEqual(self.product.stock, 1)  # no decrement at creation
+
+    def test_zero_stock_line_rejected(self):
+        """[6.2.22]: an out-of-stock product is not purchasable."""
+        products.objects.filter(pk=self.product.pk).update(stock=0)
+
+        res = self.checkout()
+
+        self.assertEqual(res.status_code, 400, res.data)
+        self.assertIn("Rose Aurum", res.data["error"])
+        self.assertEqual(Order.objects.count(), 0)
+
+    def test_exact_remaining_stock_succeeds(self):
+        """Boundary: requested == available is still purchasable."""
+        products.objects.filter(pk=self.product.pk).update(stock=2)
+
+        res = self.checkout()
+
+        self.assertEqual(res.status_code, 201, res.data)
+        order = Order.objects.get(id=res.data["id"])
+        self.assertEqual(order.items.get().quantity, 2)
+
+    def test_one_bad_line_names_only_the_bad_product(self):
+        second = self.make_product(name="Oud Royale", price="250.00", stock=4)
+        self.seed_session_cart([])
+        cart = Cart.objects.get(session_id=self.client.session.session_key)
+        CartItem.objects.create(cart=cart, product=second, quantity=1)
+        products.objects.filter(pk=self.product.pk).update(stock=1)
+
+        res = self.checkout()
+
+        self.assertEqual(res.status_code, 400, res.data)
+        self.assertIn("Rose Aurum", res.data["error"])
+        self.assertNotIn("Oud Royale", res.data["error"])
+        self.assertEqual(
+            res.data["products"],
+            [{"name": "Rose Aurum", "requested": 2, "available": 1}],
+        )
+        self.assertEqual(Order.objects.count(), 0)
+
+    def test_multiple_bad_lines_listed_in_error(self):
+        second = self.make_product(name="Oud Royale", price="250.00", stock=4)
+        self.seed_session_cart([])
+        cart = Cart.objects.get(session_id=self.client.session.session_key)
+        CartItem.objects.create(cart=cart, product=second, quantity=3)
+        products.objects.filter(pk=self.product.pk).update(stock=1)  # wants 2
+        products.objects.filter(pk=second.pk).update(stock=2)        # wants 3
+
+        res = self.checkout()
+
+        self.assertEqual(res.status_code, 400, res.data)
+        self.assertIn("Rose Aurum", res.data["error"])
+        self.assertIn("Oud Royale", res.data["error"])
+        self.assertIn("remove these items", res.data["error"])
+        self.assertEqual(
+            {row["name"] for row in res.data["products"]},
+            {"Rose Aurum", "Oud Royale"},
+        )
+        self.assertEqual(Order.objects.count(), 0)
 
 
 @tag("orders")
@@ -388,6 +540,52 @@ class VerifyPaymentTests(OrderTestBase):
         cart_items = list(CartItem.objects.filter(cart=cart))
         self.assertEqual(cart_items, [])  # both paid lines removed
 
+    def test_verified_payment_writes_one_sale_movement_per_product(self):
+        """SPEC-6-02 [6.5.17]: payment-time decrements are inventory
+        mutations too — one SALE ledger row per product, system actor (no
+        user), the order number as reference, and stock_after equal to the
+        real post-decrement stock."""
+        second = self.make_product(name="Oud Royale", price="250.00", stock=4)
+        cart = Cart.objects.get(session_id=self.client.session.session_key)
+        CartItem.objects.create(cart=cart, product=second, quantity=1)
+        order = self.create_order()
+        self.razorpay_mock(order_id="order_LEDGER")
+        self.client.post("/api/orders/payment/", {"order_id": order.id}, format="json")
+        order.refresh_from_db()
+        payload = {
+            "order_id": order.id,
+            "razorpay_order_id": order.razorpay_order_id,
+            "razorpay_payment_id": "pay_LEDGER",
+            "razorpay_signature": "sig",
+        }
+
+        res = self.client.post("/api/orders/payment/verify/", payload, format="json")
+
+        self.assertEqual(res.status_code, 200, res.data)
+        movements = list(StockMovement.objects.order_by("product_id"))
+        self.assertEqual(len(movements), 2)  # exactly one per decremented product
+
+        first, second_move = movements
+        self.assertEqual(first.product_id, self.product.id)
+        self.assertEqual(first.delta, -2)
+        self.assertEqual(first.reason, StockMovement.Reason.SALE)
+        self.assertEqual(first.stock_after, 8)
+        self.assertIsNone(first.created_by)  # system actor, not the buyer
+        self.assertEqual(first.note, f"Order #{order.id}")
+
+        self.assertEqual(second_move.product_id, second.id)
+        self.assertEqual(second_move.delta, -1)
+        self.assertEqual(second_move.reason, StockMovement.Reason.SALE)
+        self.assertEqual(second_move.stock_after, 3)
+        self.assertIsNone(second_move.created_by)
+        self.assertEqual(second_move.note, f"Order #{order.id}")
+
+        # ledger agrees with reality on the products themselves
+        self.product.refresh_from_db()
+        second.refresh_from_db()
+        self.assertEqual(self.product.stock, 8)
+        self.assertEqual(second.stock, 3)
+
     def test_verify_without_session_cookie_skips_cart_cleanup(self):
         """JWT-only client (no cookies): payment succeeds; there is simply no
         session cart to clean (documented hybrid-auth behaviour)."""
@@ -427,6 +625,8 @@ class VerifyPaymentTests(OrderTestBase):
         coupon.refresh_from_db()
         self.assertEqual(coupon.used_count, 1)           # incremented exactly once
         self.assertEqual(order.status, "confirmed")
+        # SPEC-6-02: the rejected replay must not double-book the ledger either
+        self.assertEqual(StockMovement.objects.count(), 1)
 
     def test_insufficient_stock_at_verify_returns_409(self):
         """V-03 (documents the charged-but-unfulfilled gap): when stock is
@@ -453,6 +653,8 @@ class VerifyPaymentTests(OrderTestBase):
         self.assertEqual(order.status, "pending")
         self.assertEqual(self.product.stock, 1)
         self.assertIsNone(order.razorpay_payment_id)
+        # no decrement, no ledger row (SPEC-6-02)
+        self.assertEqual(StockMovement.objects.count(), 0)
 
     def test_coupon_invalidated_between_checkout_and_verify_returns_409(self):
         coupon = self.make_coupon(code="PCT10", discount_value="10", usage_limit=1)
