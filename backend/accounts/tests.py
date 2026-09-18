@@ -1,9 +1,10 @@
 ﻿"""Accounts unit tests - docs/test-gaps.md items 1-14.
 
 Covers registration validation, email verification, enumeration-safe
-recovery flows, and the V-05 password-policy gap (flip tests marked
-``expectedFailure`` turn green automatically once ``validate_password``
-is enforced in ``RegisterSerializer``).
+recovery flows, and the V-05 password policy: registration and password
+reset both run Django's ``validate_password`` (conventions.md), so a
+password the shared validators reject fails both paths in the same
+field-error shape.
 """
 import unittest
 from unittest import mock
@@ -120,12 +121,11 @@ class RegisterSerializerTests(ApiTestCase):
         )
         self.assertNotIn("password", res.data["user"])
 
-    # 5. V-05: password policy missing (documents vulnerability; flips when fixed) -----------
-    @unittest.expectedFailure
+    # 5. V-05: registration runs the same validate_password policy as reset --------------
     def test_v05_registration_rejects_common_password(self):
-        """V-05: `Password123`-style passwords are accepted today because
-        RegisterSerializer skips validate_password. This asserts the FIXED
-        behaviour; remove @expectedFailure when Phase 2.3 lands."""
+        """V-05: `password`-style passwords clear the length validator but
+        fail CommonPasswordValidator now that RegisterSerializer runs
+        validate_password — the same policy the reset path enforces."""
         res = self.client.post(
             "/api/accounts/register/",
             {"username": "weakpass", "email": "weak@example.com", "password": "password"},
@@ -133,11 +133,11 @@ class RegisterSerializerTests(ApiTestCase):
         )
         self.assertEqual(res.status_code, 400, res.data)
         self.assertIn("password", res.data)
+        self.assertIn("common", " ".join(res.data["password"]).lower())
 
-    @unittest.expectedFailure
     def test_v05_registration_rejects_numeric_only_password(self):
-        """V-05 companion: all-numeric passwords should be rejected by
-        NumericPasswordValidator once validate_password is wired in."""
+        """V-05 companion: all-numeric passwords are rejected by
+        NumericPasswordValidator through the shared policy."""
         res = self.client.post(
             "/api/accounts/register/",
             {"username": "numericpass", "email": "numeric@example.com", "password": "987654321"},
@@ -145,6 +145,55 @@ class RegisterSerializerTests(ApiTestCase):
         )
         self.assertEqual(res.status_code, 400, res.data)
         self.assertIn("password", res.data)
+        self.assertIn("numeric", " ".join(res.data["password"]).lower())
+
+    def test_password_similar_to_submitted_attributes_rejected(self):
+        """User-aware parity with reset: the similarity validator runs against
+        the username/email being registered (transient user), not against
+        nothing."""
+        cases = {
+            ("hannelore", "hannelore@example.com"): "hannelorepass",  # ~ username
+            ("seafoam", "seafoam@example.com"): "seafoam@example.com",  # == email
+        }
+        for (username, email), password in cases.items():
+            with self.subTest(username=username):
+                serializer = RegisterSerializer(
+                    data={"username": username, "email": email, "password": password}
+                )
+                self.assertFalse(serializer.is_valid())
+                self.assertIn("password", serializer.errors)
+                self.assertIn("similar", " ".join(serializer.errors["password"]).lower())
+
+    def test_policy_errors_match_reset_path_shape_and_block_creation(self):
+        """Parity + uniform-shape contract (conventions.md): registration and
+        reset-confirm both answer 400 with a list of validator messages under
+        the `password` key — the shape the frontend's fieldErrors renderer
+        consumes for both forms. A rejected password must also create no user
+        row and send no verification email."""
+        res = self.client.post(
+            "/api/accounts/register/",
+            {"username": "parity", "email": "parity@example.com", "password": "password"},
+            format="json",
+        )
+        self.assertEqual(res.status_code, 400, res.data)
+        self.assertIsInstance(res.data["password"], list)
+        self.assertTrue(all(isinstance(message, str) for message in res.data["password"]))
+        self.assertFalse(User.objects.filter(username="parity").exists())
+        self.assertEqual(len(mail.outbox), 0)
+
+        reset_user = self.make_user("parityreset")
+        reset_res = self.client.post(
+            "/api/accounts/password-reset/confirm/",
+            {
+                "uid": _encoded_user_id(reset_user),
+                "token": default_token_generator.make_token(reset_user),
+                "password": "password",
+            },
+            format="json",
+        )
+        self.assertEqual(reset_res.status_code, 400, reset_res.data)
+        self.assertIsInstance(reset_res.data["password"], list)
+        self.assertTrue(all(isinstance(message, str) for message in reset_res.data["password"]))
 
 
 @tag("accounts")
