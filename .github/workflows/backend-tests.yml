@@ -2,9 +2,20 @@ name: backend-tests
 
 on:
   push:
+    branches: [spec-comp, feat/add-frontend, master]
     paths: ["backend/**", ".github/workflows/backend-tests.yml"]
   pull_request:
+    branches: [spec-comp, feat/add-frontend, master]
     paths: ["backend/**", ".github/workflows/backend-tests.yml"]
+
+# Least privilege: the suite only needs to read the checkout.
+permissions:
+  contents: read
+
+# One run per ref; a new push to the same ref cancels the stale run.
+concurrency:
+  group: backend-tests-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
   test:

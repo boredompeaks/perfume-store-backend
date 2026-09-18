@@ -1,0 +1,78 @@
+name: frontend-tests
+
+on:
+  push:
+    branches: [spec-comp, feat/add-frontend, master]
+    paths: ["frontend/**", ".github/workflows/frontend-tests.yml"]
+  pull_request:
+    branches: [spec-comp, feat/add-frontend, master]
+    paths: ["frontend/**", ".github/workflows/frontend-tests.yml"]
+
+# Least privilege: the suite only needs to read the checkout.
+permissions:
+  contents: read
+
+# One run per ref; a new push to the same ref cancels the stale run.
+concurrency:
+  group: frontend-tests-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  # Hermetic: vitest unit tests (node env, no network) + next build
+  # (env-independent: every NEXT_PUBLIC_* has a code fallback).
+  unit-build:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: frontend
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Install dependencies (npm ci)
+        run: npm ci
+
+      - name: Unit tests (vitest)
+        run: npm run test
+
+      - name: Production build (next build)
+        run: npm run build
+
+  # Playwright e2e is DISABLED-BY-DEFAULT by design: the current suite
+  # (frontend/e2e/) drives the REAL Razorpay widget (test-mode keys, wallet
+  # flows) against live Django + Next servers with seeded users/products.
+  # That is not hermetic and would require Razorpay credentials as repo
+  # secrets -- CI policy forbids secrets in workflows (Razorpay is always
+  # mocked). Flip the repository variable E2E_ENABLED to "true" ONLY after
+  # the e2e suite is reworked to be hermetic (mocked payment backend,
+  # checked-in DB seed fixture, playwright webServer wiring). Until then
+  # this job self-skips and does not gate merges.
+  e2e:
+    needs: unit-build
+    if: vars.E2E_ENABLED == 'true'
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: frontend
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Install dependencies (npm ci)
+        run: npm ci
+
+      - name: Install Playwright browsers
+        run: npx playwright install --with-deps
+
+      - name: E2E tests (playwright)
+        run: npm run test:e2e
