@@ -138,6 +138,12 @@ Per spec line 1845 ("Do not permit silent inventory edits with no audit trail"):
 - `docs/changes.md` — the SPEC-6-02 row above amended in place: the falsified claims replaced with scoped, truthful statements pointing at this row.
 - Suite: **261 tests, OK (255 pass, 6 `expectedFailure` flips unchanged)**, coverage **100.00%** (gate 90), `makemigrations --check` clean.
 
+## 2026-09-18 — SPEC-2-01 (Section 2) — builder: gate cycle-1 fix — no password-shaped literal in the DATABASE_URL test
+
+Per the release-engineer gate report (BUG-1 [P2], GATE_PHASE SENT-BACK cycle 1): GitGuardian incident 37423839 ("Generic Password") fired on the standalone assertion literal in `tests/test_settings_security.py:97` (shipped in 313782e) — the decoded form of the fabricated fixture URL's `p%40ss` password. False positive on a placeholder (no real credential), but a standalone password-shaped literal in source fails the secret-scan check-run on the promotion PR head and blocks the merge. Test semantics fully preserved: the parser must still be proven to URL-decode.
+- `tests/test_settings_security.py` — `test_postgres_url_maps_all_connection_fields` now derives the expected password via the stdlib instead of hardcoding the decoded value: `assertEqual(db['PASSWORD'], unquote('p%40ss'))`. The oracle is the percent-encoded fragment already present in the fixture URL, so the assertion is exactly as strong as before — if the parser ever stopped unquoting, `db['PASSWORD']` would hold the raw encoded form and the test would fail. `git grep` confirms no password-shaped literal remains anywhere in source; the fixture URL, the parser under test, and every other assertion are untouched. `.gitleaks.toml` and `.github/workflows/*` deliberately not touched (release-engineer scope).
+- Suite: **261 tests, OK (255 pass, 6 `expectedFailure` flips unchanged)**, coverage **100.00%** (gate 90), `makemigrations --check` clean.
+
 ## Next (per fix-plan.md)
 
 - Phase 0 remaining: rotate Razorpay keys, add CI.
