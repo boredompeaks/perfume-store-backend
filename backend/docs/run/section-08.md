@@ -1,0 +1,14 @@
+# Section 8 — Database architecture (task ledger)
+
+Migrated verbatim from the monolithic ledger 2026-09-19. Spec lines: 2454–2570. Compliance prefetch 2026-09-18: 6 IMPLEMENTED / 6 PARTIAL / 4 MISSING / 0 DEVIATES / 1 NOT-APPLICABLE.
+
+| Task ID | Section | Requirement summary | Spec lines | Status | Attempts |
+|---|---|---|---|---|---|
+| SPEC-8-01 | 8 | Order-number + non-sequential identifier schema: unique indexed order_number (ORD-YYYY-NNNNNN, generated inside atomic creation), UUID-vs-derived PK/exposure strategy for Order; uniqueness-race test | 2454–2570 [R-8.4],[R-8.5] | PENDING (from S8 compliance prefetch) | 0 |
+| SPEC-8-02 | 8 | SKU + variant schema core: ProductVariant with globally unique SKU (constraint+index), OrderItem snapshot columns (sku, variant_name) — executes the schema half of SPEC-3-21/SPEC-6-08 | 2454–2570 [R-8.7],[R-8.13] | PENDING (from S8 compliance prefetch; full catalogue/admin depth stays with SPEC-3-21/SPEC-6-08) | 0 |
+| SPEC-8-03 | 8 | Currency column alongside money: currency CharField (default INR, documented) on Order/OrderItem + discount amounts, serializer-surfaced, store-config-driven (not hardcoded 'INR' at orders/views.py:498,510) | 2454–2570 [R-8.11] | PENDING (from S8 compliance prefetch) | 0 |
+| SPEC-8-04 | 8 | Business-event timestamps: paid_at (written in verify_payment beside status), cancelled_at; named-timestamp pattern for shipped/delivered/refunded/published so later sections extend it | 2454–2570 [R-8.16] | PENDING (from S8 compliance prefetch; cross SPEC-6-11/SPEC-1-05/§10) | 0 |
+| SPEC-8-05 | 8 | Explicit starting indexes: Meta.indexes for Order(user,-created_at), Order(status,created_at), Product(category); SKU/variant+location indexes ride SPEC-8-02/SPEC-6-13 | 2454–2570 [R-8.17] | PENDING (from S8 compliance prefetch) | 0 |
+| SPEC-8-06 | 8 | Deletion/archival policy: soft-archive field + admin behavior folded into SPEC-6-08 archive-vs-delete; slug IntegrityError-retry alignment + products-model rename sequencing on same model-touches | 2454–2570 [R-8.9] + conventions 17,7 | PENDING (from S8 compliance prefetch) | 0 |
+
+Cross-referenced: billing addr→SPEC-3-16 · item discounts→SPEC-6-09 · tax→SPEC-3-12 · paid/webhook/refund history→SPEC-6-11/6-12/1-05 · tracking→SPEC-5-05/1-08 · audit records→SPEC-7-01 · reservations→§12. §8.2 heading empty in spec — entity inventory via §8.1 diagram note.
