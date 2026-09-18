@@ -5,12 +5,17 @@ import base64
 import unittest
 from decimal import Decimal
 
-from django.contrib.auth.models import User
+from django.contrib.auth.models import AnonymousUser, User
 from django.core.files.uploadedfile import SimpleUploadedFile
 from django.test import tag
+from rest_framework.exceptions import PermissionDenied
+from rest_framework.request import Request
+from rest_framework.test import APIRequestFactory
 
+from common.permissions import IsAdminUserOrReadOnly
 from common.testing import ApiTestCase
 from products.models import StockMovement, products
+from products.serializers import ProductSerializer
 
 # 1x1 transparent PNG so ImageField can hold a real thumbnail
 TINY_PNG = base64.b64decode(
@@ -490,3 +495,109 @@ class ProductAdminTests(ApiTestCase):
         body = res.content.decode()
         self.assertIn("id,name,slug,category,price,size,stock,created_at", body)
         self.assertIn("Plain Oud", body)
+
+
+# =====================================================================================
+# SPEC-1-01: staff writes via permission_classes + explicit serializer fields
+# =====================================================================================
+
+EXPECTED_PRODUCT_FIELDS = [
+    "id", "name", "slug", "description", "price", "size", "stock",
+    "category", "image", "created_at",
+]
+
+
+@tag("products")
+class IsAdminUserOrReadOnlyUnitTests(ApiTestCase):
+    """Unit contract for common.permissions.IsAdminUserOrReadOnly."""
+
+    def setUp(self):
+        self.permission = IsAdminUserOrReadOnly()
+        self.staff = self.make_staff()
+        self.customer = self.make_user("customer")
+
+    def _request(self, method, user):
+        request = Request(APIRequestFactory().generic(method, "/api/products/"))
+        request.user = user
+        return request
+
+    def test_message_keeps_the_legacy_403_body(self):
+        self.assertEqual(self.permission.message, "Administrator access is required.")
+
+    def test_safe_methods_allowed_without_credentials(self):
+        for method in ("GET", "HEAD", "OPTIONS"):
+            with self.subTest(method=method):
+                request = self._request(method, AnonymousUser())
+                self.assertTrue(self.permission.has_permission(request, None))
+
+    def test_write_methods_require_staff(self):
+        for method in ("POST", "PUT", "PATCH", "DELETE"):
+            with self.subTest(method=method):
+                for user in (AnonymousUser(), self.customer):
+                    request = self._request(method, user)
+                    with self.assertRaises(PermissionDenied) as ctx:
+                        self.permission.has_permission(request, None)
+                    self.assertEqual(
+                        str(ctx.exception), "Administrator access is required."
+                    )
+                staff_request = self._request(method, self.staff)
+                self.assertTrue(
+                    self.permission.has_permission(staff_request, None)
+                )
+
+
+@tag("products")
+class ProductPermissionClassesApiTests(ApiTestCase):
+    """SPEC-1-01 wiring: reads stay public, writes stay staff-only, and the
+    403 contract is unchanged now that the gate lives in permission_classes."""
+
+    def setUp(self):
+        self.staff = self.make_staff()
+        self.product = self.make_product(name="Rose Water")
+
+    def test_read_methods_stay_public_for_anonymous(self):
+        client = self.fresh_client()
+        self.assertEqual(client.get("/api/products/").status_code, 200)
+        self.assertEqual(
+            client.get(f"/api/products/{self.product.slug}/").status_code, 200
+        )
+        # OPTIONS is a SAFE_METHOD too; HEAD is not routed by the FBV
+        # (405 before and after this refactor), so it is not asserted here.
+        self.assertEqual(
+            client.options(f"/api/products/{self.product.slug}/").status_code, 200
+        )
+
+    def test_anonymous_write_on_unknown_slug_is_403_not_404(self):
+        """Permission checks run before the view body: anonymous writes get a
+        uniform 403 even for slugs that do not exist (no existence leak)."""
+        res = self.fresh_client().put(
+            "/api/products/no-such-slug/", {"price": "1.00"}, format="json"
+        )
+        self.assertEqual(res.status_code, 403, res.data)
+        self.assertEqual(res.data["detail"], "Administrator access is required.")
+
+    def test_staff_write_still_succeeds_end_to_end(self):
+        client = self.fresh_client()
+        self.api_login("staff", client=client)
+        res = client.patch(
+            f"/api/products/{self.product.slug}/", {"stock": 7}, format="json"
+        )
+        self.assertEqual(res.status_code, 200, res.data)
+        self.product.refresh_from_db()
+        self.assertEqual(self.product.stock, 7)
+
+
+@tag("products")
+class ProductSerializerFieldsTests(ApiTestCase):
+    """SPEC-1-01: '__all__' replaced by an explicit, drift-guarded whitelist."""
+
+    def test_fields_are_declared_explicitly(self):
+        fields = ProductSerializer.Meta.fields
+        self.assertIsInstance(fields, (list, tuple))
+        self.assertEqual(list(fields), EXPECTED_PRODUCT_FIELDS)
+
+    def test_whitelist_still_covers_every_concrete_model_field(self):
+        """The explicit list must equal what '__all__' exposed — a new model
+        column must force a conscious decision here, never auto-leak."""
+        concrete = {field.name for field in products._meta.concrete_fields}
+        self.assertEqual(set(ProductSerializer.Meta.fields), concrete)

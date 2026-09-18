@@ -37,6 +37,15 @@ Bugs found and fixed while writing the tests (all behaviour, no API changes):
   - E2E smoke (temp script, in-memory DB): **20/20 passed** — full auth flows, staff gates, cart, coupon, checkout, live Razorpay order creation, forged-signature rejection, password reset.
 - New findings surfaced at runtime (added to audit): discount rounding drift preview-vs-checkout (F-11), unordered pagination warning (F-12), live Razorpay keys confirmed valid (F-01/V-01 urgency).
 
+## 2026-09-18 — SPEC-1-01 (Section 1) — builder: permission_classes + explicit serializer fields
+
+Per conventions.md:14/:18 (audit F-20, F-24; serializer half of V-19). Product write authorization moved from 4 duplicated inline `is_staff` checks to DRF `permission_classes`; `ProductSerializer` declares explicit `fields`. Public surface unchanged: same endpoints, same staff-only writes, same `403 {"detail": "Administrator access is required."}` body (canary `test_serializer_field_set_is_pinned` still green).
+- `common/permissions.py` (new) — `IsAdminUserOrReadOnly`: SAFE_METHODS public, writes require `is_staff` (same gate as `IsAdminUser`). Raises `PermissionDenied` directly so guests keep the legacy 403 instead of DRF's 401 `NotAuthenticated` (JWT authenticator attached, no credentials). A blanket `IsAdminUser` was not usable: it would have locked anonymous catalogue GETs on the multi-method views.
+- `products/views.py` — inline `request.user.is_staff` checks removed (was views.py:113/172/198/225); both FBVs decorated `@permission_classes([IsAdminUserOrReadOnly])`. Edge shift: anonymous writes to an unknown slug now answer 403 before the view body (was 404) — permission checks precede view code; no existence leak.
+- `products/serializers.py` — `fields = '__all__'` → explicit whitelist of the exact 10 fields the API always exposed (`id, name, slug, description, price, size, stock, category, image, created_at`).
+- `products/tests.py` — +8 tests: unit contract of `IsAdminUserOrReadOnly` (message body, SAFE_METHODS anon, staff-only writes via `assertRaises(PermissionDenied)`), API wiring (anonymous reads incl. OPTIONS stay 200, staff PATCH e2e, unknown-slug write → 403), serializer whitelist + drift guard against `products._meta.concrete_fields`.
+- Suite: **186 passed** (8 `expectedFailure` flips unchanged), coverage **100.00%** (gate 90), `makemigrations --check` clean.
+
 ## Next (per fix-plan.md)
 
 - Phase 0 remaining: rotate Razorpay keys, add CI.
