@@ -1,4 +1,5 @@
 """Shared logic for the admin dashboard and the /health/ endpoint."""
+from datetime import timedelta
 from decimal import Decimal
 
 from django.conf import settings
@@ -21,6 +22,61 @@ REVENUE_STATUSES = ("confirmed", "shipped", "delivered")
 # the warehouse has not dispatched yet. "shipped" is already with the carrier
 # and "pending" is payment-pending, not fulfilment-pending.
 PENDING_FULFILMENT_STATUS = "confirmed"
+
+
+def get_sales_series(days=None):
+    """Daily revenue + order counts over a trailing window of PAID orders.
+
+    "Paid" is the same REVENUE_STATUSES set the gross-sales KPI uses, so the
+    chart can never disagree with the revenue card. One grouped TruncDate
+    query aggregates all days; Python zero-fills the calendar range so the
+    series has no gaps (the chart needs an entry for every day, including
+    days with no sales). Revenue stays Decimal end to end and is quantized
+    to the paisa before it leaves this function.
+    """
+    from django.db.models.functions import TruncDate
+    from django.utils import timezone
+
+    from orders.models import Order
+
+    if days is None:
+        # Read at call time, not import time (same reasoning as
+        # _low_stock_threshold): env-driven and overridable per test.
+        days = settings.DASHBOARD_SALES_WINDOW_DAYS
+    # A nonsensical window (0/negative from a malformed env value) must not
+    # produce an empty or reversed date range.
+    days = max(1, int(days))
+
+    today = timezone.localdate()
+    start = today - timedelta(days=days - 1)
+    rows = (
+        Order.objects.filter(
+            status__in=REVENUE_STATUSES,
+            created_at__date__gte=start,
+            created_at__date__lte=today,
+        )
+        .annotate(day=TruncDate("created_at"))
+        .values("day")
+        .annotate(revenue=Sum("total_amount"), orders=Count("id"))
+        .order_by("day")
+    )
+    by_day = {row["day"]: row for row in rows}
+    series = []
+    for offset in range(days):
+        day = start + timedelta(days=offset)
+        row = by_day.get(day)
+        series.append(
+            {
+                "date": day,
+                "revenue": (
+                    (row["revenue"] or Decimal("0.00")).quantize(Decimal("0.01"))
+                    if row
+                    else Decimal("0.00")
+                ),
+                "orders": row["orders"] if row else 0,
+            }
+        )
+    return series
 
 
 def _media_writable() -> bool:

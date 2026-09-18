@@ -162,6 +162,10 @@ def _env_int(name, default):
 # counts as "low stock". Tunable per deployment without a code change.
 LOW_STOCK_THRESHOLD = _env_int('LOW_STOCK_THRESHOLD', 5)
 
+# Ops dashboard: the "Sales over time" chart covers this many calendar days
+# ending today. Tunable per deployment without a code change.
+DASHBOARD_SALES_WINDOW_DAYS = _env_int('DASHBOARD_SALES_WINDOW_DAYS', 30)
+
 REST_FRAMEWORK = {
     'DEFAULT_AUTHENTICATION_CLASSES': (
         'rest_framework_simplejwt.authentication.JWTAuthentication',

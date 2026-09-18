@@ -1,8 +1,10 @@
 """Ops tests: /health/, /api/settings/, admin dashboard, services."""
 import tempfile
+from datetime import timedelta
 from decimal import Decimal
 from pathlib import Path
 
+from django.conf import settings
 from django.contrib.auth.models import User
 from django.template import Context, RequestContext, Template
 from django.test import override_settings, tag
@@ -10,7 +12,7 @@ from django.test.client import RequestFactory
 from django.utils import timezone
 
 from common.testing import ApiTestCase
-from ops.services import REVENUE_STATUSES, get_health, get_stats
+from ops.services import REVENUE_STATUSES, get_health, get_sales_series, get_stats
 
 
 @tag("ops")
@@ -259,6 +261,130 @@ class OpsServicesTests(ApiTestCase):
 
 
 @tag("ops")
+class SalesSeriesTests(ApiTestCase):
+    """get_sales_series: chart data must come from real paid orders only,
+    zero-filled over the whole window, with the window boundary respected."""
+
+    def _make_order(self, username, status, amount):
+        from orders.models import Order
+
+        buyer = self.make_user(username)
+        return Order.objects.create(
+            user=buyer, full_name="a", phone="1", address="a", city="c", state="s",
+            pincode="1", status=status, total_amount=Decimal(amount),
+        )
+
+    @staticmethod
+    def _backdate(order, days_ago):
+        # auto_now_add ignores a passed created_at; shift it after the fact.
+        from orders.models import Order
+
+        Order.objects.filter(pk=order.pk).update(
+            created_at=timezone.now() - timedelta(days=days_ago)
+        )
+
+    def test_series_covers_every_day_ending_today(self):
+        """An empty store still yields a gapless series: one entry per day
+        for the default 30-day window, ordered oldest -> newest."""
+        series = get_sales_series()
+        today = timezone.localdate()
+
+        self.assertEqual(len(series), 30)
+        self.assertEqual(series[0]["date"], today - timedelta(days=29))
+        self.assertEqual(series[-1]["date"], today)
+        dates = [entry["date"] for entry in series]
+        self.assertEqual(dates, sorted(dates))
+        for entry in series:
+            self.assertEqual(entry["revenue"], Decimal("0.00"))
+            self.assertEqual(entry["orders"], 0)
+
+    def test_revenue_and_counts_per_day_from_real_paid_orders(self):
+        """Only captured money counts: pending/cancelled never appear, two
+        paid orders on one day sum into that day's revenue, and the window
+        boundary leaves older paid orders out entirely."""
+        self._make_order("buy1", "confirmed", "100.00")
+        self._make_order("buy2", "shipped", "25.00")
+        yesterday = self._make_order("buy3", "delivered", "10.50")
+        self._make_order("buy4", "pending", "999.00")
+        cancelled = self._make_order("buy5", "cancelled", "500.00")
+        stale = self._make_order("buy6", "confirmed", "77.00")
+        self._backdate(yesterday, 1)
+        self._backdate(cancelled, 1)
+        self._backdate(stale, 40)
+
+        series = get_sales_series()
+        today = timezone.localdate()
+        by_date = {entry["date"]: entry for entry in series}
+        revenues = [entry["revenue"] for entry in series]
+
+        self.assertIsInstance(by_date[today]["revenue"], Decimal)
+        self.assertEqual(str(by_date[today]["revenue"]), "125.00")
+        self.assertEqual(by_date[today]["orders"], 2)
+        self.assertEqual(by_date[today - timedelta(days=1)]["revenue"], Decimal("10.50"))
+        self.assertEqual(by_date[today - timedelta(days=1)]["orders"], 1)
+        # unpaid, cancelled and out-of-window money appears on no day
+        self.assertNotIn(Decimal("999.00"), revenues)
+        self.assertNotIn(Decimal("500.00"), revenues)
+        self.assertNotIn(Decimal("77.00"), revenues)
+        self.assertEqual(sum(entry["orders"] for entry in series), 3)
+
+    def test_window_boundary_respected(self):
+        """days=3 covers today plus the two previous calendar days: an order
+        two days back is the oldest in-window day, three days back is out."""
+        edge = self._make_order("edgebuyer", "confirmed", "50.00")
+        outside = self._make_order("stalebuyer", "confirmed", "60.00")
+        self._backdate(edge, 2)
+        self._backdate(outside, 3)
+
+        series = get_sales_series(days=3)
+        today = timezone.localdate()
+
+        self.assertEqual(len(series), 3)
+        self.assertEqual(series[0]["date"], today - timedelta(days=2))
+        self.assertEqual(series[-1]["date"], today)
+        self.assertEqual(series[0]["revenue"], Decimal("50.00"))
+        self.assertEqual(sum(entry["orders"] for entry in series), 1)
+
+    def test_zero_fill_for_empty_days_between_busy_days(self):
+        """A day with no paid orders is present with zero revenue — the chart
+        must not skip or compress gap days."""
+        first = self._make_order("b1", "confirmed", "20.00")
+        second = self._make_order("b2", "confirmed", "30.00")
+        self._backdate(first, 5)
+        self._backdate(second, 3)
+
+        by_date = {entry["date"]: entry for entry in get_sales_series()}
+        gap = by_date[timezone.localdate() - timedelta(days=4)]
+
+        self.assertEqual(gap["revenue"], Decimal("0.00"))
+        self.assertEqual(gap["orders"], 0)
+        self.assertEqual(
+            by_date[timezone.localdate() - timedelta(days=5)]["revenue"],
+            Decimal("20.00"),
+        )
+        self.assertEqual(
+            by_date[timezone.localdate() - timedelta(days=3)]["revenue"],
+            Decimal("30.00"),
+        )
+
+    def test_window_is_env_tunable_with_explicit_override(self):
+        """The window comes from DASHBOARD_SALES_WINDOW_DAYS at call time
+        (like the low-stock threshold); an explicit argument wins."""
+        self.assertEqual(settings.DASHBOARD_SALES_WINDOW_DAYS, 30)
+        with override_settings(DASHBOARD_SALES_WINDOW_DAYS=7):
+            self.assertEqual(len(get_sales_series()), 7)
+        self.assertEqual(len(get_sales_series(days=3)), 3)
+
+    def test_nonsense_window_falls_back_to_a_single_day(self):
+        """A malformed/nonsensical env value must not produce an empty or
+        reversed range — the chart degrades to today only."""
+        for bad in (0, -5):
+            with self.subTest(bad=bad):
+                with override_settings(DASHBOARD_SALES_WINDOW_DAYS=bad):
+                    self.assertEqual(len(get_sales_series()), 1)
+
+
+@tag("ops")
 class DashboardAccessTests(ApiTestCase):
     def test_dashboard_requires_staff(self):
         res = self.client.get("/admin/dashboard/")
@@ -468,6 +594,85 @@ class DashboardAccessTests(ApiTestCase):
 
         self.assertEqual(res.status_code, 200)
         self.assertEqual(res.context["recent_orders"][0]["username"], "—")
+
+
+@tag("ops")
+class DashboardSalesChartTests(ApiTestCase):
+    """The "Sales over time" chart renders real order data server-side, per
+    spec §5.1 ("actual dashboard must use real order and payment data")."""
+
+    def setUp(self):
+        User.objects.create_superuser("boss", "boss@example.com", "boss-pass-123")
+        self.assertTrue(self.client.login(username="boss", password="boss-pass-123"))
+
+    def _order(self, username, status, amount, days_ago=0):
+        from orders.models import Order
+
+        buyer = self.make_user(username)
+        order = Order.objects.create(
+            user=buyer, full_name="a", phone="1", address="a", city="c", state="s",
+            pincode="1", status=status, total_amount=Decimal(amount),
+        )
+        if days_ago:
+            Order.objects.filter(pk=order.pk).update(
+                created_at=timezone.now() - timedelta(days=days_ago)
+            )
+        return order
+
+    def test_dashboard_renders_sales_over_time_chart_from_real_data(self):
+        """The chart block carries the window label, real per-day values from
+        the series, and unpaid money stays out of the chart's data."""
+        self._order("chartbuyer", "confirmed", "42.00")
+        self._order("olderbuyer", "shipped", "30.00", days_ago=2)
+        self._order("windowshopper", "pending", "999.00")
+
+        res = self.client.get("/admin/dashboard/")
+
+        self.assertEqual(res.status_code, 200)
+        self.assertContains(res, "Sales over time")
+        self.assertContains(res, "Last 30 days")
+        self.assertContains(res, 'role="img"')
+        # real values, not illustrative numbers: both paid days appear
+        self.assertContains(res, "42.00")
+        self.assertContains(res, "30.00")
+
+        series = res.context["sales_series"]
+        by_date = {entry["date"]: entry for entry in series}
+        self.assertEqual(len(series), 30)
+        self.assertEqual(by_date[timezone.localdate()]["revenue"], Decimal("42.00"))
+        self.assertEqual(by_date[timezone.localdate()]["orders"], 1)
+        self.assertEqual(
+            by_date[timezone.localdate() - timedelta(days=2)]["revenue"],
+            Decimal("30.00"),
+        )
+        self.assertEqual(res.context["sales_max_revenue"], Decimal("42.00"))
+
+    def test_dashboard_chart_aria_summary_matches_series(self):
+        """The figure's accessible name states the real totals (bars carry no
+        numbers), computed from the same paid-only series."""
+        self._order("chartbuyer", "confirmed", "42.00")
+        self._order("olderbuyer", "shipped", "30.00", days_ago=2)
+        self._order("windowshopper", "pending", "999.00")
+
+        res = self.client.get("/admin/dashboard/")
+
+        expected = (
+            "Sales over time for the last 30 days: "
+            "2 paid orders, total revenue ₹72.00"
+        )
+        self.assertContains(res, f'aria-label="{expected}"')
+
+    def test_dashboard_sales_window_setting_reaches_the_chart(self):
+        """The env-tunable window drives the rendered label and the series
+        length together — they can never disagree."""
+        self._order("chartbuyer", "confirmed", "42.00")
+
+        with override_settings(DASHBOARD_SALES_WINDOW_DAYS=7):
+            res = self.client.get("/admin/dashboard/")
+
+        self.assertEqual(res.status_code, 200)
+        self.assertContains(res, "Last 7 days")
+        self.assertEqual(len(res.context["sales_series"]), 7)
 
 
 @tag("ops")
