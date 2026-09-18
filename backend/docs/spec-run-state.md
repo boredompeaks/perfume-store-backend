@@ -74,7 +74,7 @@ Deferral policy: gaps whose detailed requirements live in a later spec section a
 | SPEC-5-02 | 5 | Ops convention conformance: LOW_STOCK_THRESHOLD hardcoded (ops/services.py:5) → env-driven; N+1 per-order User.objects.get in dashboard view (ops/views.py:42-48) → batch/select_related | 1269–1424 + conventions.md:23 | PR-OPENED (pushed; PR #2 comment 5727417425; cycle-1 SHIP. NOTE: push race carried unaudited ed04dff to remote — remediation: refspec-push policy) | 1 |
 | SPEC-5-03 | 5 | "Sales over time" chart from real order/payment data (time-series aggregation + dashboard chart block + tests) — fulfils SPEC-1-10 | 1269–1424 [5.7],[5.9] | PR-OPENED (ed04dff verified; PR #2 comment 5727562233; cycle-1 SHIP) | 1 |
 | SPEC-6-01 | 6 | DEVIATES [6.2.22]: out-of-stock products orderable — stock checked only at payment verify (orders/views.py:118-126,566-572). Gate line items at order creation with clear 400; payment-time atomic re-check stays as concurrency backstop | 1425–2262 [6.2.22] | PR-OPENED (pushed 313782e..823df1a via refspec; PR #2 comment 5727938088; cycle-1 SHIP) | 1 |
-| SPEC-6-02 | 6 | DEVIATES [6.5.17] + conventions: silent inventory edits — admin list_editable stock bypasses StockMovement ledger; payment decrements skip ledger; adjust_stock lacks atomic/select_for_update (products/models.py:43-63). All mutation paths must write ledger; make adjust_stock atomic | 1425–2262 [6.5.8],[6.5.17] | IN-AUDIT (commit 52ef87d built: 253 pass, 6 expected failures, cov 100.00%, migration 0006; audit dispatch HELD pending release-workflow decision) | 1 |
+| SPEC-6-02 | 6 | DEVIATES [6.5.17] + conventions: silent inventory edits — admin list_editable stock bypasses StockMovement ledger; payment decrements skip ledger; adjust_stock lacks atomic/select_for_update (products/models.py:43-63). All mutation paths must write ledger; make adjust_stock atomic | 1425–2262 [6.5.8],[6.5.17] | BUGS-FOUND (audit cycle-1 FIX @ b2b0e6d: BUG-1 P1 ProductSerializer writable stock on PUT/PATCH = 4th ledger-free path; BUG-2 P2 changes.md row overclaim. Rest clean: 253 tests/247 pass, 6 xfails, cov 100.00%, migration 0006 verified; push withheld) | 1 |
 | SPEC-6-03 | 6 | RBAC foundation: Group-based roles (support/catalogue/inventory/marketing/finance/admin) + capability permission classes applied to API views; replaces binary is_staff for authorization decisions | 1425–2262 [6.12.2],[6.12.4],[6.12.7] | PENDING | 0 |
 | SPEC-6-04 | 6 | ModelAdmin least-privilege: has_view/change/delete/add overrides per role; bulk actions and exports role-gated; sensitive actions get confirmation | 1425–2262 [6.12.4],[6.12.5],[6.12.7] | PENDING | 0 |
 | SPEC-6-05 | 6 | Staff/roles/audit surfaces: staff management, roles assignment UI, audit-log route, privileged-action logging for API-side ops | 1425–2262 [6.12.1],[6.12.6] | PENDING | 0 |
@@ -139,7 +139,7 @@ Note: §4 route matrix decoded by orchestrator via PowerShell slicing (line 1247
 
 ## Baseline
 
-Current floor (verified 2026-09-18, tree @ `1bc1378`, post-SPEC-6-02): **253 tests, OK (6 pre-existing expected failures), cov 100.00%** (1173 stmts, 0 miss). Supersedes the earlier 178/186 rows below. Floor only moves up: never fewer passing tests, never more expected failures, never lower coverage.
+Current floor (AUDITOR-verified 2026-09-18, tree @ `b2b0e6d`, SPEC-6-02 cycle-1 audit): **253 tests, OK (247 pass + 6 pre-existing expectedFailure), cov 100.00%** (1173 stmts, 0 miss). Floor only moves up: never fewer passing tests, never more expected failures, never lower coverage.
 
 ## Escalations
 
