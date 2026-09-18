@@ -14,7 +14,7 @@ Source of truth for the spec-compliance run. Updated at every status transition 
 | 1 | System overview | 29–151 | IN-COMPLIANCE |
 | 2 | Recommended technology stack | 152–278 | IN-COMPLIANCE |
 | 3 | Frontend — customer-facing website | 279–1230 | IN-COMPLIANCE |
-| 4 | Complete route map — what is public, gated or restricted? | 1231–1268 | PENDING |
+| 4 | Complete route map — what is public, gated or restricted? | 1231–1268 | IN-COMPLIANCE |
 | 5 | Admin panel — complete specification | 1269–1424 | PENDING |
 | 6 | Admin features — detailed functional requirements | 1425–2262 | PENDING |
 | 7 | Backend architecture | 2263–2453 | PENDING |
@@ -47,8 +47,8 @@ Deferral policy: gaps whose detailed requirements live in a later spec section a
 | Task ID | Section | Requirement summary | Spec lines | Status | Attempts |
 |---|---|---|---|---|---|
 | SPEC-1-01 | 1 | Staff-gated product writes must use DRF `permission_classes` (never inline `request.user.is_staff`, products/views.py:113,172,198,225); products serializer must declare explicit `fields` (no `'__all__'`, products/serializers.py:8) | 29–151 + conventions.md:14,18 | PR-OPENED (auditor SHIP cycle-1; commit 5b88c43; 186 pass, cov 100.00%; PR #2) | 1 |
-| SPEC-1-02 | 1 | Public mutating endpoints need throttle scopes (apply_coupon, cart mutations, login/register) and anonymous coupon errors must be uniform — no coupon existence/validation-state leaks (orders/views.py:284-285) | 29–151 + conventions.md:24,25 | SHIPPED (cycle-2 SHIP @ fec5f23; push bundled with SPEC-1-03 to avoid shipping unverified commits) | 1 |
-| SPEC-1-03 | 1 | Registration must run `validate_password` (same policy as reset; accounts/serializers.py:7-10 only enforces min_length=8) | 29–151 + conventions.md:19 | IN-AUDIT (cycle 2; fix commit ef04811 — changelog +2 net corrected, 4 lines rewrapped ≤88 cols; suite 198/6 xfails/100.00%) | 1 |
+| SPEC-1-02 | 1 | Public mutating endpoints need throttle scopes (apply_coupon, cart mutations, login/register) and anonymous coupon errors must be uniform — no coupon existence/validation-state leaks (orders/views.py:284-285) | 29–151 + conventions.md:24,25 | PR-OPENED (pushed 5b88c43..002d8e3; PR #2 comment 5726186620; cycle-2 SHIP) | 1 |
+| SPEC-1-03 | 1 | Registration must run `validate_password` (same policy as reset; accounts/serializers.py:7-10 only enforces min_length=8) | 29–151 + conventions.md:19 | PR-OPENED (pushed 5b88c43..002d8e3; PR #2 comment 5726186620; cycle-2 SHIP) | 1 |
 | SPEC-1-04 | 1 | Product-compare feature absent (grep zero hits) — Owner: S3 | 29–151 [1.3] | PENDING | 0 |
 | SPEC-1-05 | 1 | Refunds absent — no Razorpay refund call, no refund model/status; paid orders irreversible — Owner: S11 | 29–151 [1.14] | PENDING | 0 |
 | SPEC-1-06 | 1 | Payment webhooks absent — payment truth only via client callback; dropped callback strands captured money — Owner: S11 | 29–151 [1.15] | PENDING | 0 |
@@ -67,7 +67,9 @@ Deferral policy: gaps whose detailed requirements live in a later spec section a
 | SPEC-1-19 | 1 | No roles management (Group/permission model+UI); admin cannot manage roles/operational access — Owner: S6 | 29–151 [1.32] | PENDING | 0 |
 | SPEC-1-20 | 1 | No superadmin tier — nothing distinguishes Admin vs Superadmin surfaces — Owner: S17 | 29–151 [1.33] | PENDING | 0 |
 | SPEC-1-21 | 1 | Role-separation invariant (line 150) unenforced — any staff user can edit coupons/orders/users/settings — Owner: S17 | 29–151 [1.34] | PENDING | 0 |
-| SPEC-1-22 | 1 | Throttle remaining public mutating endpoints: verify-email, resend-verification, forgot-username, password-reset(+confirm), token/refresh — prioritize email-sending endpoints (spam/bomb vectors) | conventions.md:24 + SPEC-1-02 auditor finding | PENDING | 0 |
+| SPEC-1-22 | 1 | Throttle remaining public mutating endpoints: verify-email, resend-verification, forgot-username, password-reset(+confirm), token/refresh — prioritize email-sending endpoints (spam/bomb vectors) | conventions.md:24 + SPEC-1-02 auditor finding | BUILDING | 0 |
+| SPEC-4-01 | 4 | Regression test pinning `order_list` returns only the requester's orders + rate-limit `username-available` (public existence oracle, accounts/views.py:94-108) with tests | 1231–1268 [4.6],[4.29],P9 | PENDING | 0 |
+| SPEC-4-02 | 4 | /profile + /account/* routes MISSING from code (matrix rows) — Owner: S3/S9 via SPEC-3-15 | 1231–1268 [4.20],[4.21] | PENDING | 0 |
 | SPEC-2-01 | 2 | DATABASES hardcoded sqlite3 (settings.py:92-97) — make env-driven (e.g. dj-database-url) with sqlite dev fallback; Postgres provisioning itself stays deferred — Owner: build now; deployment/FTS deferred to S22/S9 | 152–278 [2.4] | PENDING | 0 |
 | SPEC-2-02 | 2 | No component library — no accessible dialogs/data-table primitives alongside Tailwind — Owner: S15 | 152–278 [2.2] | PENDING | 0 |
 | SPEC-2-03 | 2 | No Redis cache/job queue/async email (no CACHES/CELERY config; sync emails) — Owner: S19 | 152–278 [2.5] | PENDING | 0 |
@@ -108,6 +110,8 @@ Deferral policy: gaps whose detailed requirements live in a later spec section a
 Statuses: `PENDING -> IN-COMPLIANCE -> BUILDING -> IN-AUDIT -> BUGS-FOUND -> SHIPPED -> PR-OPENED | ESCALATED | NOT-APPLICABLE`. Max 3 builder→auditor fix cycles per task.
 
 Note: Section 3 compliance ran concurrently with the SPEC-1-02 build (commit 854396a) and audited the pre-854396a tree; its "no throttle config anywhere" convention finding is resolved by SPEC-1-02 — auditor confirms.
+
+Note: §4 route matrix decoded by orchestrator via PowerShell slicing (line 1247, 8,856 chars, 22 rows — badge divs + plain `data-d-size="xs"` text cells). Corrections to the §4 compliance report: (1) NO "Server-only" row exists — [4.24] was a phantom from the agent's probe constraints, resolved NOT-APPLICABLE; (2) the matrix classifies `/checkout` as **"Guest or authenticated"** (not "Authenticated") — guest checkout is required by §4's own map, strengthening SPEC-1-13/SPEC-3-02 (tracked); (3) full matrix rows all map to tracked tasks: /categories//collections//search → SPEC-3-05/SPEC-3-20; /account/addresses+returns → SPEC-3-16/SPEC-3-18; /track-order "Limited public access" → SPEC-3-26; /api/webhooks/* "Verified provider only" → SPEC-1-05/SPEC-1-06 (webhook must verify provider signatures); /account/wishlist "Authenticated or local" → SPEC-3-17; /reset-password "Token-gated" → IMPLEMENTED (verified).
 
 ## Baseline
 
