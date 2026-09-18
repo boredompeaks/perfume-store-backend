@@ -94,7 +94,7 @@ Deferral policy: gaps whose detailed requirements live in a later spec section a
 | SPEC-5-09 | 5 | Administration surfaces: Roles & permissions UI, Tax settings, Integrations, Payment settings surface — Owner: S6/S17/S16 | 1269–1424 [5.16] | PENDING | 0 |
 | SPEC-5-10 | 5 | Unified global admin search (cross-entity "Search orders, products, customers…") — Owner: S20 | 1269–1424 [5.2] | PENDING | 0 |
 | SPEC-5-11 | 5 | Payments admin surface + Returns & refunds nav (needs refund model) — Owner: S11 (cross SPEC-1-05/SPEC-1-18) | 1269–1424 [5.10] | PENDING | 0 |
-| SPEC-2-01 | 2 | DATABASES hardcoded sqlite3 (settings.py:92-97) — make env-driven (e.g. dj-database-url) with sqlite dev fallback; Postgres provisioning itself stays deferred — Owner: build now; deployment/FTS deferred to S22/S9 | 152–278 [2.4] | IN-AUDIT (gate cycle-2 ESCALATE @ 6f43710: fix 0e0ed17 verified landed, tree scrubbed (0 .py matches), CI all green incl. floor 261/6expF/100.00%; ONLY red = GitGuardian check on PR #3 head, historical 313782e occurrence 298458886 in 36-commit scan range — blocked on repo-owner dashboard resolution of incident 37423839; cycle 3 of 3 reserved for re-verify+merge) | 2 |
+| SPEC-2-01 | 2 | DATABASES hardcoded sqlite3 (settings.py:92-97) — make env-driven (e.g. dj-database-url) with sqlite dev fallback; Postgres provisioning itself stays deferred — Owner: build now; deployment/FTS deferred to S22/S9 | 152–278 [2.4] | PR-OPENED (MERGED: promoted via PR #3 merge 0ed1516. Gate closed in 3 cycles: SENT-BACK GitGuardian false positive on test literal → fix 0e0ed17 `unquote('p%40ss')` derived oracle → ESCALATE historical occurrence → user resolved incident 37423839 in dashboard → MERGED) | 2 |
 | SPEC-2-02 | 2 | No component library — no accessible dialogs/data-table primitives alongside Tailwind — Owner: S15 | 152–278 [2.2] | PENDING | 0 |
 | SPEC-2-03 | 2 | No Redis cache/job queue/async email (no CACHES/CELERY config; sync emails) — Owner: S19 | 152–278 [2.5] | PENDING | 0 |
 | SPEC-2-04 | 2 | Local-disk media only — no S3/Cloudinary storage backend config — Owner: S22 | 152–278 [2.7] | PENDING | 0 |
@@ -140,8 +140,11 @@ Note: §4 route matrix decoded by orchestrator via PowerShell slicing (line 1247
 ## Baseline
 
 Current floor (AUDITOR-verified 2026-09-18, tree @ `092f606`, SPEC-6-02 cycle-2 audit): **261 tests, OK (255 pass + 6 pre-existing expectedFailure), cov 100.00%** (1182 stmts, 0 miss). Floor only moves up: never fewer passing tests, never more expected failures, never lower coverage.
+last-promoted SHA: **0ed1516** (PR #3 merge "Merge pull request #3 from boredompeaks/spec-comp", `ac75148..0ed1516`, promoted 2026-09-18 — covers S1/S2/S5 + S6-01/6-02 incl. gate fix 0e0ed17; feat/add-frontend tip = 0ed1516 verified via fetch. Rows referencing closed PR #2 comments are historical. Two ledger chores 8b223fc/b81aa57 + later chores ride the next RE push — bookkeeping-only, all audited code is on the remote via the merge.)
 
 ## Escalations
+
+- 2026-09-18 -- GATE_PHASE CLOSED (MERGED, 3 cycles): cycle-3 report MERGED after user resolved GitGuardian incident 37423839; merge verified independently by orchestrator fetch — feat/add-frontend tip 0ed1516 = "Merge pull request #3 from boredompeaks/spec-comp" (ac75148..0ed1516). Last-promoted SHA recorded in Baseline. PR #2 remains closed, master untouched. STANDING DIRECTIVE (user): RE merges promotion PRs on full green — never leaves them open; RE re-verifies post-merge CI on feat/add-frontend at next wake. GATE -> BUILD transition: section 6 queue (SPEC-6-03 first), S7 compliance prefetched in parallel.
 
 - 2026-09-18 -- RESOLUTION (user): GitGuardian incident 37423839 resolved in dashboard (false positive/test credential). RE re-invoked for cycle 3 of 3 (FINAL): push tip, re-verify all-green on PR #3 head, MERGE. User directive: RE must MERGE promotion PRs on full green (never leave them open/closed unmerged).
 
