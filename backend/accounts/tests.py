@@ -162,7 +162,9 @@ class RegisterSerializerTests(ApiTestCase):
                 )
                 self.assertFalse(serializer.is_valid())
                 self.assertIn("password", serializer.errors)
-                self.assertIn("similar", " ".join(serializer.errors["password"]).lower())
+                self.assertIn(
+                    "similar", " ".join(serializer.errors["password"]).lower()
+                )
 
     def test_policy_errors_match_reset_path_shape_and_block_creation(self):
         """Parity + uniform-shape contract (conventions.md): registration and
@@ -172,12 +174,18 @@ class RegisterSerializerTests(ApiTestCase):
         row and send no verification email."""
         res = self.client.post(
             "/api/accounts/register/",
-            {"username": "parity", "email": "parity@example.com", "password": "password"},
+            {
+                "username": "parity",
+                "email": "parity@example.com",
+                "password": "password",
+            },
             format="json",
         )
         self.assertEqual(res.status_code, 400, res.data)
         self.assertIsInstance(res.data["password"], list)
-        self.assertTrue(all(isinstance(message, str) for message in res.data["password"]))
+        self.assertTrue(
+            all(isinstance(message, str) for message in res.data["password"])
+        )
         self.assertFalse(User.objects.filter(username="parity").exists())
         self.assertEqual(len(mail.outbox), 0)
 
@@ -193,7 +201,9 @@ class RegisterSerializerTests(ApiTestCase):
         )
         self.assertEqual(reset_res.status_code, 400, reset_res.data)
         self.assertIsInstance(reset_res.data["password"], list)
-        self.assertTrue(all(isinstance(message, str) for message in reset_res.data["password"]))
+        self.assertTrue(
+            all(isinstance(message, str) for message in reset_res.data["password"])
+        )
 
 
 @tag("accounts")
