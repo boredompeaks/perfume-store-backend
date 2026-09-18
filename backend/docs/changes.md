@@ -144,6 +144,14 @@ Per the release-engineer gate report (BUG-1 [P2], GATE_PHASE SENT-BACK cycle 1):
 - `tests/test_settings_security.py` — `test_postgres_url_maps_all_connection_fields` now derives the expected password via the stdlib instead of hardcoding the decoded value: `assertEqual(db['PASSWORD'], unquote('p%40ss'))`. The oracle is the percent-encoded fragment already present in the fixture URL, so the assertion is exactly as strong as before — if the parser ever stopped unquoting, `db['PASSWORD']` would hold the raw encoded form and the test would fail. `git grep` confirms no password-shaped literal remains anywhere in source; the fixture URL, the parser under test, and every other assertion are untouched. `.gitleaks.toml` and `.github/workflows/*` deliberately not touched (release-engineer scope).
 - Suite: **261 tests, OK (255 pass, 6 `expectedFailure` flips unchanged)**, coverage **100.00%** (gate 90), `makemigrations --check` clean.
 
+## 2026-09-18 — SPEC-6-03a (Section 6) — builder: RBAC foundation — six staff roles, capability map, idempotent group sync
+
+Per spec 6.12 (lines 2099–2262): staff RBAC needs named roles and capability identifiers before the staff/roles/audit-log endpoints land. Foundation only — no views or permission checks touched (later micro-tasks).
+- `common/roles.py` (new) — the six staff roles (`support`, `catalogue`, `inventory`, `marketing`, `finance`, `admin`) as constants in a stable ordered tuple, plus `CAPABILITY_ROLES`, the single capability→roles structure built from the spec 6.12 identifier table (`products.read` … `settings.manage`) under least privilege (only `admin` holds `staff.manage`/`settings.manage`). `sync_role_groups()` `get_or_create`s one Django Group per role — idempotent on re-run, no check-then-act.
+- `common/migrations/0001_sync_staff_role_groups.py` (new) — zero-risk data-only bootstrap calling `sync_role_groups` during `migrate` (no models in `common`, so `makemigrations --check --dry-run` stays clean); real reverse deletes exactly the six groups. `config/settings.py` — `common` added to `INSTALLED_APPS` so the migration loader discovers `common/migrations` (no models, no other effect).
+- `tests/test_rbac_foundation.py` (new) — 2 tests: running sync twice leaves exactly the six stable-named groups (no duplicates, no strays); a deleted role group is re-created by the next sync (create branch of `get_or_create`).
+- Suite: **263 tests, OK (257 pass, 6 `expectedFailure` flips unchanged)**, coverage **100.00%** (1182 stmts, gate 90), `makemigrations --check` clean.
+
 ## Next (per fix-plan.md)
 
 - Phase 0 remaining: rotate Razorpay keys, add CI.

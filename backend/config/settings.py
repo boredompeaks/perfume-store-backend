@@ -53,6 +53,7 @@ INSTALLED_APPS = [
     'orders',
     'accounts',
     'ops',
+    'common',
     'corsheaders',
 ]
 
