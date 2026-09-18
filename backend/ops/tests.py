@@ -221,6 +221,42 @@ class OpsServicesTests(ApiTestCase):
         # the old 'pending' (payment-pending) count must stay a separate metric
         self.assertEqual(stats["orders_by_status"]["pending"], 1)
 
+    def test_low_stock_threshold_is_env_driven(self):
+        """LOW_STOCK_THRESHOLD comes from settings and is read at call time:
+        overriding it reclassifies products on the very next call, with the
+        configured value echoed back in the payload."""
+        from products.models import products as Product
+
+        self.make_product(name="Barely There", stock=2)
+        Product.objects.create(
+            name="Getting There", description="d", price=1, size=1, stock=3,
+            category="X",
+        )
+
+        with override_settings(LOW_STOCK_THRESHOLD=5):
+            default_run = get_health()
+        with override_settings(LOW_STOCK_THRESHOLD=2):
+            tight_run = get_health()
+
+        self.assertEqual(default_run["low_stock_threshold"], 5)
+        self.assertEqual(default_run["low_stock"], 2)
+        self.assertEqual(tight_run["low_stock_threshold"], 2)
+        # stock 3 is 'low' at the default threshold but not the tighter one
+        self.assertEqual(tight_run["low_stock"], 1)
+
+    def test_threshold_env_value_is_parsed_with_safe_fallback(self):
+        """settings.py parses LOW_STOCK_THRESHOLD as an int: a malformed env
+        value must fall back to the default instead of crashing startup."""
+        import os
+        from unittest.mock import patch
+
+        from config.settings import _env_int
+
+        with patch.dict(os.environ, {"LOW_STOCK_THRESHOLD": "7"}):
+            self.assertEqual(_env_int("LOW_STOCK_THRESHOLD", 5), 7)
+        with patch.dict(os.environ, {"LOW_STOCK_THRESHOLD": "not-a-number"}):
+            self.assertEqual(_env_int("LOW_STOCK_THRESHOLD", 5), 5)
+
 
 @tag("ops")
 class DashboardAccessTests(ApiTestCase):
@@ -328,6 +364,110 @@ class DashboardAccessTests(ApiTestCase):
         self.assertEqual(res.status_code, 200)
         self.assertContains(res, low.name)
         self.assertNotContains(res, healthy.name)
+
+    def test_dashboard_low_stock_classification_follows_threshold(self):
+        """The dashboard's low-stock table is driven by the same env-driven
+        threshold as /health/: raising/lowering it moves the boundary."""
+        from products.models import products as Product
+
+        User.objects.create_superuser("boss", "boss@example.com", "boss-pass-123")
+        self.client.login(username="boss", password="boss-pass-123")
+        self.make_product(name="Threshold Edge Two", stock=2)
+        Product.objects.create(
+            name="Threshold Edge Three", description="d", price=1, size=1,
+            stock=3, category="X",
+        )
+
+        with override_settings(LOW_STOCK_THRESHOLD=5):
+            res = self.client.get("/admin/dashboard/")
+            self.assertEqual(res.status_code, 200)
+            self.assertContains(res, "Threshold Edge Two")
+            self.assertContains(res, "Threshold Edge Three")
+
+        with override_settings(LOW_STOCK_THRESHOLD=2):
+            res = self.client.get("/admin/dashboard/")
+            self.assertEqual(res.status_code, 200)
+            self.assertContains(res, "Threshold Edge Two")
+            self.assertNotContains(res, "Threshold Edge Three")
+            # the heading reports the threshold actually in force
+            self.assertContains(res, "(≤ 2)")
+
+    def test_dashboard_recent_orders_context_shape_unchanged(self):
+        """The N+1 fix must not change the rendered context: each recent-orders
+        row keeps the stats keys plus exactly one resolved username."""
+        from decimal import Decimal
+
+        from orders.models import Order
+
+        User.objects.create_superuser("boss", "boss@example.com", "boss-pass-123")
+        self.client.login(username="boss", password="boss-pass-123")
+        buyer = self.make_user("ctxbuyer")
+        Order.objects.create(
+            user=buyer, full_name="a", phone="1", address="a", city="c", state="s",
+            pincode="1", status="confirmed", total_amount=Decimal("42.00"),
+        )
+
+        res = self.client.get("/admin/dashboard/")
+
+        row = res.context["recent_orders"][0]
+        self.assertEqual(
+            set(row),
+            {"id", "status", "total_amount", "created_at", "user_id", "username"},
+        )
+        self.assertEqual(row["username"], "ctxbuyer")
+        self.assertEqual(row["user_id"], buyer.id)
+
+    def test_dashboard_resolves_order_users_in_one_query(self):
+        """Regression guard for the N+1: N distinct order customers cost one
+        batched auth_user fetch, not one User.objects.get per order row."""
+        from decimal import Decimal
+
+        from django.db import connection
+        from django.test.utils import CaptureQueriesContext
+
+        from orders.models import Order
+
+        User.objects.create_superuser("boss", "boss@example.com", "boss-pass-123")
+        self.client.login(username="boss", password="boss-pass-123")
+        for i in range(3):
+            buyer = self.make_user(f"batch{i}")
+            Order.objects.create(
+                user=buyer, full_name="a", phone="1", address="a", city="c",
+                state="s", pincode="1", status="confirmed",
+                total_amount=Decimal("10.00"),
+            )
+
+        with CaptureQueriesContext(connection) as ctx:
+            self.client.get("/admin/dashboard/")
+
+        in_queries = [
+            q["sql"]
+            for q in ctx.captured_queries
+            if "auth_user" in q["sql"] and " IN " in q["sql"]
+        ]
+        self.assertEqual(len(in_queries), 1, in_queries)
+
+    def test_dashboard_survives_user_vanishing_mid_render(self):
+        """A user row that disappears between get_stats() and the batched
+        fetch degrades to the dash placeholder, never a 500."""
+        from decimal import Decimal
+        from unittest.mock import patch
+
+        from orders.models import Order
+
+        User.objects.create_superuser("boss", "boss@example.com", "boss-pass-123")
+        self.client.login(username="boss", password="boss-pass-123")
+        buyer = self.make_user("vanisher")
+        Order.objects.create(
+            user=buyer, full_name="a", phone="1", address="a", city="c", state="s",
+            pincode="1", status="pending", total_amount=Decimal("42.00"),
+        )
+
+        with patch.object(User.objects, "in_bulk", return_value={}):
+            res = self.client.get("/admin/dashboard/")
+
+        self.assertEqual(res.status_code, 200)
+        self.assertEqual(res.context["recent_orders"][0]["username"], "—")
 
 
 @tag("ops")

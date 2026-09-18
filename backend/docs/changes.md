@@ -83,6 +83,16 @@ Per spec §5.1 dashboard mockup (Orders / Average order value / Pending fulfilme
 - `ops/tests.py` — +4 net tests: AOV correctness on seeded mixed statuses (265.75/3 → "88.58", unpaid + cancelled orders excluded from both sides), zero-paid-orders guard (empty store and unpaid-only store → "0.00", no crash), pending-fulfilment counting only `confirmed` while `pending` stays a separate metric, and a staff dashboard render test asserting all three cards with real numbers plus the retained payment-pending labeling.
 - Suite: **211 tests, OK (205 pass, 6 `expectedFailure` flips unchanged)**, coverage **100.00%** (gate 90), `makemigrations --check` clean.
 
+## 2026-09-18 — SPEC-5-02 (Section 5) — builder: env-driven low-stock threshold + dashboard N+1 fix
+
+Ops convention conformance (conventions.md env hygiene): the low-stock threshold was a hardcoded module constant and the dashboard resolved each recent-order customer with its own `User.objects.get` (N+1).
+- `config/settings.py` — new `LOW_STOCK_THRESHOLD` setting read from the environment with default 5; parsed via a small `_env_int` helper so a malformed env value falls back to the default instead of crashing startup (a bare `int(os.getenv(...))` would 500 the whole app on bad input).
+- `ops/services.py` — the hardcoded `LOW_STOCK_THRESHOLD = 5` constant is gone; `get_health()` reads `settings.LOW_STOCK_THRESHOLD` at call time via `_low_stock_threshold()` (not import time, so env changes and test overrides take effect immediately); the payload still echoes the configured threshold, degraded-DB path included.
+- `ops/views.py` — the dashboard's per-order `User.objects.get(pk=row["user_id"])` loop is replaced by one batched `User.objects.in_bulk(user_ids)`; a user row that vanishes between `get_stats()` and the fetch degrades to the same "—" placeholder instead of crashing; rendered context keys and values are unchanged.
+- `.env.example` — documents `LOW_STOCK_THRESHOLD=5` with its meaning and bad-value behavior.
+- `ops/tests.py` — +6 net tests: threshold override reclassifies products on the next `get_health()` call with the echoed value updated; `_env_int` parses valid values and falls back on garbage; the dashboard low-stock table and its "(≤ n)" heading follow the override; recent-orders context shape pinned exactly (stats keys + one resolved username); N+1 regression guard (3 distinct customers ⇒ exactly one batched `auth_user … IN` query); a user vanishing mid-render yields the dash placeholder, not a 500.
+- Suite: **217 tests, OK (211 pass, 6 `expectedFailure` flips unchanged)**, coverage **100.00%** (gate 90), `makemigrations --check` clean.
+
 ## Next (per fix-plan.md)
 
 - Phase 0 remaining: rotate Razorpay keys, add CI.

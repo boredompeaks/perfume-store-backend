@@ -4,7 +4,13 @@ from decimal import Decimal
 from django.conf import settings
 from django.db.models import Count, Sum
 
-LOW_STOCK_THRESHOLD = 5
+
+def _low_stock_threshold() -> int:
+    # Read at call time, not import time: the value is env-driven (settings)
+    # and overridable per test, so a module-level constant would freeze the
+    # first-seen value for the life of the process.
+    return settings.LOW_STOCK_THRESHOLD
+
 
 # "Paid" = money actually captured: verify_payment flips pending -> confirmed
 # the moment Razorpay verification succeeds (orders/views.py), and an order
@@ -61,9 +67,10 @@ def get_health() -> dict:
 
     low_stock = 0
     out_of_stock = 0
+    threshold = _low_stock_threshold()
     if checks["database"]:
         low_stock = products.objects.filter(
-            stock__gt=0, stock__lte=LOW_STOCK_THRESHOLD
+            stock__gt=0, stock__lte=threshold
         ).count()
         out_of_stock = products.objects.filter(stock=0).count()
 
@@ -75,7 +82,7 @@ def get_health() -> dict:
         "carts": carts,
         "low_stock": low_stock,
         "out_of_stock": out_of_stock,
-        "low_stock_threshold": LOW_STOCK_THRESHOLD,
+        "low_stock_threshold": threshold,
     }
 
 

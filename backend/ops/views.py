@@ -38,14 +38,15 @@ def dashboard(request):
     from orders.models import Order
     from products.models import StockMovement, products
 
+    # One batched pk -> username fetch replaces the old per-order
+    # User.objects.get (N+1 on recent orders). A user row that vanishes
+    # between get_stats() and this fetch degrades to the dash, never a 500.
+    user_ids = {row["user_id"] for row in stats["recent_orders"]}
+    users = User.objects.in_bulk(user_ids)
     recent_orders = []
     for row in stats["recent_orders"]:
-        try:
-            user = User.objects.get(pk=row["user_id"])
-            username = user.username
-        except User.DoesNotExist:
-            username = "—"
-        recent_orders.append({**row, "username": username})
+        user = users.get(row["user_id"])
+        recent_orders.append({**row, "username": user.username if user else "—"})
 
     recent_movements = StockMovement.objects.select_related(
         "product", "created_by"

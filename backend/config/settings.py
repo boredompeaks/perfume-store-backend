@@ -148,6 +148,20 @@ FRONTEND_URL = os.getenv('FRONTEND_URL', 'http://localhost:3000').rstrip('/')
 MEDIA_URL = '/media/'
 MEDIA_ROOT = BASE_DIR / 'media'
 
+
+def _env_int(name, default):
+    # Env-driven ints must never take the app down at startup: a malformed
+    # value falls back to the documented default instead of raising.
+    try:
+        return int(os.getenv(name, str(default)))
+    except ValueError:
+        return default
+
+
+# Ops dashboard / /health/: a product with stock at or below this many units
+# counts as "low stock". Tunable per deployment without a code change.
+LOW_STOCK_THRESHOLD = _env_int('LOW_STOCK_THRESHOLD', 5)
+
 REST_FRAMEWORK = {
     'DEFAULT_AUTHENTICATION_CLASSES': (
         'rest_framework_simplejwt.authentication.JWTAuthentication',
