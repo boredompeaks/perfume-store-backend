@@ -61,13 +61,13 @@ async function addMarjToCart(page: Page) {
 
 async function fillAddress(page: Page) {
   await page.goto("/checkout");
-  await page.getByLabel("Full name").fill("E2E Tester");
-  await page.getByLabel("Email").fill("e2e_customer@example.com");
-  await page.getByLabel("Phone").fill("9876543210");
-  await page.getByLabel("Address").fill("1 Test Lane");
-  await page.getByLabel("City").fill("Mumbai");
-  await page.getByLabel("State").fill("Maharashtra");
-  await page.getByLabel("Pincode").fill("400001");
+  await page.getByLabel("Full name", { exact: true }).fill("E2E Tester");
+  await page.getByLabel("Email", { exact: true }).fill("e2e_customer@example.com");
+  await page.getByLabel("Phone", { exact: true }).fill("9876543210");
+  await page.getByLabel("Address", { exact: true }).fill("1 Test Lane");
+  await page.getByLabel("City", { exact: true }).fill("Mumbai");
+  await page.getByLabel("State", { exact: true }).fill("Maharashtra");
+  await page.getByLabel("Pincode", { exact: true }).fill("400001");
 }
 
 async function createOrderAndOpenPay(page: Page) {

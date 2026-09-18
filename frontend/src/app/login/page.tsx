@@ -1,5 +1,6 @@
 import type { Metadata } from "next";
 import AuthShell from "@/components/auth/AuthShell";
+import GuestOnly from "@/components/auth/GuestOnly";
 import LoginForm from "@/components/auth/LoginForm";
 import { safeNext } from "@/lib/redirect";
 
@@ -20,7 +21,9 @@ export default async function LoginPage({
 
   return (
     <AuthShell title="Sign in">
-      <LoginForm next={next} />
+      <GuestOnly next={next}>
+        <LoginForm next={next} />
+      </GuestOnly>
     </AuthShell>
   );
 }

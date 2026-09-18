@@ -19,19 +19,19 @@ async function NewArrivals() {
     if (page.results.length === 0) return null;
 
     return (
-      <section className="mx-auto max-w-6xl px-4 py-20 sm:px-6">
-        <div className="flex items-baseline justify-between gap-4">
+      <section className="mx-auto max-w-6xl px-4 py-24 sm:px-6">
+        <div className="flex items-baseline justify-between gap-4 border-t border-line pt-10">
           <h2 className="font-display text-3xl tracking-tight">
             New arrivals
           </h2>
           <Link
             href="/products?ordering=-created_at"
-            className="text-sm underline underline-offset-4 transition-colors hover:text-bronze"
+            className="link-underline text-sm transition-colors hover:text-bronze"
           >
             View all
           </Link>
         </div>
-        <div className="mt-8 grid grid-cols-2 gap-x-4 gap-y-10 sm:grid-cols-3 lg:grid-cols-4">
+        <div className="mt-10 grid grid-cols-2 gap-x-4 gap-y-12 sm:grid-cols-3 lg:grid-cols-4">
           {page.results.map((product, index) => (
             <ProductCard key={product.id} product={product} priority={index < 2} />
           ))}
@@ -62,33 +62,47 @@ export default function HomePage() {
         }}
       />
 
-      <section className="mx-auto max-w-6xl px-4 sm:px-6">
-        <div className="border-b border-line py-24 md:py-36">
-          <p className="text-xs uppercase tracking-[0.2em] text-bronze">
-            Eau de parfum
+      <section className="noise relative overflow-hidden border-b border-line">
+        <span
+          aria-hidden="true"
+          className="text-ghost pointer-events-none absolute -right-8 top-6 hidden select-none font-display text-[20rem] leading-none lg:block"
+        >
+          A
+        </span>
+        <div className="relative mx-auto max-w-6xl px-4 py-28 sm:px-6 md:py-40">
+          <p className="text-xs uppercase tracking-[0.25em] text-bronze">
+            Eau de parfum · Small batches
           </p>
-          <h1 className="mt-5 max-w-3xl font-display text-5xl leading-[1.05] tracking-tight md:text-7xl">
-            Perfumes composed with restraint.
+          <h1 className="mt-6 max-w-4xl font-display text-6xl leading-[0.98] tracking-tight md:text-8xl">
+            Perfumes composed with{" "}
+            <em className="italic text-bronze">restraint</em>.
           </h1>
-          <p className="mt-6 max-w-xl text-lg text-ink-muted">
+          <p className="mt-8 max-w-xl text-lg leading-relaxed text-ink-muted">
             {site.name} is a small perfume house. Fewer materials, longer
             macerations, no seasonal noise — fragrances built to be worn
             often.
           </p>
-          <div className="mt-10 flex flex-wrap items-center gap-4">
+          <div className="mt-12 flex flex-wrap items-center gap-5">
             <Link
               href="/products"
-              className="bg-ink px-6 py-3 text-sm text-paper transition-colors hover:bg-bronze"
+              className="bg-ink px-7 py-3.5 text-sm text-paper transition-all hover:bg-bronze active:scale-[0.98]"
             >
               Shop all fragrances
             </Link>
             <Link
               href="/products?ordering=-created_at"
-              className="text-sm underline underline-offset-4 transition-colors hover:text-bronze"
+              className="link-underline text-sm transition-colors hover:text-bronze"
             >
               See new arrivals
             </Link>
           </div>
+          <p className="mt-14 flex flex-wrap gap-x-6 gap-y-2 text-xs uppercase tracking-[0.15em] text-ink-muted">
+            <span>Ships across India</span>
+            <span aria-hidden="true" className="text-line">·</span>
+            <span>Secure Razorpay payments</span>
+            <span aria-hidden="true" className="text-line">·</span>
+            <span>7-day returns</span>
+          </p>
         </div>
       </section>
 
@@ -103,11 +117,16 @@ export default function HomePage() {
       </Suspense>
 
       <section className="mx-auto max-w-6xl px-4 pb-24 sm:px-6">
-        <div className="grid gap-10 md:grid-cols-2">
-          <h2 className="font-display text-3xl tracking-tight">
-            The house position
-          </h2>
-          <div className="space-y-4 leading-relaxed text-ink-muted">
+        <div className="grid gap-10 border-t border-line pt-10 md:grid-cols-2">
+          <div>
+            <p className="text-xs uppercase tracking-[0.2em] text-bronze">
+              The house position
+            </p>
+            <h2 className="mt-4 font-display text-3xl tracking-tight">
+              Built around a single idea, worked until it holds.
+            </h2>
+          </div>
+          <div className="space-y-4 leading-relaxed text-ink-muted md:pt-12">
             <p>
               Every fragrance is built around a single idea, worked until it
               holds. We would rather release three perfumes we stand behind

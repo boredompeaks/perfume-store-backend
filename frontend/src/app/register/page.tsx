@@ -1,5 +1,6 @@
 import type { Metadata } from "next";
 import AuthShell from "@/components/auth/AuthShell";
+import GuestOnly from "@/components/auth/GuestOnly";
 import RegisterForm from "@/components/auth/RegisterForm";
 
 export const metadata: Metadata = {
@@ -10,7 +11,9 @@ export const metadata: Metadata = {
 export default function RegisterPage() {
   return (
     <AuthShell title="Create account">
-      <RegisterForm />
+      <GuestOnly>
+        <RegisterForm />
+      </GuestOnly>
     </AuthShell>
   );
 }

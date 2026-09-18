@@ -35,6 +35,7 @@ export default function Header() {
   const pathname = usePathname();
   const { status, logout } = useAuth();
   const [menuOpen, setMenuOpen] = useState(false);
+  const [scrolled, setScrolled] = useState(false);
 
   const { data: cart } = useQuery({
     queryKey: ["cart"],
@@ -49,9 +50,21 @@ export default function Header() {
     setMenuOpen(false);
   }, [pathname]);
 
+  // Quiet shadow once the page scrolls under the bar.
+  useEffect(() => {
+    const onScroll = () => setScrolled(window.scrollY > 8);
+    onScroll();
+    window.addEventListener("scroll", onScroll, { passive: true });
+    return () => window.removeEventListener("scroll", onScroll);
+  }, []);
+
   return (
     <>
-      <header className="sticky top-0 z-40 border-b border-line bg-paper">
+      <header
+        className={`sticky top-0 z-40 border-b border-line bg-paper transition-shadow ${
+          scrolled ? "shadow-[0_2px_12px_-6px_rgb(28_25_23/0.15)]" : ""
+        }`}
+      >
         <div className="relative mx-auto flex h-16 max-w-6xl items-center justify-between px-4 sm:px-6">
           <div className="flex items-center">
             <button
@@ -82,7 +95,7 @@ export default function Header() {
                 <Link
                   key={link.label}
                   href={link.href}
-                  className="text-sm transition-colors hover:text-bronze"
+                  className="link-underline text-sm transition-colors hover:text-bronze"
                 >
                   {link.label}
                 </Link>

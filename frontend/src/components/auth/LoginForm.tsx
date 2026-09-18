@@ -23,8 +23,11 @@ export default function LoginForm({ next }: { next?: string }) {
     setError(null);
     try {
       await login(username.trim(), password);
-      // Cart is session-based and survives login; go where the user was headed.
-      router.push(next ?? "/");
+      // Cart is session-based and survives login; go where the user was
+      // headed. Awaiting keeps "Signing in…" visible until the destination
+      // is rendering (the backend's PBKDF2 check costs ~0.7s — honest
+      // feedback beats a dead-looking button).
+      await router.push(next ?? "/");
     } catch (err) {
       setError(
         err instanceof ApiError

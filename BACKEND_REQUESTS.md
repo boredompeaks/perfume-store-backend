@@ -75,6 +75,13 @@ Format per entry: priority, where needed, what's missing, why, suggested contrac
 - **Suggested contract:** `Decimal.quantize(0.01)` on all discount math in a shared service (fix-plan Phase 3.1).
 - **Current workaround:** the frontend always displays the most recent server response as truth (preview on cart; `Order.total_amount` after checkout) and labels checkout as the confirmation point, so a drift shows as a small change between steps rather than a wrong charge.
 
+## [P2] Site settings editable in the Django admin
+- **Where it's needed:** store contact details (support email, phone, WhatsApp number/message, Instagram) shown by the frontend
+- **What's missing:** a `SiteSettings` model (singleton) exposed in the admin + a small `GET /api/settings/` endpoint, so the store owner can edit contact details without a redeploy.
+- **Why:** the frontend currently reads contact details from build-time env/config (`src/lib/site.ts` + `NEXT_PUBLIC_*`) — fine, but every change needs a rebuild and a commit.
+- **Suggested contract:** `GET /api/settings/` (public) → `{support_email, support_phone, whatsapp_number, whatsapp_message, instagram_url}`; admin-edited singleton with cache-friendly semantics (short revalidate).
+- **Current workaround:** env/config single-source in `src/lib/site.ts`; the storefront renders only configured channels and hides the rest.
+
 ## [P2] Single-order endpoint
 - **Where it's needed:** order detail page (`/orders/[id]`)
 - **What's missing:** `GET /api/orders/{id}/` — only the unpaginated list endpoint exists, so the detail page fetches the whole list and finds the order client-side.

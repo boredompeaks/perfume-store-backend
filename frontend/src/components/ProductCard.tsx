@@ -13,14 +13,17 @@ export default function ProductCard({
   const soldOut = product.stock <= 0;
 
   return (
-    <Link href={`/products/${product.slug}`} className="group block">
+    <Link
+      href={`/products/${product.slug}`}
+      className="card-lift group block border border-transparent p-3 transition-colors hover:border-line"
+    >
       <div className="relative aspect-[4/5] overflow-hidden bg-bronze-soft">
         <ProductImage
           src={product.image}
           alt={product.name}
           priority={priority}
           sizes="(min-width: 1024px) 25vw, (min-width: 640px) 33vw, 50vw"
-          className="transition-transform duration-300 group-hover:scale-[1.02]"
+          className="transition-transform duration-500 group-hover:scale-[1.04]"
         />
         {soldOut && (
           <span className="absolute left-3 top-3 bg-ink px-2 py-1 text-xs uppercase tracking-wide text-paper">
@@ -28,7 +31,7 @@ export default function ProductCard({
           </span>
         )}
       </div>
-      <div className="mt-3 flex items-baseline justify-between gap-3">
+      <div className="mt-4 flex items-baseline justify-between gap-3">
         <h3 className="font-display text-lg tracking-tight">
           {product.name}
         </h3>
