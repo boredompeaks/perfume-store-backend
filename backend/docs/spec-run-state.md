@@ -3,7 +3,7 @@
 Source of truth for the spec-compliance run. Updated at every status transition with evidence (commit SHA, test command + result, or report verdict).
 
 - Spec: `Saturday, Jul 25, 2026 at 5_23 AM.txt` (repo root, 5,734 lines; git-ignored by design)
-- Work branch: `spec-comp` (created from `feat/add-frontend` @ `ac75148`); PR base: `master`; only the auditor pushes and opens/updates the PR. Orchestrator never merges.
+- Work branch: `spec-comp` (created from `feat/add-frontend` @ `ac75148`). Promotion model: the release-engineer opens AND merges promotion PRs `spec-comp -> feat/add-frontend` at section boundaries (GATE_PHASE, merge on all-green); the auditor pushes `origin/spec-comp` (durability backup + PR head updates); `master` is frozen; the legacy PR #2 (base `master`) is closed at first promotion, never merged.
 - Conventions: `backend/docs/conventions.md` (quoted into every builder handoff)
 - Changelog: `backend/docs/changes.md` (append-only rows; auditor verifies each row against the diff)
 
@@ -139,9 +139,9 @@ Note: §4 route matrix decoded by orchestrator via PowerShell slicing (line 1247
 
 ## Baseline
 
-backend tests: 178 pass, cov 100.00% (2026-09-18)
-Current floor after SPEC-1-01 (PR #2): 186 pass + 8 pre-existing expected failures, cov 100.00% (auditor-verified incl. baseline worktree re-run)
+Current floor (verified 2026-09-18, tree @ `1bc1378`, post-SPEC-6-02): **253 tests, OK (6 pre-existing expected failures), cov 100.00%** (1173 stmts, 0 miss). Supersedes the earlier 178/186 rows below. Floor only moves up: never fewer passing tests, never more expected failures, never lower coverage.
 
 ## Escalations
 
-- 2026-09-18 — USER WORKFLOW DIRECTIVE: per-section PRs ("only commits for that section to that PR"), not one massive PR. All subagent dispatches for next sections HELD pending user decision on release-engineer timing (now vs end-of-run sweep). In-flight: SPEC-6-02 built (52ef87d), audit ready but not commissioned. Current PR #2 (spec-comp → master) holds all shipped commits interleaved: S1 (SPEC-1-01/02/03/22), S2 (SPEC-2-01), S5 (SPEC-5-01/02/03), S6 (SPEC-6-01) + ledger chores — a per-section split requires branch surgery (cherry-pick) since commits are chronologically interleaved on one branch.
+- 2026-09-18 -- RESOLUTION (user decision, supersedes the hold below): promotion model adopted. The release-engineer is integrated at section boundaries WITH merge authority (auto-merge on all-green: macro commit analysis + GitGuardian/gitleaks + full CI). The auditor KEEPS its push duty. Per-section PRs are achieved via successive delta-only promotion PRs `spec-comp -> feat/add-frontend` (no cherry-picks, no spec-sN branches -- after each merge the next PR shows only that section's commits). Legacy PR #2 (base master) is closed at first promotion, never merged. Master stays frozen. Resume sequence: drain held SPEC-6-02 audit -> GATE_PHASE (RE exclusive) -> BUILD_PHASE resumes on RE's MERGED report.
+- 2026-09-18 -- USER WORKFLOW DIRECTIVE: per-section PRs ("only commits for that section to that PR"), not one massive PR. All subagent dispatches for next sections HELD pending user decision on release-engineer timing (now vs end-of-run sweep). In-flight: SPEC-6-02 built (52ef87d), audit ready but not commissioned. Current PR #2 (spec-comp → master) holds all shipped commits interleaved: S1 (SPEC-1-01/02/03/22), S2 (SPEC-2-01), S5 (SPEC-5-01/02/03), S6 (SPEC-6-01) + ledger chores -- a per-section split requires branch surgery (cherry-pick) since commits are chronologically interleaved on one branch.
