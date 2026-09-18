@@ -115,14 +115,52 @@ def create_order(request):
     # Calculate cart subtotal
     # =========================
 
+    # SPEC-6-01 [6.2.22]: a cart line that outlasted its stock (stock can
+    # drop after the item was added) must not become an order the customer
+    # can pay for. This gate is advisory and read-only -- stock can still
+    # change between create and pay, so verify_payment re-checks under a
+    # row lock before decrementing; that remains the authoritative backstop.
+    unavailable = []
+
     subtotal_amount = Decimal('0.00')
 
     for cart_item in cart_items:
 
         product = cart_item.product
 
+        if cart_item.quantity > product.stock:
+
+            unavailable.append(
+                {
+                    "name": product.name,
+                    "requested": cart_item.quantity,
+                    "available": product.stock,
+                }
+            )
+
         subtotal_amount += (
             product.price * cart_item.quantity
+        )
+
+    if unavailable:
+
+        details = ", ".join(
+            f'"{item["name"]}" (requested {item["requested"]}, '
+            f'only {item["available"]} in stock)'
+            for item in unavailable
+        )
+
+        if len(unavailable) == 1:
+            action = "Reduce the quantity or remove the item to continue."
+        else:
+            action = "Reduce the quantity or remove these items to continue."
+
+        return Response(
+            {
+                "error": f"Not enough stock for {details}. {action}",
+                "products": unavailable,
+            },
+            status=status.HTTP_400_BAD_REQUEST
         )
 
     # =========================

@@ -293,6 +293,98 @@ class CheckoutTests(OrderTestBase):
 
 
 @tag("orders")
+class CheckoutStockGateTests(OrderTestBase):
+    """SPEC-6-01 [6.2.22]: a cart line whose stock dropped after the add is
+    rejected at order creation with an actionable 400, so the customer never
+    pays for an unfulfillable order. The gate is advisory and read-only: the
+    authoritative stock check stays in verify_payment, because stock can
+    change again between create and pay."""
+
+    def test_insufficient_stock_at_creation_returns_400_without_side_effects(self):
+        # stock dropped after the item was added to the cart
+        products.objects.filter(pk=self.product.pk).update(stock=1)
+
+        res = self.checkout()
+
+        self.assertEqual(res.status_code, 400, res.data)
+        self.assertEqual(
+            res.data["error"],
+            'Not enough stock for "Rose Aurum" (requested 2, only 1 in stock). '
+            "Reduce the quantity or remove the item to continue.",
+        )
+        self.assertEqual(
+            res.data["products"],
+            [{"name": "Rose Aurum", "requested": 2, "available": 1}],
+        )
+        # nothing was created or mutated: the customer fixes the cart
+        # instead of paying for an order that cannot be fulfilled
+        self.assertEqual(Order.objects.count(), 0)
+        self.assertEqual(OrderItem.objects.count(), 0)
+        cart = Cart.objects.get(session_id=self.client.session.session_key)
+        self.assertEqual(cart.items.get().quantity, 2)  # cart line untouched
+        self.product.refresh_from_db()
+        self.assertEqual(self.product.stock, 1)  # no decrement at creation
+
+    def test_zero_stock_line_rejected(self):
+        """[6.2.22]: an out-of-stock product is not purchasable."""
+        products.objects.filter(pk=self.product.pk).update(stock=0)
+
+        res = self.checkout()
+
+        self.assertEqual(res.status_code, 400, res.data)
+        self.assertIn("Rose Aurum", res.data["error"])
+        self.assertEqual(Order.objects.count(), 0)
+
+    def test_exact_remaining_stock_succeeds(self):
+        """Boundary: requested == available is still purchasable."""
+        products.objects.filter(pk=self.product.pk).update(stock=2)
+
+        res = self.checkout()
+
+        self.assertEqual(res.status_code, 201, res.data)
+        order = Order.objects.get(id=res.data["id"])
+        self.assertEqual(order.items.get().quantity, 2)
+
+    def test_one_bad_line_names_only_the_bad_product(self):
+        second = self.make_product(name="Oud Royale", price="250.00", stock=4)
+        self.seed_session_cart([])
+        cart = Cart.objects.get(session_id=self.client.session.session_key)
+        CartItem.objects.create(cart=cart, product=second, quantity=1)
+        products.objects.filter(pk=self.product.pk).update(stock=1)
+
+        res = self.checkout()
+
+        self.assertEqual(res.status_code, 400, res.data)
+        self.assertIn("Rose Aurum", res.data["error"])
+        self.assertNotIn("Oud Royale", res.data["error"])
+        self.assertEqual(
+            res.data["products"],
+            [{"name": "Rose Aurum", "requested": 2, "available": 1}],
+        )
+        self.assertEqual(Order.objects.count(), 0)
+
+    def test_multiple_bad_lines_listed_in_error(self):
+        second = self.make_product(name="Oud Royale", price="250.00", stock=4)
+        self.seed_session_cart([])
+        cart = Cart.objects.get(session_id=self.client.session.session_key)
+        CartItem.objects.create(cart=cart, product=second, quantity=3)
+        products.objects.filter(pk=self.product.pk).update(stock=1)  # wants 2
+        products.objects.filter(pk=second.pk).update(stock=2)        # wants 3
+
+        res = self.checkout()
+
+        self.assertEqual(res.status_code, 400, res.data)
+        self.assertIn("Rose Aurum", res.data["error"])
+        self.assertIn("Oud Royale", res.data["error"])
+        self.assertIn("remove these items", res.data["error"])
+        self.assertEqual(
+            {row["name"] for row in res.data["products"]},
+            {"Rose Aurum", "Oud Royale"},
+        )
+        self.assertEqual(Order.objects.count(), 0)
+
+
+@tag("orders")
 class CreatePaymentTests(OrderTestBase):
     """36. Razorpay order creation (mocked), idempotent reuse, ownership."""
 
