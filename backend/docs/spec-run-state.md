@@ -12,7 +12,7 @@ Source of truth for the spec-compliance run. Updated at every status transition 
 | # | Title | Spec lines | Status |
 |---|---|---|---|
 | 1 | System overview | 29–151 | SHIPPED (build-now tasks SPEC-1-01/02/03/22 all PR-OPENED; 20 deferred tasks tracked with owner sections) |
-| 2 | Recommended technology stack | 152–278 | IN-COMPLIANCE |
+| 2 | Recommended technology stack | 152–278 | SHIPPED (build-now SPEC-2-01 PR-OPENED; 9 deferred rows tracked with owner sections) |
 | 3 | Frontend — customer-facing website | 279–1230 | IN-COMPLIANCE |
 | 4 | Complete route map — what is public, gated or restricted? | 1231–1268 | IN-COMPLIANCE |
 | 5 | Admin panel — complete specification | 1269–1424 | SHIPPED (build-now SPEC-5-01/02/03 PR-OPENED; 8 deferred rows tracked with owner sections) |
@@ -73,8 +73,8 @@ Deferral policy: gaps whose detailed requirements live in a later spec section a
 | SPEC-5-01 | 5 | Dashboard KPI gaps: aggregate Orders card (orders_total computed but not rendered), Average order value (missing), true pending-fulfilment metric (currently shows payment-pending, ops/services.py:38) — get_stats + dashboard.html + ops tests | 1269–1424 [5.4],[5.5],[5.6] | PR-OPENED (pushed 7255b3c..10857a5; PR #2 comment 5727168338; cycle-1 SHIP) | 1 |
 | SPEC-5-02 | 5 | Ops convention conformance: LOW_STOCK_THRESHOLD hardcoded (ops/services.py:5) → env-driven; N+1 per-order User.objects.get in dashboard view (ops/views.py:42-48) → batch/select_related | 1269–1424 + conventions.md:23 | PR-OPENED (pushed; PR #2 comment 5727417425; cycle-1 SHIP. NOTE: push race carried unaudited ed04dff to remote — remediation: refspec-push policy) | 1 |
 | SPEC-5-03 | 5 | "Sales over time" chart from real order/payment data (time-series aggregation + dashboard chart block + tests) — fulfils SPEC-1-10 | 1269–1424 [5.7],[5.9] | PR-OPENED (ed04dff verified; PR #2 comment 5727562233; cycle-1 SHIP) | 1 |
-| SPEC-6-01 | 6 | DEVIATES [6.2.22]: out-of-stock products orderable — stock checked only at payment verify (orders/views.py:118-126,566-572). Gate line items at order creation with clear 400; payment-time atomic re-check stays as concurrency backstop | 1425–2262 [6.2.22] | PENDING | 0 |
-| SPEC-6-02 | 6 | DEVIATES [6.5.17] + conventions: silent inventory edits — admin list_editable stock bypasses StockMovement ledger; payment decrements skip ledger; adjust_stock lacks atomic/select_for_update (products/models.py:43-63). All mutation paths must write ledger; make adjust_stock atomic | 1425–2262 [6.5.8],[6.5.17] | PENDING | 0 |
+| SPEC-6-01 | 6 | DEVIATES [6.2.22]: out-of-stock products orderable — stock checked only at payment verify (orders/views.py:118-126,566-572). Gate line items at order creation with clear 400; payment-time atomic re-check stays as concurrency backstop | 1425–2262 [6.2.22] | IN-AUDIT (commit 823df1a; 249 pass, 6 expected failures, cov 100.00%) | 1 |
+| SPEC-6-02 | 6 | DEVIATES [6.5.17] + conventions: silent inventory edits — admin list_editable stock bypasses StockMovement ledger; payment decrements skip ledger; adjust_stock lacks atomic/select_for_update (products/models.py:43-63). All mutation paths must write ledger; make adjust_stock atomic | 1425–2262 [6.5.8],[6.5.17] | BUILDING | 0 |
 | SPEC-6-03 | 6 | RBAC foundation: Group-based roles (support/catalogue/inventory/marketing/finance/admin) + capability permission classes applied to API views; replaces binary is_staff for authorization decisions | 1425–2262 [6.12.2],[6.12.4],[6.12.7] | PENDING | 0 |
 | SPEC-6-04 | 6 | ModelAdmin least-privilege: has_view/change/delete/add overrides per role; bulk actions and exports role-gated; sensitive actions get confirmation | 1425–2262 [6.12.4],[6.12.5],[6.12.7] | PENDING | 0 |
 | SPEC-6-05 | 6 | Staff/roles/audit surfaces: staff management, roles assignment UI, audit-log route, privileged-action logging for API-side ops | 1425–2262 [6.12.1],[6.12.6] | PENDING | 0 |
@@ -94,7 +94,7 @@ Deferral policy: gaps whose detailed requirements live in a later spec section a
 | SPEC-5-09 | 5 | Administration surfaces: Roles & permissions UI, Tax settings, Integrations, Payment settings surface — Owner: S6/S17/S16 | 1269–1424 [5.16] | PENDING | 0 |
 | SPEC-5-10 | 5 | Unified global admin search (cross-entity "Search orders, products, customers…") — Owner: S20 | 1269–1424 [5.2] | PENDING | 0 |
 | SPEC-5-11 | 5 | Payments admin surface + Returns & refunds nav (needs refund model) — Owner: S11 (cross SPEC-1-05/SPEC-1-18) | 1269–1424 [5.10] | PENDING | 0 |
-| SPEC-2-01 | 2 | DATABASES hardcoded sqlite3 (settings.py:92-97) — make env-driven (e.g. dj-database-url) with sqlite dev fallback; Postgres provisioning itself stays deferred — Owner: build now; deployment/FTS deferred to S22/S9 | 152–278 [2.4] | IN-AUDIT (commit 313782e; 244 pass, 6 expected failures, cov 100.00%; no new deps — stdlib URL parser per task constraint) | 1 |
+| SPEC-2-01 | 2 | DATABASES hardcoded sqlite3 (settings.py:92-97) — make env-driven (e.g. dj-database-url) with sqlite dev fallback; Postgres provisioning itself stays deferred — Owner: build now; deployment/FTS deferred to S22/S9 | 152–278 [2.4] | PR-OPENED (pushed ed04dff..313782e via refspec; PR #2 comment 5727771167; cycle-1 SHIP) | 1 |
 | SPEC-2-02 | 2 | No component library — no accessible dialogs/data-table primitives alongside Tailwind — Owner: S15 | 152–278 [2.2] | PENDING | 0 |
 | SPEC-2-03 | 2 | No Redis cache/job queue/async email (no CACHES/CELERY config; sync emails) — Owner: S19 | 152–278 [2.5] | PENDING | 0 |
 | SPEC-2-04 | 2 | Local-disk media only — no S3/Cloudinary storage backend config — Owner: S22 | 152–278 [2.7] | PENDING | 0 |
