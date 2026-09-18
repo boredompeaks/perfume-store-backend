@@ -230,6 +230,12 @@ LOW_STOCK_THRESHOLD = _env_int('LOW_STOCK_THRESHOLD', 5)
 # ending today. Tunable per deployment without a code change.
 DASHBOARD_SALES_WINDOW_DAYS = _env_int('DASHBOARD_SALES_WINDOW_DAYS', 30)
 
+# Storefront products listing: rows per page. The historical hardcoded 2
+# was a dev/test artifact (F-23); 12 is a storefront-appropriate default.
+# Tunable per deployment without a code change; non-integer values are
+# ignored and the default is used instead.
+PRODUCTS_PAGE_SIZE = _env_int('PRODUCTS_PAGE_SIZE', 12)
+
 REST_FRAMEWORK = {
     'DEFAULT_AUTHENTICATION_CLASSES': (
         'rest_framework_simplejwt.authentication.JWTAuthentication',
