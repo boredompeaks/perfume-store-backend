@@ -152,6 +152,13 @@ Per spec 6.12 (lines 2099–2262): staff RBAC needs named roles and capability i
 - `tests/test_rbac_foundation.py` (new) — 2 tests: running sync twice leaves exactly the six stable-named groups (no duplicates, no strays); a deleted role group is re-created by the next sync (create branch of `get_or_create`).
 - Suite: **263 tests, OK (257 pass, 6 `expectedFailure` flips unchanged)**, coverage **100.00%** (1182 stmts, gate 90), `makemigrations --check` clean.
 
+## 2026-09-18 — SPEC-6-03b (Section 6) — builder: capability permission classes on the roles map
+
+Continues spec 6.12 RBAC: turns `CAPABILITY_ROLES` into usable DRF `permission_classes` so the next micro-task can gate the staff API views. No view touched, `IsAdminUserOrReadOnly` and `common/roles.py` untouched.
+- `common/permissions.py` — `get_user_roles` (staff roles from Group membership, intersected with `STAFF_ROLES` so stray groups grant nothing), `user_has_capability` (map lookup, unknown identifiers deny by default — least privilege), `CapabilityPermission` base (pinned `capability`; unpinned base denies everyone; denials raise `PermissionDenied` for a uniform 403, mirroring the legacy gate), the `capability_permission(capability)` factory, and one named class per capability (`HasProductsRead` … `HasSettingsManage`, `admin` = full authority because the map already grants it every capability).
+- `tests/test_rbac_foundation.py` — 10 new tests: anonymous and role-less-customer denied for all 14 capabilities; the full 14×6 role→capability matrix pinned against `CAPABILITY_ROLES`; unknown-capability and unpinned-base deny paths; named-class set pinned to the map (no drift, no extras, naming rule enforced); factory builds a correctly pinned subclass; `IsAdminUserOrReadOnly` regression guard (message, safe methods public, writes still legacy-`is_staff`-only).
+- Suite: **273 tests, OK (267 pass, 6 `expectedFailure` flips unchanged)**, coverage **100.00%** (1182 stmts, gate 90), `makemigrations --check` clean.
+
 ## Next (per fix-plan.md)
 
 - Phase 0 remaining: rotate Razorpay keys, add CI.
