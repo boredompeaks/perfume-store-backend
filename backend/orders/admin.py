@@ -3,6 +3,7 @@ import csv
 from django.contrib import admin, messages
 from django.http import HttpResponse
 
+from common.admin import RoleAwareModelAdmin
 from .models import Coupon, Order, OrderItem
 
 
@@ -39,7 +40,29 @@ def transition_allowed(old_status: str, new_status: str) -> bool:
 
 
 @admin.register(Order)
-class OrderAdmin(admin.ModelAdmin):
+class OrderAdmin(RoleAwareModelAdmin):
+    # Role-aware least privilege (spec 6.12): support fulfils and cancels,
+    # finance reads. Add/delete stay capability-less on purpose — orders
+    # originate from checkout (manual rows would bypass payment), and hard
+    # delete would bypass the legal status flow; the sanctioned paths are
+    # the status actions and the cancel action below.
+    capability_map = {
+        "view": "orders.read",
+        "add": None,
+        "change": "orders.fulfill",
+        "delete": None,
+    }
+    action_capabilities = {
+        "mark_confirmed": "orders.fulfill",
+        "mark_shipped": "orders.fulfill",
+        "mark_delivered": "orders.fulfill",
+        "cancel_pending": "orders.cancel",
+        "export_csv": "orders.read",
+    }
+    # Cancelling orders is the one destructive bulk action here ([6.12.4]):
+    # irreversible status change on a financial record, so it must be
+    # explicitly confirmed before it executes.
+    confirmation_required_actions = frozenset({"cancel_pending"})
     list_display = (
         "id",
         "user",
@@ -116,10 +139,17 @@ class OrderAdmin(admin.ModelAdmin):
 
     def _bulk_set_status(self, request, queryset, new_status):
         allowed_from = [s for s, targets in ALLOWED_TRANSITIONS.items() if new_status in targets]
-        matched = queryset.filter(status__in=allowed_from)
-        count = matched.update(status=new_status)
+        matched_pks = list(
+            queryset.filter(status__in=allowed_from).values_list("pk", flat=True)
+        )
+        count = queryset.filter(pk__in=matched_pks).update(status=new_status)
         skipped = queryset.count() - count
         if count:
+            self.log_bulk_action(
+                request,
+                self.get_queryset(request).filter(pk__in=matched_pks),
+                f"Bulk action: status changed to {new_status}.",
+            )
             self.message_user(
                 request, f"{count} order(s) marked {new_status}.", messages.SUCCESS
             )
@@ -145,10 +175,17 @@ class OrderAdmin(admin.ModelAdmin):
 
     @admin.action(description="Cancel selected (unpaid only)")
     def cancel_pending(self, request, queryset):
-        unpaid = queryset.filter(status="pending")
-        count = unpaid.update(status="cancelled")
+        unpaid_pks = list(
+            queryset.filter(status="pending").values_list("pk", flat=True)
+        )
+        count = queryset.filter(pk__in=unpaid_pks).update(status="cancelled")
         skipped = queryset.count() - count
         if count:
+            self.log_bulk_action(
+                request,
+                self.get_queryset(request).filter(pk__in=unpaid_pks),
+                "Bulk action: order cancelled.",
+            )
             self.message_user(request, f"{count} unpaid order(s) cancelled.", messages.SUCCESS)
         if skipped:
             self.message_user(
@@ -182,7 +219,17 @@ class OrderAdmin(admin.ModelAdmin):
 
 
 @admin.register(Coupon)
-class CouponAdmin(admin.ModelAdmin):
+class CouponAdmin(RoleAwareModelAdmin):
+    # Promotions are marketing's domain and the capability map has no
+    # read-only split for them, so every model permission rides
+    # ``discounts.write`` (marketing + admin) — least privilege by default:
+    # support/finance/inventory get no coupon surface.
+    capability_map = {
+        "view": "discounts.write",
+        "add": "discounts.write",
+        "change": "discounts.write",
+        "delete": "discounts.write",
+    }
     list_display = (
         "code",
         "discount_type",

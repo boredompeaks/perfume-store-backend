@@ -4,7 +4,7 @@ from django.urls import path, include
 from django.conf import settings
 from django.conf.urls.static import static
 
-from ops.views import api_settings, dashboard, health
+from ops.views import api_settings, audit_log, dashboard, health
 
 
 urlpatterns = [
@@ -12,6 +12,10 @@ urlpatterns = [
     # Store dashboard (staff-only) — must be registered BEFORE the admin
     # include, or the admin's URLconf swallows it and returns 404.
     path('admin/dashboard/', dashboard, name='admin-dashboard'),
+
+    # Audit log (spec 6.12 route /admin/audit-log) — same before-the-admin
+    # include rule as the dashboard above.
+    path('admin/audit-log/', audit_log, name='admin-audit-log'),
 
     path('admin/', 
         admin.site.urls),

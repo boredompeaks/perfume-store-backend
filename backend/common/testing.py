@@ -69,12 +69,21 @@ class ApiTestCase(TestCase):
         )
 
     def make_staff(self, username="staff", password="S3cure-Passphrase!"):
-        return User.objects.create_user(
+        # SPEC-6-03c: API write authority flows from the roles map, so the
+        # shared staff fixture holds the admin role — the role-map equivalent
+        # of the legacy blanket is_staff authority it replaces.
+        from django.contrib.auth.models import Group
+
+        from common.roles import ROLE_ADMIN
+
+        user = User.objects.create_user(
             username=username,
             email=f"{username}@example.com",
             password=password,
             is_staff=True,
         )
+        user.groups.add(Group.objects.get_or_create(name=ROLE_ADMIN)[0])
+        return user
 
     def make_product(self, name="Rose Aurum", price="499.99", stock=10, category="Floral", **overrides):
         from products.models import products
