@@ -1,4 +1,6 @@
 from rest_framework.decorators import api_view, throttle_scope
+from rest_framework.exceptions import AuthenticationFailed
+from rest_framework.exceptions import ValidationError as DRFValidationError
 from rest_framework.response import Response
 from rest_framework import status
 from rest_framework_simplejwt.views import TokenObtainPairView
@@ -8,9 +10,11 @@ from django.contrib.auth.tokens import default_token_generator
 from django.contrib.auth.password_validation import validate_password
 from django.core.mail import send_mail
 from django.core.exceptions import ValidationError
+from django.db import transaction
 from django.utils.encoding import force_bytes, force_str
 from django.utils.http import urlsafe_base64_encode, urlsafe_base64_decode
 
+from common.models import AuditEvent
 from .serializers import RegisterSerializer
 
 
@@ -18,9 +22,39 @@ class LoginView(TokenObtainPairView):
     """JWT login behind the 'auth' throttle scope.
 
     Throttling here bounds credential stuffing (V-04). The response contract
-    is TokenObtainPairView's, unchanged."""
+    is TokenObtainPairView's, unchanged. [R-7.20] successful (200) and
+    rejected (400/401) attempts each land an audit event; 429 refusals are
+    raised by throttling before this view runs, so they are the rate limit
+    doing its job, not an authentication outcome, and write nothing."""
 
     throttle_scope = 'auth'
+
+    def post(self, request, *args, **kwargs):
+        try:
+            response = super().post(request, *args, **kwargs)
+        except (AuthenticationFailed, DRFValidationError):
+            # super().post signals every rejection by raising; record the
+            # failed attempt, then re-raise so the response is unchanged.
+            self._record_login(request, succeeded=False)
+            raise
+        self._record_login(request, succeeded=True)
+        return response
+
+    @staticmethod
+    def _record_login(request, succeeded):
+        # request.data may be any parsed JSON (a list body has no .get);
+        # the attempted username always rides in detail, while the actor FK
+        # resolves only an exact username match — the same lookup
+        # authenticate() just performed.
+        payload = request.data if isinstance(request.data, dict) else {}
+        username = str(payload.get("username", "") or "")
+        AuditEvent.record(
+            AuditEvent.EventType.AUTH_LOGIN
+            if succeeded
+            else AuditEvent.EventType.AUTH_LOGIN_FAILED,
+            actor=User.objects.filter(username=username).first(),
+            detail={"username": username},
+        )
 
 
 def _encoded_user_id(user):
@@ -63,7 +97,15 @@ def register(request):
 
     if serializer.is_valid():
 
-        user = serializer.save()
+        # [R-7.20] The account creation and its trail row commit together:
+        # no user without its registration event, no event without a user.
+        with transaction.atomic():
+            user = serializer.save()
+            AuditEvent.record(
+                AuditEvent.EventType.AUTH_REGISTERED,
+                actor=user,
+                detail={"username": user.username},
+            )
 
         try:
             _send_verification_email(user)
@@ -124,8 +166,17 @@ def verify_email(request):
         return Response({'error': 'This verification link is invalid or expired.'}, status=status.HTTP_400_BAD_REQUEST)
 
     if not user.is_active:
-        user.is_active = True
-        user.save(update_fields=['is_active'])
+        # [R-7.20] The activation and its trail row commit together; a
+        # re-verify of an already-active account is a no-op and writes
+        # nothing.
+        with transaction.atomic():
+            user.is_active = True
+            user.save(update_fields=['is_active'])
+            AuditEvent.record(
+                AuditEvent.EventType.AUTH_EMAIL_VERIFIED,
+                actor=user,
+                detail={"username": user.username},
+            )
     return Response({'message': 'Email verified. You can now log in.'})
 
 
@@ -192,6 +243,15 @@ def reset_password(request):
         validate_password(password, user)
     except ValidationError as error:
         return Response({'password': list(error.messages)}, status=status.HTTP_400_BAD_REQUEST)
-    user.set_password(password)
-    user.save(update_fields=['password'])
+    # [R-7.20] The credential change and its trail row commit together. The
+    # one-time token is deliberately not stored in detail: it is single-use
+    # evidence, not audit data.
+    with transaction.atomic():
+        user.set_password(password)
+        user.save(update_fields=['password'])
+        AuditEvent.record(
+            AuditEvent.EventType.AUTH_PASSWORD_RESET,
+            actor=user,
+            detail={"username": user.username},
+        )
     return Response({'message': 'Password reset successfully. You can now log in.'})
