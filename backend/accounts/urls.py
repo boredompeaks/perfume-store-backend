@@ -9,6 +9,15 @@ from rest_framework_simplejwt.views import (
 )
 
 
+class RefreshView(TokenRefreshView):
+    """JWT refresh behind the 'auth' throttle scope.
+
+    Throttling here bounds refresh-token brute forcing (V-04 family). The
+    response contract is TokenRefreshView's, unchanged."""
+
+    throttle_scope = 'auth'
+
+
 urlpatterns = [
 
     path('verify-email/', verify_email, name='verify-email'),
@@ -37,7 +46,7 @@ urlpatterns = [
 
     path(
         'token/refresh/',
-        TokenRefreshView.as_view(),
+        RefreshView.as_view(),
         name='token-refresh'
     ),
 

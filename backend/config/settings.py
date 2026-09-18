@@ -163,6 +163,9 @@ REST_FRAMEWORK = {
         'coupon': os.getenv('THROTTLE_COUPON_RATE', '10/min'),
         'cart': os.getenv('THROTTLE_CART_RATE', '60/min'),
         'auth': os.getenv('THROTTLE_AUTH_RATE', '10/min'),
+        # Tighter than 'auth': the recovery views each send an email per
+        # accepted request, so this budget is the outbound-mail-bomb bound.
+        'recovery': os.getenv('THROTTLE_RECOVERY_RATE', '5/min'),
     },
 }
 CORS_ALLOWED_ORIGINS = [origin for origin in os.getenv(

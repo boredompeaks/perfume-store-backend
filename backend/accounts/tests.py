@@ -17,11 +17,13 @@ from django.utils.encoding import force_bytes
 from django.utils.http import urlsafe_base64_encode
 
 from accounts.serializers import RegisterSerializer
+from accounts.urls import urlpatterns as account_urlpatterns
 from accounts.views import LoginView, _encoded_user_id, _get_user, register
 from common.testing import ApiTestCase, extract_link_params
 from django.core.cache import cache
 from rest_framework.settings import api_settings
 from rest_framework.throttling import ScopedRateThrottle
+from rest_framework_simplejwt.tokens import RefreshToken
 
 
 def make_inactive_user(username="pending", email=None):
@@ -498,7 +500,11 @@ class UsernameAvailableTests(ApiTestCase):
 class AuthThrottleTests(ApiTestCase):
     """Conventions: every public mutating endpoint gets a throttle scope.
     Register + login share the 'auth' scope (V-04: credential stuffing,
-    registration spam)."""
+    registration spam); verify-email, password-reset-confirm, the
+    username-available GET oracle and token refresh join that budget,
+    while the email-sending recovery flows get the tighter dedicated
+    'recovery' scope — each accepted request sends an email, so the
+    budget *is* the mail-bomb bound. Non-429 bodies stay uniform."""
 
     def _register(self, username):
         return self.client.post(
@@ -516,6 +522,30 @@ class AuthThrottleTests(ApiTestCase):
         self.assertEqual(LoginView.throttle_scope, "auth")
         self.assertIn(ScopedRateThrottle, LoginView.throttle_classes)
         self.assertIn("auth", api_settings.DEFAULT_THROTTLE_RATES)
+
+    def test_all_account_urlpatterns_declare_throttle_scopes(self):
+        """Wiring guard over the real URLConf: every account route —
+        including the GET existence oracle and the JWT refresh route —
+        must declare a scope, so a future endpoint cannot ship
+        unthrottled silently."""
+        expected = {
+            "verify-email": "auth",
+            "resend-verification": "recovery",
+            "forgot-username": "recovery",
+            "password-reset": "recovery",
+            "password-reset-confirm": "auth",
+            "username-available": "auth",
+            "register": "auth",
+            "login": "auth",
+            "token-refresh": "auth",
+        }
+        found = {}
+        for pattern in account_urlpatterns:
+            scope = getattr(pattern.callback.view_class, "throttle_scope", None)
+            self.assertTrue(scope, f"/{pattern.name}/ has no throttle_scope")
+            found[pattern.name] = scope
+        self.assertEqual(found, expected)
+        self.assertIn("recovery", api_settings.DEFAULT_THROTTLE_RATES)
 
     def test_register_rate_limit_engages(self):
         """A second registration inside a 1/min budget is 429'd and creates
@@ -559,3 +589,216 @@ class AuthThrottleTests(ApiTestCase):
         self.assertIn("refresh", first.data)
         self.assertEqual(second.status_code, 200, second.data)
         self.assertEqual(throttled.status_code, 429, throttled.data)
+
+    def test_verify_email_rate_limit_engages(self):
+        """A second verify inside a 1/min 'auth' budget is 429'd — before
+        scoping it answered an idempotent 200, giving token replay an
+        unbounded probe budget."""
+        user = make_inactive_user("verifyrate")
+        payload = {
+            "uid": _encoded_user_id(user),
+            "token": default_token_generator.make_token(user),
+        }
+        rates = dict(api_settings.DEFAULT_THROTTLE_RATES)
+        rates["auth"] = "1/min"
+        with mock.patch.object(ScopedRateThrottle, "THROTTLE_RATES", rates):
+            cache.clear()
+            first = self.client.post(
+                "/api/accounts/verify-email/", payload, format="json"
+            )
+            throttled = self.client.post(
+                "/api/accounts/verify-email/", payload, format="json"
+            )
+        self.assertEqual(first.status_code, 200, first.data)
+        self.assertIn("Email verified", first.data["message"])
+        self.assertEqual(throttled.status_code, 429, throttled.data)
+
+    def test_password_reset_confirm_rate_limit_engages(self):
+        """The second confirm inside a 1/min 'auth' budget is 429'd; the
+        one in-budget confirm still changes the password."""
+        user = self.make_user("confirmrate")
+        payload = {
+            "uid": _encoded_user_id(user),
+            "token": default_token_generator.make_token(user),
+            "password": "N3w-Passphrase-77",
+        }
+        rates = dict(api_settings.DEFAULT_THROTTLE_RATES)
+        rates["auth"] = "1/min"
+        with mock.patch.object(ScopedRateThrottle, "THROTTLE_RATES", rates):
+            cache.clear()
+            first = self.client.post(
+                "/api/accounts/password-reset/confirm/", payload, format="json"
+            )
+            throttled = self.client.post(
+                "/api/accounts/password-reset/confirm/", payload, format="json"
+            )
+        self.assertEqual(first.status_code, 200, first.data)
+        self.assertEqual(throttled.status_code, 429, throttled.data)
+        user.refresh_from_db()
+        self.assertTrue(user.check_password("N3w-Passphrase-77"))
+
+    def test_token_refresh_rate_limit_engages(self):
+        """The second refresh inside a 1/min 'auth' budget is 429'd,
+        bounding refresh-token brute forcing; the in-budget contract is
+        unchanged (an access token is issued)."""
+        user = self.make_user("refreshrate")
+        refresh = RefreshToken.for_user(user)
+        rates = dict(api_settings.DEFAULT_THROTTLE_RATES)
+        rates["auth"] = "1/min"
+        with mock.patch.object(ScopedRateThrottle, "THROTTLE_RATES", rates):
+            cache.clear()
+            first = self.client.post(
+                "/api/accounts/token/refresh/", {"refresh": str(refresh)}, format="json"
+            )
+            throttled = self.client.post(
+                "/api/accounts/token/refresh/", {"refresh": str(refresh)}, format="json"
+            )
+        self.assertEqual(first.status_code, 200, first.data)
+        self.assertIn("access", first.data)
+        self.assertEqual(throttled.status_code, 429, throttled.data)
+
+    def test_username_available_rate_limit_engages(self):
+        """The GET existence oracle is throttled too (ScopedRateThrottle
+        has no safe-method exemption): the second username probe inside a
+        1/min 'auth' budget is 429'd, capping cheap enumeration."""
+        rates = dict(api_settings.DEFAULT_THROTTLE_RATES)
+        rates["auth"] = "1/min"
+        with mock.patch.object(ScopedRateThrottle, "THROTTLE_RATES", rates):
+            cache.clear()
+            first = self.client.get(
+                "/api/accounts/username-available/", {"username": "probe1"}
+            )
+            throttled = self.client.get(
+                "/api/accounts/username-available/", {"username": "probe2"}
+            )
+        self.assertEqual(first.status_code, 200, first.data)
+        self.assertTrue(first.data["available"])
+        self.assertEqual(throttled.status_code, 429, throttled.data)
+
+    def test_resend_verification_rate_limit_engages(self):
+        """The second resend inside a 1/min 'recovery' budget is 429'd and
+        sends nothing further — the per-IP mail-bomb bound."""
+        make_inactive_user("resendrate")
+        rates = dict(api_settings.DEFAULT_THROTTLE_RATES)
+        rates["recovery"] = "1/min"
+        with mock.patch.object(ScopedRateThrottle, "THROTTLE_RATES", rates):
+            cache.clear()
+            first = self.client.post(
+                "/api/accounts/resend-verification/",
+                {"email": "resendrate@example.com"},
+                format="json",
+            )
+            throttled = self.client.post(
+                "/api/accounts/resend-verification/",
+                {"email": "resendrate@example.com"},
+                format="json",
+            )
+        self.assertEqual(first.status_code, 200, first.data)
+        self.assertEqual(len(mail.outbox), 1)
+        self.assertEqual(throttled.status_code, 429, throttled.data)
+        self.assertEqual(len(mail.outbox), 1)  # throttled request triggers no send
+
+    def test_forgot_username_rate_limit_engages(self):
+        """One username email per 'recovery' budget: the in-budget request
+        sends exactly one mail, the throttled replay adds none."""
+        self.make_user("usernamerate")
+        rates = dict(api_settings.DEFAULT_THROTTLE_RATES)
+        rates["recovery"] = "1/min"
+        with mock.patch.object(ScopedRateThrottle, "THROTTLE_RATES", rates):
+            cache.clear()
+            first = self.client.post(
+                "/api/accounts/forgot-username/",
+                {"email": "usernamerate@example.com"},
+                format="json",
+            )
+            throttled = self.client.post(
+                "/api/accounts/forgot-username/",
+                {"email": "usernamerate@example.com"},
+                format="json",
+            )
+        self.assertEqual(first.status_code, 200, first.data)
+        self.assertIn("Your username is: usernamerate", mail.outbox[0].body)
+        self.assertEqual(throttled.status_code, 429, throttled.data)
+        self.assertEqual(len(mail.outbox), 1)  # throttled request triggers no send
+
+    def test_password_reset_rate_limit_engages(self):
+        """One reset email per 'recovery' budget — and the throttled
+        replay stays 429'd for an unknown address too, so the limiter
+        itself cannot be used to differentially probe accounts."""
+        self.make_user("resetrate")
+        rates = dict(api_settings.DEFAULT_THROTTLE_RATES)
+        rates["recovery"] = "1/min"
+        with mock.patch.object(ScopedRateThrottle, "THROTTLE_RATES", rates):
+            cache.clear()
+            first = self.client.post(
+                "/api/accounts/password-reset/",
+                {"email": "resetrate@example.com"},
+                format="json",
+            )
+            throttled = self.client.post(
+                "/api/accounts/password-reset/",
+                {"email": "ghost@example.com"},
+                format="json",
+            )
+        self.assertEqual(first.status_code, 200, first.data)
+        self.assertEqual(len(mail.outbox), 1)
+        self.assertEqual(throttled.status_code, 429, throttled.data)
+        self.assertEqual(len(mail.outbox), 1)  # throttled request triggers no send
+
+    def test_recovery_throttling_preserves_uniform_bodies(self):
+        """Throttling must not alter the non-429 contract of the uniform
+        anonymous recovery flows: known or unknown email alike, every
+        in-budget request still answers the exact pinned 200 body."""
+        self.make_user("uniformrate")
+        rates = dict(api_settings.DEFAULT_THROTTLE_RATES)
+        rates["recovery"] = "3/min"
+        with mock.patch.object(ScopedRateThrottle, "THROTTLE_RATES", rates):
+            cache.clear()
+            resend = self.client.post(
+                "/api/accounts/resend-verification/",
+                {"email": "ghost@example.com"},
+                format="json",
+            )
+            forgot = self.client.post(
+                "/api/accounts/forgot-username/",
+                {"email": "ghost@example.com"},
+                format="json",
+            )
+            reset = self.client.post(
+                "/api/accounts/password-reset/",
+                {"email": "uniformrate@example.com"},
+                format="json",
+            )
+        self.assertEqual(resend.status_code, 200, resend.data)
+        self.assertEqual(
+            resend.data,
+            {
+                "message": (
+                    "If an unverified account exists, "
+                    "a verification email has been sent."
+                )
+            },
+        )
+        self.assertEqual(forgot.status_code, 200, forgot.data)
+        self.assertEqual(
+            forgot.data,
+            {
+                "message": (
+                    "If an account exists for this email, the username has been sent."
+                )
+            },
+        )
+        self.assertEqual(reset.status_code, 200, reset.data)
+        self.assertEqual(
+            reset.data,
+            {
+                "message": (
+                    "If an active account exists for this email, "
+                    "a password-reset link has been sent."
+                )
+            },
+        )
+        # only the known-address reset probe sent mail — the ghost probes
+        # sent none, and throttling added no extra bodies or sends
+        self.assertEqual(len(mail.outbox), 1)
+        self.assertEqual(mail.outbox[0].to, ["uniformrate@example.com"])
