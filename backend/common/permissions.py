@@ -1,8 +1,14 @@
 """Shared DRF permission classes.
 
 conventions.md: authorize via ``permission_classes`` — never inline
-``request.user.is_staff`` checks.
+``request.user.is_staff`` checks. ``capability_required`` is the
+plain-Django twin for admin-chrome routes that are not DRF views.
 """
+from functools import wraps
+
+from django.contrib.auth.views import redirect_to_login
+from django.core.exceptions import PermissionDenied as DjangoPermissionDenied
+from django.urls import reverse
 from rest_framework.exceptions import PermissionDenied
 from rest_framework.permissions import SAFE_METHODS, BasePermission
 
@@ -90,6 +96,39 @@ class CapabilityPermission(BasePermission):
         if user_has_capability(request.user, self.capability):
             return True
         raise PermissionDenied(self.message)
+
+
+def capability_required(capability):
+    """Decorator: the plain-Django twin of ``CapabilityPermission``.
+
+    The spec-6.12 admin-chrome routes (e.g. the audit-log page) are not DRF
+    views, so ``permission_classes`` cannot reach them; this applies the
+    same ``CAPABILITY_ROLES`` authority to a session view. Django's own
+    superuser bypass is preserved here, mirroring the admin surfaces'
+    trust anchor (``RoleAwareModelAdmin._holds_capability``) — the DRF
+    classes deliberately have none. Anonymous callers follow the
+    admin-chrome contract: send them to the admin login, while an
+    authenticated caller without the capability gets a visible 403 (never
+    a login redirect they can already pass, never a silent empty page).
+    """
+
+    def decorator(view):
+        @wraps(view)
+        def gated(request, *args, **kwargs):
+            user = request.user
+            if not user.is_authenticated:
+                return redirect_to_login(
+                    request.get_full_path(), reverse("admin:login")
+                )
+            if user.is_superuser or user_has_capability(user, capability):
+                return view(request, *args, **kwargs)
+            raise DjangoPermissionDenied(
+                "You do not have permission to perform this action."
+            )
+
+        return gated
+
+    return decorator
 
 
 def _permission_class_name(capability):

@@ -1,10 +1,18 @@
 from decimal import Decimal
 
+from django.contrib.admin.models import LogEntry
 from django.contrib.admin.views.decorators import staff_member_required
+from django.core.paginator import Paginator
 from django.http import JsonResponse
 from django.shortcuts import render
 
+from common.permissions import capability_required
 from .services import get_health, get_sales_series, get_stats
+
+# Page size for the audit-log table: a presentation constant for an
+# internal staff surface, not deployment config — named here so the route
+# has no magic numbers.
+AUDIT_PAGE_SIZE = 50
 
 
 def health(request):
@@ -87,4 +95,27 @@ def dashboard(request):
             "sales_max_revenue": sales_max_revenue,
             "sales_summary": sales_summary,
         },
+    )
+
+
+@capability_required("staff.manage")
+def audit_log(request):
+    """Audit-log route (spec 6.12, /admin/audit-log): the single staff-gated
+    reader for the privileged-action trail. Every admin form save, gated
+    bulk action (RoleAwareModelAdmin) and API-side write (log_api_action)
+    lands a LogEntry — this page reads that one source.
+
+    Gated by ``staff.manage`` (admin role, the map's only grantee): the
+    trail names actors across every domain, including role changes, so
+    reading it is privilege-management oversight, not a per-team report.
+    """
+    entries = LogEntry.objects.select_related("user", "content_type").order_by(
+        "-action_time"
+    )
+    paginator = Paginator(entries, AUDIT_PAGE_SIZE)
+    page = paginator.get_page(request.GET.get("page"))
+    return render(
+        request,
+        "ops/audit_log.html",
+        {"title": "Audit log", "entries": page},
     )

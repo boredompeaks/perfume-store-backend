@@ -164,6 +164,22 @@ class StoreUserAdmin(RoleAwareModelAdmin, DjangoUserAdmin):
             )
         return form
 
+    # Spec 6.12 (line 2261): a non-superuser editor — the admin role
+    # included — may reassign the six staff roles but must never grant the
+    # user flags themselves. is_staff opens the admin door, is_superuser is
+    # the trust anchor, and user_permissions is the same "permission
+    # change" escalation channel. Read-only keeps the current values
+    # visible while ModelForm excludes the fields entirely, so a crafted
+    # POST is ignored rather than validated away — only the superuser
+    # bypass grants flags. Role assignment (staff.manage) is unaffected.
+    PRIVILEGE_FLAGS = ("is_staff", "is_superuser", "user_permissions")
+
+    def get_readonly_fields(self, request, obj=None):
+        readonly = super().get_readonly_fields(request, obj)
+        if obj is not None and not request.user.is_superuser:
+            return tuple(readonly) + self.PRIVILEGE_FLAGS
+        return readonly
+
     def save_model(self, request, obj, form, change):
         if "staff_roles" in form.cleaned_data and not self._map_grants(
             request, "change"

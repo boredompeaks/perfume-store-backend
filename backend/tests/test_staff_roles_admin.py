@@ -12,12 +12,19 @@ Pins the role-management surface on StoreUserAdmin end to end:
 - every Group add/remove on a staff user writes its own admin LogEntry
   naming the acting user and the role ([6.12.5]),
 - non-staff customers are unaffected: no roles field, no role groups.
+
+SPEC-6-05b adds the privilege-escalation guard (spec 6.12, line 2261):
+a non-superuser editor — the admin role included — can never grant
+``is_staff``/``is_superuser``/``user_permissions`` through the User form;
+the flags are read-only for them and ignored if POSTed. Only the
+superuser bypass grants flags (and therefore owns the roles-plus-demotion
+refusal the form guard still enforces there).
 """
 from types import SimpleNamespace
 
 from django.contrib import admin
 from django.contrib.admin.models import CHANGE, LogEntry
-from django.contrib.auth.models import Group, User
+from django.contrib.auth.models import Group, Permission, User
 from django.core.exceptions import PermissionDenied
 from django.test import RequestFactory, tag
 
@@ -227,7 +234,14 @@ class StaffRoleSurfaceUITests(ApiTestCase):
     def test_demoting_to_non_staff_with_roles_selected_is_refused(self):
         # Roles + demotion in one save would leave a customer account
         # holding staff API authority; the form-level guard rejects it.
-        self.client.force_login(self.admin_user)
+        # The demotion vector only exists where is_staff is editable, i.e.
+        # for a superuser editor (SPEC-6-05b made the flags read-only for
+        # everyone else — pinned by the flag-guard tests below).
+        User.objects.create_superuser(
+            "root-demote", "root-demote@example.com", TEST_PASSWORD
+        )
+        root = User.objects.get(username="root-demote")
+        self.client.force_login(root)
         res = self.client.post(
             f"/admin/auth/user/{self.staff_target.id}/change/",
             user_change_post(
@@ -240,6 +254,84 @@ class StaffRoleSurfaceUITests(ApiTestCase):
         self.staff_target.refresh_from_db()
         self.assertTrue(self.staff_target.is_staff)  # nothing was written
         self.assertFalse(self.staff_target.groups.exists())
+
+    # ——— SPEC-6-05b: privilege-escalation guard (line 2261) ———
+
+    def test_admin_role_cannot_grant_is_staff_or_is_superuser(self):
+        # Role management is admin authority, but the user flags are the
+        # trust anchor itself: a crafted POST carrying both flags must not
+        # change them (read-only fields are excluded from the built form,
+        # so the values are ignored — nothing to validate, nothing saved).
+        # The sanctioned part of the same save (role assignment) still lands.
+        self.client.force_login(self.admin_user)
+        page = self.client.get(f"/admin/auth/user/{self.staff_target.id}/change/")
+        self.assertEqual(page.status_code, 200)
+        for flag in ("is_staff", "is_superuser"):
+            self.assertNotIn(flag, page.context["adminform"].form.fields)
+        res = self.client.post(
+            f"/admin/auth/user/{self.staff_target.id}/change/",
+            user_change_post(
+                self.staff_target,
+                is_staff="on",
+                is_superuser="on",
+                staff_roles=[str(Group.objects.get(name=ROLE_SUPPORT).pk)],
+            ),
+        )
+        self.assertEqual(res.status_code, 302)
+        self.staff_target.refresh_from_db()
+        self.assertFalse(self.staff_target.is_superuser)  # grant ignored
+        self.assertTrue(self.staff_target.is_staff)  # untouched (already staff)
+        self.assertTrue(
+            self.staff_target.groups.filter(name=ROLE_SUPPORT).exists()
+        )
+
+    def test_admin_role_cannot_promote_a_customer_to_staff(self):
+        # The crispest form of the guard: "grant is_staff to ANY user".
+        self.client.force_login(self.admin_user)
+        res = self.client.post(
+            f"/admin/auth/user/{self.customer.id}/change/",
+            user_change_post(self.customer, is_staff="on"),
+        )
+        self.assertEqual(res.status_code, 302)
+        self.customer.refresh_from_db()
+        self.assertFalse(self.customer.is_staff)
+        self.assertFalse(self.customer.is_superuser)
+
+    def test_admin_role_cannot_grant_user_permissions(self):
+        # Same escalation channel class ("permission changes", line 2261):
+        # model permissions are inert in this app's roles-map authorization,
+        # but the M2M stays an out-of-band grant nobody below the superuser
+        # may write.
+        delete_user = Permission.objects.get(
+            content_type__app_label="auth", codename="delete_user"
+        )
+        self.client.force_login(self.admin_user)
+        res = self.client.post(
+            f"/admin/auth/user/{self.staff_target.id}/change/",
+            user_change_post(
+                self.staff_target, user_permissions=[str(delete_user.pk)]
+            ),
+        )
+        self.assertEqual(res.status_code, 302)
+        self.staff_target.refresh_from_db()
+        self.assertEqual(self.staff_target.user_permissions.count(), 0)
+
+    def test_superuser_still_grants_the_flags(self):
+        # The guard must not over-tighten: the superuser trust anchor keeps
+        # full flag authority on the same surface.
+        User.objects.create_superuser(
+            "root-flags", "root-flags@example.com", TEST_PASSWORD
+        )
+        root = User.objects.get(username="root-flags")
+        self.client.force_login(root)
+        res = self.client.post(
+            f"/admin/auth/user/{self.customer.id}/change/",
+            user_change_post(self.customer, is_staff="on", is_superuser="on"),
+        )
+        self.assertEqual(res.status_code, 302)
+        self.customer.refresh_from_db()
+        self.assertTrue(self.customer.is_staff)
+        self.assertTrue(self.customer.is_superuser)
 
     def test_add_view_still_creates_a_user_without_roles(self):
         # The add view keeps DjangoUserAdmin.add_fieldsets/UserCreationForm;

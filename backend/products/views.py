@@ -1,3 +1,5 @@
+from django.contrib.admin.models import ADDITION, CHANGE, DELETION
+from django.db import transaction
 from django.db.models import Q
 from django.core.paginator import Paginator
 from decimal import Decimal, InvalidOperation
@@ -6,6 +8,7 @@ from rest_framework.decorators import api_view, permission_classes
 from rest_framework.response import Response
 from rest_framework import status
 
+from common.audit import log_api_action
 from common.permissions import HasProductsWriteOrReadOnly
 
 from .models import products
@@ -122,7 +125,12 @@ def product_list(request):
         )
 
         if serializer.is_valid():
-            serializer.save()
+            # [6.12.6] Log privileged actions: the write and its LogEntry
+            # commit together, so an audit trail can never lag the row it
+            # describes (an unlogged product write is a spec violation).
+            with transaction.atomic():
+                product = serializer.save()
+                log_api_action(request, product, ADDITION, "Created via API.")
 
             return Response(
                 serializer.data,
@@ -177,7 +185,10 @@ def product_detail(request, slug):
         )
 
         if serializer.is_valid():
-            serializer.save()
+            # [6.12.6] write + audit record commit together (see POST).
+            with transaction.atomic():
+                product = serializer.save()
+                log_api_action(request, product, CHANGE, "Updated via API.")
 
             return Response(
                 serializer.data
@@ -201,7 +212,10 @@ def product_detail(request, slug):
         )
 
         if serializer.is_valid():
-            serializer.save()
+            # [6.12.6] write + audit record commit together (see POST).
+            with transaction.atomic():
+                product = serializer.save()
+                log_api_action(request, product, CHANGE, "Updated via API.")
 
             return Response(
                 serializer.data
@@ -218,6 +232,13 @@ def product_detail(request, slug):
 
     elif request.method == 'DELETE':
 
-        product.delete()
+        with transaction.atomic():
+            # [6.12.6] Logged before the delete: Django's collector clears
+            # the instance pk afterwards, so the record must capture the
+            # identity first (the admin's own log_deletion does the same).
+            # The record stores the repr and pk (never a FK), so it
+            # survives the row it describes.
+            log_api_action(request, product, DELETION, "Deleted via API.")
+            product.delete()
 
         return Response(status=status.HTTP_204_NO_CONTENT)
