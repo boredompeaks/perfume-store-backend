@@ -15,7 +15,7 @@ Source of truth for the spec-compliance run. Updated at every status transition 
 | 2 | Recommended technology stack | 152–278 | IN-COMPLIANCE |
 | 3 | Frontend — customer-facing website | 279–1230 | IN-COMPLIANCE |
 | 4 | Complete route map — what is public, gated or restricted? | 1231–1268 | IN-COMPLIANCE |
-| 5 | Admin panel — complete specification | 1269–1424 | PENDING |
+| 5 | Admin panel — complete specification | 1269–1424 | IN-COMPLIANCE |
 | 6 | Admin features — detailed functional requirements | 1425–2262 | PENDING |
 | 7 | Backend architecture | 2263–2453 | PENDING |
 | 8 | Database architecture | 2454–2570 | PENDING |
@@ -67,9 +67,20 @@ Deferral policy: gaps whose detailed requirements live in a later spec section a
 | SPEC-1-19 | 1 | No roles management (Group/permission model+UI); admin cannot manage roles/operational access — Owner: S6 | 29–151 [1.32] | PENDING | 0 |
 | SPEC-1-20 | 1 | No superadmin tier — nothing distinguishes Admin vs Superadmin surfaces — Owner: S17 | 29–151 [1.33] | PENDING | 0 |
 | SPEC-1-21 | 1 | Role-separation invariant (line 150) unenforced — any staff user can edit coupons/orders/users/settings — Owner: S17 | 29–151 [1.34] | PENDING | 0 |
-| SPEC-1-22 | 1 | Throttle remaining public mutating endpoints: verify-email, resend-verification, forgot-username, password-reset(+confirm), token/refresh — prioritize email-sending endpoints (spam/bomb vectors) | conventions.md:24 + SPEC-1-02 auditor finding | BUILDING | 0 |
+| SPEC-1-22 | 1 | Throttle remaining public mutating endpoints: verify-email, resend-verification, forgot-username, password-reset(+confirm), token/refresh — prioritize email-sending endpoints (spam/bomb vectors) | conventions.md:24 + SPEC-1-02 auditor finding | IN-AUDIT (commit 8f9c2af; 207 pass, 6 expected failures, cov 100.00%) | 1 |
 | SPEC-4-01 | 4 | Regression test pinning `order_list` returns only the requester's orders + rate-limit `username-available` (public existence oracle, accounts/views.py:94-108) with tests | 1231–1268 [4.6],[4.29],P9 | PENDING | 0 |
 | SPEC-4-02 | 4 | /profile + /account/* routes MISSING from code (matrix rows) — Owner: S3/S9 via SPEC-3-15 | 1231–1268 [4.20],[4.21] | PENDING | 0 |
+| SPEC-5-01 | 5 | Dashboard KPI gaps: aggregate Orders card (orders_total computed but not rendered), Average order value (missing), true pending-fulfilment metric (currently shows payment-pending, ops/services.py:38) — get_stats + dashboard.html + ops tests | 1269–1424 [5.4],[5.5],[5.6] | PENDING | 0 |
+| SPEC-5-02 | 5 | Ops convention conformance: LOW_STOCK_THRESHOLD hardcoded (ops/services.py:5) → env-driven; N+1 per-order User.objects.get in dashboard view (ops/views.py:42-48) → batch/select_related | 1269–1424 + conventions.md:23 | PENDING | 0 |
+| SPEC-5-03 | 5 | "Sales over time" chart from real order/payment data (time-series aggregation + dashboard chart block + tests) — fulfils SPEC-1-10 | 1269–1424 [5.7],[5.9] | PENDING | 0 |
+| SPEC-5-04 | 5 | Catalogue admin surfaces: Category/Collection/Brand/Attribute/Review models+admins, media library — Owner: S8/S9 (cross SPEC-3-19/SPEC-3-20) | 1269–1424 [5.11] | PENDING | 0 |
+| SPEC-5-05 | 5 | Fulfilment admin: Warehouses, Shipments, Shipping rules — Owner: S10/S12 (cross SPEC-1-07/SPEC-1-08) | 1269–1424 [5.12] | PENDING | 0 |
+| SPEC-5-06 | 5 | Marketing admin: Campaigns, Gift cards (Newsletter subscribers → SPEC-3-10) — Owner: S6 (cross SPEC-1-17/SPEC-3-20) | 1269–1424 [5.13] | PENDING | 0 |
+| SPEC-5-07 | 5 | Storefront content admin: Pages & content, Navigation menus, Homepage builder, SEO settings — Owner: S16 (cross SPEC-3-25/SPEC-3-09) | 1269–1424 [5.14] | PENDING | 0 |
+| SPEC-5-08 | 5 | Operations admin: Support inbox/tickets, Activity logs, Import, Background jobs — Owner: S6/S7/S19 (cross SPEC-1-15/SPEC-1-11/SPEC-2-03) | 1269–1424 [5.15] | PENDING | 0 |
+| SPEC-5-09 | 5 | Administration surfaces: Roles & permissions UI, Tax settings, Integrations, Payment settings surface — Owner: S6/S17/S16 | 1269–1424 [5.16] | PENDING | 0 |
+| SPEC-5-10 | 5 | Unified global admin search (cross-entity "Search orders, products, customers…") — Owner: S20 | 1269–1424 [5.2] | PENDING | 0 |
+| SPEC-5-11 | 5 | Payments admin surface + Returns & refunds nav (needs refund model) — Owner: S11 (cross SPEC-1-05/SPEC-1-18) | 1269–1424 [5.10] | PENDING | 0 |
 | SPEC-2-01 | 2 | DATABASES hardcoded sqlite3 (settings.py:92-97) — make env-driven (e.g. dj-database-url) with sqlite dev fallback; Postgres provisioning itself stays deferred — Owner: build now; deployment/FTS deferred to S22/S9 | 152–278 [2.4] | PENDING | 0 |
 | SPEC-2-02 | 2 | No component library — no accessible dialogs/data-table primitives alongside Tailwind — Owner: S15 | 152–278 [2.2] | PENDING | 0 |
 | SPEC-2-03 | 2 | No Redis cache/job queue/async email (no CACHES/CELERY config; sync emails) — Owner: S19 | 152–278 [2.5] | PENDING | 0 |
