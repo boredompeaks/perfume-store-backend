@@ -9,7 +9,6 @@ omit =
     config/wsgi.py
     config/asgi.py
     */migrations/*
-    common/*
     tests/*
     */tests.py
 

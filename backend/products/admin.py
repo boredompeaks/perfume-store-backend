@@ -6,6 +6,7 @@ from django.shortcuts import render
 from django.utils.html import format_html, mark_safe
 from django import forms
 
+from common.admin import RoleAwareModelAdmin
 from .models import StockMovement, products
 
 
@@ -36,7 +37,26 @@ class StockMovementInline(admin.TabularInline):
 
 
 @admin.register(products)
-class ProductAdmin(admin.ModelAdmin):
+class ProductAdmin(RoleAwareModelAdmin):
+    # Role-aware least privilege (spec 6.12): the catalogue team owns the
+    # product lifecycle; hard delete rides ``products.publish`` because it
+    # is at least as sensitive as unpublishing (a later narrowing of
+    # publish would narrow delete with it).
+    capability_map = {
+        "view": "products.read",
+        "add": "products.write",
+        "change": "products.write",
+        "delete": "products.publish",
+    }
+    action_capabilities = {
+        # adjust_stock is the sanctioned inventory mutation, so it needs
+        # ``inventory.adjust`` — not merely a products permission.
+        "adjust_stock": "inventory.adjust",
+        "export_csv": "products.read",
+    }
+    # adjust_stock renders its own deliberate input form (delta/reason +
+    # Apply) — that form is the explicit confirmation [6.12.4], so it stays
+    # off confirmation_required_actions.
     list_display = (
         "thumb",
         "name",
@@ -116,17 +136,22 @@ class ProductAdmin(admin.ModelAdmin):
                 delta = form.cleaned_data["delta"]
                 reason = form.cleaned_data["reason"]
                 note = form.cleaned_data["note"]
-                ok, failed = 0, []
+                adjusted, failed = [], []
                 for product in queryset:
                     try:
                         product.adjust_stock(request.user, delta, reason, note)
-                        ok += 1
+                        adjusted.append(product)
                     except ValueError as exc:
                         failed.append(str(exc))
-                if ok:
+                if adjusted:
+                    self.log_bulk_action(
+                        request,
+                        adjusted,
+                        f"Bulk action: stock adjusted ({delta:+d}).",
+                    )
                     self.message_user(
                         request,
-                        f"Stock adjusted ({delta:+d}) for {ok} product(s).",
+                        f"Stock adjusted ({delta:+d}) for {len(adjusted)} product(s).",
                         messages.SUCCESS,
                     )
                 for message in failed:

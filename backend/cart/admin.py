@@ -1,5 +1,6 @@
 from django.contrib import admin
 
+from common.admin import RoleAwareModelAdmin
 from .models import Cart, CartItem
 
 
@@ -12,7 +13,17 @@ class CartItemInline(admin.TabularInline):
 
 
 @admin.register(Cart)
-class CartAdmin(admin.ModelAdmin):
+class CartAdmin(RoleAwareModelAdmin):
+    # Carts are customer-owned session state: staff may inspect them to help
+    # customers (``customers.read``) but never edit them from the admin —
+    # row edits would bypass the cart API's quantity/stock checks. The
+    # mutation kinds therefore map to no capability (superuser bypass only).
+    capability_map = {
+        "view": "customers.read",
+        "add": None,
+        "change": None,
+        "delete": None,
+    }
     list_display = ("id", "session_short", "item_count", "created_at", "updated_at")
     search_fields = ("session_id", "id")
     ordering = ("-updated_at",)

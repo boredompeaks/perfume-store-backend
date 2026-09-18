@@ -2,6 +2,7 @@ from django.contrib import admin
 from django.contrib.auth.admin import UserAdmin as DjangoUserAdmin
 from django.contrib.auth.models import User
 
+from common.admin import RoleAwareModelAdmin
 from orders.models import Order
 # Replace auth's default User admin with the store-aware one below.
 admin.site.unregister(User)
@@ -22,9 +23,23 @@ class OrderInline(admin.TabularInline):
 
 
 @admin.register(User)
-class StoreUserAdmin(DjangoUserAdmin):
-    """Customer view: who they are, what they've ordered."""
+class StoreUserAdmin(RoleAwareModelAdmin, DjangoUserAdmin):
+    """Customer view: who they are, what they've ordered.
 
+    Role-aware least privilege (spec 6.12): anyone with ``customers.read``
+    may inspect customer records, but the User row is also where
+    ``is_staff`` and role groups live — viewing/creating/editing/deleting
+    it is privilege management, so every mutation rides ``staff.manage``
+    (admin only). This base class must precede ``DjangoUserAdmin`` so the
+    capability-driven permission methods win the MRO.
+    """
+
+    capability_map = {
+        "view": "customers.read",
+        "add": "staff.manage",
+        "change": "staff.manage",
+        "delete": "staff.manage",
+    }
     list_display = (
         "username",
         "email",
