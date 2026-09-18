@@ -29,7 +29,7 @@ class StockMovementInline(admin.TabularInline):
     fields = ("delta", "stock_after", "reason", "note", "created_by", "created_at")
     readonly_fields = fields
     verbose_name = "Inventory adjustment"
-    verbose_name_plural = "Inventory history (manual adjustments)"
+    verbose_name_plural = "Inventory history (all mutations)"
 
     def has_add_permission(self, request, obj=None):
         return False
@@ -47,7 +47,10 @@ class ProductAdmin(admin.ModelAdmin):
         "stock_flag",
         "created_at",
     )
-    list_editable = ("price", "stock")
+    # stock is display-only here: a changelist inline edit would bypass the
+    # StockMovement ledger ([6.5.17] forbids silent inventory edits), so the
+    # adjust-stock action is the only sanctioned mutation path for stock.
+    list_editable = ("price",)
     list_filter = ("category", "created_at")
     search_fields = ("name", "slug", "description")
     ordering = ("-created_at",)

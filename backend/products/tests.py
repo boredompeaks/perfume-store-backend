@@ -2,6 +2,7 @@
 stock-adjustment feature (``adjust_stock`` / ``StockMovement``) and its
 admin surface."""
 import base64
+import re
 import unittest
 from decimal import Decimal
 
@@ -14,6 +15,7 @@ from rest_framework.test import APIRequestFactory
 
 from common.permissions import IsAdminUserOrReadOnly
 from common.testing import ApiTestCase
+from products.admin import ProductAdmin
 from products.models import StockMovement, products
 from products.serializers import ProductSerializer
 
@@ -377,6 +379,19 @@ class AdjustStockTests(ApiTestCase):
         self.product.refresh_from_db()
         self.assertEqual(self.product.stock, 6)
 
+    def test_adjust_stock_re_reads_the_locked_row(self):
+        """SPEC-6-02: adjust_stock runs under atomic + select_for_update, so
+        it must gate on the row's current value, not the instance's stale
+        snapshot — the observable consequence of serialising against the
+        payment flow's locked decrements."""
+        # a concurrent writer changed the row behind self's back
+        products.objects.filter(pk=self.product.pk).update(stock=50)
+        self.product.adjust_stock(self.admin, -5, StockMovement.Reason.CORRECTION)
+        self.product.refresh_from_db()
+        self.assertEqual(self.product.stock, 45)  # 50 - 5, not 10 - 5
+        movement = StockMovement.objects.get()
+        self.assertEqual(movement.stock_after, 45)
+
     def test_adjustment_by_anonymous_actor_records_no_user(self):
         self.product.adjust_stock(None, 5, StockMovement.Reason.OTHER, "seed data")
         movement = StockMovement.objects.get()
@@ -430,13 +445,53 @@ class ProductAdminTests(ApiTestCase):
         self.assertContains(res, "low (3)")        # stock 3 -> amber branch
         self.assertContains(res, "rose_")          # thumbnail from the ImageField
 
+    def test_changelist_stock_column_is_display_only(self):
+        """SPEC-6-02 [6.5.17]: a changelist inline stock edit writes no
+        movement row, so stock left list_editable — the adjust-stock action
+        is the only sanctioned mutation path. The column stays visible and
+        price stays inline-editable."""
+        self.assertNotIn("stock", ProductAdmin.list_editable)
+        res = self.client.get("/admin/products/products/")
+        self.assertEqual(res.status_code, 200)
+        self.assertContains(res, 'name="form-0-price"')     # price still editable
+        self.assertNotContains(res, 'name="form-0-stock"')  # no inline stock input
+        self.assertContains(res, 'class="field-stock"')  # stock column still displayed
+
+    def test_changelist_bulk_save_ignores_tampered_stock(self):
+        """A hand-crafted changelist POST must not move stock: the formset
+        only accepts list_editable fields, so stock can never be changed —
+        and certainly never without a movement row — from the changelist."""
+        res = self.client.get("/admin/products/products/")
+        management = dict(
+            re.findall(r'name="(form-[A-Z_]+)" value="([^"]*)"', res.content.decode())
+        )
+
+        res = self.client.post(
+            "/admin/products/products/",
+            {
+                **management,
+                "form-TOTAL_FORMS": "1",
+                "form-INITIAL_FORMS": "1",
+                "form-0-id": str(self.plain.id),
+                "form-0-price": "77.00",
+                "form-0-stock": "999",  # the silent edit the old UI allowed
+                "_save": "Save",
+            },
+            follow=True,
+        )
+        self.assertEqual(res.status_code, 200)
+        self.plain.refresh_from_db()
+        self.assertEqual(self.plain.price, Decimal("77.00"))  # sanctioned edit applied
+        self.assertEqual(self.plain.stock, 3)                 # stock untouched
+        self.assertEqual(StockMovement.objects.count(), 0)    # no mutation, no movement
+
     def test_change_page_renders_with_movement_inline_and_preview(self):
         self.with_image.adjust_stock(None, 7, StockMovement.Reason.RESTOCK, "initial fill")
 
         # with an image: preview renders the stored file
         res = self.client.get(f"/admin/products/products/{self.with_image.id}/change/")
         self.assertEqual(res.status_code, 200)
-        self.assertContains(res, "Inventory history (manual adjustments)")
+        self.assertContains(res, "Inventory history (all mutations)")
         self.assertContains(res, "rose_")
         self.assertContains(res, "Imaged Rose: +7 (restock)")  # movement __str__ in the inline
 

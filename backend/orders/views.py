@@ -12,7 +12,7 @@ from .models import Order, OrderItem, Coupon
 from .serializers import OrderSerializer
 
 from cart.models import Cart
-from products.models import products
+from products.models import StockMovement, products
 
 import razorpay
 from django.conf import settings
@@ -628,6 +628,19 @@ def verify_payment(request):
             product = locked_products[item.product_id]
             product.stock -= item.quantity
             product.save(update_fields=['stock'])
+            # [6.5.17] No silent inventory edits: a paid sale is an inventory
+            # mutation like any other, so every decrement lands in the ledger
+            # with the order as its reference and no actor (system). The row
+            # is locked and the new value was just computed here, so
+            # stock_after is the real post-decrement quantity.
+            StockMovement.objects.create(
+                product=product,
+                delta=-item.quantity,
+                reason=StockMovement.Reason.SALE,
+                stock_after=product.stock,
+                note=f"Order #{order.id}",
+                created_by=None,
+            )
 
         if coupon:
             coupon.used_count += 1

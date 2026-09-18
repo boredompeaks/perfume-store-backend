@@ -18,7 +18,7 @@ from cart.models import Cart, CartItem
 from common.testing import TEST_RAZORPAY_KEY_ID, ApiTestCase
 from orders.models import Coupon, Order, OrderItem
 from orders.views import apply_coupon
-from products.models import products
+from products.models import StockMovement, products
 
 
 class OrderTestBase(ApiTestCase):
@@ -540,6 +540,52 @@ class VerifyPaymentTests(OrderTestBase):
         cart_items = list(CartItem.objects.filter(cart=cart))
         self.assertEqual(cart_items, [])  # both paid lines removed
 
+    def test_verified_payment_writes_one_sale_movement_per_product(self):
+        """SPEC-6-02 [6.5.17]: payment-time decrements are inventory
+        mutations too — one SALE ledger row per product, system actor (no
+        user), the order number as reference, and stock_after equal to the
+        real post-decrement stock."""
+        second = self.make_product(name="Oud Royale", price="250.00", stock=4)
+        cart = Cart.objects.get(session_id=self.client.session.session_key)
+        CartItem.objects.create(cart=cart, product=second, quantity=1)
+        order = self.create_order()
+        self.razorpay_mock(order_id="order_LEDGER")
+        self.client.post("/api/orders/payment/", {"order_id": order.id}, format="json")
+        order.refresh_from_db()
+        payload = {
+            "order_id": order.id,
+            "razorpay_order_id": order.razorpay_order_id,
+            "razorpay_payment_id": "pay_LEDGER",
+            "razorpay_signature": "sig",
+        }
+
+        res = self.client.post("/api/orders/payment/verify/", payload, format="json")
+
+        self.assertEqual(res.status_code, 200, res.data)
+        movements = list(StockMovement.objects.order_by("product_id"))
+        self.assertEqual(len(movements), 2)  # exactly one per decremented product
+
+        first, second_move = movements
+        self.assertEqual(first.product_id, self.product.id)
+        self.assertEqual(first.delta, -2)
+        self.assertEqual(first.reason, StockMovement.Reason.SALE)
+        self.assertEqual(first.stock_after, 8)
+        self.assertIsNone(first.created_by)  # system actor, not the buyer
+        self.assertEqual(first.note, f"Order #{order.id}")
+
+        self.assertEqual(second_move.product_id, second.id)
+        self.assertEqual(second_move.delta, -1)
+        self.assertEqual(second_move.reason, StockMovement.Reason.SALE)
+        self.assertEqual(second_move.stock_after, 3)
+        self.assertIsNone(second_move.created_by)
+        self.assertEqual(second_move.note, f"Order #{order.id}")
+
+        # ledger agrees with reality on the products themselves
+        self.product.refresh_from_db()
+        second.refresh_from_db()
+        self.assertEqual(self.product.stock, 8)
+        self.assertEqual(second.stock, 3)
+
     def test_verify_without_session_cookie_skips_cart_cleanup(self):
         """JWT-only client (no cookies): payment succeeds; there is simply no
         session cart to clean (documented hybrid-auth behaviour)."""
@@ -579,6 +625,8 @@ class VerifyPaymentTests(OrderTestBase):
         coupon.refresh_from_db()
         self.assertEqual(coupon.used_count, 1)           # incremented exactly once
         self.assertEqual(order.status, "confirmed")
+        # SPEC-6-02: the rejected replay must not double-book the ledger either
+        self.assertEqual(StockMovement.objects.count(), 1)
 
     def test_insufficient_stock_at_verify_returns_409(self):
         """V-03 (documents the charged-but-unfulfilled gap): when stock is
@@ -605,6 +653,8 @@ class VerifyPaymentTests(OrderTestBase):
         self.assertEqual(order.status, "pending")
         self.assertEqual(self.product.stock, 1)
         self.assertIsNone(order.razorpay_payment_id)
+        # no decrement, no ledger row (SPEC-6-02)
+        self.assertEqual(StockMovement.objects.count(), 0)
 
     def test_coupon_invalidated_between_checkout_and_verify_returns_409(self):
         coupon = self.make_coupon(code="PCT10", discount_value="10", usage_limit=1)
