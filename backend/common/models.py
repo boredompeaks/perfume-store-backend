@@ -16,7 +16,14 @@ Events are written by ``AuditEvent.record`` inside the same
 commit or roll back together and can never disagree.
 """
 
+import logging
+
 from django.db import models
+
+# A dedicated channel name (not this module's __name__) so deployments can
+# route or filter the business trail in log tooling independently of model
+# noise; settings.LOGGING pins it at INFO (SPEC-7-02).
+audit_logger = logging.getLogger("common.audit")
 
 
 class AuditEvent(models.Model):
@@ -113,13 +120,26 @@ class AuditEvent(models.Model):
         category query will ever find. Anonymous/system actors store NULL,
         mirroring ``StockMovement.created_by``.
         """
-        return cls.objects.create(
+        event = cls.objects.create(
             category=cls.Category(event_type.split(".", 1)[0]),
             event_type=event_type,
             actor=actor if getattr(actor, "is_authenticated", False) else None,
             order=order,
             detail=detail or {},
         )
+        # [SPEC-7-02] Observability baseline: the trail is DB-only
+        # otherwise, so a log reader has no surface for it. Emitted after
+        # the insert with the stored identity; the call writes no rows, so
+        # the transaction placement above is untouched.
+        audit_logger.info(
+            "audit %s id=%s actor=%s order=%s detail=%s",
+            event.event_type,
+            event.pk,
+            event.actor.username if event.actor else None,
+            event.order_id,
+            event.detail,
+        )
+        return event
 
     def save(self, *args, **kwargs):
         if self.pk is not None:

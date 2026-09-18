@@ -15,8 +15,11 @@ from cart.models import Cart
 from common.models import AuditEvent
 from products.models import StockMovement, products
 
+import logging
 import razorpay
 from django.conf import settings
+
+logger = logging.getLogger(__name__)
 # ==================================
 # Order List
 # ==================================
@@ -510,11 +513,20 @@ def create_payment(request):
     if order.razorpay_order_id:
         razorpay_order_id = order.razorpay_order_id
     else:
-        razorpay_order = client.order.create({
-            'amount': amount,
-            'currency': 'INR',
-            'receipt': f'order_{order.id}',
-        })
+        try:
+            razorpay_order = client.order.create({
+                'amount': amount,
+                'currency': 'INR',
+                'receipt': f'order_{order.id}',
+            })
+        except Exception:
+            # [SPEC-7-02] Without this, a gateway/network failure surfaces
+            # only as a bare 500 with no order reference; the re-raise
+            # preserves the 500 semantics exactly.
+            logger.exception(
+                "Payment intent creation failed for order %s", order.id
+            )
+            raise
         razorpay_order_id = razorpay_order['id']
         # [R-7.20] First persistence of the gateway intent is a payment
         # event: the intent and its trail row commit together, so a crash
@@ -602,6 +614,15 @@ def verify_payment(request):
             },
         )
 
+        # [SPEC-7-02] The audit row is the structured record; this log line
+        # makes the failure greppable for an operator (same pattern in
+        # every verify failure branch below).
+        logger.warning(
+            "Payment signature rejected (gateway order %s, payment %s)",
+            razorpay_order_id,
+            razorpay_payment_id,
+        )
+
         return Response(
             {"error": "Payment verification failed"},
             status=status.HTTP_400_BAD_REQUEST
@@ -630,6 +651,11 @@ def verify_payment(request):
                 detail={"order_id": order_id},
             )
 
+            logger.warning(
+                "Payment verify failed: order %s not found for this user",
+                order_id,
+            )
+
             return Response(
                 {"error": "Order not found"},
                 status=status.HTTP_404_NOT_FOUND
@@ -648,6 +674,14 @@ def verify_payment(request):
                 },
             )
 
+            # Benign double-submit retry, so INFO: a WARNING here would
+            # spam the log on every impatient re-click.
+            logger.info(
+                "Payment verify skipped: order %s already processed (%s)",
+                order.id,
+                order.status,
+            )
+
             return Response(
                 {"error": "This order has already been processed"},
                 status=status.HTTP_400_BAD_REQUEST
@@ -663,6 +697,14 @@ def verify_payment(request):
                     "claimed_razorpay_order_id": razorpay_order_id,
                     "razorpay_payment_id": razorpay_payment_id,
                 },
+            )
+
+            logger.warning(
+                "Payment verify failed: order %s is bound to gateway "
+                "order %s, not %s",
+                order.id,
+                order.razorpay_order_id,
+                razorpay_order_id,
             )
 
             return Response(
@@ -692,6 +734,16 @@ def verify_payment(request):
                     },
                 )
 
+                # A lost checkout race, not an attack: INFO.
+                logger.info(
+                    "Payment verify failed: order %s stock conflict "
+                    "(product %s requested %s, available %s)",
+                    order.id,
+                    item.product_id,
+                    item.quantity,
+                    product.stock if product else 0,
+                )
+
                 return Response(
                     {"error": "An item is no longer available in the requested quantity"},
                     status=status.HTTP_409_CONFLICT
@@ -713,6 +765,14 @@ def verify_payment(request):
                     actor=request.user,
                     order=order,
                     detail={"coupon_id": coupon.pk},
+                )
+
+                # Same race shape as the stock conflict: INFO.
+                logger.info(
+                    "Payment verify failed: order %s coupon %s no longer "
+                    "valid",
+                    order.id,
+                    coupon.pk,
                 )
 
                 return Response(

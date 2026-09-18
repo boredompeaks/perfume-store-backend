@@ -10,6 +10,7 @@ For the full list of settings and their values, see
 https://docs.djangoproject.com/en/6.1/ref/settings/
 """
 
+import logging
 from pathlib import Path
 from urllib.parse import unquote, urlparse
 import os
@@ -257,3 +258,87 @@ CSRF_TRUSTED_ORIGINS = [origin for origin in os.getenv(
 ).split(',') if origin]
 
 CORS_ALLOW_CREDENTIALS = True
+
+
+# Logging (SPEC-7-02): an env-driven dictConfig baseline. No external
+# services are wired here — sentry/metrics/alerts stay deferred to the S22
+# deployment work.
+
+# The levels an operator may set via LOG_LEVEL. NOTSET is deliberately
+# absent: a root logger at NOTSET logs everything, which is the opposite
+# of a level constraint.
+_VALID_LOG_LEVELS = ("DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL")
+
+
+def _env_log_level(name, default):
+    """Resolve an env-driven log level, never crashing startup.
+
+    An unknown value falls back to the documented default with a warning
+    instead of failing the import — the same fail-safe pattern as _env_int
+    above — so a typo in an env file cannot take the app down.
+    """
+    raw = os.getenv(name, "").strip().upper()
+    if raw in _VALID_LOG_LEVELS:
+        return raw
+    if raw:
+        logging.getLogger(__name__).warning(
+            "Ignoring unsupported %s value %r; using %s", name, raw, default
+        )
+    return default
+
+
+def _build_logging(app_level, file_path=None):
+    """Return the LOGGING dict for the given app level and optional file.
+
+    Console is always wired (12-factor: logs stream to stdout and the
+    platform decides where they go); a rotating file handler joins it only
+    when LOG_FILE names a path, because no hardcoded path may assume a
+    writable location — read-only filesystems and container stdout
+    collection work with no configuration at all. django.request is pinned
+    at ERROR and the audit-trail logger at INFO so request 5xx and the
+    audit trail stay visible even when LOG_LEVEL is raised; neither adds
+    handlers, so each record reaches the root handlers exactly once.
+    """
+    handlers = {
+        "console": {
+            "class": "logging.StreamHandler",
+            "formatter": "plain",
+        },
+    }
+    root_handlers = ["console"]
+    if file_path:
+        handlers["file"] = {
+            "class": "logging.handlers.RotatingFileHandler",
+            "formatter": "plain",
+            "filename": file_path,
+            "maxBytes": 5 * 1024 * 1024,
+            "backupCount": 3,
+        }
+        root_handlers.append("file")
+    return {
+        "version": 1,
+        # Loggers created before settings import (e.g. in dependencies)
+        # keep working.
+        "disable_existing_loggers": False,
+        "formatters": {
+            # Brace-style: audit detail payloads render dicts with braces,
+            # which a %-style template would collide with on %% escaping.
+            "plain": {
+                "format": "{levelname} {asctime} {name} {message}",
+                "style": "{",
+            },
+        },
+        "handlers": handlers,
+        "root": {"handlers": root_handlers, "level": app_level},
+        "loggers": {
+            "django.request": {"level": "ERROR"},
+            # The audit trail doubles as log output (SPEC-7-02): pinned at
+            # INFO here so AuditEvent.record lines survive a raised
+            # LOG_LEVEL.
+            "common.audit": {"level": "INFO"},
+        },
+    }
+
+
+APP_LOG_LEVEL = _env_log_level("LOG_LEVEL", "INFO")
+LOGGING = _build_logging(APP_LOG_LEVEL, os.getenv("LOG_FILE"))
