@@ -176,6 +176,51 @@ class OpsServicesTests(ApiTestCase):
         self.assertEqual(stats["revenue"], "0")
         self.assertEqual(stats["recent_orders"], [])
 
+    def test_get_stats_average_order_value(self):
+        self._seed_orders()
+        stats = get_stats()
+
+        # paid revenue 250.00 + 10.50 + 5.25 = 265.75 across 3 paid orders;
+        # the unpaid (pending) and cancelled orders must not dilute either side.
+        self.assertEqual(stats["revenue"], "265.75")
+        self.assertEqual(stats["average_order_value"], "88.58")
+        self.assertIsInstance(stats["average_order_value"], str)
+
+    def test_get_stats_average_order_value_guards_zero_paid_orders(self):
+        """Division by zero must quantize to 0.00, not crash: an order that is
+        merely created (pending) has captured no money yet."""
+        from decimal import Decimal
+
+        from orders.models import Order
+
+        for subcase in ("empty store", "only unpaid orders"):
+            with self.subTest(subcase=subcase):
+                Order.objects.all().delete()
+                if subcase == "only unpaid orders":
+                    buyer = self.make_user("windowshopper")
+                    Order.objects.create(
+                        user=buyer, full_name="a", phone="1", address="a",
+                        city="c", state="s", pincode="1", status="pending",
+                        total_amount=Decimal("99.00"),
+                    )
+                stats = get_stats()
+                self.assertEqual(stats["average_order_value"], "0.00")
+                self.assertEqual(stats["orders_pending_fulfilment"], 0)
+
+    def test_get_stats_pending_fulfilment_counts_paid_unshipped_only(self):
+        """Fulfilment-pending = payment captured but not dispatched yet:
+        only 'confirmed' qualifies — 'pending' is payment-pending, 'shipped' /
+        'delivered' have left the warehouse, 'cancelled' is dead."""
+        from ops.services import PENDING_FULFILMENT_STATUS
+
+        self.assertEqual(PENDING_FULFILMENT_STATUS, "confirmed")
+        self._seed_orders()
+        stats = get_stats()
+        self.assertEqual(stats["orders_pending_fulfilment"], 1)
+        self.assertEqual(stats["orders_by_status"]["confirmed"], 1)
+        # the old 'pending' (payment-pending) count must stay a separate metric
+        self.assertEqual(stats["orders_by_status"]["pending"], 1)
+
 
 @tag("ops")
 class DashboardAccessTests(ApiTestCase):
@@ -207,6 +252,39 @@ class DashboardAccessTests(ApiTestCase):
         res = self.client.get("/admin/dashboard/")
         self.assertEqual(res.status_code, 200)
         self.assertContains(res, "dashbuyer")
+
+    def test_dashboard_renders_new_kpi_cards(self):
+        """The aggregate Orders card, the AOV card and the pending-fulfilment
+        card render real numbers; the payment-pending metric stays visible and
+        clearly labeled instead of being silently repurposed."""
+        from decimal import Decimal
+
+        from orders.models import Order
+
+        User.objects.create_superuser("boss", "boss@example.com", "boss-pass-123")
+        self.client.login(username="boss", password="boss-pass-123")
+        buyer = self.make_user("kpibuyer")
+        kpis = (("confirmed", "100.00"), ("shipped", "25.00"), ("pending", "50.00"))
+        for status, amount in kpis:
+            Order.objects.create(
+                user=buyer, full_name="a", phone="1", address="a", city="c", state="s",
+                pincode="1", status=status, total_amount=Decimal(amount),
+            )
+
+        res = self.client.get("/admin/dashboard/")
+
+        self.assertEqual(res.status_code, 200)
+        self.assertContains(res, "all statuses")
+        self.assertEqual(res.context["stats"]["orders_total"], 3)
+        # AOV = paid revenue (100.00 + 25.00) / 2 paid orders
+        self.assertContains(res, "Average order value")
+        self.assertContains(res, "paid revenue ÷ paid orders")
+        self.assertContains(res, "₹62.50")
+        self.assertContains(res, "Pending fulfilment")
+        self.assertContains(res, "paid, awaiting shipment (confirmed)")
+        # payment-pending remains its own, clearly labeled metric
+        self.assertContains(res, "Orders · pending")
+        self.assertContains(res, "awaiting payment")
 
     def test_dashboard_survives_orders_with_deleted_users(self):
         """An order row whose user no longer resolves must render as a dash,

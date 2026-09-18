@@ -1,10 +1,20 @@
 """Shared logic for the admin dashboard and the /health/ endpoint."""
+from decimal import Decimal
+
 from django.conf import settings
 from django.db.models import Count, Sum
 
 LOW_STOCK_THRESHOLD = 5
 
+# "Paid" = money actually captured: verify_payment flips pending -> confirmed
+# the moment Razorpay verification succeeds (orders/views.py), and an order
+# stays paid through shipped/delivered. pending/cancelled never held money.
 REVENUE_STATUSES = ("confirmed", "shipped", "delivered")
+
+# Pending fulfilment = paid orders awaiting shipment: payment captured, but
+# the warehouse has not dispatched yet. "shipped" is already with the carrier
+# and "pending" is payment-pending, not fulfilment-pending.
+PENDING_FULFILMENT_STATUS = "confirmed"
 
 
 def _media_writable() -> bool:
@@ -81,11 +91,18 @@ def get_stats() -> dict:
     for row in Order.objects.values("status").annotate(n=Count("id")):
         by_status[row["status"]] = row["n"]
 
-    revenue = (
-        Order.objects.filter(status__in=REVENUE_STATUSES).aggregate(
-            total=Sum("total_amount")
-        )["total"]
-        or 0
+    paid = Order.objects.filter(status__in=REVENUE_STATUSES).aggregate(
+        total=Sum("total_amount"), n=Count("id")
+    )
+    paid_orders = paid["n"]
+    revenue = paid["total"] or 0
+    # Decimal end to end; quantize to the paisa before serializing. The guard
+    # is on the paid count, not the revenue total: an unpaid order contributes
+    # nothing to either, but only an empty paid set makes the division invalid.
+    average_order_value = (
+        (paid["total"] / paid_orders).quantize(Decimal("0.01"))
+        if paid_orders
+        else Decimal("0.00")
     )
 
     settings_row = SiteSettings.load()
@@ -94,6 +111,8 @@ def get_stats() -> dict:
         "products": products.objects.count(),
         "orders_total": sum(by_status.values()),
         "orders_by_status": by_status,
+        "average_order_value": str(average_order_value),
+        "orders_pending_fulfilment": by_status[PENDING_FULFILMENT_STATUS],
         "revenue": str(revenue),
         "recent_orders": list(
             Order.objects.order_by("-created_at").values(

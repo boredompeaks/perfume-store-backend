@@ -17,10 +17,26 @@
         <div style="font-size: 26px; font-weight: 600;">₹{{ stats.revenue }}</div>
         <div style="font-size: 11px; color: #666;">confirmed + shipped + delivered</div>
       </div>
+      <div class="module" style="padding: 14px;">
+        <div style="font-size: 11px; color: #666; text-transform: uppercase;">Orders</div>
+        <div style="font-size: 26px; font-weight: 600;">{{ stats.orders_total }}</div>
+        <div style="font-size: 11px; color: #666;">all statuses</div>
+      </div>
+      <div class="module" style="padding: 14px;">
+        <div style="font-size: 11px; color: #666; text-transform: uppercase;">Average order value</div>
+        <div style="font-size: 26px; font-weight: 600;">₹{{ stats.average_order_value }}</div>
+        <div style="font-size: 11px; color: #666;">paid revenue ÷ paid orders</div>
+      </div>
+      <div class="module" style="padding: 14px;">
+        <div style="font-size: 11px; color: #666; text-transform: uppercase;">Pending fulfilment</div>
+        <div style="font-size: 26px; font-weight: 600;">{{ stats.orders_pending_fulfilment }}</div>
+        <div style="font-size: 11px; color: #666;">paid, awaiting shipment (confirmed)</div>
+      </div>
       {% for status, n in stats.orders_by_status.items %}
         <div class="module" style="padding: 14px;">
           <div style="font-size: 11px; color: #666; text-transform: uppercase;">Orders · {{ status }}</div>
           <div style="font-size: 26px; font-weight: 600;">{{ n }}</div>
+          {% if status == "pending" %}<div style="font-size: 11px; color: #666;">awaiting payment</div>{% endif %}
         </div>
       {% endfor %}
     </div>
