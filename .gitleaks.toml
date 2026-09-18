@@ -11,11 +11,17 @@ useDefault = true
 [allowlist]
   description = "Documented dummy/test credentials (never real secrets)"
   regexes = [
-    '''rzp_test_CI_DUMMY''',
+    '''\brzp_test_CI_DUMMY\b''',
     '''rzp_test_TESTINGONLYDO.?NOT.?USE''',
     '''TESTINGONLY[A-Za-z]*-DO-NOT-USE''',
-    '''ci-dummy-secret''',
-    '''change-me-to-a-long-random-string''',
-    '''boss-pass-123''',
-    '''e2e-(Customer|Staff)-9''',
+    '''\bci-dummy-secret\b''',
+    '''\bchange-me-to-a-long-random-string\b''',
+    '''\bboss-pass-123\b''',
+    '''\be2e-(Customer|Staff)-9\b''',
+    # Legacy (pre-run) test-fixture passwords in backend tests; they exist
+    # only to create throwaway users inside the isolated test DB.
+    '''Ev1l-Passphrase-9\b''',
+    '''S3cure-Passphrase!''',
+    '''N3w-Passphrase-99\b''',
+    '''An0ther-Pass-77\b''',
   ]
