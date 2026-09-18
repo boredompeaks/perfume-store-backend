@@ -6,6 +6,7 @@ Source of truth for the spec-compliance run. Updated at every status transition 
 - Work branch: `spec-comp` (created from `feat/add-frontend` @ `ac75148`). Promotion model: the release-engineer opens AND merges promotion PRs `spec-comp -> feat/add-frontend` at section boundaries (GATE_PHASE, merge on all-green); the auditor pushes `origin/spec-comp` (durability backup + PR head updates); `master` is frozen; the legacy PR #2 (base `master`) is closed at first promotion, never merged.
 - Conventions: `backend/docs/conventions.md` (quoted into every builder handoff)
 - Changelog: `backend/docs/changes.md` (append-only rows; auditor verifies each row against the diff)
+- Topology (session note 2026-09-18): `spec-comp` is checked out ONLY in agent worktree `C:\Users\Admin\AppData\Local\Temp\opencode\spec-comp-wt` — ALL agent git ops and test runs happen there (backend venv is NOT in the worktree; run tests with `& "C:\Users\Admin\Downloads\backend\backend\venv\Scripts\python.exe" -m coverage ...` from `spec-comp-wt\backend`). Main dir `C:\Users\Admin\Downloads\backend` sits on user branch `UI/UX` (an ancestor of spec-comp, do NOT switch it; the user-owned untracked demo file lives there).
 
 ## Section index
 
@@ -166,7 +167,7 @@ Note: §4 route matrix decoded by orchestrator via PowerShell slicing (line 1247
 
 ## Baseline
 
-Current floor (AUDITOR-verified 2026-09-18, tree @ `1b2cff6`, SPEC-6-04 audit): **307 tests, OK (301 pass + 6 pre-existing expectedFailure), cov 100.00%** (1406 stmts — measured set now INCLUDES common/*; auditor-endorsed re-baseline, verified 0 miss). Floor only moves up: never fewer passing tests, never more expected failures, never lower coverage.
+Current floor (ORCHestrator-verified 2026-09-18, session resume, tree @ `9e30c82`, SPEC-6-05a built): **319 tests, OK (313 pass + 6 pre-existing expectedFailure), cov 100.00%** (1449 stmts, 0 miss; test exit 0, cov gate exit 0). Floor only moves up: never fewer passing tests, never more expected failures, never lower coverage.
 last-promoted SHA: **0ed1516** (PR #3 merge "Merge pull request #3 from boredompeaks/spec-comp", `ac75148..0ed1516`, promoted 2026-09-18 — covers S1/S2/S5 + S6-01/6-02 incl. gate fix 0e0ed17; feat/add-frontend tip = 0ed1516 verified via fetch. Rows referencing closed PR #2 comments are historical.)
 
 ## Escalations
