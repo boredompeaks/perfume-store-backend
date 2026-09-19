@@ -1,0 +1,15 @@
+# GitGuardian GitHub App false-positive allowlist (scanner config, owned by
+# the release/CI engineer alongside .gitleaks.toml and .github/workflows/).
+#
+# Scope policy: exact-literal matches only, each with a rationale. Never add
+# paths-ignore entries — full file coverage stays in force; the mandatory
+# gitleaks CI backstop (secret-scan.yml) has NO ignores at all.
+#
+# 1. Incident 37439385 (detector: Username Password) @ fac27e4,
+#    backend/tests/test_audit_trail.py:361. The literal "whatever-1A" is a
+#    dummy credential POSTed for the NONEXISTENT user "ghost"; the test
+#    asserts a 401 and an AUTH_LOGIN_FAILED audit event. Not a real secret;
+#    nothing to revoke or rotate.
+matches-ignore:
+  - match: "whatever-1A"
+    name: "dummy test credential (test_audit_trail.py: unknown-user 401 assertion, incident 37439385)"

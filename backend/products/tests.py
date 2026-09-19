@@ -2,13 +2,15 @@
 stock-adjustment feature (``adjust_stock`` / ``StockMovement``) and its
 admin surface."""
 import base64
+import math
 import re
 import unittest
 from decimal import Decimal
 
+from django.conf import settings
 from django.contrib.auth.models import AnonymousUser, User
 from django.core.files.uploadedfile import SimpleUploadedFile
-from django.test import tag
+from django.test import override_settings, tag
 from rest_framework.exceptions import PermissionDenied
 from rest_framework.request import Request
 from rest_framework.test import APIRequestFactory
@@ -49,8 +51,7 @@ class ProductListFilterTests(ApiTestCase):
         )
 
     def _list_all(self, params=None):
-        """Walk every page (page size is hardcoded 2, F-23) and return the
-        combined results list."""
+        """Walk every page and return the combined results list."""
         results, page = [], 1
         while True:
             res = self.client.get("/api/products/", {**(params or {}), "page": page})
@@ -104,6 +105,9 @@ class ProductListFilterTests(ApiTestCase):
                 self.assertEqual(res.data["error"], "Price filters must be valid numbers")
 
     # 17. ordering whitelist (invalid value ignored, not 500) ------------------------------
+    # Page 2 is requested explicitly below, so the size-2 override keeps the
+    # walk genuinely multi-page instead of clamping back onto page 1.
+    @override_settings(PRODUCTS_PAGE_SIZE=2)
     def test_ordering_by_price_and_name(self):
         res = self.client.get("/api/products/", {"ordering": "-price", "page": 1})
         res2 = self.client.get("/api/products/", {"ordering": "-price", "page": 2})
@@ -132,13 +136,16 @@ class ProductListFilterTests(ApiTestCase):
                 self.assertEqual(res.data["count"], 3)
 
     # 18. pagination envelope shape ---------------------------------------------------------
+    # The size-2 override pins the multi-page envelope behaviour explicitly;
+    # the production default is the env-driven PRODUCTS_PAGE_SIZE (F-23).
+    @override_settings(PRODUCTS_PAGE_SIZE=2)
     def test_pagination_envelope_shape(self):
         res = self.client.get("/api/products/")
         self.assertEqual(res.status_code, 200, res.data)
         for key in ("count", "total_pages", "current_page", "next_page", "previous_page", "results"):
             self.assertIn(key, res.data)
         self.assertEqual(res.data["count"], 3)
-        self.assertEqual(res.data["total_pages"], 2)  # page size is hardcoded 2 (F-23)
+        self.assertEqual(res.data["total_pages"], 2)
         self.assertEqual(res.data["current_page"], 1)
         self.assertTrue(res.data["next_page"])
         self.assertFalse(res.data["previous_page"])
@@ -150,6 +157,22 @@ class ProductListFilterTests(ApiTestCase):
         self.assertTrue(res.data["previous_page"])
         self.assertEqual(len(res.data["results"]), 1)
 
+    def test_page_size_is_env_driven(self):
+        """F-23: the page size comes from the env-driven
+        ``settings.PRODUCTS_PAGE_SIZE`` (documented in .env.example), not a
+        hardcoded literal — the envelope math always follows the active size
+        and a deployment tunes it without a code change."""
+        res = self.client.get("/api/products/")
+        self.assertEqual(res.data["count"], 3)
+        expected_pages = math.ceil(3 / settings.PRODUCTS_PAGE_SIZE)
+        self.assertEqual(res.data["total_pages"], expected_pages)
+
+        with override_settings(PRODUCTS_PAGE_SIZE=1):
+            res = self.client.get("/api/products/")
+            self.assertEqual(res.data["total_pages"], 3)
+            self.assertEqual(len(res.data["results"]), 1)
+
+    @override_settings(PRODUCTS_PAGE_SIZE=2)
     def test_out_of_range_and_non_integer_pages_clamped(self):
         res = self.client.get("/api/products/", {"page": 999})
         self.assertEqual(res.status_code, 200, res.data)
@@ -159,12 +182,14 @@ class ProductListFilterTests(ApiTestCase):
         self.assertEqual(res.status_code, 200, res.data)
         self.assertEqual(res.data["current_page"], 1)
 
-    @unittest.expectedFailure
     def test_f12_default_listing_order_is_deterministic(self):
-        """F-12/V-20: without an explicit ``ordering`` the queryset is
-        unordered, so pages are not guaranteed stable. Asserts the fixed
-        behaviour (Meta.ordering = ['-created_at', 'id']); remove
-        @expectedFailure when Phase 3.4 lands."""
+        """F-12/V-20 regression pin: without an explicit ``ordering`` the
+        listing still has a deterministic default order (newest first,
+        ``-created_at``, with the unique ``-id`` as the total tiebreaker),
+        so pages are stable across identical requests. The pin's mechanism
+        is the view-level default order_by (the model keeps no Meta.ordering
+        by design); identical timestamps force the id tiebreaker to decide
+        the sequence."""
         from django.utils import timezone
 
         fixed = timezone.make_aware(timezone.datetime(2026, 1, 1, 12, 0, 0))

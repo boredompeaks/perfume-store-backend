@@ -12,10 +12,15 @@ from .models import Order, OrderItem, Coupon
 from .serializers import OrderSerializer
 
 from cart.models import Cart
+from common.models import AuditEvent
+from common.money import quantize_money
 from products.models import StockMovement, products
 
+import logging
 import razorpay
 from django.conf import settings
+
+logger = logging.getLogger(__name__)
 # ==================================
 # Order List
 # ==================================
@@ -236,9 +241,13 @@ def create_order(request):
         # Calculate discount
         if coupon.discount_type == 'percentage':
 
-            discount_amount = (
-                subtotal_amount * coupon.discount_value
-            ) / Decimal('100')
+            # Quantize before any comparison or storage: the raw division
+            # carries extra decimal places, and an unquantized discount
+            # drifts the display, the audit trail and the stored 2-dp
+            # order amount apart (F-11).
+            discount_amount = quantize_money(
+                (subtotal_amount * coupon.discount_value) / Decimal('100')
+            )
 
             if coupon.maximum_discount is not None:
 
@@ -304,6 +313,22 @@ def create_order(request):
                 quantity=quantity,
                 subtotal=item_subtotal
             )
+
+        # [R-7.20] Business-event trail: the order's creation is recorded in
+        # the same transaction as the order rows, so a rolled-back checkout
+        # leaves no phantom trail row and a committed order is never
+        # trail-less.
+        AuditEvent.record(
+            AuditEvent.EventType.ORDER_CREATED,
+            actor=request.user,
+            order=order,
+            detail={
+                "order_id": order.id,
+                "total_amount": str(order.total_amount),
+                "coupon": coupon.code if coupon else None,
+                "item_count": len(cart_items),
+            },
+        )
 
     # =========================
     # Return order
@@ -413,9 +438,11 @@ def apply_coupon(request):
     # Calculate discount
     if coupon.discount_type == 'percentage':
 
-        discount = (
-            subtotal * coupon.discount_value
-        ) / Decimal('100')
+        # Same quantize parity as checkout (F-11): the preview must show
+        # the exact 2-dp discount the order will store.
+        discount = quantize_money(
+            (subtotal * coupon.discount_value) / Decimal('100')
+        )
 
         if coupon.maximum_discount is not None:
             discount = min(
@@ -493,14 +520,37 @@ def create_payment(request):
     if order.razorpay_order_id:
         razorpay_order_id = order.razorpay_order_id
     else:
-        razorpay_order = client.order.create({
-            'amount': amount,
-            'currency': 'INR',
-            'receipt': f'order_{order.id}',
-        })
+        try:
+            razorpay_order = client.order.create({
+                'amount': amount,
+                'currency': 'INR',
+                'receipt': f'order_{order.id}',
+            })
+        except Exception:
+            # [SPEC-7-02] Without this, a gateway/network failure surfaces
+            # only as a bare 500 with no order reference; the re-raise
+            # preserves the 500 semantics exactly.
+            logger.exception(
+                "Payment intent creation failed for order %s", order.id
+            )
+            raise
         razorpay_order_id = razorpay_order['id']
-        order.razorpay_order_id = razorpay_order_id
-        order.save(update_fields=['razorpay_order_id'])
+        # [R-7.20] First persistence of the gateway intent is a payment
+        # event: the intent and its trail row commit together, so a crash
+        # between the two cannot leave an intent the trail never saw. The
+        # reuse path above writes nothing, so it emits nothing.
+        with transaction.atomic():
+            order.razorpay_order_id = razorpay_order_id
+            order.save(update_fields=['razorpay_order_id'])
+            AuditEvent.record(
+                AuditEvent.EventType.PAYMENT_INITIATED,
+                actor=request.user,
+                order=order,
+                detail={
+                    "razorpay_order_id": razorpay_order_id,
+                    "amount_paise": amount,
+                },
+            )
 
     return Response({
         "order_id": order.id,
@@ -558,6 +608,28 @@ def verify_payment(request):
 
     except razorpay.errors.SignatureVerificationError:
 
+        # [R-7.20] A rejected signature is a verify failure with no other
+        # side effect to share a transaction with: the single insert is
+        # atomic on its own, and the claimed gateway references ride in
+        # detail because no order relationship is proven yet.
+        AuditEvent.record(
+            AuditEvent.EventType.PAYMENT_SIGNATURE_REJECTED,
+            actor=request.user,
+            detail={
+                "razorpay_order_id": razorpay_order_id,
+                "razorpay_payment_id": razorpay_payment_id,
+            },
+        )
+
+        # [SPEC-7-02] The audit row is the structured record; this log line
+        # makes the failure greppable for an operator (same pattern in
+        # every verify failure branch below).
+        logger.warning(
+            "Payment signature rejected (gateway order %s, payment %s)",
+            razorpay_order_id,
+            razorpay_payment_id,
+        )
+
         return Response(
             {"error": "Payment verification failed"},
             status=status.HTTP_400_BAD_REQUEST
@@ -577,18 +649,71 @@ def verify_payment(request):
                 user=request.user
             )
         except Order.DoesNotExist:
+
+            # [R-7.20] The verify attempt names an order the caller does not
+            # own: there is no FK target, so the claimed id rides in detail.
+            AuditEvent.record(
+                AuditEvent.EventType.PAYMENT_ORDER_NOT_FOUND,
+                actor=request.user,
+                detail={"order_id": order_id},
+            )
+
+            logger.warning(
+                "Payment verify failed: order %s not found for this user",
+                order_id,
+            )
+
             return Response(
                 {"error": "Order not found"},
                 status=status.HTTP_404_NOT_FOUND
             )
 
         if order.status != 'pending' or order.razorpay_payment_id:
+
+            AuditEvent.record(
+                AuditEvent.EventType.PAYMENT_ALREADY_PROCESSED,
+                actor=request.user,
+                order=order,
+                detail={
+                    "razorpay_order_id": razorpay_order_id,
+                    "razorpay_payment_id": razorpay_payment_id,
+                    "order_status": order.status,
+                },
+            )
+
+            # Benign double-submit retry, so INFO: a WARNING here would
+            # spam the log on every impatient re-click.
+            logger.info(
+                "Payment verify skipped: order %s already processed (%s)",
+                order.id,
+                order.status,
+            )
+
             return Response(
                 {"error": "This order has already been processed"},
                 status=status.HTTP_400_BAD_REQUEST
             )
 
         if order.razorpay_order_id != razorpay_order_id:
+
+            AuditEvent.record(
+                AuditEvent.EventType.PAYMENT_REFERENCE_MISMATCH,
+                actor=request.user,
+                order=order,
+                detail={
+                    "claimed_razorpay_order_id": razorpay_order_id,
+                    "razorpay_payment_id": razorpay_payment_id,
+                },
+            )
+
+            logger.warning(
+                "Payment verify failed: order %s is bound to gateway "
+                "order %s, not %s",
+                order.id,
+                order.razorpay_order_id,
+                razorpay_order_id,
+            )
+
             return Response(
                 {"error": "Payment does not belong to this order"},
                 status=status.HTTP_400_BAD_REQUEST
@@ -604,6 +729,28 @@ def verify_payment(request):
         for item in order_items:
             product = locked_products.get(item.product_id)
             if product is None or product.stock < item.quantity:
+
+                AuditEvent.record(
+                    AuditEvent.EventType.PAYMENT_STOCK_CONFLICT,
+                    actor=request.user,
+                    order=order,
+                    detail={
+                        "product_id": item.product_id,
+                        "requested": item.quantity,
+                        "available": product.stock if product else 0,
+                    },
+                )
+
+                # A lost checkout race, not an attack: INFO.
+                logger.info(
+                    "Payment verify failed: order %s stock conflict "
+                    "(product %s requested %s, available %s)",
+                    order.id,
+                    item.product_id,
+                    item.quantity,
+                    product.stock if product else 0,
+                )
+
                 return Response(
                     {"error": "An item is no longer available in the requested quantity"},
                     status=status.HTTP_409_CONFLICT
@@ -619,6 +766,22 @@ def verify_payment(request):
                 or now > coupon.valid_until
                 or (coupon.usage_limit is not None and coupon.used_count >= coupon.usage_limit)
             ):
+
+                AuditEvent.record(
+                    AuditEvent.EventType.PAYMENT_COUPON_INVALID,
+                    actor=request.user,
+                    order=order,
+                    detail={"coupon_id": coupon.pk},
+                )
+
+                # Same race shape as the stock conflict: INFO.
+                logger.info(
+                    "Payment verify failed: order %s coupon %s no longer "
+                    "valid",
+                    order.id,
+                    coupon.pk,
+                )
+
                 return Response(
                     {"error": "The coupon is no longer valid"},
                     status=status.HTTP_409_CONFLICT
@@ -654,6 +817,30 @@ def verify_payment(request):
             cart = Cart.objects.filter(session_id=request.session.session_key).first()
             if cart:
                 cart.items.filter(product_id__in=product_ids).delete()
+
+        # [R-7.20] The success story has two halves: the gateway
+        # reconciliation view wants payment.verified with the razorpay
+        # references, the order timeline wants order.paid. Both are written
+        # inside this atomic block, so a verify that rolls back (for any
+        # reason) leaves neither behind.
+        AuditEvent.record(
+            AuditEvent.EventType.PAYMENT_VERIFIED,
+            actor=request.user,
+            order=order,
+            detail={
+                "razorpay_order_id": razorpay_order_id,
+                "razorpay_payment_id": razorpay_payment_id,
+            },
+        )
+        AuditEvent.record(
+            AuditEvent.EventType.ORDER_PAID,
+            actor=request.user,
+            order=order,
+            detail={
+                "order_id": order.id,
+                "total_amount": str(order.total_amount),
+            },
+        )
 
     return Response({
         "message": "Payment verified successfully",

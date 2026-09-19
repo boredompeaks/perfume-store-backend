@@ -1,3 +1,4 @@
+from django.conf import settings
 from django.contrib.admin.models import ADDITION, CHANGE, DELETION
 from django.db import transaction
 from django.db.models import Q
@@ -89,6 +90,13 @@ def product_list(request):
 
         if ordering in allowed_ordering:
             products_data = products_data.order_by(ordering)
+        else:
+            # F-12: an unordered queryset makes Paginator unstable (and
+            # emits UnorderedObjectListWarning). When no valid ``ordering``
+            # is requested, newest-first is the storefront default, and the
+            # unique ``-id`` tiebreaker makes the sort total, so identical
+            # requests always partition the catalogue into identical pages.
+            products_data = products_data.order_by('-created_at', '-id')
 
         # =========================
         # Pagination
@@ -96,7 +104,7 @@ def product_list(request):
 
         page_number = request.query_params.get('page', 1)
 
-        paginator = Paginator(products_data, 2)
+        paginator = Paginator(products_data, settings.PRODUCTS_PAGE_SIZE)
 
         page = paginator.get_page(page_number)
 

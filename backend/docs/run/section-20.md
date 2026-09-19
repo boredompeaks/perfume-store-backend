@@ -1,0 +1,18 @@
+# Section 20 — Admin usability and operational workflows (task ledger)
+
+Created 2026-09-19 from the S20 compliance prefetch. Spec lines: 4778–4853. Prefetch result: 30 rows — 19 IMPLEMENTED / 5 PARTIAL / 2 MISSING / 0 DEVIATES / 4 N-A (verified: loading states — no async admin surface; publish-batch confirmation — no publish state, SPEC-6-08; refund confirmation — V-03; payment/tax config — env-only).
+
+| Task ID | Section | Requirement summary | Spec lines | Status | Attempts |
+|---|---|---|---|---|---|
+| SPEC-20-1 | 20 | P2 — PARTIAL [R-20.20]: financially significant confirmations must show amount, currency, affected items, resulting state — the interstitial (common/admin.py + templates/admin/action_confirmation.html) shows only description/count/str for cancel_pending; enrich for order-affecting actions (≤3 files + tests) | 4778–4853 [R-20.20] | PENDING (P2, S20 loop) | 0 |
+| SPEC-20-2 | 20 | P2 — PARTIAL [R-20.18]: staff-role changes commit directly on save with audit+authorization but NO confirmation dialog — add an explicit confirmation step on staff_roles change, coordinated with SPEC-6-04's delivered interstitial infra (accounts/admin.py + tests) | 4778–4853 [R-20.18] | PENDING (P2, S20 loop) | 0 |
+| SPEC-20-3 | 20 | P2 — MISSING [R-20.26]: zero correlation/request-ID infrastructure — add middleware generating/propagating X-Request-ID, surfaced in the audit trail + log formatter; cross-cutting with the SPEC-7-02 logging baseline | 4778–4853 [R-20.26] | PENDING (P2 — PULL-FORWARD candidate, coordinates with 7-02's logging; new common/middleware.py + settings + models/audit + tests, 5 files at limit) | 0 |
+| SPEC-20-4 | 20 | P3 — PARTIAL [R-20.27/20.29]: no structured before→after values and no source discriminator (admin/api) on guarded mutations — add to change messages and log_api_action (≤5 files) | 4778–4853 [R-20.27],[R-20.29] | PENDING (P3, S20 loop) | 0 |
+| SPEC-20-5 | 20 | P3 — PARTIAL [R-20.28]: reason/note capture exists only on the inventory path — add optional reason/note on cancel_pending via the confirmation interstitial, merged into the change message (4 files) | 4778–4853 [R-20.28] | PENDING (P3, S20 loop) | 0 |
+| SPEC-20-6 | 20 | P3 — MISSING [R-20.11]: saved filters/views ("where useful" soft requirement) — deliver for the two highest-traffic changelists (orders, products) or record an explicit grandfathering decision on the Django-admin limitation | 4778–4853 [R-20.11] | PENDING (P3, S20 loop — decision + implementation or documented skip) | 0 |
+
+S20 loop queue (when the section opens): **SPEC-5-10** (unified global admin search — ledger-assigned to S20) + SPEC-20-1, 20-2, 20-4, 20-5, 20-6 — all self-contained admin-surface work sharing the common/admin interstitial seam and its test suite. Pull-forward: SPEC-20-3 (correlation IDs) coordinates with the SPEC-7-02 logging owner.
+
+Owner attributions (no duplicate tasks): per-listing search/filters/sort/pagination/columns/empty-states/error-recovery/row-actions/bulk/export — delivered, gated via capability RBAC (R-20.10/20.12 test-pinned; R-20.10 bulk scope → SPEC-6-04/6-08). Audit-trail actor/action/target/timestamp (R-20.22..25) + no-secrets (R-20.30) → delivered by SPEC-6-04/6-05b/7-01. Superuser interstitial bypass + no stock-magnitude tiering → grandfathered (test-pinned design decisions).
+
+Verified strong: confirmation machinery (interstitial, adjust_stock deliberate form, admin delete-confirmation), transition guards + bulk error recovery, exports permission-enforced end-to-end (dropdown hidden AND direct POST rejected), audit-log reader pagination/empty states, dashboard degraded-user handling. No P1.
