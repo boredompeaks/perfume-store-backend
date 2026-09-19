@@ -4,9 +4,7 @@ import Link from "next/link";
 import { useEffect, useRef, useState } from "react";
 import { ApiError } from "@/lib/api";
 import { register, usernameAvailable } from "@/lib/accounts-api";
-
-const inputClass =
-  "w-full border border-line bg-surface px-3 py-2 text-sm placeholder:text-ink-muted/70 focus:outline-none";
+import { inputClass } from "@/lib/ui";
 
 type Availability =
   | { state: "idle" }
@@ -113,7 +111,7 @@ export default function RegisterForm() {
           value={username}
           onChange={(e) => setUsername(e.target.value)}
           aria-describedby="reg-username-hint"
-          className={inputClass}
+          className={`${inputClass} w-full`}
           required
         />
         <p id="reg-username-hint" className="mt-1 text-sm text-ink-muted" aria-live="polite">
@@ -144,7 +142,7 @@ export default function RegisterForm() {
           autoComplete="email"
           value={email}
           onChange={(e) => setEmail(e.target.value)}
-          className={inputClass}
+          className={`${inputClass} w-full`}
           required
         />
         {fieldErrors.email?.map((msg) => (
@@ -164,7 +162,7 @@ export default function RegisterForm() {
           autoComplete="new-password"
           value={password}
           onChange={(e) => setPassword(e.target.value)}
-          className={inputClass}
+          className={`${inputClass} w-full`}
           required
           minLength={8}
         />

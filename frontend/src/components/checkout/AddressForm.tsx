@@ -6,9 +6,7 @@ import {
   hasStoredShipping,
   type ShippingDetails,
 } from "@/lib/shipping-store";
-
-const inputClass =
-  "w-full border border-line bg-surface px-3 py-2 text-sm placeholder:text-ink-muted/70 focus:outline-none";
+import { inputClass } from "@/lib/ui";
 
 type Errors = Partial<Record<keyof ShippingDetails, string>>;
 
@@ -114,7 +112,7 @@ export default function AddressForm({
               onChange={(e) => set(f.key)(e.target.value)}
               aria-invalid={errors[f.key] ? true : undefined}
               aria-describedby={errors[f.key] ? `addr-${f.key}-err` : undefined}
-              className={inputClass}
+              className={`${inputClass} w-full`}
               required
             />
             {errors[f.key] && (

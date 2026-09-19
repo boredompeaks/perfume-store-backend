@@ -243,6 +243,18 @@ Per the section-7 conventions findings: the products listing page size is env-dr
 - No model changes — `makemigrations --check` clean.
 - Suite: **378 tests, OK (374 pass, 4 `expectedFailure` — F-12 flipped green)**, coverage **100.00%** (1615 stmts, up from 1612; gate 90), `makemigrations --check` clean.
 
+## 2026-09-19 — SPEC-15-1 (Section 15) — builder: WCAG 2.2 AA input contrast fix via shared field class
+
+Per spec 15.4 ("Sufficient text contrast", WCAG 2.2 AA target; S15 audit SPEC-15-1) — the two REAL failures fixed and measured with the WCAG relative-luminance formula (per-channel linearization → L = 0.2126R + 0.7152G + 0.0722B, ratio = (L1+0.05)/(L2+0.05)):
+- OLD placeholder: `placeholder:text-ink-muted/70` composited #57534e at 70% over the white input background → #898783, **3.5855:1** on surface (< 4.5:1). NEW: full-strength `placeholder:text-ink-muted` → **7.6293:1** on surface, **7.1882:1** worst-case on paper (pass with wide margin).
+- OLD border: `border-line` #e6e1d7 → L = 0.755797, **1.3031:1** on surface / 1.2277:1 on paper (< 3:1, WCAG 1.4.11 non-text). NEW: dedicated field-border token `--color-line-strong: #75706a` → **4.9041:1** on surface, **4.6205:1** worst-case on paper.
+- `frontend/src/lib/ui.ts` (new) — one `inputClass` export (`border border-line-strong bg-surface px-3 py-2 text-sm placeholder:text-ink-muted focus:outline-none`) replaces the 7 duplicated copies, so future form-control fixes land everywhere at once. Width intentionally excluded from the base class: the 5 full-width forms append `w-full` at the element, CouponForm/FilterBar keep their `min-w-0 flex-1`/`w-56`/`w-24` appends — no conflicting width utilities in one class list. Placement: `src/lib/` is the established shared-module home (money/filters/redirect pattern) with colocated vitest tests; `lib/tokens.ts` is the AUTH-token module, not design tokens.
+- `frontend/src/app/globals.css` — `--color-line-strong` added; the decorative `line` token deliberately untouched: grep shows 60+ non-input `border-line`/`divide-line` uses (dividers, cards, footers, badges) plus `var(--color-line)` in `.skeleton`/`.text-ghost`, all exempt from 1.4.11 and visually unchanged. #75706a stays on the palette's warm r>g>b axis between ink-muted (#57534e) and line (#e6e1d7).
+- Consumers switched to the shared class — 7, not just the 4 the audit pinned: AddressForm, LoginForm, RegisterForm, EmailOnlyForm, ResetPasswordClient, CouponForm, FilterBar. Grep found the identical failing string (same /70 placeholder + border-line) in the 3 unpinned auth forms, so scoping to 4 would have left the same AA failure live in the tree. No markup or behavior changes beyond className sources/imports.
+- `frontend/src/lib/ui.test.ts` (new, 2 tests) — token-level pins (`border-line-strong` + `placeholder:text-ink-muted` present; a guard that no `placeholder:…/NN` opacity modifier ever returns — the exact mechanism that broke 4.5:1). Deliberately not a whole-string snapshot so unrelated layout classes can evolve.
+- Frontend evidence: BEFORE (aa01edf, deps `npm ci`) vitest **22/22 (4 files)** + clean build; AFTER vitest **24/24 (5 files, floor moved up)** + clean `next build`; `border-line-strong` confirmed present in the compiled `.next` CSS (utility actually generated). Playwright e2e NOT run locally per task instructions (non-hermetic, CI self-skips; SPEC-3-01 owns it). No backend files touched — backend suite/floor untouched; no new env keys; no model changes.
+- Ledger note: section-15.md had parked inputClass centralization under SPEC-2-02; this task's handoff mandates it now, so SPEC-2-02 retains only the broader component-library scope.
+
 ## Next (per fix-plan.md)
 
 - Phase 0 remaining: rotate Razorpay keys, add CI.

@@ -2,9 +2,7 @@
 
 import { useState } from "react";
 import { apiFetch, ApiError } from "@/lib/api";
-
-const inputClass =
-  "w-full border border-line bg-surface px-3 py-2 text-sm placeholder:text-ink-muted/70 focus:outline-none";
+import { inputClass } from "@/lib/ui";
 
 type State =
   | { kind: "idle" }
@@ -74,7 +72,7 @@ export default function EmailOnlyForm({
           autoComplete="email"
           value={email}
           onChange={(e) => setEmail(e.target.value)}
-          className={inputClass}
+          className={`${inputClass} w-full`}
           required
         />
       </div>

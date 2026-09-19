@@ -7,6 +7,7 @@ import {
   isInvalidPrice,
   type Ordering,
 } from "@/lib/filters";
+import { inputClass } from "@/lib/ui";
 
 const sortOptions: { value: Ordering; label: string }[] = [
   { value: "-created_at", label: "Newest" },
@@ -15,9 +16,6 @@ const sortOptions: { value: Ordering; label: string }[] = [
   { value: "name", label: "Name A–Z" },
   { value: "-name", label: "Name Z–A" },
 ];
-
-const inputClass =
-  "border border-line bg-surface px-3 py-2 text-sm placeholder:text-ink-muted/70 focus:outline-none";
 
 /**
  * Client filter bar writing to the URL (shareable, noindex when narrowed).
