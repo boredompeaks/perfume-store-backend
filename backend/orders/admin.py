@@ -9,6 +9,9 @@ from common.admin import RoleAwareModelAdmin
 # [R-10.1] The order machine lives in orders.state (single source); this
 # module only consumes it.
 from .models import Coupon, Order, OrderItem, OrderStatusEvent
+# [R-10.16] SPEC-10-05: the per-transition side-effect contract (one
+# dispatch point, shared with the JSON seam).
+from .events import notify_transition
 # [R-10.1] SPEC-10-01b: the fulfilment-dimension mapping for the writers.
 # [R-10.12] SPEC-10-02: the trigger vocabulary for the audit writers.
 from .state import (
@@ -241,6 +244,9 @@ class OrderAdmin(RoleAwareModelAdmin):
                     actor=request.user,
                     trigger=TRIGGER_ADMIN_CHANGE_FORM,
                 )
+                # [R-10.16] SPEC-10-05: the side-effect hook rides the
+                # same atomic block, after the transition + its audit row.
+                notify_transition(obj, old, obj.status)
 
     # ——— bulk actions (respect the same guards) ———
 
@@ -293,6 +299,7 @@ class OrderAdmin(RoleAwareModelAdmin):
                         actor=request.user,
                         trigger=TRIGGER_ADMIN_BULK_ACTION,
                     )
+                    previous_status = order.status
                     order.status = new_status
                     order.fulfilment_status = fulfilment_for_status(new_status)
                     # updated_at rides update_fields explicitly: on this
@@ -303,6 +310,10 @@ class OrderAdmin(RoleAwareModelAdmin):
                     order.save(
                         update_fields=["status", "fulfilment_status", "updated_at"]
                     )
+                    # [R-10.16] SPEC-10-05: the side-effect hook rides the
+                    # same atomic block, after the transition + its audit
+                    # row; skips never reach it.
+                    notify_transition(order, previous_status, new_status)
                     count += 1
         skipped = queryset.count() - count
         if count:
@@ -374,6 +385,7 @@ class OrderAdmin(RoleAwareModelAdmin):
                         actor=request.user,
                         trigger=TRIGGER_ADMIN_BULK_ACTION,
                     )
+                    previous_status = order.status
                     order.status = "cancelled"
                     # [R-8.16] The stamp rides the same save as the status
                     # transition. A pending order's cancelled_at is
@@ -395,6 +407,10 @@ class OrderAdmin(RoleAwareModelAdmin):
                             "updated_at",
                         ]
                     )
+                    # [R-10.16] SPEC-10-05: the side-effect hook rides the
+                    # same atomic block, after the transition + its audit
+                    # row; skipped rows never reach it.
+                    notify_transition(order, previous_status, "cancelled")
                     count += 1
         skipped = queryset.count() - count
         if count:

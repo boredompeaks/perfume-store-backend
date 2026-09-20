@@ -24,6 +24,7 @@ from common.roles import ROLE_FINANCE, ROLE_SUPPORT
 from common.testing import TEST_RAZORPAY_KEY_ID, ApiTestCase
 from config.settings import _env_currency
 from orders.admin import OrderAdmin
+from orders import events as order_events
 from orders.models import Coupon, Order, OrderItem, OrderStatusEvent
 from orders.serializers import OrderItemSerializer, OrderSerializer
 from orders import state as order_state
@@ -3118,3 +3119,205 @@ class ShippedPreconditionTests(OrderTestBase):
             any("no shipment exists" in m for m in admin_warnings),
             admin_warnings,
         )
+
+
+# ==================================
+# [R-10.16] SPEC-10-05: per-transition side-effect contract
+# ==================================
+
+@tag("orders")
+class TransitionNotificationTests(OrderTestBase):
+    """[R-10.16] SPEC-10-05: the shipped/delivered/cancelled transitions
+    each fire ONE call into the shared notifications seam — the same
+    ``notifications.dispatch`` verify_payment already uses for order.paid —
+    with the transitioned order as payload. A notification failure can
+    never fail or roll back its transition (log-only, rollback isolation
+    pinned), and non-hooked transitions fire nothing."""
+
+    def _paid_itemful_confirmed(self):
+        """A confirmed row as verify_payment leaves it: captured payment
+        and the checkout lines — eligible for the shipped edge."""
+        order = self.create_order()  # checkout rows always carry items
+        Order.objects.filter(pk=order.pk).update(
+            status="confirmed", payment_status="captured"
+        )
+        order.refresh_from_db()
+        return order
+
+    def _admin_login(self):
+        if not User.objects.filter(username="notifyboss").exists():
+            User.objects.create_superuser(
+                "notifyboss", "notifyboss@example.com", "S3cure-Passphrase!"
+            )
+        self.assertTrue(
+            self.client.login(username="notifyboss", password="S3cure-Passphrase!")
+        )
+
+    def _run_admin_action(self, action, orders):
+        self._admin_login()
+        return self.client.post(
+            "/admin/orders/order/",
+            {
+                "action": action,
+                "_selected_action": [str(order.id) for order in orders],
+                "select_across": "0",
+            },
+            follow=True,
+        )
+
+    def _change_form_post(self, order, status_value):
+        return self.client.post(
+            f"/admin/orders/order/{order.id}/change/",
+            {
+                "user": order.user_id,
+                "full_name": order.full_name,
+                "phone": order.phone,
+                "address": order.address,
+                "city": order.city,
+                "state": order.state,
+                "pincode": order.pincode,
+                "status": status_value,
+                "_save": "Save",
+                "items-TOTAL_FORMS": "0",
+                "items-INITIAL_FORMS": "0",
+                "items-MIN_NUM_FORMS": "0",
+                "items-MAX_NUM_FORMS": "1000",
+            },
+            follow=True,
+        )
+
+    def _staff_client(self, username):
+        from django.contrib.auth.models import Group
+
+        user = User.objects.create_user(
+            username, f"{username}@example.com", "S3cure-Passphrase!"
+        )
+        user.groups.add(Group.objects.get_or_create(name=ROLE_SUPPORT)[0])
+        client = self.fresh_client()
+        client.force_authenticate(user)
+        return client
+
+    # ——— every hooked transition fires with the right payload ———
+
+    def test_bulk_writers_fire_shipped_then_delivered_hooks(self):
+        order = self._paid_itemful_confirmed()
+
+        with mock.patch("orders.events.notifications.dispatch") as dispatch_mock:
+            res = self._run_admin_action("mark_shipped", [order])
+            self.assertEqual(res.status_code, 200)
+            dispatch_mock.assert_called_once_with(
+                "order.shipped", {"order": order}
+            )
+            dispatch_mock.reset_mock()
+            res = self._run_admin_action("mark_delivered", [order])
+            self.assertEqual(res.status_code, 200)
+            dispatch_mock.assert_called_once_with(
+                "order.delivered", {"order": order}
+            )
+        order.refresh_from_db()
+        self.assertEqual(order.status, "delivered")
+
+    def test_change_form_ship_fires_the_shipped_hook(self):
+        order = self._paid_itemful_confirmed()
+        self._admin_login()
+
+        with mock.patch("orders.events.notifications.dispatch") as dispatch_mock:
+            res = self._change_form_post(order, "shipped")
+            self.assertEqual(res.status_code, 200)
+            dispatch_mock.assert_called_once_with(
+                "order.shipped", {"order": order}
+            )
+        order.refresh_from_db()
+        self.assertEqual(order.status, "shipped")
+
+    def test_seam_fulfil_fires_the_shipped_hook(self):
+        order = self._paid_itemful_confirmed()
+        support = self._staff_client("notifyfulfil")
+
+        with mock.patch("orders.events.notifications.dispatch") as dispatch_mock:
+            res = support.post(f"/api/admin/orders/{order.id}/fulfill/")
+            self.assertEqual(res.status_code, 200, res.data)
+            dispatch_mock.assert_called_once_with(
+                "order.shipped", {"order": order}
+            )
+        order.refresh_from_db()
+        self.assertEqual(order.status, "shipped")
+
+    def test_both_cancel_writers_fire_the_cancelled_hook(self):
+        # both rows are created on the buyer's session BEFORE the admin
+        # action replaces that session with the admin login; the cart is
+        # reseeded because an identical resubmission would replay the
+        # first order (the checkout dedup guard, SPEC-21-1)
+        bulk_order = self.create_order()  # pending, unpaid
+        self.seed_session_cart([(self.product, 1)])
+        seam_order = self.create_order()
+        support = self._staff_client("notifycancel")
+
+        with mock.patch("orders.events.notifications.dispatch") as dispatch_mock:
+            res = self._run_admin_action("cancel_pending", [bulk_order])
+            self.assertEqual(res.status_code, 200)
+            dispatch_mock.assert_called_once_with(
+                "order.cancelled", {"order": bulk_order}
+            )
+        bulk_order.refresh_from_db()
+        self.assertEqual(bulk_order.status, "cancelled")
+
+        with mock.patch("orders.events.notifications.dispatch") as dispatch_mock:
+            res = support.post(f"/api/admin/orders/{seam_order.id}/cancel/")
+            self.assertEqual(res.status_code, 200, res.data)
+            dispatch_mock.assert_called_once_with(
+                "order.cancelled", {"order": seam_order}
+            )
+        seam_order.refresh_from_db()
+        self.assertEqual(seam_order.status, "cancelled")
+
+    # ——— rollback isolation: a hook failure can never fail the transition ———
+
+    def test_hook_exception_leaves_the_transition_and_event_committed(self):
+        """The notify site sits inside the writer's transaction but is
+        failure-swallowing: a dispatch that raises fails NEITHER the
+        request, nor the transition, nor its audit row."""
+        order = self._paid_itemful_confirmed()
+
+        with mock.patch(
+            "orders.events.notifications.dispatch",
+            side_effect=RuntimeError("smtp down"),
+        ):
+            res = self._run_admin_action("mark_shipped", [order])
+        self.assertEqual(res.status_code, 200)
+        order.refresh_from_db()
+        self.assertEqual(order.status, "shipped")
+        self.assertEqual(order.fulfilment_status, "fulfilled")
+        event = order.status_events.exclude(
+            trigger=order_state.TRIGGER_ORDER_CREATE
+        ).get()
+        self.assertEqual(event.from_status, "confirmed")
+        self.assertEqual(event.to_status, "shipped")
+
+    # ——— non-hooked transitions fire nothing ———
+
+    def test_non_hooked_transitions_fire_nothing(self):
+        confirmed = self.create_order()  # pending
+
+        with mock.patch("orders.events.notifications.dispatch") as dispatch_mock:
+            res = self._run_admin_action("mark_confirmed", [confirmed])
+            self.assertEqual(res.status_code, 200)
+            confirmed.refresh_from_db()
+            self.assertEqual(confirmed.status, "confirmed")
+            dispatch_mock.assert_not_called()
+
+    def test_hook_map_pins_the_contract(self):
+        """The hook set is exactly the three lifecycle transitions the
+        side-effect contract covers — a fourth transition must be added
+        here deliberately, not by drift."""
+        self.assertEqual(
+            order_events.TRANSITION_EVENTS,
+            {
+                "shipped": "order.shipped",
+                "delivered": "order.delivered",
+                "cancelled": "order.cancelled",
+            },
+        )
+        # confirmed is deliberately unhooked: verify_payment's own
+        # order.paid dispatch (R-19.0) owns the payment notification
+        self.assertNotIn("confirmed", order_events.TRANSITION_EVENTS)

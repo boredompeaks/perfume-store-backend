@@ -22,6 +22,9 @@ from .state import (
     precondition_failures,
     transition_allowed,
 )
+# [R-10.16] SPEC-10-05: the per-transition side-effect contract (one
+# dispatch point, shared with the admin writers).
+from .events import notify_transition
 # [R-10.1] SPEC-10-01b: dimension mappings for the writers. Kept as its own
 # line so every hunk in this file stays insertion-only.
 from .state import fulfilment_for_status, payment_for_status
@@ -1381,6 +1384,10 @@ def admin_order_fulfill(request, order_id):
             actor=request.user,
             trigger=TRIGGER_ADMIN_API_FULFIL,
         )
+        # [R-10.16] SPEC-10-05: the side-effect hook rides the same
+        # atomic block, after the transition + its audit row
+        # (insertion-only hunk).
+        notify_transition(order, previous_status, target)
         # [6.12.6] API-side staff write: land the privileged-action record
         # the admin surface would have written (audit-log route reads it).
         log_api_action(
@@ -1454,6 +1461,10 @@ def admin_order_cancel(request, order_id):
             actor=request.user,
             trigger=TRIGGER_ADMIN_API_CANCEL,
         )
+        # [R-10.16] SPEC-10-05: the side-effect hook rides the same
+        # atomic block; the idempotent replay above returns before this
+        # site, so a re-cancel never notifies twice (insertion-only hunk).
+        notify_transition(order, previous_status, "cancelled")
         log_api_action(request, order, CHANGE, "Cancelled via API.")
 
     return Response({
