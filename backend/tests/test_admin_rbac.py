@@ -26,7 +26,7 @@ from cart.models import Cart
 from ops.admin import SiteSettingsAdmin
 from ops.models import SiteSettings
 from orders.admin import CouponAdmin, OrderAdmin
-from orders.models import Coupon, Order
+from orders.models import Coupon, Order, OrderItem
 from products.admin import ProductAdmin
 from products.models import products
 
@@ -276,6 +276,17 @@ class RoleAwareAdminSurfaceTests(ApiTestCase):
         self.buyer = self.make_user("buyer")
         self.pending = make_order(self.buyer, status="pending")
         self.confirmed = make_order(self.buyer, status="confirmed", total="250.00")
+        # SPEC-10-03 fixture: the shipped edge requires items + a captured
+        # payment; this row plays the paid, fulfilable order in the tests
+        # below that mark it shipped.
+        OrderItem.objects.create(
+            order=self.confirmed,
+            product_name="Fixture perfume",
+            price=self.confirmed.total_amount,
+            quantity=1,
+            subtotal=self.confirmed.total_amount,
+        )
+        Order.objects.filter(pk=self.confirmed.pk).update(payment_status="captured")
 
     def test_view_only_role_browses_but_cannot_change(self):
         self.client.force_login(make_role_user("support", "surf-support"))

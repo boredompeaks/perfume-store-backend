@@ -81,6 +81,11 @@ class OrderSerializer(serializers.ModelSerializer):
             # Read-only like status itself: dimensions are machine-maintained.
             'payment_status',
             'fulfilment_status',
+            # [R-10.2] SPEC-10-04: how the order intends to pay rides every
+            # order read beside the dimensions. Read-only: the marker is
+            # machine-maintained (checkout's COD input is a checkout-
+            # section row; nothing client-writable today).
+            'payment_method',
 
             'coupon',
             'discount_amount',
@@ -111,6 +116,7 @@ class OrderSerializer(serializers.ModelSerializer):
             'status',
             'payment_status',
             'fulfilment_status',
+            'payment_method',
             'coupon',
             'discount_amount',
             'total_amount',

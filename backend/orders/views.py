@@ -16,7 +16,15 @@ from rest_framework import status
 # lives in orders.state — the single source; views only consume it.
 from .models import Order, OrderItem, Coupon
 from .serializers import OrderSerializer
-from .state import ADMIN_FULFILMENT_NEXT, ALLOWED_TRANSITIONS, transition_allowed
+from .state import (
+    ADMIN_FULFILMENT_NEXT,
+    ALLOWED_TRANSITIONS,
+    precondition_failures,
+    transition_allowed,
+)
+# [R-10.16] SPEC-10-05: the per-transition side-effect contract (one
+# dispatch point, shared with the admin writers).
+from .events import notify_transition
 # [R-10.1] SPEC-10-01b: dimension mappings for the writers. Kept as its own
 # line so every hunk in this file stays insertion-only.
 from .state import fulfilment_for_status, payment_for_status
@@ -29,6 +37,11 @@ from .state import (
     TRIGGER_ORDER_CREATE,
     TRIGGER_PAYMENT_VERIFY,
 )
+# [R-10.4] SPEC-10-04: the failed-verify audit trigger + the
+# payment-dimension transition gate. Own import lines so every hunk in
+# this file stays insertion-only.
+from .state import TRIGGER_PAYMENT_FAILED
+from .state import payment_transition_allowed
 
 from cart.models import Cart
 from common import notifications
@@ -985,6 +998,47 @@ def verify_payment(request):
             razorpay_payment_id,
         )
 
+        # [R-10.4] SPEC-10-04: the failure path marks the payment dimension
+        # failed (spec 10.2) while the ORDER stays pending — retryable by
+        # design: neither status nor razorpay_payment_id moves, so the
+        # already-processed gate passes and a later successful verify
+        # captures normally (failed -> captured, the machine's retry edge).
+        # Scoped to the caller's own order whose stored gateway ref equals
+        # the claimed one, with no prior capture claim: a forged or
+        # mismatched reference can never write payment state, and the
+        # response below stays byte-identical either way (no existence
+        # leak). The write and its audit row share one transaction (the
+        # 10-02 rollback-together contract).
+        with transaction.atomic():
+            failed_order = (
+                Order.objects.select_for_update()
+                .filter(
+                    razorpay_order_id=razorpay_order_id,
+                    user=request.user,
+                )
+                .first()
+            )
+            if (
+                failed_order
+                and failed_order.status == "pending"
+                and not failed_order.razorpay_payment_id
+                and payment_transition_allowed(failed_order.payment_status, "failed")
+            ):
+                failed_order.payment_status = "failed"
+                failed_order.save(update_fields=["payment_status"])
+                # [R-10.12]/[R-10.17] The audit row rides the same
+                # transaction. The order status did not move on a failed
+                # attempt, so the row records from == to ('pending') and
+                # the trigger names the failure; actor NULL — the customer
+                # flow has no admin actor.
+                OrderStatusEvent.objects.create(
+                    order=failed_order,
+                    from_status=failed_order.status,
+                    to_status=failed_order.status,
+                    actor=None,
+                    trigger=TRIGGER_PAYMENT_FAILED,
+                )
+
         return Response(
             {"error": "Payment verification failed"},
             status=status.HTTP_400_BAD_REQUEST
@@ -1339,6 +1393,23 @@ def admin_order_fulfill(request, order_id):
                 status=status.HTTP_409_CONFLICT
             )
 
+        # [R-10.19]/[R-10.14] SPEC-10-03: the fulfil seam advances
+        # confirmed→shipped too, so the shipped preconditions (payment
+        # captured + items present) gate it here with the same authority
+        # as the admin surface (insertion-only hunk; the 9-07 write below
+        # stays byte-identical). The envelope middleware wraps this body,
+        # so callers read the reasons at details.preconditions.
+        precondition_reasons = precondition_failures(order, target)
+        if precondition_reasons:
+            return Response(
+                {
+                    "error": f"Order cannot be fulfilled from status "
+                             f"'{order.status}'",
+                    "preconditions": precondition_reasons,
+                },
+                status=status.HTTP_409_CONFLICT
+            )
+
         # [R-10.12] SPEC-10-02: capture the pre-transition status for the
         # audit row written below (insertion-only hunk).
         previous_status = order.status
@@ -1359,6 +1430,10 @@ def admin_order_fulfill(request, order_id):
             actor=request.user,
             trigger=TRIGGER_ADMIN_API_FULFIL,
         )
+        # [R-10.16] SPEC-10-05: the side-effect hook rides the same
+        # atomic block, after the transition + its audit row
+        # (insertion-only hunk).
+        notify_transition(order, previous_status, target)
         # [6.12.6] API-side staff write: land the privileged-action record
         # the admin surface would have written (audit-log route reads it).
         log_api_action(
@@ -1432,6 +1507,10 @@ def admin_order_cancel(request, order_id):
             actor=request.user,
             trigger=TRIGGER_ADMIN_API_CANCEL,
         )
+        # [R-10.16] SPEC-10-05: the side-effect hook rides the same
+        # atomic block; the idempotent replay above returns before this
+        # site, so a re-cancel never notifies twice (insertion-only hunk).
+        notify_transition(order, previous_status, "cancelled")
         log_api_action(request, order, CHANGE, "Cancelled via API.")
 
     return Response({

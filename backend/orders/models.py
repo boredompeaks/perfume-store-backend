@@ -10,9 +10,13 @@ from products.models import products
 # Order class body by its address ``state`` field.
 from .state import (
     FULFILMENT_STATUS_CHOICES,
+    PAYMENT_METHOD_CHOICES,
+    PAYMENT_METHOD_COD,
+    PAYMENT_METHOD_PREPAID,
     PAYMENT_STATUS_CHOICES,
     STATUS_CHOICES,
     STATUS_EVENT_TRIGGERS,
+    register_transition_preconditions,
 )
 
 
@@ -171,6 +175,21 @@ class Order(models.Model):
         choices=FULFILMENT_STATUS_CHOICES,
         default='unfulfilled',
         help_text="Fulfilment dimension of the lifecycle (spec 10.2).",
+    )
+
+    # [R-10.2] SPEC-10-04: how the order intends to pay — prepaid (the
+    # store's current and default behavior: gateway capture before
+    # fulfilment) or cash on delivery (captured at/after delivery). The
+    # machine reads it to pick the shipped-precondition variant below.
+    # null=False with a literal default: every row always answers the
+    # question, and the 0014 backfill stamps pre-existing rows 'prepaid' —
+    # exactly the behavior those rows lived under. No checkout input
+    # exists yet: accepting COD at checkout is a checkout-section row.
+    payment_method = models.CharField(
+        max_length=20,
+        choices=PAYMENT_METHOD_CHOICES,
+        default=PAYMENT_METHOD_PREPAID,
+        help_text="How the order intends to pay (spec 10.1 COD mandate).",
     )
 
     coupon = models.ForeignKey(
@@ -347,6 +366,44 @@ class OrderItem(models.Model):
 
     def __str__(self):
         return f"{self.product_name} x {self.quantity}"
+
+
+# ——— [R-10.19]/[R-10.14] SPEC-10-03: built-in shipped preconditions ——————
+# The machine (orders.state) stays dependency-free, so the ORM-backed
+# precondition callables live here beside the model they inspect and
+# register into the state's extension hook at import. Every callable
+# returns a list of human-readable failure reasons (empty = met); the
+# writers evaluate them through state.precondition_failures only.
+
+def _require_captured_payment(order):
+    """Ship only after the money is real: a shipped order whose payment
+    later fails is un-reconcilable (no refund flow yet, V-03), and the
+    payment dimension (spec 10.2) is exactly where that truth lives.
+
+    [R-10.2] SPEC-10-04 COD variant: a cash-on-delivery order is paid at/
+    after delivery, so demanding a capture before shipping would make COD
+    orders unfulfillable — the precondition waives for COD (items-only via
+    _require_items_to_ship) and the capture point is the delivery surface
+    (spec 10.1 mandates handling COD orders but prescribes no capture
+    timing; the reading is documented in changes.md)."""
+    if order.payment_method == PAYMENT_METHOD_COD:
+        return []
+    if order.payment_status != "captured":
+        return [f"payment must be captured (is '{order.payment_status}')"]
+    return []
+
+
+def _require_items_to_ship(order):
+    """Spec 10.3's mark-shipped example: the order must have
+    fulfilment-ready items — no lines, nothing to ship."""
+    if not order.items.exists():
+        return ["order has no items to ship"]
+    return []
+
+
+register_transition_preconditions(
+    "shipped", _require_captured_payment, _require_items_to_ship
+)
 
 
 class OrderStatusEvent(models.Model):
