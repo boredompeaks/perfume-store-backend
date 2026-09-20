@@ -369,6 +369,16 @@ def create_order(request):
 
     coupon_code = request.data.get('coupon_code')
 
+    # [R-9.3.5/R-9.3.6] The coupon applied to the cart persists as cart
+    # state: when the checkout payload posts no explicit code, the
+    # persisted one becomes the coupon source. The pre-existing validation
+    # below still re-runs every rule at checkout time (state may have
+    # changed since apply), so an invalidated coupon is rejected here
+    # rather than silently riding the FK into the order; a deleted coupon
+    # is already gone (SET_NULL) and simply applies nothing.
+    if not coupon_code and cart.coupon_id:
+        coupon_code = cart.coupon.code
+
     if coupon_code:
 
         try:
@@ -654,6 +664,55 @@ def _uniform_coupon_rejection():
     )
 
 
+def validate_redeemable_coupon(code, cart):
+    """Shared gate for the coupon surfaces that answer against a session
+    cart: the public preview and the cart-state apply (R-9.3.5). Resolves
+    `code` case-insensitively and enforces the full redeemable rule set --
+    active, within the validity window, under the usage limit, and not
+    below the minimum order amount -- rejecting with the ONE uniform body
+    so validation state never leaks (V-11). Extracted from apply_coupon so
+    the cart endpoints delegate to the same rules instead of copying them
+    (SPEC-9-05).
+
+    Returns (coupon, subtotal, None) when redeemable -- subtotal is handed
+    back because the preview needs the exact figure the minimum check used
+    for its discount math -- or (None, None, rejection) otherwise."""
+    try:
+        coupon = Coupon.objects.get(
+            code__iexact=code
+        )
+
+    except Coupon.DoesNotExist:
+        return None, None, _uniform_coupon_rejection()
+
+    now = timezone.now()
+
+    if (
+        not coupon.active
+        or now < coupon.valid_from
+        or now > coupon.valid_until
+        or (
+            coupon.usage_limit is not None
+            and coupon.used_count >= coupon.usage_limit
+        )
+    ):
+        return None, None, _uniform_coupon_rejection()
+
+    # Calculate cart subtotal
+    subtotal = Decimal('0.00')
+
+    for item in cart.items.select_related('product'):
+        subtotal += (
+            item.product.price * item.quantity
+        )
+
+    # Check minimum order amount
+    if subtotal < coupon.minimum_order_amount:
+        return None, None, _uniform_coupon_rejection()
+
+    return coupon, subtotal, None
+
+
 @api_view(['POST'])
 @throttle_scope('coupon')
 def apply_coupon(request):
@@ -691,45 +750,10 @@ def apply_coupon(request):
 
     # From here on every rejection shares one uniform response: unknown,
     # inactive, not-yet-valid, expired, usage limit, and below minimum.
-    try:
-        coupon = Coupon.objects.get(
-            code__iexact=code
-        )
+    coupon, subtotal, rejection = validate_redeemable_coupon(code, cart)
 
-    except Coupon.DoesNotExist:
-        return _uniform_coupon_rejection()
-
-    # Check active
-    if not coupon.active:
-        return _uniform_coupon_rejection()
-
-    # Check dates
-    now = timezone.now()
-
-    if now < coupon.valid_from:
-        return _uniform_coupon_rejection()
-
-    if now > coupon.valid_until:
-        return _uniform_coupon_rejection()
-
-    # Check usage limit
-    if (
-        coupon.usage_limit is not None
-        and coupon.used_count >= coupon.usage_limit
-    ):
-        return _uniform_coupon_rejection()
-
-    # Calculate cart subtotal
-    subtotal = Decimal('0.00')
-
-    for item in cart.items.all():
-        subtotal += (
-            item.product.price * item.quantity
-        )
-
-    # Check minimum order amount
-    if subtotal < coupon.minimum_order_amount:
-        return _uniform_coupon_rejection()
+    if rejection is not None:
+        return rejection
 
     # Calculate discount
     if coupon.discount_type == 'percentage':

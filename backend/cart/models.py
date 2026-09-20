@@ -9,6 +9,20 @@ class Cart(models.Model):
         unique=True
     )
 
+    # R-9.3.5/R-9.3.6: the applied coupon is persistent cart state, not a
+    # per-request payload -- it survives across requests so checkout can
+    # pick it up when the payload posts no explicit code (and re-validate
+    # it through its pre-existing coupon path). SET_NULL: deleting a coupon
+    # drops it from carts instead of stranding them on a dangling FK; the
+    # invalidated-coupon case is handled by checkout re-validation.
+    coupon = models.ForeignKey(
+        'orders.Coupon',
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='+'
+    )
+
     created_at = models.DateTimeField(
         auto_now_add=True
     )

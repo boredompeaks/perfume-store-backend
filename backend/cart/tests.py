@@ -1,15 +1,20 @@
 """Cart unit tests - docs/test-gaps.md items 23-29."""
 import unittest
+from datetime import timedelta
+from decimal import Decimal
 from unittest import mock
 
 from django.core.cache import cache
 from django.test import tag
+from django.urls import resolve
+from django.utils import timezone
 from rest_framework.settings import api_settings
 from rest_framework.throttling import ScopedRateThrottle
 
 from cart.models import Cart, CartItem
-from cart.views import CartMutationRateThrottle, cart_detail, cart_item_detail
+from cart.views import CartMutationRateThrottle, cart_coupon, cart_detail, cart_item_detail
 from common.testing import ApiTestCase
+from orders.models import Order
 
 
 @tag("cart")
@@ -277,3 +282,254 @@ class CartThrottleTests(ApiTestCase):
             self.assertEqual(self._add(product.id).status_code, 429)  # budget spent
             # GET stays available even with the mutation bucket exhausted
             self.assertEqual(self.client.get("/api/cart/").status_code, 200)
+
+
+@tag("cart")
+class CartCouponStateTests(ApiTestCase):
+    """R-9.3.5/R-9.3.6: POST/DELETE /api/cart/coupon/ manage the coupon as
+    persistent cart state (a nullable FK on Cart), so the applied coupon
+    survives across requests and is re-validated by checkout's pre-existing
+    coupon path when the payload posts no explicit code."""
+
+    def setUp(self):
+        self.buyer = self.make_user("buyer")
+        self.api_login("buyer")
+        self.product = self.make_product(price="500.00", stock=10)
+        self.seed_session_cart([(self.product, 2)])  # subtotal 1000.00
+
+    def _apply(self, payload, client=None):
+        return (client or self.client).post("/api/cart/coupon/", payload, format="json")
+
+    def _remove(self, client=None):
+        return (client or self.client).delete("/api/cart/coupon/")
+
+    def _cart(self):
+        return Cart.objects.get()
+
+    # -- apply: persistence + serializer exposure ---------------------------
+    def test_apply_persists_coupon_on_cart_and_surfaces_code(self):
+        coupon = self.make_coupon(code="SAVE10", discount_value="10")
+
+        res = self._apply({"code": "SAVE10"})
+
+        self.assertEqual(res.status_code, 200, res.data)
+        self.assertEqual(self._cart().coupon_id, coupon.id)
+        # The applied code rides every cart representation so the frontend
+        # can render it without a second lookup (R-9.3.5).
+        self.assertEqual(res.data["coupon_code"], "SAVE10")
+        self.assertEqual(self.client.get("/api/cart/").data["coupon_code"], "SAVE10")
+
+    def test_apply_matches_code_case_insensitively(self):
+        coupon = self.make_coupon(code="SAVE10", discount_value="10")
+
+        res = self._apply({"code": "save10"})
+
+        self.assertEqual(res.status_code, 200, res.data)
+        self.assertEqual(self._cart().coupon_id, coupon.id)
+        self.assertEqual(res.data["coupon_code"], "SAVE10")  # canonical form
+
+    def test_apply_replaces_previous_coupon(self):
+        first = self.make_coupon(code="SAVE10", discount_value="10")
+        second = self.make_coupon(code="FIVEPC", discount_value="5")
+
+        self._apply({"code": first.code})
+        res = self._apply({"code": second.code})
+
+        self.assertEqual(res.status_code, 200, res.data)
+        self.assertEqual(self._cart().coupon_id, second.id)
+
+    # -- apply: rejections (delegated to the shared preview gate, V-11) -----
+    def test_apply_rejections_share_the_uniform_envelope(self):
+        cases = [
+            ("unknown", "SAVE404"),
+            ("inactive", self.make_coupon(code="DEAD", active=False).code),
+            (
+                "expired",
+                self.make_coupon(
+                    code="OLD", valid_until=timezone.now() - timedelta(minutes=1)
+                ).code,
+            ),
+            (
+                "not-yet-valid",
+                self.make_coupon(
+                    code="FUTURE", valid_from=timezone.now() + timedelta(days=1)
+                ).code,
+            ),
+            (
+                "usage-limit",
+                self.make_coupon(code="MAXED", usage_limit=5, used_count=5).code,
+            ),
+            (
+                "min-order",
+                self.make_coupon(code="BIGSPEND", minimum_order_amount="5000").code,
+            ),
+        ]
+        for name, code in cases:
+            with self.subTest(case=name):
+                res = self._apply({"code": code})
+                self.assertEqual(res.status_code, 400, res.data)
+                # One body for every failure reason (SPEC-9-03 envelope on
+                # the preview's uniform rejection): no reason leaks.
+                self.assertEqual(
+                    res.data,
+                    {
+                        "error": "Invalid coupon code",
+                        "code": "validation_error",
+                        "details": {},
+                    },
+                )
+        self.assertIsNone(self._cart().coupon_id)  # nothing persisted on rejection
+
+    def test_apply_without_code_is_rejected(self):
+        res = self._apply({})
+
+        self.assertEqual(res.status_code, 400, res.data)
+        self.assertEqual(res.data["error"], "Coupon code is required")
+        self.assertEqual(res.data["code"], "validation_error")
+        self.assertIsNone(self._cart().coupon_id)
+
+    def test_apply_without_cart_404s_uniformly(self):
+        """No existence leak: with no cart, a known-valid and an unknown code
+        get the identical 404 (orders.apply_coupon precedent)."""
+        self.make_coupon(code="SAVE10", discount_value="10")
+        fresh = self.fresh_client()
+
+        known = self._apply({"code": "SAVE10"}, client=fresh)
+        unknown = self._apply({"code": "SAVE404"}, client=fresh)
+
+        self.assertEqual(known.status_code, 404, known.data)
+        self.assertEqual(known.data, unknown.data)
+        self.assertEqual(
+            known.data, {"error": "Cart not found", "code": "not_found", "details": {}}
+        )
+
+    # -- remove: idempotent --------------------------------------------------
+    def test_remove_clears_the_persisted_coupon(self):
+        self.make_coupon(code="SAVE10", discount_value="10")
+        self._apply({"code": "SAVE10"})
+
+        res = self._remove()
+
+        self.assertEqual(res.status_code, 200, res.data)
+        self.assertIsNone(self._cart().coupon_id)
+        self.assertIsNone(res.data["coupon_code"])
+
+    def test_remove_without_coupon_applied_is_idempotent(self):
+        """Removing when nothing is applied still succeeds: the caller's end
+        state (no coupon) already holds, so no error and no 404 — the
+        response is the cart-family 200 with the cart body."""
+        res = self._remove()
+
+        self.assertEqual(res.status_code, 200, res.data)
+        self.assertIsNone(res.data["coupon_code"])
+        self.assertIsNone(self._cart().coupon_id)
+
+    def test_remove_without_cart_404s(self):
+        res = self.fresh_client().delete("/api/cart/coupon/")
+
+        self.assertEqual(res.status_code, 404, res.data)
+        self.assertEqual(res.data["error"], "Cart not found")
+
+    def test_apply_with_session_but_no_cart_row_404s(self):
+        """A session without a cart row is the same 404 as no session at
+        all: apply never lazily creates a cart to attach a coupon to."""
+        self.make_coupon(code="SAVE10", discount_value="10")
+        Cart.objects.all().delete()
+
+        res = self._apply({"code": "SAVE10"})
+
+        self.assertEqual(res.status_code, 404, res.data)
+        self.assertEqual(res.data["error"], "Cart not found")
+
+    # -- isolation: session-scoped authority (the cart family's permission
+    #    dimension — no token can reach another session's cart state) -------
+    def test_another_session_cannot_read_or_clear_my_coupon(self):
+        coupon = self.make_coupon(code="SAVE10", discount_value="10")
+        self._apply({"code": "SAVE10"})
+        attacker = self.fresh_client()
+
+        res = attacker.delete("/api/cart/coupon/")
+
+        self.assertEqual(res.status_code, 404, res.data)
+        self.assertEqual(self._cart().coupon_id, coupon.id)  # untouched
+        self.assertIsNone(attacker.get("/api/cart/").data["coupon_code"])
+
+    # -- throttle: conventions require a scope on public mutating endpoints --
+    def test_coupon_endpoints_share_the_cart_mutation_scope(self):
+        self.assertEqual(cart_coupon.view_class.throttle_scope, "cart")
+        self.assertIn(ScopedRateThrottle, cart_coupon.view_class.throttle_classes)
+        self.assertIn("cart", api_settings.DEFAULT_THROTTLE_RATES)
+
+    def test_apply_and_remove_share_one_mutation_budget(self):
+        rates = dict(api_settings.DEFAULT_THROTTLE_RATES)
+        rates["cart"] = "1/min"
+        self.make_coupon(code="SAVE10", discount_value="10")
+
+        with mock.patch.object(ScopedRateThrottle, "THROTTLE_RATES", rates):
+            cache.clear()
+            self.assertEqual(self._apply({"code": "SAVE10"}).status_code, 200)
+            throttled = self._remove()
+
+        self.assertEqual(throttled.status_code, 429, throttled.data)
+        # the throttled remove never landed
+        self.assertIsNotNone(self._cart().coupon_id)
+
+    # -- dual mount (SPEC-9-02): one urlconf serves both route families ------
+    def test_legacy_and_v1_mounts_resolve_the_same_view(self):
+        legacy = resolve("/api/cart/coupon/")
+        versioned = resolve("/api/v1/store/cart/coupon/")
+
+        self.assertEqual(legacy.func, versioned.func)
+
+    # -- checkout re-validation composition -----------------------------------
+    def test_checkout_uses_the_persisted_coupon_when_no_code_is_posted(self):
+        self.make_coupon(code="SAVE10", discount_value="10")
+        self._apply({"code": "SAVE10"})
+
+        res = self.checkout()
+
+        self.assertEqual(res.status_code, 201, res.data)
+        order = Order.objects.get(id=res.data["id"])
+        self.assertEqual(order.coupon.code, "SAVE10")
+        self.assertEqual(order.discount_amount, Decimal("100.00"))
+        self.assertEqual(order.total_amount, Decimal("900.00"))
+
+    def test_checkout_revalidates_a_coupon_invalidated_after_apply(self):
+        """The persisted reference never bypasses the rules: state changed
+        since apply, so checkout rejects through its pre-existing coupon
+        path instead of silently riding the FK into the order."""
+        coupon = self.make_coupon(code="SAVE10", discount_value="10")
+        self._apply({"code": "SAVE10"})
+        coupon.active = False
+        coupon.save()
+
+        res = self.checkout()
+
+        self.assertEqual(res.status_code, 400, res.data)
+        self.assertEqual(res.data["error"], "This coupon is inactive")
+        self.assertFalse(Order.objects.exists())
+
+    def test_explicit_checkout_code_wins_over_the_persisted_coupon(self):
+        self.make_coupon(code="SAVE10", discount_value="10")
+        other = self.make_coupon(code="FIVEPC", discount_value="5")
+        self._apply({"code": "SAVE10"})
+
+        res = self.checkout(coupon_code=other.code)
+
+        self.assertEqual(res.status_code, 201, res.data)
+        self.assertEqual(Order.objects.get(id=res.data["id"]).coupon.code, "FIVEPC")
+
+    def test_deleted_coupon_degrades_gracefully_at_checkout(self):
+        """SET_NULL: deleting the coupon row drops it from the cart instead
+        of stranding checkout with a dangling reference."""
+        coupon = self.make_coupon(code="SAVE10", discount_value="10")
+        self._apply({"code": "SAVE10"})
+
+        coupon.delete()
+
+        self.assertIsNone(self._cart().coupon_id)
+        res = self.checkout()
+        self.assertEqual(res.status_code, 201, res.data)
+        order = Order.objects.get(id=res.data["id"])
+        self.assertIsNone(order.coupon)
+        self.assertEqual(order.total_amount, Decimal("1000.00"))

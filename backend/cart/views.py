@@ -1,3 +1,4 @@
+from django.db import transaction
 from rest_framework.decorators import api_view, throttle_classes, throttle_scope
 from rest_framework.response import Response
 from rest_framework import status
@@ -5,6 +6,7 @@ from rest_framework.throttling import ScopedRateThrottle
 
 from .models import Cart, CartItem
 from .serializers import CartSerializer
+from orders.views import validate_redeemable_coupon
 from products.models import products
 
 
@@ -226,3 +228,87 @@ def cart_item_detail(request, item_id):
             serializer.data,
             status=status.HTTP_200_OK
         )
+
+
+@api_view(['POST', 'DELETE'])
+@throttle_scope('cart')
+def cart_coupon(request):
+    """R-9.3.5/R-9.3.6: apply/remove a coupon as persistent cart state.
+
+    The coupon rides the Cart as a FK, so it survives across requests; the
+    checkout flow re-validates it through its pre-existing coupon path, so
+    a coupon invalidated between apply and checkout can never reach an
+    order."""
+
+    if not request.session.session_key:
+        return Response(
+            {"error": "Cart not found"},
+            status=status.HTTP_404_NOT_FOUND
+        )
+
+    try:
+        cart = Cart.objects.get(
+            session_id=request.session.session_key
+        )
+
+    except Cart.DoesNotExist:
+        return Response(
+            {"error": "Cart not found"},
+            status=status.HTTP_404_NOT_FOUND
+        )
+
+    # =========================
+    # DELETE - Remove Coupon
+    # =========================
+
+    if request.method == 'DELETE':
+
+        # Idempotent by contract: removing when no coupon is applied still
+        # succeeds (the caller's end state already holds), returning the
+        # cart-family 200 with the cart body so the client can re-render
+        # without a follow-up GET.
+        with transaction.atomic():
+            locked = Cart.objects.select_for_update().get(pk=cart.pk)
+            if locked.coupon_id:
+                locked.coupon = None
+                locked.save(update_fields=['coupon'])
+            serializer = CartSerializer(locked)
+
+        return Response(
+            serializer.data
+        )
+
+    # =========================
+    # POST - Apply Coupon
+    # =========================
+
+    code = request.data.get('code')
+
+    if not code:
+        return Response(
+            {"error": "Coupon code is required"},
+            status=status.HTTP_400_BAD_REQUEST
+        )
+
+    # Delegated redemption check: the same gate the public preview uses,
+    # so an unknown/inactive/expired/limit-hit/below-minimum coupon is
+    # refused here with the one uniform body (V-11) and never stored.
+    coupon, _subtotal, rejection = validate_redeemable_coupon(code, cart)
+
+    if rejection is not None:
+        return rejection
+
+    with transaction.atomic():
+        # Lock the cart row around the write: apply and remove are
+        # user-scoped single-row mutations, and the lock serializes a
+        # concurrent apply/remove pair (double-submit) on the cart
+        # (conventions.md: side-effectful flows run under a row lock).
+        locked = Cart.objects.select_for_update().get(pk=cart.pk)
+        locked.coupon = coupon
+        locked.save(update_fields=['coupon'])
+        serializer = CartSerializer(locked)
+
+    return Response(
+        serializer.data,
+        status=status.HTTP_200_OK
+    )
