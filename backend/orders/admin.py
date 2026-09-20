@@ -8,7 +8,8 @@ from common.admin import RoleAwareModelAdmin
 # [R-10.1] The order machine lives in orders.state (single source); this
 # module only consumes it.
 from .models import Coupon, Order, OrderItem
-from .state import ALLOWED_TRANSITIONS, transition_allowed
+# [R-10.1] SPEC-10-01b: the fulfilment-dimension mapping for the writers.
+from .state import ALLOWED_TRANSITIONS, fulfilment_for_status, transition_allowed
 
 
 class OrderItemInline(admin.TabularInline):
@@ -179,6 +180,12 @@ class OrderAdmin(RoleAwareModelAdmin):
             # existing value: a set event time is never mutated.
             if obj.status == "cancelled" and obj.cancelled_at is None:
                 obj.cancelled_at = timezone.now()
+        # [R-10.1] SPEC-10-01b: the fulfilment dimension rides every legal
+        # status change through this form — the transition guard above is
+        # the gate, fulfilment_for_status is the mapping. Admin never
+        # touches payment_status: that dimension moves only with payment
+        # events (verify_payment; SPEC-10-04 owns the rest).
+        obj.fulfilment_status = fulfilment_for_status(obj.status)
         super().save_model(request, obj, form, change)
 
     # ——— bulk actions (respect the same guards) ———
@@ -194,9 +201,16 @@ class OrderAdmin(RoleAwareModelAdmin):
         # be swept to the new status. Re-applying status__in in the UPDATE's
         # WHERE clause makes the transition predicate the final authority:
         # an out-of-set row can never be written, only counted as skipped.
+        # The WHERE clause (pk__in + status__in) is preserved verbatim;
+        # [R-10.1] SPEC-10-01b only adds the fulfilment dimension to the
+        # SET list so a swept row can never end up with a status its
+        # dimensions deny.
         count = queryset.filter(
             pk__in=matched_pks, status__in=allowed_from
-        ).update(status=new_status)
+        ).update(
+            status=new_status,
+            fulfilment_status=fulfilment_for_status(new_status),
+        )
         skipped = queryset.count() - count
         if count:
             self.log_bulk_action(
@@ -236,8 +250,12 @@ class OrderAdmin(RoleAwareModelAdmin):
         # Every row in unpaid_pks is still pending, so its cancelled_at is
         # necessarily NULL (only a cancel writes it) — the update can never
         # overwrite an existing stamp, and a re-run skips cancelled rows.
+        # [R-10.1] SPEC-10-01b: the fulfilment dimension rides the same
+        # statement (a cancelled order was never fulfilled).
         count = queryset.filter(pk__in=unpaid_pks).update(
-            status="cancelled", cancelled_at=timezone.now()
+            status="cancelled",
+            cancelled_at=timezone.now(),
+            fulfilment_status=fulfilment_for_status("cancelled"),
         )
         skipped = queryset.count() - count
         if count:

@@ -17,6 +17,9 @@ from rest_framework import status
 from .models import Order, OrderItem, Coupon
 from .serializers import OrderSerializer
 from .state import ADMIN_FULFILMENT_NEXT, ALLOWED_TRANSITIONS, transition_allowed
+# [R-10.1] SPEC-10-01b: dimension mappings for the writers. Kept as its own
+# line so every hunk in this file stays insertion-only.
+from .state import fulfilment_for_status, payment_for_status
 
 from cart.models import Cart
 from common import notifications
@@ -1147,6 +1150,15 @@ def verify_payment(request):
         order.status = 'confirmed'
         order.razorpay_payment_id = razorpay_payment_id
         order.save(update_fields=['status', 'razorpay_payment_id', 'paid_at'])
+        # [R-10.1] SPEC-10-01b: the payment dimension is captured by the
+        # same confirmed-payment event (the only payment-dimension writer
+        # in this batch — COD/failure states are SPEC-10-04). The save
+        # above is a byte-frozen region (SPEC-8-04), so the dimension rides
+        # this second persistence of the already-locked row in the SAME
+        # atomic block: both UPDATEs commit or roll back together, and the
+        # already-processed gate keeps this path unreachable on replay.
+        order.payment_status = payment_for_status('confirmed')
+        order.save(update_fields=['payment_status'])
 
         if request.session.session_key:
             cart = Cart.objects.filter(session_id=request.session.session_key).first()
@@ -1289,7 +1301,13 @@ def admin_order_fulfill(request, order_id):
             )
 
         order.status = target
+        # [R-10.1] SPEC-10-01b: the fulfilment dimension rides the same
+        # transition. Insertion-only hunk (the 9-07 save below stays
+        # byte-identical), so the dimension persists via a second
+        # same-transaction write to the row locked above.
+        order.fulfilment_status = fulfilment_for_status(target)
         order.save(update_fields=['status'])
+        order.save(update_fields=['fulfilment_status'])
         # [6.12.6] API-side staff write: land the privileged-action record
         # the admin surface would have written (audit-log route reads it).
         log_api_action(
@@ -1345,7 +1363,11 @@ def admin_order_cancel(request, order_id):
 
         order.status = "cancelled"
         order.cancelled_at = order.cancelled_at or timezone.now()
+        # [R-10.1] SPEC-10-01b: fulfilment dimension rides the cancel
+        # transition (insertion-only; second same-transaction write).
+        order.fulfilment_status = fulfilment_for_status("cancelled")
         order.save(update_fields=['status', 'cancelled_at'])
+        order.save(update_fields=['fulfilment_status'])
         log_api_action(request, order, CHANGE, "Cancelled via API.")
 
     return Response({

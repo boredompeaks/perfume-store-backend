@@ -2066,3 +2066,278 @@ class LifecycleBackfillMigrationTests(TransactionTestCase):
                 order = Order.objects.get(full_name=f"Backfill-{legacy_status}")
                 self.assertEqual(order.payment_status, payment)
                 self.assertEqual(order.fulfilment_status, fulfilment)
+
+
+@tag("orders")
+class LifecycleWiringTests(OrderTestBase):
+    """[R-10.1] SPEC-10-01b: the writers keep the two dimension fields in
+    sync with the legacy status. The payment dimension moves ONLY with
+    payment events (verify_payment — COD/failure writers are SPEC-10-04);
+    the admin surface and the 9-07 JSON seam move the fulfilment dimension
+    with every fulfilment transition, and admin never touches payment."""
+
+    def _verify_payload(self, order):
+        return {
+            "order_id": order.id,
+            "razorpay_order_id": order.razorpay_order_id,
+            "razorpay_payment_id": "pay_DIM001",
+            "razorpay_signature": "sig",
+        }
+
+    def _admin_client(self):
+        if not User.objects.filter(username="dimboss").exists():
+            User.objects.create_superuser(
+                "dimboss", "dimboss@example.com", "S3cure-Passphrase!"
+            )
+        admin_client = self.fresh_client()
+        self.assertTrue(
+            admin_client.login(username="dimboss", password="S3cure-Passphrase!")
+        )
+        return admin_client
+
+    def _run_admin_action(self, action, orders):
+        """Bulk action through the real admin UI (mirrors the 8-16 tests)."""
+        admin_client = self._admin_client()
+        return admin_client.post(
+            "/admin/orders/order/",
+            {
+                "action": action,
+                "_selected_action": [str(order.id) for order in orders],
+                "select_across": "0",
+            },
+            follow=True,
+        )
+
+    def _staff_client(self, username):
+        from django.contrib.auth.models import Group
+
+        from common.roles import ROLE_SUPPORT
+
+        user = User.objects.create_user(
+            username, f"{username}@example.com", "S3cure-Passphrase!"
+        )
+        user.groups.add(Group.objects.get_or_create(name=ROLE_SUPPORT)[0])
+        client = self.fresh_client()
+        client.force_authenticate(user)
+        return client
+
+    def _order_with_status(self, user, status):
+        """A row exactly as the writers would have left it: the status AND
+        both dimension columns per the state.py mapping (a raw status-only
+        update would strand the dimensions stale, a state no writer makes)."""
+        order = Order.objects.create(
+            user=user,
+            full_name="Dim Buyer",
+            phone="1",
+            address="a",
+            city="c",
+            state="s",
+            pincode="1",
+            total_amount=Decimal("10.00"),
+        )
+        Order.objects.filter(pk=order.pk).update(
+            status=status,
+            payment_status=order_state.payment_for_status(status),
+            fulfilment_status=order_state.fulfilment_for_status(status),
+        )
+        order.refresh_from_db()
+        return order
+
+    # ——— payment dimension: verify_payment only ————————————————
+
+    def test_verify_payment_captures_the_payment_dimension(self):
+        order = self.create_order()
+        self.razorpay_mock(order_id="order_DIM")
+        res = self.client.post(
+            "/api/orders/payment/", {"order_id": order.id}, format="json"
+        )
+        self.assertEqual(res.status_code, 200, res.data)
+        order.refresh_from_db()  # picks up the minted razorpay_order_id
+
+        res = self.client.post(
+            "/api/orders/payment/verify/", self._verify_payload(order), format="json"
+        )
+        self.assertEqual(res.status_code, 200, res.data)
+        order.refresh_from_db()
+        # the legacy status semantics are untouched (8-04 pins stay green)
+        self.assertEqual(order.status, "confirmed")
+        self.assertIsNotNone(order.paid_at)
+        # ...and the payment dimension moved with the payment event alone
+        self.assertEqual(order.payment_status, "captured")
+        self.assertEqual(order.fulfilment_status, "unfulfilled")
+
+    def test_verify_rollback_leaves_the_payment_dimension_pending(self):
+        """The dimension write sits inside verify_payment's atomic block: an
+        audit failure after it must roll the captured dimension back with
+        everything else — effect and trail never disagree."""
+        order = self.create_order()
+        self.razorpay_mock(order_id="order_DIMRB")
+        res = self.client.post(
+            "/api/orders/payment/", {"order_id": order.id}, format="json"
+        )
+        self.assertEqual(res.status_code, 200, res.data)
+        order.refresh_from_db()  # picks up the minted razorpay_order_id
+        self.client.raise_request_exception = False
+        with mock.patch.object(
+            AuditEvent, "record", side_effect=RuntimeError("down")
+        ):
+            res = self.client.post(
+                "/api/orders/payment/verify/",
+                self._verify_payload(order),
+                format="json",
+            )
+        self.assertEqual(res.status_code, 500)
+        order.refresh_from_db()
+        self.assertEqual(order.status, "pending")
+        self.assertIsNone(order.paid_at)
+        self.assertEqual(order.payment_status, "pending")
+        self.assertEqual(order.fulfilment_status, "unfulfilled")
+
+    # ——— fulfilment dimension: admin surface ————————————————————
+    # Admin syncs fulfilment_status and must NEVER set payment_status.
+
+    def test_admin_change_form_moves_dimension_with_the_status(self):
+        order = self._order_with_status(self.buyer, "confirmed")
+        admin_client = self._admin_client()
+
+        res = admin_client.post(
+            f"/admin/orders/order/{order.id}/change/",
+            {
+                "user": order.user_id,
+                "full_name": order.full_name,
+                "phone": order.phone,
+                "address": order.address,
+                "city": order.city,
+                "state": order.state,
+                "pincode": order.pincode,
+                "status": "shipped",
+                "_save": "Save",
+                "items-TOTAL_FORMS": "0",
+                "items-INITIAL_FORMS": "0",
+                "items-MIN_NUM_FORMS": "0",
+                "items-MAX_NUM_FORMS": "1000",
+            },
+            follow=True,
+        )
+        self.assertEqual(res.status_code, 200)
+        order.refresh_from_db()
+        self.assertEqual(order.status, "shipped")
+        self.assertEqual(order.fulfilment_status, "fulfilled")
+        # admin never touches the payment dimension: the captured value the
+        # row carried in stays exactly as it was
+        self.assertEqual(order.payment_status, "captured")
+
+    def test_admin_change_form_illegal_transition_moves_nothing(self):
+        order = self._order_with_status(self.buyer, "shipped")
+        admin_client = self._admin_client()
+
+        res = admin_client.post(
+            f"/admin/orders/order/{order.id}/change/",
+            {
+                "user": order.user_id,
+                "full_name": order.full_name,
+                "phone": order.phone,
+                "address": order.address,
+                "city": order.city,
+                "state": order.state,
+                "pincode": order.pincode,
+                "status": "cancelled",
+                "_save": "Save",
+                "items-TOTAL_FORMS": "0",
+                "items-INITIAL_FORMS": "0",
+                "items-MIN_NUM_FORMS": "0",
+                "items-MAX_NUM_FORMS": "1000",
+            },
+            follow=True,
+        )
+        self.assertEqual(res.status_code, 200)
+        order.refresh_from_db()
+        self.assertEqual(order.status, "shipped")
+        self.assertEqual(order.fulfilment_status, "fulfilled")
+
+    def test_bulk_ship_syncs_dimension_per_row_and_skips_out_of_set(self):
+        confirmed = self._order_with_status(self.buyer, "confirmed")
+        pending = self._order_with_status(self.buyer, "pending")
+
+        res = self._run_admin_action("mark_shipped", [confirmed, pending])
+        self.assertEqual(res.status_code, 200)
+        confirmed.refresh_from_db()
+        pending.refresh_from_db()
+        # the in-set row sweeps both columns in the SAME UPDATE...
+        self.assertEqual(confirmed.status, "shipped")
+        self.assertEqual(confirmed.fulfilment_status, "fulfilled")
+        # ...and admin never touches the payment dimension, paid row included
+        self.assertEqual(confirmed.payment_status, "captured")
+        # ...the out-of-set row is only counted as skipped (9-07 hardening)
+        self.assertEqual(pending.status, "pending")
+        self.assertEqual(pending.fulfilment_status, "unfulfilled")
+
+    def test_admin_bulk_cancel_keeps_the_payment_dimension_untouched(self):
+        order = self.create_order()  # pending, unpaid
+
+        res = self._run_admin_action("cancel_pending", [order])
+        self.assertEqual(res.status_code, 200)
+        order.refresh_from_db()
+        self.assertEqual(order.status, "cancelled")
+        self.assertEqual(order.fulfilment_status, "unfulfilled")
+        self.assertEqual(order.payment_status, "pending")
+
+    # ——— fulfilment dimension: the 9-07 JSON seam ———————————————
+
+    def test_json_seam_fulfil_walk_syncs_fulfilment_dimension(self):
+        order = self.create_order()
+        support = self._staff_client("dimsupp")
+
+        for expected_status, expected_fulfilment in (
+            ("confirmed", "unfulfilled"),
+            ("shipped", "fulfilled"),
+            ("delivered", "fulfilled"),
+        ):
+            res = support.post(f"/api/admin/orders/{order.id}/fulfill/")
+            self.assertEqual(res.status_code, 200, res.data)
+            self.assertEqual(res.data["status"], expected_status)
+            order.refresh_from_db()
+            self.assertEqual(order.status, expected_status)
+            self.assertEqual(order.fulfilment_status, expected_fulfilment)
+
+    def test_json_seam_cancel_syncs_fulfilment_dimension(self):
+        order = self.create_order()
+        support = self._staff_client("dimcancel")
+
+        res = support.post(f"/api/admin/orders/{order.id}/cancel/")
+        self.assertEqual(res.status_code, 200, res.data)
+        order.refresh_from_db()
+        self.assertEqual(order.status, "cancelled")
+        self.assertEqual(order.fulfilment_status, "unfulfilled")
+        self.assertEqual(order.payment_status, "pending")
+
+    # ——— the dimensions surface through the serializer —————————
+
+    def test_serializer_shows_updated_dimensions_after_transitions(self):
+        order = self.create_order()
+        self.razorpay_mock(order_id="order_DIMSER")
+        res = self.client.post(
+            "/api/orders/payment/", {"order_id": order.id}, format="json"
+        )
+        self.assertEqual(res.status_code, 200, res.data)
+        order.refresh_from_db()  # picks up the minted razorpay_order_id
+        res = self.client.post(
+            "/api/orders/payment/verify/", self._verify_payload(order), format="json"
+        )
+        self.assertEqual(res.status_code, 200, res.data)
+
+        support = self._staff_client("dimser")
+        for _ in range(2):  # confirmed -> shipped
+            res = support.post(f"/api/admin/orders/{order.id}/fulfill/")
+            self.assertEqual(res.status_code, 200, res.data)
+
+        detail = support.get(f"/api/admin/orders/{order.id}/")
+        self.assertEqual(detail.status_code, 200, detail.data)
+        self.assertEqual(detail.data["payment_status"], "captured")
+        self.assertEqual(detail.data["fulfilment_status"], "fulfilled")
+
+        listing = self.client.get("/api/orders/")
+        self.assertEqual(listing.status_code, 200, listing.data)
+        row = next(r for r in listing.data["results"] if r["id"] == order.id)
+        self.assertEqual(row["payment_status"], "captured")
+        self.assertEqual(row["fulfilment_status"], "fulfilled")
