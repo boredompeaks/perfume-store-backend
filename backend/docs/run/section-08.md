@@ -4,7 +4,7 @@ Migrated verbatim from the monolithic ledger 2026-09-19. Spec lines: 2454–2570
 
 | Task ID | Section | Requirement summary | Spec lines | Status | Attempts |
 |---|---|---|---|---|---|
-| SPEC-8-01 | 8 | Order-number + non-sequential identifier schema: unique indexed order_number (ORD-YYYY-NNNNNN, generated inside atomic creation), UUID-vs-derived PK/exposure strategy for Order; uniqueness-race test | 2454–2570 [R-8.4],[R-8.5] | PENDING (from S8 compliance prefetch) | 0 |
+| SPEC-8-01 | 8 | Order-number + non-sequential identifier schema: unique indexed order_number (ORD-YYYY-NNNNNN, generated inside atomic creation), UUID-vs-derived PK/exposure strategy for Order; uniqueness-race test | 2454–2570 [R-8.4],[R-8.5] | BUILDING (dispatched on 7d13502+; S8 queue task 1 of 5; baseline 407/403+4xf/100.00% @ 1665) | 1 |
 | SPEC-8-02 | 8 | SKU + variant schema core: ProductVariant with globally unique SKU (constraint+index), OrderItem snapshot columns (sku, variant_name) — executes the schema half of SPEC-3-21/SPEC-6-08 | 2454–2570 [R-8.7],[R-8.13] | PENDING (from S8 compliance prefetch; full catalogue/admin depth stays with SPEC-3-21/SPEC-6-08) | 0 |
 | SPEC-8-03 | 8 | Currency column alongside money: currency CharField (default INR, documented) on Order/OrderItem + discount amounts, serializer-surfaced, store-config-driven (not hardcoded 'INR' at orders/views.py:498,510) | 2454–2570 [R-8.11] | PENDING (from S8 compliance prefetch) | 0 |
 | SPEC-8-04 | 8 | Business-event timestamps: paid_at (written in verify_payment beside status), cancelled_at; named-timestamp pattern for shipped/delivered/refunded/published so later sections extend it | 2454–2570 [R-8.16] | PENDING (from S8 compliance prefetch; cross SPEC-6-11/SPEC-1-05/§10) | 0 |
