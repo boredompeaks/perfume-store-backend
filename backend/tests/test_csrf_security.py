@@ -243,6 +243,6 @@ class ApiXssOutputSafetyTests(ApiTestCase):
         self.assertTrue(
             listing["Content-Type"].startswith("application/json")
         )
-        order = listing.data[0]
+        order = listing.data["results"][0]
         self.assertEqual(order["full_name"], name)
         self.assertEqual(order["address"], address)

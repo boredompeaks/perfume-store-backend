@@ -188,8 +188,8 @@ class CurrencyExposureTests(OrderTestBase):
 
         res = self.client.get("/api/orders/")
         self.assertEqual(res.status_code, 200, res.data)
-        self.assertEqual(res.data[0]["currency"], "INR")
-        self.assertEqual(res.data[0]["id"], order.id)
+        self.assertEqual(res.data["results"][0]["currency"], "INR")
+        self.assertEqual(res.data["results"][0]["id"], order.id)
 
     def test_checkout_replay_and_item_bodies_carry_the_currency(self):
         """OrderSerializer is the single surface for the checkout response,
@@ -213,9 +213,9 @@ class CurrencyExposureTests(OrderTestBase):
 
         res = self.client.get("/api/orders/")
         self.assertEqual(res.status_code, 200, res.data)
-        self.assertEqual(res.data[0]["id"], order.id)
-        self.assertEqual(res.data[0]["currency"], "USD")
-        self.assertEqual(res.data[0]["items"][0]["currency"], "USD")
+        self.assertEqual(res.data["results"][0]["id"], order.id)
+        self.assertEqual(res.data["results"][0]["currency"], "USD")
+        self.assertEqual(res.data["results"][0]["items"][0]["currency"], "USD")
 
     def test_admin_list_display_and_read_only_detail_surface_currency(self):
         self.assertIn("currency", OrderAdmin.list_display)
@@ -1155,18 +1155,155 @@ class OrderListTests(OrderTestBase):
 
         res = self.client.get("/api/orders/")
         self.assertEqual(res.status_code, 200, res.data)
-        ids = [row["id"] for row in res.data]
+        ids = [row["id"] for row in res.data["results"]]
         self.assertEqual(ids, [mine.id])
         self.assertNotIn(theirs.id, ids)
         # serializer shape: coupon rendered as its code, items embedded
-        self.assertEqual(res.data[0]["coupon"], "PCT10")
-        self.assertEqual(res.data[0]["items"][0]["price"], "500.00")
+        self.assertEqual(res.data["results"][0]["coupon"], "PCT10")
+        self.assertEqual(res.data["results"][0]["items"][0]["price"], "500.00")
 
     def test_model_string_representations(self):
         order = self.create_order()
         item = order.items.first()
         self.assertEqual(str(order), f"Order #{order.id} - buyer")
         self.assertEqual(str(item), "Rose Aurum x 2")
+
+
+@tag("orders")
+class OrderDetailTests(OrderTestBase):
+    """SPEC-9-04 [R-9.2.15] (spec lines 2951-2959, `GET /account/orders/:id`
+    = "Owned order details"): the caller's OWN order only. Ownership is part
+    of the lookup, so a foreign order is a uniform 404 — never a 200 (the
+    IDOR pin) and never a 403 that would confirm existence."""
+
+    def test_owner_gets_own_order_detail(self):
+        order = self.create_order()
+        res = self.client.get(f"/api/orders/{order.id}/")
+        self.assertEqual(res.status_code, 200, res.data)
+        self.assertEqual(res.data["id"], order.id)
+        self.assertEqual(res.data["order_number"], order.order_number)
+        self.assertEqual(res.data["status"], "pending")
+        self.assertEqual(res.data["total_amount"], "1000.00")
+        self.assertEqual(res.data["items"][0]["product_name"], "Rose Aurum")
+
+    def test_other_users_order_is_404_not_200(self):
+        """The IDOR case: another user's order id must not resolve."""
+        mine = self.create_order()
+        self.make_user("intruder")
+        intruder = self.fresh_client()
+        self.api_login("intruder", client=intruder)
+        res = intruder.get(f"/api/orders/{mine.id}/")
+        self.assertEqual(res.status_code, 404, res.data)
+        self.assertEqual(res.data["error"], "Order not found")
+
+    def test_unknown_order_id_is_404(self):
+        res = self.client.get("/api/orders/999999/")
+        self.assertEqual(res.status_code, 404, res.data)
+        self.assertEqual(res.data["error"], "Order not found")
+
+    def test_order_detail_requires_authentication(self):
+        order = self.create_order()
+        res = self.fresh_client().get(f"/api/orders/{order.id}/")
+        self.assertEqual(res.status_code, 401, res.data)
+
+    def test_order_detail_served_on_the_v1_mirror(self):
+        """New app-urlconf routes are automatically served on both mounts."""
+        order = self.create_order()
+        res = self.client.get(f"/api/v1/store/orders/{order.id}/")
+        self.assertEqual(res.status_code, 200, res.data)
+        self.assertEqual(res.data["id"], order.id)
+
+
+@tag("orders")
+class OrderHistoryPaginationTests(OrderTestBase):
+    """SPEC-9-04 [R-9.2.14] (spec lines 2938-2946, `GET /account/orders`
+    = "Customer order history"). The spec pins neither a page size nor an
+    envelope shape for this endpoint, so the house page-number envelope
+    (products-listing parity, the shape the frontend's pagination UI is
+    built to) is used with env-driven defaults: ORDER_HISTORY_PAGE_SIZE,
+    capped by ORDER_HISTORY_MAX_PAGE_SIZE for ?page_size callers."""
+
+    def _checkout_distinct_orders(self, count):
+        # Distinct shipping payloads so the SPEC-21-1 dedup guard treats
+        # each checkout as a deliberate new purchase, not a replay.
+        for i in range(count):
+            res = self.checkout(city=f"City {i}")
+            self.assertEqual(res.status_code, 201, res.data)
+
+    def test_history_envelope_shape_and_default_page(self):
+        self._checkout_distinct_orders(3)
+        res = self.client.get("/api/orders/")
+        self.assertEqual(res.status_code, 200, res.data)
+        self.assertEqual(
+            set(res.data.keys()),
+            {
+                "count",
+                "total_pages",
+                "current_page",
+                "next_page",
+                "previous_page",
+                "results",
+            },
+        )
+        self.assertEqual(res.data["count"], 3)
+        self.assertEqual(res.data["total_pages"], 1)
+        self.assertEqual(res.data["current_page"], 1)
+        self.assertFalse(res.data["next_page"])
+        self.assertFalse(res.data["previous_page"])
+        self.assertEqual(len(res.data["results"]), 3)
+
+    def test_history_is_newest_first_and_page_param_selects(self):
+        older = self.create_order()
+        res = self.checkout(city="Pune")
+        newer = Order.objects.get(id=res.data["id"])
+
+        with override_settings(ORDER_HISTORY_PAGE_SIZE=1):
+            page1 = self.client.get("/api/orders/")
+            self.assertEqual(page1.data["total_pages"], 2)
+            self.assertEqual(
+                [row["id"] for row in page1.data["results"]], [newer.id]
+            )
+            self.assertTrue(page1.data["next_page"])
+            self.assertFalse(page1.data["previous_page"])
+
+            page2 = self.client.get("/api/orders/?page=2")
+            self.assertEqual(
+                [row["id"] for row in page2.data["results"]], [older.id]
+            )
+            self.assertTrue(page2.data["previous_page"])
+            self.assertFalse(page2.data["next_page"])
+
+    def test_page_size_param_overrides_default(self):
+        self._checkout_distinct_orders(3)
+        res = self.client.get("/api/orders/?page_size=2")
+        self.assertEqual(len(res.data["results"]), 2)
+        self.assertEqual(res.data["total_pages"], 2)
+        self.assertEqual(res.data["current_page"], 1)
+
+    def test_page_size_is_capped(self):
+        self._checkout_distinct_orders(3)
+        with override_settings(ORDER_HISTORY_MAX_PAGE_SIZE=2):
+            res = self.client.get("/api/orders/?page_size=1000")
+        self.assertEqual(len(res.data["results"]), 2)
+
+    def test_invalid_page_size_falls_back_to_default(self):
+        self._checkout_distinct_orders(2)
+        for raw in ("abc", "0", "-5"):
+            with self.subTest(page_size=raw):
+                res = self.client.get(f"/api/orders/?page_size={raw}")
+                self.assertEqual(len(res.data["results"]), 2)  # default (10)
+
+    def test_invalid_page_number_falls_back_to_first_page(self):
+        self._checkout_distinct_orders(2)
+        res = self.client.get("/api/orders/?page=not-a-page")
+        self.assertEqual(res.data["current_page"], 1)
+        self.assertEqual(len(res.data["results"]), 2)
+
+    def test_empty_history_is_a_valid_first_page(self):
+        res = self.client.get("/api/orders/")
+        self.assertEqual(res.data["count"], 0)
+        self.assertEqual(res.data["total_pages"], 1)
+        self.assertEqual(res.data["results"], [])
 
 
 @tag("orders")
@@ -1365,7 +1502,7 @@ class BusinessEventTimestampTests(OrderTestBase):
 
         listing = self.client.get("/api/orders/")
         self.assertEqual(listing.status_code, 200, listing.data)
-        row = listing.data[0]
+        row = listing.data["results"][0]
         self.assertEqual(row["id"], order.id)
         for field in self.BUSINESS_FIELDS:
             self.assertIsNone(row[field])  # NULL until the event

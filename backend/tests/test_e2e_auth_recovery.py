@@ -35,7 +35,7 @@ class VerificationGateTests(ApiTestCase):
         self.assertTrue(access)
         res = self.client.get("/api/orders/")
         self.assertEqual(res.status_code, 200, res.data)
-        self.assertEqual(res.data, [])
+        self.assertEqual(res.data["results"], [])
 
 
 @tag("e2e")

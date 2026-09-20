@@ -41,7 +41,16 @@ describe("apiFetch silent refresh", () => {
           orderCalls++;
           lastAuth = (init?.headers as Record<string, string>)?.Authorization;
           if (orderCalls === 1) return jsonResponse({ detail: "gone" }, 401);
-          return jsonResponse([{ id: 7 }]);
+          // SPEC-9-04: the history endpoint returns the house page-number
+          // envelope; fetchOrders unwraps `results` for list consumers.
+          return jsonResponse({
+            count: 1,
+            total_pages: 1,
+            current_page: 1,
+            next_page: false,
+            previous_page: false,
+            results: [{ id: 7 }],
+          });
         }
         throw new Error(`unexpected fetch: ${url}`);
       }),

@@ -250,6 +250,14 @@ PRODUCTS_PAGE_SIZE = _env_int('PRODUCTS_PAGE_SIZE', 12)
 # ignored and the default is used instead.
 CHECKOUT_DEDUP_WINDOW_SECONDS = _env_int('CHECKOUT_DEDUP_WINDOW_SECONDS', 300)
 
+# SPEC-9-04 [R-9.2.14] Customer order-history listing (GET /api/orders/):
+# rows per page, and the ceiling a ?page_size caller may request. The spec
+# pins no number for order history, so both are deployment config
+# (conventions.md: no hardcoded thresholds); non-integer values are ignored
+# and the defaults are used instead.
+ORDER_HISTORY_PAGE_SIZE = _env_int('ORDER_HISTORY_PAGE_SIZE', 10)
+ORDER_HISTORY_MAX_PAGE_SIZE = _env_int('ORDER_HISTORY_MAX_PAGE_SIZE', 100)
+
 
 # ISO 4217 currency codes are exactly three uppercase letters.
 _ISO_4217 = re.compile(r"^[A-Z]{3}$")

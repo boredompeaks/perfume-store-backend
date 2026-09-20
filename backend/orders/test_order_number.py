@@ -197,9 +197,9 @@ class OrderNumberExposureTests(OrderNumberTestBase):
 
         listing = self.client.get("/api/orders/")
         self.assertEqual(listing.status_code, 200, listing.data)
-        self.assertEqual(listing.data[0]["order_number"], order.order_number)
+        self.assertEqual(listing.data["results"][0]["order_number"], order.order_number)
         # the pk stays the internal key: untouched, still the URL id
-        self.assertEqual(listing.data[0]["id"], order.id)
+        self.assertEqual(listing.data["results"][0]["id"], order.id)
 
     def test_admin_list_display_includes_order_number(self):
         self.assertIn("order_number", OrderAdmin.list_display)
