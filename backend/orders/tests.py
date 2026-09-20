@@ -28,8 +28,8 @@ from orders import events as order_events
 from orders.models import Coupon, Order, OrderItem, OrderStatusEvent
 from orders.serializers import OrderItemSerializer, OrderSerializer
 from orders import state as order_state
-from orders.views import apply_coupon, create_payment
-from products.models import StockMovement, products
+from orders.views import _mint_order_reservations, apply_coupon, create_payment
+from products.models import StockMovement, StockReservation, products
 
 
 class OrderTestBase(ApiTestCase):
@@ -3692,3 +3692,284 @@ class TransitionNotificationTests(OrderTestBase):
         # confirmed is deliberately unhooked: verify_payment's own
         # order.paid dispatch (R-19.0) owns the payment notification
         self.assertNotIn("confirmed", order_events.TRANSITION_EVENTS)
+
+
+@tag("orders")
+class ReservationLifecycleTests(OrderTestBase):
+    """SPEC-12-02 (spec section 12.2 [R-12.6]/[R-12.7]/[R-12.8]).
+
+    The checkout reservation lifecycle: create_order mints one time-limited
+    hold per line inside its atomic block; verify_payment converts active
+    holds into committed sales behind the unchanged locked sufficiency
+    re-check (the oversell backstop); every failed/cancelled checkout path
+    releases the holds. Razorpay is always mocked; no network.
+    """
+
+    def _checkout_and_pay(self, order_id="order_RESV001", **checkout_overrides):
+        """Mirror of VerifyPaymentTests._prepare_paid_setup: a real
+        checkout (so holds are minted), a payment intent, and the verify
+        payload — plus the mock client so a test can flip the signature."""
+        client_mock = self.razorpay_mock(order_id=order_id)
+        order = self.create_order(**checkout_overrides)
+        res = self.client.post(
+            "/api/orders/payment/", {"order_id": order.id}, format="json"
+        )
+        self.assertEqual(res.status_code, 200, res.data)
+        order.refresh_from_db()  # picks up the gateway ref the intent wrote
+        payload = {
+            "order_id": order.id,
+            "razorpay_order_id": order.razorpay_order_id,
+            "razorpay_payment_id": "pay_RESV001",
+            "razorpay_signature": "sig",
+        }
+        return client_mock, order, payload
+
+    # ——— [R-12.6] mint at checkout ———
+
+    def test_checkout_mints_one_active_hold_per_line_with_env_ttl(self):
+        """§12.1 step 3: checkout leaves one active, owner-bound hold per
+        order line, sized to the line and expiring on the env-driven TTL."""
+        self.product2 = self.make_product(name="Oud Royale", price="700.00", stock=5)
+        self.seed_session_cart([(self.product2, 1)])  # second cart line
+        with override_settings(RESERVATION_TTL=120):
+            before = timezone.now()
+            res = self.checkout()
+        self.assertEqual(res.status_code, 201, res.data)
+        order = Order.objects.get(id=res.data["id"])
+
+        holds = {hold.product_id: hold for hold in order.stock_reservations.all()}
+        self.assertEqual(len(holds), 2)
+        for item in order.items.all():
+            hold = holds[item.product_id]
+            self.assertEqual(hold.quantity, item.quantity)
+            self.assertEqual(hold.owner_id, self.buyer.pk)
+            self.assertEqual(hold.order_id, order.id)
+            self.assertEqual(hold.status, StockReservation.Status.ACTIVE)
+            # expires_at = mint time + RESERVATION_TTL, read at call time
+            self.assertGreater(hold.expires_at, before + timedelta(seconds=110))
+            self.assertLessEqual(
+                hold.expires_at, timezone.now() + timedelta(seconds=121)
+            )
+
+    def test_replayed_checkout_collapses_without_touching_the_hold(self):
+        """The dedup guard's reuse path returns the original order before
+        the mint runs: a retried checkout re-targets the existing hold by
+        leaving it exactly as the first attempt minted it — never a second
+        (order, product) row (§12.1: one hold per checkout line)."""
+        first = self.checkout()
+        self.assertEqual(first.status_code, 201, first.data)
+        second = self.checkout()  # identical pending submission
+        self.assertEqual(second.status_code, 200, second.data)
+        self.assertEqual(second.data["id"], first.data["id"])
+
+        order = Order.objects.get(id=first.data["id"])
+        holds = order.stock_reservations.all()
+        self.assertEqual(holds.count(), 1)
+        self.assertEqual(holds.get().status, StockReservation.Status.ACTIVE)
+
+    def test_mint_retargets_the_existing_hold_on_a_lost_unique_race(self):
+        """The (order, product) unique constraint is the concurrency
+        authority for a replay that slips past both collapse guards: the
+        mint's IntegrityError fallback re-targets the surviving hold —
+        re-armed to the retried line's quantity and a fresh TTL — instead
+        of double-creating or crashing the checkout."""
+        order = self.create_order()
+        hold = order.stock_reservations.get()
+        # Simulate the stale survivor of a lost race: wrong size, lapsed
+        # TTL, released by an earlier abandoned attempt.
+        StockReservation.objects.filter(pk=hold.pk).update(
+            quantity=99,
+            status=StockReservation.Status.RELEASED,
+            expires_at=timezone.now() + timedelta(seconds=1),
+        )
+        # Re-run the view's mint for the same order (the reuse path): the
+        # duplicate create hits the real constraint and the fallback fires.
+        _mint_order_reservations(
+            order, order.items.select_related("product").all(), self.buyer
+        )
+        hold.refresh_from_db()
+        self.assertEqual(order.stock_reservations.count(), 1)
+        self.assertEqual(hold.quantity, 2)  # re-armed to the line's size
+        self.assertEqual(hold.status, StockReservation.Status.ACTIVE)
+        self.assertGreater(hold.expires_at, timezone.now() + timedelta(seconds=800))
+
+    # ——— [R-12.7] convert at verify ———
+
+    def test_verify_converts_active_holds_into_committed_sales(self):
+        """§12.1 step 5: confirmation converts the holds; the decrement and
+        its SALE ledger row stay the stock authority (unchanged behavior),
+        and a replayed verify cannot convert twice."""
+        _, order, payload = self._checkout_and_pay()
+
+        res = self.client.post("/api/orders/payment/verify/", payload, format="json")
+        self.assertEqual(res.status_code, 200, res.data)
+
+        hold = order.stock_reservations.get()
+        self.assertEqual(hold.status, StockReservation.Status.CONVERTED)
+        self.product.refresh_from_db()
+        self.assertEqual(self.product.stock, 8)
+        self.assertTrue(
+            StockMovement.objects.filter(
+                product=self.product,
+                delta=-2,
+                reason=StockMovement.Reason.SALE,
+                note=f"Order #{order.id}",
+            ).exists()
+        )
+        # replay hits the already-processed gate: still exactly one hold
+        replay = self.client.post("/api/orders/payment/verify/", payload, format="json")
+        self.assertEqual(replay.status_code, 400, replay.data)
+        self.assertEqual(
+            order.stock_reservations.filter(
+                status=StockReservation.Status.CONVERTED
+            ).count(),
+            1,
+        )
+
+    def test_verify_converts_a_lapsed_hold_ttl_never_gates_the_sale(self):
+        """Declared reading of §12.2: expiry is the SPEC-12-03 reconciler's
+        concern, never a conversion gate. The locked sufficiency re-check
+        is the only availability authority for a captured payment, so a
+        hold past its expires_at still converts instead of 409-ing paid
+        money onto a bookkeeping lapse."""
+        _, order, payload = self._checkout_and_pay()
+        order.stock_reservations.update(
+            expires_at=timezone.now() - timedelta(seconds=1)
+        )
+
+        res = self.client.post("/api/orders/payment/verify/", payload, format="json")
+
+        self.assertEqual(res.status_code, 200, res.data)
+        self.assertEqual(
+            order.stock_reservations.get().status,
+            StockReservation.Status.CONVERTED,
+        )
+
+    def test_verify_succeeds_for_an_order_without_holds(self):
+        """Legacy compatibility: an order minted before the reservation
+        model (or with its rows gone) verifies exactly as before — the
+        conversion filter simply matches nothing."""
+        _, order, payload = self._checkout_and_pay()
+        order.stock_reservations.all().delete()
+
+        res = self.client.post("/api/orders/payment/verify/", payload, format="json")
+
+        self.assertEqual(res.status_code, 200, res.data)
+        order.refresh_from_db()
+        self.assertEqual(order.status, "confirmed")
+        self.product.refresh_from_db()
+        self.assertEqual(self.product.stock, 8)
+
+    # ——— [R-12.8] release on failed/cancelled checkout ———
+
+    def test_failed_verify_releases_holds_and_the_retry_rechecks_cleanly(self):
+        """[R-10.4] interplay: the 10-04 failure marks the payment failed
+        AND releases the holds in the same transaction; the retry (the
+        machine's failed->captured edge) then re-checks stock cleanly —
+        the released hold is terminal and is never converted into the
+        eventual sale."""
+        client_mock, order, payload = self._checkout_and_pay()
+        self.razorpay_fail_signature(client_mock)
+
+        first = self.client.post("/api/orders/payment/verify/", payload, format="json")
+        self.assertEqual(first.status_code, 400, first.data)
+        order.refresh_from_db()
+        self.assertEqual(order.payment_status, "failed")
+        self.assertEqual(order.status, "pending")
+        self.assertEqual(
+            order.stock_reservations.get().status,
+            StockReservation.Status.RELEASED,
+        )
+        self.product.refresh_from_db()
+        self.assertEqual(self.product.stock, 10)  # untouched by the failure
+
+        # a fresh, genuine attempt on the same order
+        self.razorpay_mock(order_id=order.razorpay_order_id)
+        second = self.client.post("/api/orders/payment/verify/", payload, format="json")
+        self.assertEqual(second.status_code, 200, second.data)
+        order.refresh_from_db()
+        self.assertEqual(order.status, "confirmed")
+        # the released hold stays released — the sale needed no conversion
+        self.assertEqual(
+            order.stock_reservations.get().status,
+            StockReservation.Status.RELEASED,
+        )
+        self.product.refresh_from_db()
+        self.assertEqual(self.product.stock, 8)  # decremented exactly once
+
+    def test_stock_conflict_verify_releases_holds_and_retry_rechecks(self):
+        """The oversell race's loser: the 409 backstop keeps hard oversell
+        impossible and now also releases the loser's holds, so no phantom
+        pressure survives on available-to-sell; after a restock the order
+        is still retryable and re-checks live stock."""
+        _, order, payload = self._checkout_and_pay()
+        # the units the hold points at were sold out from under it
+        products.objects.filter(pk=self.product.pk).update(stock=1)
+
+        res = self.client.post("/api/orders/payment/verify/", payload, format="json")
+        self.assertEqual(res.status_code, 409, res.data)
+        self.assertEqual(
+            res.data["error"],
+            "An item is no longer available in the requested quantity",
+        )
+        order.refresh_from_db()
+        self.assertEqual(order.status, "pending")  # retryable, per 10-04
+        self.assertEqual(
+            order.stock_reservations.get().status,
+            StockReservation.Status.RELEASED,
+        )
+        products.objects.filter(pk=self.product.pk).update(stock=10)
+
+        retry = self.client.post("/api/orders/payment/verify/", payload, format="json")
+        self.assertEqual(retry.status_code, 200, retry.data)
+        self.assertEqual(
+            order.stock_reservations.get().status,
+            StockReservation.Status.RELEASED,
+        )
+        self.product.refresh_from_db()
+        self.assertEqual(self.product.stock, 8)
+
+    def test_coupon_conflict_verify_releases_holds(self):
+        """A verify that fails a checkout precondition (coupon gone) is a
+        failed checkout: the holds release, the order stays pending."""
+        coupon = self.make_coupon(code="HOLD10", discount_value="10", usage_limit=1)
+        _, order, payload = self._checkout_and_pay(coupon=coupon)
+        Coupon.objects.filter(pk=coupon.pk).update(used_count=1)  # raced away
+
+        res = self.client.post("/api/orders/payment/verify/", payload, format="json")
+
+        self.assertEqual(res.status_code, 409, res.data)
+        self.assertEqual(res.data["error"], "The coupon is no longer valid")
+        order.refresh_from_db()
+        self.assertEqual(order.status, "pending")
+        self.assertEqual(
+            order.stock_reservations.get().status,
+            StockReservation.Status.RELEASED,
+        )
+
+    def test_admin_cancel_releases_holds(self):
+        """§12.1 step 6: cancelling an unpaid order is a cancelled
+        checkout — its holds release inside the cancel transaction and the
+        units return to available-to-sell immediately."""
+        from django.contrib.auth.models import Group
+
+        from common.roles import ROLE_SUPPORT
+
+        order = self.create_order()
+        support = User.objects.create_user(
+            "supp", "supp@example.com", "S3cure-Passphrase!"
+        )
+        support.groups.add(Group.objects.get_or_create(name=ROLE_SUPPORT)[0])
+        self.client.force_authenticate(support)
+
+        res = self.client.post(f"/api/admin/orders/{order.id}/cancel/")
+
+        self.assertEqual(res.status_code, 200, res.data)
+        order.refresh_from_db()
+        self.assertEqual(order.status, "cancelled")
+        self.assertEqual(
+            order.stock_reservations.get().status,
+            StockReservation.Status.RELEASED,
+        )
+        self.product.refresh_from_db()
+        self.assertEqual(self.product.stock, 10)  # a hold was never stock

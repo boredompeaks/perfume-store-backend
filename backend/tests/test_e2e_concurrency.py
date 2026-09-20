@@ -11,7 +11,7 @@ from django.utils import timezone
 from cart.models import Cart, CartItem
 from common.testing import ApiTestCase
 from orders.models import Order
-from products.models import products as Product
+from products.models import StockReservation, products as Product
 
 
 @tag("e2e")
@@ -79,6 +79,22 @@ class OversellRaceTests(ApiTestCase):
         self.assertEqual(statuses[order_ids["bob"]], "pending")
         product.refresh_from_db()
         self.assertEqual(product.stock, 0)
+
+        # [SPEC-12-02] the same race through the reservation lens: both
+        # checkouts minted a hold on the last unit (soft overbooking,
+        # by-design); the winner's hold converted into the committed sale
+        # and the 409 backstop released the loser's, so no phantom active
+        # hold survives the race.
+        alice_hold = Order.objects.get(id=order_ids["alice"]).stock_reservations.get()
+        bob_hold = Order.objects.get(id=order_ids["bob"]).stock_reservations.get()
+        self.assertEqual(alice_hold.status, StockReservation.Status.CONVERTED)
+        self.assertEqual(alice_hold.quantity, 1)
+        self.assertEqual(bob_hold.status, StockReservation.Status.RELEASED)
+        self.assertEqual(bob_hold.quantity, 1)
+        self.assertEqual(
+            StockReservation.objects.filter(status=StockReservation.Status.ACTIVE).count(),
+            0,
+        )
 
 
 @tag("e2e")

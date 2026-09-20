@@ -49,7 +49,10 @@ from common.audit import log_api_action
 from common.models import AuditEvent
 from common.money import quantize_money
 from common.permissions import HasOrdersCancel, HasOrdersFulfill, HasOrdersRead
-from products.models import StockMovement, products
+# [SPEC-12-02] StockReservation rides the existing products.models import
+# line (insertion-only style): the checkout lifecycle mints them in
+# create_order and transitions them in verify_payment / admin_order_cancel.
+from products.models import StockMovement, StockReservation, products
 
 import logging
 import razorpay
@@ -257,6 +260,47 @@ def _next_order_sequence(year):
 def _generate_order_number():
     year = _current_year()
     return f"ORD-{year}-{_next_order_sequence(year):06d}"
+
+
+def _mint_order_reservations(order, lines, user):
+    """[R-12.6] SPEC-12-02 §12.1 step 3: one time-limited hold per order
+    line, minted inside the caller's atomic block so a rolled-back checkout
+    never leaves a hold behind.
+
+    Deliberately lock-free and rule-free on stock: create_order's advisory
+    gate already validated live availability, and verify_payment's locked
+    sufficiency re-check stays the oversell authority (§12.2's
+    pay-then-409 residual for two concurrent last-unit checkouts is
+    by-design). The TTL comes from expiry_from_now(), the single
+    env-driven source (RESERVATION_TTL)."""
+    for line in lines:
+        try:
+            # Savepoint: a lost (order, product) mint race rolls back only
+            # this insert and leaves the outer transaction usable for the
+            # re-target below (same shape as the order-number mint loop).
+            with transaction.atomic():
+                StockReservation.objects.create(
+                    product=line.product,
+                    order=order,
+                    owner=user,
+                    quantity=line.quantity,
+                    expires_at=StockReservation.expiry_from_now(),
+                )
+        except IntegrityError:
+            # The (order, product) unique constraint is the concurrency
+            # authority: a replay that slipped past both collapse guards
+            # re-targets the existing hold instead of double-creating it
+            # (§12.1: one hold per checkout line — a duplicate row would
+            # double-count reserved stock). Re-targeting re-arms the hold
+            # for this attempt: the retried line's quantity, a fresh TTL,
+            # active again.
+            reservation = StockReservation.objects.select_for_update().get(
+                order=order, product=line.product
+            )
+            reservation.quantity = line.quantity
+            reservation.expires_at = StockReservation.expiry_from_now()
+            reservation.status = StockReservation.Status.ACTIVE
+            reservation.save(update_fields=["quantity", "expires_at", "status"])
 
 
 @api_view(['POST'])
@@ -672,6 +716,11 @@ def create_order(request):
                 subtotal=item_subtotal
             )
 
+        # [R-12.6] SPEC-12-02 §12.1 step 3: mint the checkout's time-limited
+        # holds inside this same atomic block, so a rolled-back checkout
+        # never leaves a hold behind (helper above carries the semantics).
+        _mint_order_reservations(order, cart_items, request.user)
+
         # [R-7.20] Business-event trail: the order's creation is recorded in
         # the same transaction as the order rows, so a rolled-back checkout
         # leaves no phantom trail row and a committed order is never
@@ -1069,6 +1118,16 @@ def verify_payment(request):
                     trigger=TRIGGER_PAYMENT_FAILED,
                 )
 
+                # [R-12.8] SPEC-12-02 §12.1 step 6: the checkout attempt
+                # failed, so its holds are dead — release them in this same
+                # transaction. A retry (the machine's failed->captured edge)
+                # then re-checks stock cleanly and converts only holds that
+                # are still active; a hold this failure abandoned is never
+                # resurrected into a sale.
+                failed_order.stock_reservations.filter(
+                    status=StockReservation.Status.ACTIVE
+                ).update(status=StockReservation.Status.RELEASED)
+
         return Response(
             {"error": "Payment verification failed"},
             status=status.HTTP_400_BAD_REQUEST
@@ -1160,9 +1219,17 @@ def verify_payment(request):
 
         order_items = list(order.items.all())
         product_ids = [item.product_id for item in order_items]
+        # [SPEC-12-02] Deterministic lock acquisition (ascending id):
+        # unordered ``filter(id__in=...)`` let the plan pick the sequence,
+        # so two carts sharing products in different insertion orders could
+        # deadlock across the lock handoff (section-12 verified-facts
+        # advisory — the loser died with a rollback 500). One total order
+        # closes the cycle; the sufficiency re-check below is unchanged.
         locked_products = {
             product.id: product
-            for product in products.objects.select_for_update().filter(id__in=product_ids)
+            for product in products.objects.select_for_update()
+            .filter(id__in=product_ids)
+            .order_by("id")
         }
 
         for item in order_items:
@@ -1189,6 +1256,17 @@ def verify_payment(request):
                     item.quantity,
                     product.stock if product else 0,
                 )
+
+                # [R-12.8] SPEC-12-02 §12.1 step 6: this attempt failed the
+                # sufficiency re-check (the oversell race's loser), so its
+                # holds are dead — release them now instead of leaving
+                # phantom pressure on available-to-sell until the TTL sweep
+                # (SPEC-12-03). The order stays pending/retryable: a later
+                # retry re-checks against live stock with no hold to
+                # convert, exactly like the payment-failure retry edge.
+                order.stock_reservations.filter(
+                    status=StockReservation.Status.ACTIVE
+                ).update(status=StockReservation.Status.RELEASED)
 
                 return Response(
                     {"error": "An item is no longer available in the requested quantity"},
@@ -1221,10 +1299,34 @@ def verify_payment(request):
                     coupon.pk,
                 )
 
+                # [R-12.8] SPEC-12-02 §12.1 step 6: this attempt failed a
+                # checkout precondition, so its holds are released like
+                # every other failed-verify path; the order stays
+                # pending/retryable for a corrected re-attempt.
+                order.stock_reservations.filter(
+                    status=StockReservation.Status.ACTIVE
+                ).update(status=StockReservation.Status.RELEASED)
+
                 return Response(
                     {"error": "The coupon is no longer valid"},
                     status=status.HTTP_409_CONFLICT
                 )
+
+        # [R-12.7] SPEC-12-02 §12.1 step 5: confirmation converts the
+        # order's live holds into committed sales. The decrement below
+        # stays the stock authority and the sufficiency re-check above
+        # remains the oversell backstop (R-12.12: the sale never re-learns
+        # availability from a reservation); this flip is the reservation
+        # ledger's truth. Filtering on active makes it idempotent and
+        # retry-safe: a hold released by an earlier failed attempt is
+        # terminal (never resurrected into a sale), and an order with no
+        # holds (legacy, or the post-failure retry) verifies unchanged. A
+        # lapsed TTL is deliberately NOT a conversion gate — the captured
+        # payment proceeds on the re-checked stock; expiry belongs to the
+        # SPEC-12-03 reconciler.
+        order.stock_reservations.filter(
+            status=StockReservation.Status.ACTIVE
+        ).update(status=StockReservation.Status.CONVERTED)
 
         for item in order_items:
             product = locked_products[item.product_id]
@@ -1537,6 +1639,14 @@ def admin_order_cancel(request, order_id):
             actor=request.user,
             trigger=TRIGGER_ADMIN_API_CANCEL,
         )
+        # [R-12.8] SPEC-12-02 §12.1 step 6: a cancelled checkout releases
+        # its holds in this same transaction — cancelled units return to
+        # available-to-sell immediately, not at the TTL sweep. The
+        # idempotent replay above returns before this site, and the
+        # active-only filter is a no-op on already-released holds.
+        order.stock_reservations.filter(
+            status=StockReservation.Status.ACTIVE
+        ).update(status=StockReservation.Status.RELEASED)
         # [R-10.16] SPEC-10-05: the side-effect hook rides the same
         # atomic block; the idempotent replay above returns before this
         # site, so a re-cancel never notifies twice (insertion-only hunk).
