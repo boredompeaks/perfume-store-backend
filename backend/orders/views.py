@@ -1,7 +1,7 @@
 from datetime import timedelta
 from decimal import Decimal
 
-from django.db import transaction
+from django.db import IntegrityError, transaction
 from django.db.models import Q
 from django.utils import timezone
 
@@ -102,6 +102,47 @@ def _find_duplicate_pending_order(user, cart_items, coupon, payload):
             continue
         return candidate
     return None
+
+
+# ==================================
+# Order number generation (R-8.4)
+# ==================================
+
+# Bounded retries: a checkout still losing the order-number race after this
+# many attempts indicates something is deeply wrong, so it fails loudly (the
+# whole checkout transaction rolls back) instead of looping forever.
+ORDER_NUMBER_ATTEMPTS = 5
+
+
+def _current_year():
+    """The order-number year bucket: the sequence restarts each January 1st
+    (R-8.4), so this is the only clock the format depends on."""
+    return timezone.now().year
+
+
+def _next_order_sequence(year):
+    """Next sequence for the year's ORD-YYYY- prefix: the highest committed
+    number's sequence plus one. Fixed-width zero padding keeps lexicographic
+    order equal to numeric order. This lookup is check-then-act and
+    deliberately NOT the concurrency authority -- two connections can read
+    the same max before either commits -- the unique constraint on
+    Order.order_number is, and the caller retries on the IntegrityError
+    (conventions.md:17)."""
+    prefix = f"ORD-{year}-"
+    latest = (
+        Order.objects.filter(order_number__startswith=prefix)
+        .order_by("-order_number")
+        .values_list("order_number", flat=True)
+        .first()
+    )
+    if latest is None:
+        return 1
+    return int(latest.rsplit("-", 1)[1]) + 1
+
+
+def _generate_order_number():
+    year = _current_year()
+    return f"ORD-{year}-{_next_order_sequence(year):06d}"
 
 
 @api_view(['POST'])
@@ -367,18 +408,39 @@ def create_order(request):
                 status=status.HTTP_200_OK
             )
 
-        order = Order.objects.create(
-            user=request.user,
-            full_name=request.data.get('full_name'),
-            phone=request.data.get('phone'),
-            address=request.data.get('address'),
-            city=request.data.get('city'),
-            state=request.data.get('state'),
-            pincode=request.data.get('pincode'),
-            coupon=coupon,
-            discount_amount=discount_amount,
-            total_amount=total_amount
-        )
+        # [R-8.4] The order number is minted inside this same atomic block,
+        # so a rolled-back checkout never burns a number. Each attempt runs
+        # in a savepoint: a lost race (another connection committed the same
+        # candidate first) rolls back only the failed insert and the next
+        # turn regenerates from committed state. Same-session replays never
+        # reach this loop -- the dedup guard above returns first.
+        for attempt in range(ORDER_NUMBER_ATTEMPTS):
+            candidate = _generate_order_number()
+            try:
+                with transaction.atomic():
+                    order = Order.objects.create(
+                        user=request.user,
+                        full_name=request.data.get('full_name'),
+                        phone=request.data.get('phone'),
+                        address=request.data.get('address'),
+                        city=request.data.get('city'),
+                        state=request.data.get('state'),
+                        pincode=request.data.get('pincode'),
+                        coupon=coupon,
+                        discount_amount=discount_amount,
+                        total_amount=total_amount,
+                        order_number=candidate,
+                    )
+            except IntegrityError:
+                # Lost the number race: the unique constraint rejected the
+                # candidate, so the savepoint above rolled the failed insert
+                # back and this transaction stays usable for the retry. The
+                # bound is a safety net, not the expected path: one retry
+                # converges because the collision window is a single insert.
+                if attempt == ORDER_NUMBER_ATTEMPTS - 1:
+                    raise
+                continue
+            break
 
         # Snapshot cart items. Inventory, coupon usage, and cart cleanup occur
         # only after the payment provider confirms this specific order.

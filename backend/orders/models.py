@@ -64,6 +64,14 @@ class Coupon(models.Model):
 
 
 class Order(models.Model):
+    """A checkout-created purchase.
+
+    [R-8.4]/[R-8.5] Identifier-exposure strategy: the sequential ``id`` stays
+    the internal key (URL/admin primary key, no URL changes); ``order_number``
+    (ORD-YYYY-NNNNNN, per-year sequence) is the customer-facing reference the
+    serializer exposes read-only. Guest checkout (SPEC-3-02) will key on
+    ``order_number`` -- the pk never leaves server-side routing.
+    """
 
     STATUS_CHOICES = [
         ('pending', 'Pending'),
@@ -72,6 +80,20 @@ class Order(models.Model):
         ('delivered', 'Delivered'),
         ('cancelled', 'Cancelled'),
     ]
+
+    # [R-8.4] Customer-facing reference, minted inside create_order's atomic
+    # block. Nullable by design: checkout (the only production writer) always
+    # sets it, non-checkout ORM creations keep working, and the 0006 data
+    # migration backfills every pre-existing row, so the column is fully
+    # populated after migrating. The unique index doubles as the concurrency
+    # authority for generation (IntegrityError retry) and as the spec 8.3
+    # "order number" index.
+    order_number = models.CharField(
+        max_length=20,  # 15 for ORD-YYYY-NNNNNN + headroom for format drift
+        null=True,
+        blank=True,
+        unique=True,
+    )
 
     user = models.ForeignKey(
         User,

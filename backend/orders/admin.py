@@ -65,6 +65,8 @@ class OrderAdmin(RoleAwareModelAdmin):
     confirmation_required_actions = frozenset({"cancel_pending"})
     list_display = (
         "id",
+        # [R-8.5] the customer-facing reference beside the internal pk
+        "order_number",
         "user",
         "full_name",
         "status",
