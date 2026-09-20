@@ -678,9 +678,11 @@ def create_payment(request):
         razorpay_order_id = order.razorpay_order_id
     else:
         try:
+            # [R-8.11] The gateway is charged in the denomination the order
+            # was minted with, read off the row — never a hardcoded code.
             razorpay_order = client.order.create({
                 'amount': amount,
-                'currency': 'INR',
+                'currency': order.currency,
                 'receipt': f'order_{order.id}',
             })
         except Exception:
@@ -714,7 +716,8 @@ def create_payment(request):
         "razorpay_order_id": razorpay_order_id,
         "amount": amount,
         "amount_in_rupees": order.total_amount,
-        "currency": "INR",
+        # [R-8.11] Same currency the gateway payload used: the order's own.
+        "currency": order.currency,
         "key_id": settings.RAZORPAY_KEY_ID,
     })
 # ==================================

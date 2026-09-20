@@ -3,13 +3,17 @@
 Razorpay is always mocked (``self.razorpay_mock``); no test touches the
 network or the real keys from ``.env`` (V-01 containment).
 """
+import os
 from datetime import timedelta
 from decimal import Decimal
 from unittest import mock
 
 from django.conf import settings
+from django.contrib.auth.models import User
 from django.core.cache import cache
-from django.test import tag
+from django.core.management import call_command
+from django.db import connection
+from django.test import SimpleTestCase, TransactionTestCase, override_settings, tag
 from django.utils import timezone
 from rest_framework.settings import api_settings
 from rest_framework.throttling import ScopedRateThrottle
@@ -17,6 +21,7 @@ from rest_framework.throttling import ScopedRateThrottle
 from cart.models import Cart, CartItem
 from common.models import AuditEvent
 from common.testing import TEST_RAZORPAY_KEY_ID, ApiTestCase
+from config.settings import _env_currency
 from orders.models import Coupon, Order, OrderItem
 from orders.views import apply_coupon
 from products.models import StockMovement, products
@@ -38,6 +43,133 @@ class OrderTestBase(ApiTestCase):
         res = self.checkout(**payload)
         self.assertEqual(res.status_code, 201, res.data)
         return Order.objects.get(id=res.data["id"])
+
+
+@tag("orders")
+class CurrencyStoreConfigTests(OrderTestBase):
+    """[R-8.11] Currency rides every money column, driven by store config."""
+
+    def test_new_order_and_items_default_to_store_currency(self):
+        order = self.create_order()
+
+        self.assertEqual(order.currency, "INR")
+        items = list(order.items.all())
+        self.assertTrue(items)
+        for item in items:
+            self.assertEqual(item.currency, "INR")
+        # The label rides the money; it never replaces the Decimal amounts.
+        self.assertIsInstance(order.total_amount, Decimal)
+        self.assertIsInstance(order.discount_amount, Decimal)
+
+    def test_setting_override_changes_currency_of_new_rows(self):
+        with override_settings(DEFAULT_CURRENCY="USD"):
+            order = Order.objects.create(
+                user=self.buyer,
+                full_name="B", phone="1", address="a",
+                city="c", state="s", pincode="1",
+                total_amount=Decimal("10.00"),
+            )
+            item = OrderItem.objects.create(
+                order=order,
+                product=self.product,
+                product_name=self.product.name,
+                price=self.product.price,
+                quantity=1,
+                subtotal=self.product.price,
+            )
+
+        self.assertEqual(order.currency, "USD")
+        self.assertEqual(item.currency, "USD")
+
+    def test_checkout_mints_rows_in_the_configured_currency(self):
+        with override_settings(DEFAULT_CURRENCY="EUR"):
+            order = self.create_order()
+
+        self.assertEqual(order.currency, "EUR")
+        for item in order.items.all():
+            self.assertEqual(item.currency, "EUR")
+
+    def test_gateway_payload_uses_the_order_currency(self):
+        with override_settings(DEFAULT_CURRENCY="USD"):
+            order = self.create_order()
+        client_mock = self.razorpay_mock(order_id="order_USD001")
+
+        res = self.client.post(
+            "/api/orders/payment/", {"order_id": order.id}, format="json"
+        )
+
+        self.assertEqual(res.status_code, 200, res.data)
+        self.assertEqual(res.data["currency"], "USD")
+        client_mock.order.create.assert_called_once_with(
+            {"amount": 100000, "currency": "USD", "receipt": f"order_{order.id}"}
+        )
+
+    def test_recorded_currency_is_frozen_against_later_setting_changes(self):
+        order = self.create_order()  # minted under the current config
+        with override_settings(DEFAULT_CURRENCY="USD"):
+            order.refresh_from_db()
+
+        # Existing rows keep the currency they were minted with; the setting
+        # only ever steers new rows.
+        self.assertEqual(order.currency, "INR")
+
+
+class DefaultCurrencySettingTests(SimpleTestCase):
+    """[R-8.11] _env_currency: env-driven with the fail-safe INR default."""
+
+    def test_valid_code_is_normalised_to_uppercase(self):
+        with mock.patch.dict(os.environ, {"DEFAULT_CURRENCY": "usd"}):
+            self.assertEqual(_env_currency("DEFAULT_CURRENCY", "INR"), "USD")
+
+    def test_malformed_code_falls_back_with_warning(self):
+        with mock.patch.dict(os.environ, {"DEFAULT_CURRENCY": "rupees"}):
+            with self.assertLogs("config.settings", level="WARNING") as logs:
+                self.assertEqual(_env_currency("DEFAULT_CURRENCY", "INR"), "INR")
+        # The resolver upper-cases before matching, so the warning names
+        # the offending value in its normalised form.
+        self.assertIn("RUPEES", logs.output[0])
+
+    def test_missing_code_uses_the_documented_default(self):
+        env = {k: v for k, v in os.environ.items() if k != "DEFAULT_CURRENCY"}
+        with mock.patch.dict(os.environ, env, clear=True):
+            self.assertEqual(_env_currency("DEFAULT_CURRENCY", "INR"), "INR")
+
+
+@tag("orders")
+class CurrencyBackfillMigrationTests(TransactionTestCase):
+    """[R-8.11] The 0008 backfill is deterministic: rows that predate the
+    column land 'INR' regardless of the migrating environment's config."""
+
+    def test_0008_backfills_preexisting_rows_to_inr(self):
+        call_command("migrate", "orders", "0007", verbosity=0, interactive=False)
+        user_id = User.objects.create_user(
+            "backfill", "backfill@example.com", "S3cure-Passphrase!"
+        ).id
+        # The columns do not exist at 0007, so the ORM cannot write these
+        # rows: raw SQL reproduces exactly what a pre-currency store had.
+        with connection.cursor() as cursor:
+            cursor.execute(
+                "INSERT INTO orders_order (user_id, full_name, phone, address,"
+                " city, state, pincode, status, discount_amount, total_amount,"
+                " created_at, updated_at)"
+                " VALUES (%s, 'Backfill', '1', 'a', 'c', 's', '1', 'pending',"
+                " 0, 100.00, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)",
+                [user_id],
+            )
+            cursor.execute(
+                "INSERT INTO orders_orderitem (order_id, product_id, product_name,"
+                " sku, variant_name, price, quantity, subtotal)"
+                " VALUES ((SELECT MAX(id) FROM orders_order), NULL, 'Legacy',"
+                " '', 'Legacy', 100.00, 1, 100.00)"
+            )
+
+        call_command("migrate", "orders", verbosity=0, interactive=False)
+
+        order = Order.objects.get(full_name="Backfill")
+        self.assertEqual(order.currency, "INR")
+        items = list(order.items.all())
+        self.assertEqual(len(items), 1)
+        self.assertEqual(items[0].currency, "INR")
 
 
 @tag("orders")

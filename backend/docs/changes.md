@@ -321,6 +321,18 @@ Per spec 8.3 "Historical snapshots" (orders must retain what was actually purcha
 - No changes to cart, verify_payment, stock gate, dedup guard, order-number mint or URLs; no fixture edits; no new env keys.
 - Suite: **433 tests, OK (429 pass, 4 pre-existing `expectedFailure` unchanged — ceiling held)**, coverage **100.00%** (1923 stmts, 0 miss — grew from 1920 with the new code; gate 90), `makemigrations --check` clean.
 
+## 2026-09-20 - SPEC-8-03 (Section 8) - builder: currency column alongside every money column, store-config-driven ([R-8.11], part 1/2)
+
+- `config/settings.py` — `DEFAULT_CURRENCY` via `_env_currency(name, default)`, a fail-safe env resolver in the established `_env_int`/`_env_log_level` idiom: three-letter ISO 4217 shape (case-insensitive), malformed values fall back to `INR` with a warning instead of failing startup. Deliberately env config, NOT a SiteSettings column: a currency is never-changes-at-runtime config (S16 boundary) — runtime-editable currency would reprice historical rows' meaning.
+- `.env.example` — `DEFAULT_CURRENCY=INR` documented (affects NEW rows only; existing rows keep their minted currency).
+- `orders/models.py` — `Order.currency` + `OrderItem.currency` (`CharField(max_length=3)`, callable `default_currency()` reading `settings.DEFAULT_CURRENCY` at creation — chosen over set-at-creation so every writer, not just checkout, gets the config value; the callable reference keeps migration files deterministic). Order currency denominates `total_amount` + `discount_amount`; item currency rides `price`/`subtotal`. `Coupon.discount_value` stays out of scope: catalogue config, not transaction money.
+- `orders/migrations/0008_order_currency.py` — two AddFields + `RunPython` backfill stamping every pre-existing row with the literal `'INR'` (deterministic regardless of the migrating environment's `DEFAULT_CURRENCY`, which the callable default would otherwise bake in); reverse is a documented noop.
+- `orders/views.py` — both hardcoded `'INR'` literals in `create_payment` (gateway `order.create` payload + client response) now read `order.currency`; no other line touched (dedup guard, order-number mint, snapshot population byte-unchanged).
+- `orders/tests.py` (+9): store-default currency on order/items with Decimal money intact, setting override changes new rows (ORM + checkout), gateway payload charged in the order's currency (mocked Razorpay), recorded currency frozen against later setting changes, `_env_currency` valid/malformed-with-warning/missing branches, and a migration round-trip (`0007` → raw pre-currency rows → `0008`) pinning the deterministic `'INR'` backfill.
+- **Part 2/2 remainder (next dispatch)**: `orders/serializers.py` (`currency` in `OrderSerializer` + `OrderItemSerializer` fields/read_only), `orders/admin.py` (`OrderAdmin.list_display` + payment fieldset/readonly), and their exposure tests — spec sentence "customer-facing serializers surface the currency + admin list_display".
+- Boundary note: `verify_payment` does NOT assert the gateway amount at HEAD (the dispatch premise was stale — there is no gateway fetch/reconciliation in the verify path); adding server-side amount+currency reconciliation is a separate concern, not smuggled in here. Frontend `money.ts` INR formatting is explicitly a frontend task (formatting consumption, not schema).
+- Suite: **442 tests, OK (438 pass, 4 pre-existing `expectedFailure` unchanged — ceiling held)**, coverage **100.00%** (1938 stmts, 0 miss — grew from 1923 with the new code; gate 90), `makemigrations --check` clean.
+
 ## Next (per fix-plan.md)
 
 - Phase 0 remaining: rotate Razorpay keys, add CI.

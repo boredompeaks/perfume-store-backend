@@ -1,7 +1,22 @@
+from django.conf import settings
 from django.db import models
 from django.contrib.auth.models import User
 
 from products.models import products
+
+
+def default_currency():
+    """[R-8.11] Store-config-driven currency for new money-bearing rows.
+
+    A callable default rather than a hardcoded literal so a deployment can
+    retune the store via the DEFAULT_CURRENCY env setting without a code
+    change, while every order/item row still carries an explicit currency
+    beside its amounts. Migrations stay deterministic regardless: the 0008
+    backfill stamps existing rows with the literal 'INR' they were minted
+    under, never with whatever the migrating environment's config says.
+    """
+    return settings.DEFAULT_CURRENCY
+
 
 class Coupon(models.Model):
 
@@ -148,6 +163,16 @@ class Order(models.Model):
         decimal_places=2
     )
 
+    # [R-8.11] Currency rides every money column (spec 8.3: "Store the
+    # currency alongside the amount. Do not assume all currencies use two
+    # decimal places."): total_amount and discount_amount are denominated
+    # in this code, and the gateway payload and serializers read it from
+    # here instead of assuming INR.
+    currency = models.CharField(
+        max_length=3,  # ISO 4217 code width
+        default=default_currency,
+    )
+
     razorpay_order_id = models.CharField(max_length=100, blank=True, null=True, unique=True)
     razorpay_payment_id = models.CharField(max_length=100, blank=True, null=True, unique=True)
 
@@ -212,6 +237,15 @@ class OrderItem(models.Model):
         max_digits=10,
         decimal_places=2,
         default=0
+    )
+
+    # [R-8.11] Denomination of the price/subtotal money columns: set once
+    # beside the amounts it labels, same store-config default as the parent
+    # order, so per-line amounts stay unambiguous if the store currency
+    # ever changes between order generations.
+    currency = models.CharField(
+        max_length=3,  # ISO 4217 code width
+        default=default_currency,
     )
 
     def __str__(self):
