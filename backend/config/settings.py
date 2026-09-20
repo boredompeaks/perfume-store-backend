@@ -68,6 +68,12 @@ MIDDLEWARE = [
     'django.contrib.auth.middleware.AuthenticationMiddleware',
     'django.contrib.messages.middleware.MessageMiddleware',
     'django.middleware.clickjacking.XFrameOptionsMiddleware',
+    # SPEC-9-03 (R-9.2.19, spec line 3002 "consistent error responses"):
+    # every JSON error response is rewritten into the single uniform
+    # {"error", "code", "details"} shape in one place — middleware-level,
+    # because the ad-hoc {"error": ...} view returns raise no exception a
+    # DRF EXCEPTION_HANDLER could see.
+    'common.errors.ErrorEnvelopeMiddleware',
 ]
 
 ROOT_URLCONF = 'config.urls'

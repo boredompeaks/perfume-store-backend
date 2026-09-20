@@ -268,7 +268,7 @@ class ProductWritePermissionTests(ApiTestCase):
                 self.api_login("customer", client=client)
             res = getattr(client, method.lower())(f"/api/products/{self.product.slug}/", payload, format="json")
             self.assertEqual(res.status_code, 403, (client_name, res.status_code))
-            self.assertEqual(res.data["detail"], "Administrator access is required.")
+            self.assertEqual(res.data["error"], "Administrator access is required.")
         self.product.refresh_from_db()
 
     def test_create_requires_staff(self):
@@ -325,20 +325,20 @@ class ProductWritePermissionTests(ApiTestCase):
         self.api_login("staff", client=client)
         res = client.post("/api/products/", {"name": ""}, format="json")
         self.assertEqual(res.status_code, 400, res.data)
-        self.assertIn("name", res.data)
+        self.assertIn("name", res.data["details"])
         res = client.post("/api/products/", {"name": "X", "price": "not-a-number"}, format="json")
         self.assertEqual(res.status_code, 400, res.data)
-        self.assertIn("price", res.data)
+        self.assertIn("price", res.data["details"])
 
     def test_staff_put_and_patch_invalid_payload_rejected_400(self):
         client = self.fresh_client()
         self.api_login("staff", client=client)
         res = client.put(f"/api/products/{self.product.slug}/", {"name": ""}, format="json")
         self.assertEqual(res.status_code, 400, res.data)
-        self.assertIn("name", res.data)
+        self.assertIn("name", res.data["details"])
         res = client.patch(f"/api/products/{self.product.slug}/", {"price": "nope"}, format="json")
         self.assertEqual(res.status_code, 400, res.data)
-        self.assertIn("price", res.data)
+        self.assertIn("price", res.data["details"])
 
 
 @tag("products")
@@ -700,7 +700,7 @@ class ProductPermissionClassesApiTests(ApiTestCase):
             "/api/products/no-such-slug/", {"price": "1.00"}, format="json"
         )
         self.assertEqual(res.status_code, 403, res.data)
-        self.assertEqual(res.data["detail"], "Administrator access is required.")
+        self.assertEqual(res.data["error"], "Administrator access is required.")
 
     def test_staff_write_still_succeeds_end_to_end(self):
         """SPEC-1-01 wiring: a staff PATCH succeeds end-to-end. The payload
@@ -778,7 +778,7 @@ class ProductCapabilityGateRoleTests(ApiTestCase):
             "/api/products/", self._write_payload("Sneak"), format="json"
         )
         self.assertEqual(res.status_code, 403, res.data)
-        self.assertEqual(res.data["detail"], "Administrator access is required.")
+        self.assertEqual(res.data["error"], "Administrator access is required.")
         self.assertFalse(products.objects.filter(name="Sneak").exists())
 
     def test_customer_write_is_denied(self):
@@ -787,7 +787,7 @@ class ProductCapabilityGateRoleTests(ApiTestCase):
             f"/api/products/{self.product.slug}/", {"price": "2.00"}, format="json"
         )
         self.assertEqual(res.status_code, 403, res.data)
-        self.assertEqual(res.data["detail"], "Administrator access is required.")
+        self.assertEqual(res.data["error"], "Administrator access is required.")
 
     def test_roleless_staff_write_is_denied(self):
         """The no-downgrade rule permits only tightenings: the blanket

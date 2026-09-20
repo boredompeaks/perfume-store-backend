@@ -58,7 +58,7 @@ class PasswordResetFlowTests(ApiTestCase):
             format="json",
         )
         self.assertEqual(res.status_code, 400, res.data)
-        self.assertIn("password", res.data)
+        self.assertIn("password", res.data["details"])
 
         # strong password accepted
         res = self.client.post(

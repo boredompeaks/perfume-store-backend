@@ -278,8 +278,17 @@ class ApplyCouponTests(OrderTestBase):
                 res = self._preview(code)
                 self.assertEqual(res.status_code, 400, res.data)
                 # one body for every failure reason; no configuration detail
-                # (e.g. minimum_order_amount) may ride along
-                self.assertEqual(res.data, {"error": "Invalid coupon code"})
+                # (e.g. minimum_order_amount) may ride along (SPEC-9-03: the
+                # uniform envelope adds the status-family code + empty
+                # details, the message stays the top-level string)
+                self.assertEqual(
+                    res.data,
+                    {
+                        "error": "Invalid coupon code",
+                        "code": "validation_error",
+                        "details": {},
+                    },
+                )
 
     def test_missing_code_rejected(self):
         res = self.client.post("/api/orders/apply-coupon/", {}, format="json")
@@ -515,7 +524,7 @@ class CheckoutStockGateTests(OrderTestBase):
             "Reduce the quantity or remove the item to continue.",
         )
         self.assertEqual(
-            res.data["products"],
+            res.data["details"]["products"],
             [{"name": "Rose Aurum", "requested": 2, "available": 1}],
         )
         # nothing was created or mutated: the customer fixes the cart
@@ -560,7 +569,7 @@ class CheckoutStockGateTests(OrderTestBase):
         self.assertIn("Rose Aurum", res.data["error"])
         self.assertNotIn("Oud Royale", res.data["error"])
         self.assertEqual(
-            res.data["products"],
+            res.data["details"]["products"],
             [{"name": "Rose Aurum", "requested": 2, "available": 1}],
         )
         self.assertEqual(Order.objects.count(), 0)
@@ -580,7 +589,7 @@ class CheckoutStockGateTests(OrderTestBase):
         self.assertIn("Oud Royale", res.data["error"])
         self.assertIn("remove these items", res.data["error"])
         self.assertEqual(
-            {row["name"] for row in res.data["products"]},
+            {row["name"] for row in res.data["details"]["products"]},
             {"Rose Aurum", "Oud Royale"},
         )
         self.assertEqual(Order.objects.count(), 0)
