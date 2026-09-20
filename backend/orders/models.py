@@ -176,6 +176,27 @@ class Order(models.Model):
     razorpay_order_id = models.CharField(max_length=100, blank=True, null=True, unique=True)
     razorpay_payment_id = models.CharField(max_length=100, blank=True, null=True, unique=True)
 
+    # [R-8.16] Business-event timeline (spec 8.3 "Timestamps": store distinct
+    # timestamps for each business event; do not overload a generic
+    # ``updated_at`` to represent one). Each column is NULL until the event
+    # happens, is written exactly once by the code path that performs the
+    # event, and is never mutated once set (writers guard with an is-none /
+    # or-check; serializers and the admin expose them read-only). UTC
+    # storage comes from USE_TZ=True, not from the columns. paid_at and
+    # cancelled_at have live writers (verify_payment / admin cancel);
+    # fulfilled_at, shipped_at, delivered_at and refunded_at are the named
+    # pattern the later fulfilment and refund sections write -- no writer
+    # touches them yet. Historical rows stay NULL on purpose: the events
+    # predate the columns, their times are unknowable, so no backfill is
+    # possible. No index yet: spec 8.3 says add indexes from measured query
+    # patterns, and none of these dates is queried with status today.
+    paid_at = models.DateTimeField(null=True, blank=True)
+    fulfilled_at = models.DateTimeField(null=True, blank=True)
+    shipped_at = models.DateTimeField(null=True, blank=True)
+    delivered_at = models.DateTimeField(null=True, blank=True)
+    cancelled_at = models.DateTimeField(null=True, blank=True)
+    refunded_at = models.DateTimeField(null=True, blank=True)
+
     created_at = models.DateTimeField(
         auto_now_add=True
     )

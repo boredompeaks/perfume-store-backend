@@ -88,6 +88,15 @@ class OrderSerializer(serializers.ModelSerializer):
             'items',
             'created_at',
             'updated_at',
+            # [R-8.16] The business-event timeline rides every order read
+            # (checkout, dedup replay, list/detail). Read-only like the
+            # events themselves: a client can never claim an event happened.
+            'paid_at',
+            'fulfilled_at',
+            'shipped_at',
+            'delivered_at',
+            'cancelled_at',
+            'refunded_at',
         ]
 
         read_only_fields = [
@@ -102,6 +111,12 @@ class OrderSerializer(serializers.ModelSerializer):
             'items',
             'created_at',
             'updated_at',
+            'paid_at',
+            'fulfilled_at',
+            'shipped_at',
+            'delivered_at',
+            'cancelled_at',
+            'refunded_at',
         ]
 
 

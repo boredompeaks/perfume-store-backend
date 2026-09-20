@@ -1158,3 +1158,205 @@ class OrderListTests(OrderTestBase):
         item = order.items.first()
         self.assertEqual(str(order), f"Order #{order.id} - buyer")
         self.assertEqual(str(item), "Rose Aurum x 2")
+
+
+@tag("orders")
+class BusinessEventTimestampTests(OrderTestBase):
+    """[R-8.16] Business-event timestamps (spec 8.3 "Timestamps"): the order
+    lifecycle carries one named column per business event, NULL until the
+    event happens, written exactly once by the code path that performs it and
+    never mutated afterwards — ``updated_at`` is never overloaded to stand
+    for an event. paid_at/cancelled_at have live writers (verify_payment /
+    admin cancel); fulfilled_at/shipped_at/delivered_at/refunded_at are the
+    named pattern the later fulfilment and refund sections write.
+    """
+
+    BUSINESS_FIELDS = (
+        "paid_at",
+        "fulfilled_at",
+        "shipped_at",
+        "delivered_at",
+        "cancelled_at",
+        "refunded_at",
+    )
+
+    def _verify_payload(self, order):
+        return {
+            "order_id": order.id,
+            "razorpay_order_id": order.razorpay_order_id,
+            "razorpay_payment_id": "pay_TS001",
+            "razorpay_signature": "sig",
+        }
+
+    def _admin_client(self):
+        """Superuser session on a fresh client: logging in on the API client
+        would swap the session and drop the buyer's session cart under the
+        order being created."""
+        if not User.objects.filter(username="tsboss").exists():
+            User.objects.create_superuser(
+                "tsboss", "tsboss@example.com", "S3cure-Passphrase!"
+            )
+        admin_client = self.fresh_client()
+        self.assertTrue(
+            admin_client.login(username="tsboss", password="S3cure-Passphrase!")
+        )
+        return admin_client
+
+    def _run_admin_action(self, action, orders):
+        """Bulk action through the real admin UI (mirrors test_e2e_admin_ops)."""
+        admin_client = self._admin_client()
+        return admin_client.post(
+            "/admin/orders/order/",
+            {
+                "action": action,
+                "_selected_action": [str(order.id) for order in orders],
+                "select_across": "0",
+            },
+            follow=True,
+        )
+
+    def _admin_login(self):
+        if not User.objects.filter(username="tsboss").exists():
+            User.objects.create_superuser(
+                "tsboss", "tsboss@example.com", "S3cure-Passphrase!"
+            )
+        self.assertTrue(
+            self.client.login(username="tsboss", password="S3cure-Passphrase!")
+        )
+
+    def test_new_order_starts_with_all_business_timestamps_null(self):
+        order = self.create_order()
+        for field in self.BUSINESS_FIELDS:
+            with self.subTest(field=field):
+                self.assertIsNone(getattr(order, field))
+
+    def test_verify_writes_paid_at_once_and_replay_never_overwrites(self):
+        order = self.create_order()
+        self.razorpay_mock(order_id="order_TS")
+        res = self.client.post(
+            "/api/orders/payment/", {"order_id": order.id}, format="json"
+        )
+        self.assertEqual(res.status_code, 200, res.data)
+        order.refresh_from_db()
+
+        first = self.client.post(
+            "/api/orders/payment/verify/", self._verify_payload(order), format="json"
+        )
+        self.assertEqual(first.status_code, 200, first.data)
+        order.refresh_from_db()
+        self.assertIsNotNone(order.paid_at)
+        self.assertGreaterEqual(order.paid_at, order.created_at)
+        first_paid_at = order.paid_at
+
+        # the already-processed gate rejects the replay; paid_at must keep
+        # the exact first value — a re-verify never re-stamps the event
+        replay = self.client.post(
+            "/api/orders/payment/verify/", self._verify_payload(order), format="json"
+        )
+        self.assertEqual(replay.status_code, 400, replay.data)
+        order.refresh_from_db()
+        self.assertEqual(order.paid_at, first_paid_at)
+
+    def test_failed_verify_leaves_paid_at_null(self):
+        order = self.create_order()
+        client_mock = self.razorpay_mock(order_id="order_TSFAIL")
+        res = self.client.post(
+            "/api/orders/payment/", {"order_id": order.id}, format="json"
+        )
+        self.assertEqual(res.status_code, 200, res.data)
+        order.refresh_from_db()
+        self.razorpay_fail_signature(client_mock)
+
+        res = self.client.post(
+            "/api/orders/payment/verify/", self._verify_payload(order), format="json"
+        )
+
+        self.assertEqual(res.status_code, 400, res.data)
+        order.refresh_from_db()
+        self.assertEqual(order.status, "pending")
+        self.assertIsNone(order.paid_at)
+
+    def test_admin_cancel_bulk_stamps_cancelled_at_once(self):
+        order = self.create_order()  # pending, unpaid
+
+        res = self._run_admin_action("cancel_pending", [order])
+        self.assertEqual(res.status_code, 200)
+        order.refresh_from_db()
+        self.assertEqual(order.status, "cancelled")
+        self.assertIsNotNone(order.cancelled_at)
+        # cancelling before payment writes exactly one event timestamp:
+        # a cancelled order was never paid, shipped or refunded
+        self.assertIsNone(order.paid_at)
+        self.assertIsNone(order.fulfilled_at)
+        self.assertIsNone(order.shipped_at)
+        self.assertIsNone(order.delivered_at)
+        self.assertIsNone(order.refunded_at)
+
+        # the pending filter skips already-cancelled rows, so a re-run of
+        # the action never mutates the stamp
+        first_cancelled_at = order.cancelled_at
+        res = self._run_admin_action("cancel_pending", [order])
+        self.assertEqual(res.status_code, 200)
+        order.refresh_from_db()
+        self.assertEqual(order.cancelled_at, first_cancelled_at)
+
+    def test_admin_change_form_cancel_stamps_cancelled_at(self):
+        """The single-object path: pending -> cancelled through the change
+        form is a legal transition, so it must stamp cancelled_at too."""
+        self._admin_login()
+        order = Order.objects.create(
+            user=self.buyer,
+            full_name="TS Buyer",
+            phone="9876543210",
+            address="1 Timeline Way",
+            city="Mumbai",
+            state="Maharashtra",
+            pincode="400001",
+            total_amount=Decimal("10.00"),
+        )
+        res = self.client.post(
+            f"/admin/orders/order/{order.id}/change/",
+            {
+                "user": order.user_id,
+                "full_name": order.full_name,
+                "phone": order.phone,
+                "address": order.address,
+                "city": order.city,
+                "state": order.state,
+                "pincode": order.pincode,
+                "status": "cancelled",
+                "_save": "Save",
+                "items-TOTAL_FORMS": "0",
+                "items-INITIAL_FORMS": "0",
+                "items-MIN_NUM_FORMS": "0",
+                "items-MAX_NUM_FORMS": "1000",
+            },
+            follow=True,
+        )
+        self.assertEqual(res.status_code, 200)
+        order.refresh_from_db()
+        self.assertEqual(order.status, "cancelled")
+        self.assertIsNotNone(order.cancelled_at)
+
+    def test_business_timestamps_exposed_read_only_everywhere(self):
+        order = self.create_order()
+
+        for field in self.BUSINESS_FIELDS:
+            with self.subTest(field=field):
+                self.assertIn(field, OrderSerializer.Meta.fields)
+                self.assertIn(field, OrderSerializer.Meta.read_only_fields)
+                self.assertIn(field, OrderAdmin.readonly_fields)
+                self.assertIn(
+                    field, dict(OrderAdmin.fieldsets)["Timestamps"]["fields"]
+                )
+
+        # the changelist carries the two live event stamps beside the row
+        self.assertIn("paid_at", OrderAdmin.list_display)
+        self.assertIn("cancelled_at", OrderAdmin.list_display)
+
+        listing = self.client.get("/api/orders/")
+        self.assertEqual(listing.status_code, 200, listing.data)
+        row = listing.data[0]
+        self.assertEqual(row["id"], order.id)
+        for field in self.BUSINESS_FIELDS:
+            self.assertIsNone(row[field])  # NULL until the event

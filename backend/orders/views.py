@@ -969,9 +969,15 @@ def verify_payment(request):
             coupon.used_count += 1
             coupon.save(update_fields=['used_count'])
 
+        # [R-8.16] paid_at is the business-event timestamp of exactly this
+        # transition, so it is written beside it inside the same atomic
+        # block (rollback together). The already-processed gate above makes
+        # a replay unreachable here; the or-guard pins "written exactly
+        # once, never mutated" even if a future path re-enters.
+        order.paid_at = order.paid_at or timezone.now()
         order.status = 'confirmed'
         order.razorpay_payment_id = razorpay_payment_id
-        order.save(update_fields=['status', 'razorpay_payment_id'])
+        order.save(update_fields=['status', 'razorpay_payment_id', 'paid_at'])
 
         if request.session.session_key:
             cart = Cart.objects.filter(session_id=request.session.session_key).first()
