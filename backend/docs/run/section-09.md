@@ -4,7 +4,7 @@ Migrated verbatim from the monolithic ledger 2026-09-19. Spec lines: 2571–3404
 
 | Task ID | Section | Requirement summary | Spec lines | Status | Attempts |
 |---|---|---|---|---|---|
-| SPEC-9-01 | 9 | P1 — Checkout submit idempotency + duplicate-order guard: Idempotency-Key on POST checkout, unique-by-key dedupe inside existing atomic block, regression tests | 2571–3404 [R-9.3.14],[R-9.3.19] | PENDING (from S9 compliance prefetch; §12 keeps reservation concurrency) | 0 |
+| SPEC-9-01 | 9 | P1 — Checkout submit idempotency + duplicate-order guard: Idempotency-Key on POST checkout, unique-by-key dedupe inside existing atomic block, regression tests | 2571–3404 [R-9.3.14],[R-9.3.19] | SHIPPED (FULL c1 2026-09-20 @ 63d8aa5: 474=470+4xf cov 100.00% @2098; mig fwd/rev/reapply OK) | 0 |
 | SPEC-9-02 | 9 | P2 — /api/v1/ namespace + prefix mapping (store/account/admin/webhooks), legacy-path aliases, dual-mount tests; coordinate frontend base URL with S3 before cutover | 2571–3404 [R-9.0 DEVIATES] | PENDING (from S9 compliance prefetch) | 0 |
 | SPEC-9-03 | 9 | P2 — Uniform error envelope: one helper converting DRF field errors + {"error":…} into a single response shape, envelope-pinning tests | 2571–3404 [R-9.2.19] | PENDING (from S9 compliance prefetch) | 0 |
 | SPEC-9-04 | 9 | P2 — Customer order-detail endpoint GET /api/orders/<id>/ owner-checked + pagination on order history | 2571–3404 [R-9.2.14],[R-9.2.15] | PENDING (from S9 compliance prefetch) | 0 |
