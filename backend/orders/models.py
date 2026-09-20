@@ -12,6 +12,7 @@ from .state import (
     FULFILMENT_STATUS_CHOICES,
     PAYMENT_STATUS_CHOICES,
     STATUS_CHOICES,
+    STATUS_EVENT_TRIGGERS,
 )
 
 
@@ -346,3 +347,82 @@ class OrderItem(models.Model):
 
     def __str__(self):
         return f"{self.product_name} x {self.quantity}"
+
+
+class OrderStatusEvent(models.Model):
+    """[R-10.12]/[R-10.17]/[R-10.18] One immutable row per status transition.
+
+    Every legal order-status transition (checkout creation, verify_payment,
+    the admin change form, the admin bulk actions, the 9-07 admin JSON seam)
+    appends exactly one row in the SAME transaction as the transition it
+    records: a rolled-back writer leaves no event behind, and a committed
+    event can never lack its transition ([R-10.18] rollback-together, pinned
+    per writer in tests). Append-only by design: the save guard below
+    rejects any pk-set re-save, and the admin registration is view-only
+    (no add/change/delete permission), so no code path can rewrite history.
+    ``actor`` is SET_NULL — deleting a user account must never cascade into
+    the audit trail (and verify_payment's events carry actor NULL by design:
+    the customer payment flow has no admin actor, the trigger names the
+    source). ``from_status`` is NULL exactly for creation events (no source
+    state). No backfill: rows predate the table and the transitions that
+    produced them are unknowable, so historical orders legitimately have
+    no trail before their next live transition.
+
+    This is the TRANSITION trail; the privileged-action LogEntry trail
+    (common.audit.log_api_action, SPEC-7-01) separately records who performed
+    which admin operation — the two complement, never replace, each other.
+    """
+
+    order = models.ForeignKey(
+        Order,
+        on_delete=models.CASCADE,
+        related_name='status_events'
+    )
+
+    from_status = models.CharField(
+        max_length=20,
+        choices=STATUS_CHOICES,
+        null=True,
+        blank=True,  # NULL only on creation events (no source state)
+    )
+
+    to_status = models.CharField(
+        max_length=20,
+        choices=STATUS_CHOICES,
+    )
+
+    actor = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='order_status_events',
+    )
+
+    trigger = models.CharField(
+        max_length=30,
+        choices=STATUS_EVENT_TRIGGERS,
+    )
+
+    created_at = models.DateTimeField(
+        auto_now_add=True
+    )
+
+    class Meta:
+        # Newest first: the admin surface (and any future consumer) reads
+        # the trail most-recent-first; the id breaks ties between events
+        # written in the same transaction with equal timestamps.
+        ordering = ("-created_at", "-id")
+        verbose_name = "order status event"
+        verbose_name_plural = "order status events"
+
+    def save(self, *args, **kwargs):
+        # [R-10.18] Append-only: a pk on the instance means an update path
+        # (re-save or bulk-style edit via save), which would rewrite
+        # history — reject it outright.
+        if self.pk is not None:
+            raise TypeError("OrderStatusEvent rows are append-only")
+        return super().save(*args, **kwargs)
+
+    def __str__(self):
+        return f"{self.order_id}: {self.from_status}->{self.to_status} ({self.trigger})"

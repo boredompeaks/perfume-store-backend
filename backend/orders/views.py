@@ -20,6 +20,15 @@ from .state import ADMIN_FULFILMENT_NEXT, ALLOWED_TRANSITIONS, transition_allowe
 # [R-10.1] SPEC-10-01b: dimension mappings for the writers. Kept as its own
 # line so every hunk in this file stays insertion-only.
 from .state import fulfilment_for_status, payment_for_status
+# [R-10.12] SPEC-10-02: transition-audit writers. Own import lines so every
+# hunk in this file stays insertion-only.
+from .models import OrderStatusEvent
+from .state import (
+    TRIGGER_ADMIN_API_CANCEL,
+    TRIGGER_ADMIN_API_FULFIL,
+    TRIGGER_ORDER_CREATE,
+    TRIGGER_PAYMENT_VERIFY,
+)
 
 from cart.models import Cart
 from common import notifications
@@ -589,6 +598,20 @@ def create_order(request):
                 continue
             break
 
+        # [R-10.12]/[R-10.17] SPEC-10-02: creation is the lifecycle's first
+        # transition (no source state -> pending), so the audit trail opens
+        # here — inside the same outer atomic block as the order row, the
+        # minted number, the snapshots and the key binding. A rolled-back
+        # checkout leaves no order and no event; the actor is the customer
+        # who placed the order.
+        OrderStatusEvent.objects.create(
+            order=order,
+            from_status=None,
+            to_status=order.status,
+            actor=request.user,
+            trigger=TRIGGER_ORDER_CREATE,
+        )
+
         # [R-9.3.14] SPEC-9-01: bind the submission key to the freshly
         # minted order inside this same transaction, so a later replay's
         # probe above finds it and collapses. The write is an UPDATE of the
@@ -1146,6 +1169,10 @@ def verify_payment(request):
         # block (rollback together). The already-processed gate above makes
         # a replay unreachable here; the or-guard pins "written exactly
         # once, never mutated" even if a future path re-enters.
+        # [R-10.12] SPEC-10-02: capture the pre-transition status for the
+        # audit row written below (insertion-only hunk; the byte-frozen
+        # 8-04 region below is untouched).
+        previous_status = order.status
         order.paid_at = order.paid_at or timezone.now()
         order.status = 'confirmed'
         order.razorpay_payment_id = razorpay_payment_id
@@ -1159,6 +1186,18 @@ def verify_payment(request):
         # already-processed gate keeps this path unreachable on replay.
         order.payment_status = payment_for_status('confirmed')
         order.save(update_fields=['payment_status'])
+        # [R-10.12]/[R-10.17] SPEC-10-02: the transition's audit row rides
+        # this same atomic block — a rolled-back verify leaves no event
+        # behind (pinned). No admin acts on this path, so the trigger
+        # records the source and the actor stays NULL (spec 10.3: "Actor
+        # or triggering event" — one of the two is enough).
+        OrderStatusEvent.objects.create(
+            order=order,
+            from_status=previous_status,
+            to_status=order.status,
+            actor=None,
+            trigger=TRIGGER_PAYMENT_VERIFY,
+        )
 
         if request.session.session_key:
             cart = Cart.objects.filter(session_id=request.session.session_key).first()
@@ -1300,6 +1339,9 @@ def admin_order_fulfill(request, order_id):
                 status=status.HTTP_409_CONFLICT
             )
 
+        # [R-10.12] SPEC-10-02: capture the pre-transition status for the
+        # audit row written below (insertion-only hunk).
+        previous_status = order.status
         order.status = target
         # [R-10.1] SPEC-10-01b: the fulfilment dimension rides the same
         # transition. Insertion-only hunk (the 9-07 save below stays
@@ -1308,6 +1350,15 @@ def admin_order_fulfill(request, order_id):
         order.fulfilment_status = fulfilment_for_status(target)
         order.save(update_fields=['status'])
         order.save(update_fields=['fulfilment_status'])
+        # [R-10.12]/[R-10.18] SPEC-10-02: the audit row lands in this same
+        # transaction — a rolled-back fulfil never leaves a phantom event.
+        OrderStatusEvent.objects.create(
+            order=order,
+            from_status=previous_status,
+            to_status=target,
+            actor=request.user,
+            trigger=TRIGGER_ADMIN_API_FULFIL,
+        )
         # [6.12.6] API-side staff write: land the privileged-action record
         # the admin surface would have written (audit-log route reads it).
         log_api_action(
@@ -1361,6 +1412,9 @@ def admin_order_cancel(request, order_id):
                 status=status.HTTP_409_CONFLICT
             )
 
+        # [R-10.12] SPEC-10-02: capture the pre-transition status for the
+        # audit row written below (insertion-only hunk).
+        previous_status = order.status
         order.status = "cancelled"
         order.cancelled_at = order.cancelled_at or timezone.now()
         # [R-10.1] SPEC-10-01b: fulfilment dimension rides the cancel
@@ -1368,6 +1422,16 @@ def admin_order_cancel(request, order_id):
         order.fulfilment_status = fulfilment_for_status("cancelled")
         order.save(update_fields=['status', 'cancelled_at'])
         order.save(update_fields=['fulfilment_status'])
+        # [R-10.12]/[R-10.18] SPEC-10-02: the audit row lands in this same
+        # transaction; the idempotent replay above returns before reaching
+        # it, so a re-cancel never appends a second event.
+        OrderStatusEvent.objects.create(
+            order=order,
+            from_status=previous_status,
+            to_status="cancelled",
+            actor=request.user,
+            trigger=TRIGGER_ADMIN_API_CANCEL,
+        )
         log_api_action(request, order, CHANGE, "Cancelled via API.")
 
     return Response({

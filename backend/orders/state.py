@@ -101,3 +101,27 @@ def payment_for_status(status: str) -> str:
 def fulfilment_for_status(status: str) -> str:
     """The fulfilment-dimension value implied by a legacy single status."""
     return LEGACY_STATUS_DIMENSIONS[status][1]
+
+
+# ——— [R-10.12]/[R-10.17] SPEC-10-02: transition-audit triggers ——————————
+# Every legal status transition appends an OrderStatusEvent row naming the
+# surface that performed it. The trigger vocabulary lives here beside the
+# machine it audits (single source): a new writer must pick a trigger from
+# this list, so the audit trail cannot grow unregistered sources. Spec 10.3
+# prescribes "Actor or triggering event" per transition — the pair below is
+# how each event answers it (who did it, or what fired it).
+TRIGGER_ORDER_CREATE = "order_create"
+TRIGGER_ADMIN_CHANGE_FORM = "admin_change_form"
+TRIGGER_ADMIN_BULK_ACTION = "admin_bulk_action"
+TRIGGER_PAYMENT_VERIFY = "payment_verify"
+TRIGGER_ADMIN_API_FULFIL = "admin_api_fulfil"
+TRIGGER_ADMIN_API_CANCEL = "admin_api_cancel"
+
+STATUS_EVENT_TRIGGERS = [
+    (TRIGGER_ORDER_CREATE, "Order created"),
+    (TRIGGER_ADMIN_CHANGE_FORM, "Admin change form"),
+    (TRIGGER_ADMIN_BULK_ACTION, "Admin bulk action"),
+    (TRIGGER_PAYMENT_VERIFY, "Payment verified"),
+    (TRIGGER_ADMIN_API_FULFIL, "Admin fulfilment API"),
+    (TRIGGER_ADMIN_API_CANCEL, "Admin cancel API"),
+]

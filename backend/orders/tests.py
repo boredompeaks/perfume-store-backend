@@ -24,7 +24,7 @@ from common.roles import ROLE_FINANCE, ROLE_SUPPORT
 from common.testing import TEST_RAZORPAY_KEY_ID, ApiTestCase
 from config.settings import _env_currency
 from orders.admin import OrderAdmin
-from orders.models import Coupon, Order, OrderItem
+from orders.models import Coupon, Order, OrderItem, OrderStatusEvent
 from orders.serializers import OrderItemSerializer, OrderSerializer
 from orders import state as order_state
 from orders.views import apply_coupon
@@ -1917,6 +1917,19 @@ class BulkSetStatusRaceGuardTests(ApiTestCase):
         self.assertEqual(victim.status, "cancelled")
         self.assertEqual(control.status, "confirmed")
 
+        # [R-10.12] SPEC-10-02: the reworked per-row path keeps the same
+        # skip semantics at the audit layer — the row it skipped gets NO
+        # event for the sweep it never underwent, the swept row gets
+        # exactly one.
+        self.assertFalse(
+            OrderStatusEvent.objects.filter(
+                order=victim, to_status="confirmed"
+            ).exists()
+        )
+        swept_event = OrderStatusEvent.objects.get(order=control)
+        self.assertEqual(swept_event.from_status, "pending")
+        self.assertEqual(swept_event.to_status, "confirmed")
+
 
 # ==================================
 # [R-10.1] SPEC-10-01a: order lifecycle dimensions
@@ -2341,3 +2354,443 @@ class LifecycleWiringTests(OrderTestBase):
         row = next(r for r in listing.data["results"] if r["id"] == order.id)
         self.assertEqual(row["payment_status"], "captured")
         self.assertEqual(row["fulfilment_status"], "fulfilled")
+
+
+# ==================================
+# [R-10.12]/[R-10.17]/[R-10.18] SPEC-10-02: transition audit trail
+# ==================================
+
+@tag("orders")
+class TransitionAuditTrailTests(OrderTestBase):
+    """[R-10.12] Every legal order-status transition appends one immutable
+    OrderStatusEvent row (from→to, actor, trigger, timestamp) inside the
+    SAME transaction as the transition it records ([R-10.18] append-only:
+    a rolled-back writer leaves no event, a committed event can never lack
+    its transition, and no writer can mutate a row afterwards). The
+    privileged-action LogEntry trail (SPEC-7-01) is a separate record and
+    is not touched here."""
+
+    def _verify_payload(self, order):
+        return {
+            "order_id": order.id,
+            "razorpay_order_id": order.razorpay_order_id,
+            "razorpay_payment_id": "pay_AUD001",
+            "razorpay_signature": "sig",
+        }
+
+    def _admin_login(self):
+        if not User.objects.filter(username="auditboss").exists():
+            User.objects.create_superuser(
+                "auditboss", "auditboss@example.com", "S3cure-Passphrase!"
+            )
+        self.assertTrue(
+            self.client.login(username="auditboss", password="S3cure-Passphrase!")
+        )
+
+    def _admin_user(self):
+        return User.objects.get(username="auditboss")
+
+    def _run_admin_action(self, action, orders):
+        """Bulk action through the real admin UI (mirrors the 8-16 tests)."""
+        self._admin_login()
+        return self.client.post(
+            "/admin/orders/order/",
+            {
+                "action": action,
+                "_selected_action": [str(order.id) for order in orders],
+                "select_across": "0",
+            },
+            follow=True,
+        )
+
+    def _staff_client(self, username):
+        from django.contrib.auth.models import Group
+
+        from common.roles import ROLE_SUPPORT
+
+        user = User.objects.create_user(
+            username, f"{username}@example.com", "S3cure-Passphrase!"
+        )
+        user.groups.add(Group.objects.get_or_create(name=ROLE_SUPPORT)[0])
+        client = self.fresh_client()
+        client.force_authenticate(user)
+        return client
+
+    def _order_with_status(self, user, status):
+        """A row exactly as the writers would have left it (status plus the
+        dimension mapping). The .update() deliberately bypasses auto_now —
+        which is the staleness the bulk path's per-row rework fixes."""
+        order = Order.objects.create(
+            user=user,
+            full_name="Audit Buyer",
+            phone="1",
+            address="a",
+            city="c",
+            state="s",
+            pincode="1",
+            total_amount=Decimal("10.00"),
+        )
+        Order.objects.filter(pk=order.pk).update(
+            status=status,
+            payment_status=order_state.payment_for_status(status),
+            fulfilment_status=order_state.fulfilment_for_status(status),
+        )
+        order.refresh_from_db()
+        return order
+
+    # ——— checkout: the trail opens with the creation event ———
+
+    def test_checkout_appends_the_creation_event(self):
+        """[R-10.12] Creation is the lifecycle's first transition (no source
+        state → pending), so the trail opens at checkout."""
+        order = self.create_order()
+        events = list(order.status_events.all())
+        self.assertEqual(len(events), 1)
+        event = events[0]
+        self.assertIsNone(event.from_status)
+        self.assertEqual(event.to_status, "pending")
+        self.assertEqual(event.actor, self.buyer)
+        self.assertEqual(event.trigger, order_state.TRIGGER_ORDER_CREATE)
+        self.assertIsNotNone(event.created_at)
+
+    # ——— verify_payment ———
+
+    def test_verify_payment_appends_the_transition_event(self):
+        order = self.create_order()
+        self.razorpay_mock(order_id="order_AUDV")
+        res = self.client.post(
+            "/api/orders/payment/", {"order_id": order.id}, format="json"
+        )
+        self.assertEqual(res.status_code, 200, res.data)
+        order.refresh_from_db()  # picks up the minted razorpay_order_id
+
+        res = self.client.post(
+            "/api/orders/payment/verify/", self._verify_payload(order), format="json"
+        )
+        self.assertEqual(res.status_code, 200, res.data)
+        events = list(order.status_events.order_by("created_at", "id"))
+        self.assertEqual([e.to_status for e in events], ["pending", "confirmed"])
+        transition = events[-1]
+        self.assertEqual(transition.from_status, "pending")
+        self.assertEqual(transition.to_status, "confirmed")
+        # [R-10.17] No admin acts on this path: the trigger records the
+        # source and the actor stays NULL — "actor OR triggering event".
+        self.assertIsNone(transition.actor)
+        self.assertEqual(transition.trigger, order_state.TRIGGER_PAYMENT_VERIFY)
+
+    def test_failed_verify_appends_no_event(self):
+        order = self.create_order()
+        client_mock = self.razorpay_mock(order_id="order_AUDFAIL")
+        res = self.client.post(
+            "/api/orders/payment/", {"order_id": order.id}, format="json"
+        )
+        self.assertEqual(res.status_code, 200, res.data)
+        order.refresh_from_db()
+        self.razorpay_fail_signature(client_mock)
+
+        res = self.client.post(
+            "/api/orders/payment/verify/", self._verify_payload(order), format="json"
+        )
+        self.assertEqual(res.status_code, 400, res.data)
+        # no transition, no event: the trail still holds creation only
+        self.assertEqual(
+            list(order.status_events.values_list("to_status", flat=True)),
+            ["pending"],
+        )
+
+    def test_verify_rollback_takes_the_event_with_it(self):
+        """[R-10.18] Rollback-together pin: the event rides verify_payment's
+        atomic block, so an audit-layer failure after it reverts both."""
+        order = self.create_order()
+        self.razorpay_mock(order_id="order_AUDRB")
+        res = self.client.post(
+            "/api/orders/payment/", {"order_id": order.id}, format="json"
+        )
+        self.assertEqual(res.status_code, 200, res.data)
+        order.refresh_from_db()
+        self.client.raise_request_exception = False
+        with mock.patch.object(
+            AuditEvent, "record", side_effect=RuntimeError("down")
+        ):
+            res = self.client.post(
+                "/api/orders/payment/verify/",
+                self._verify_payload(order),
+                format="json",
+            )
+        self.assertEqual(res.status_code, 500)
+        order.refresh_from_db()
+        self.assertEqual(order.status, "pending")
+        self.assertEqual(order.status_events.count(), 1)  # creation only
+
+    # ——— admin change form ———
+
+    def _change_form_post(self, order, status):
+        return self.client.post(
+            f"/admin/orders/order/{order.id}/change/",
+            {
+                "user": order.user_id,
+                "full_name": order.full_name,
+                "phone": order.phone,
+                "address": order.address,
+                "city": order.city,
+                "state": order.state,
+                "pincode": order.pincode,
+                "status": status,
+                "_save": "Save",
+                "items-TOTAL_FORMS": "0",
+                "items-INITIAL_FORMS": "0",
+                "items-MIN_NUM_FORMS": "0",
+                "items-MAX_NUM_FORMS": "1000",
+            },
+            follow=True,
+        )
+
+    def test_admin_change_form_appends_one_event_per_legal_transition(self):
+        self._admin_login()
+        order = self._order_with_status(self.buyer, "pending")
+
+        res = self._change_form_post(order, "cancelled")
+        self.assertEqual(res.status_code, 200)
+        order.refresh_from_db()
+        self.assertEqual(order.status, "cancelled")
+
+        event = order.status_events.exclude(
+            trigger=order_state.TRIGGER_ORDER_CREATE
+        ).get()
+        self.assertEqual(event.from_status, "pending")
+        self.assertEqual(event.to_status, "cancelled")
+        self.assertEqual(event.actor, self._admin_user())
+        self.assertEqual(event.trigger, order_state.TRIGGER_ADMIN_CHANGE_FORM)
+
+    def test_admin_change_form_skips_noop_saves_and_illegal_moves(self):
+        self._admin_login()
+        confirmed = self._order_with_status(self.buyer, "confirmed")
+        shipped = self._order_with_status(self.buyer, "shipped")
+
+        # no-op: the self-transition is not a transition, so no audit row
+        res = self._change_form_post(confirmed, "confirmed")
+        self.assertEqual(res.status_code, 200)
+        # illegal: the machine gate aborts the save entirely
+        res = self._change_form_post(shipped, "cancelled")
+        self.assertEqual(res.status_code, 200)
+
+        self.assertEqual(confirmed.status_events.count(), 0)
+        self.assertEqual(shipped.status_events.count(), 0)
+
+    def test_admin_change_form_failed_audit_write_reverts_the_transition(self):
+        """[R-10.18] Rollback-together pin for the change form: a failing
+        event write rolls the whole save back with it."""
+        self._admin_login()
+        self.client.raise_request_exception = False
+        order = self._order_with_status(self.buyer, "pending")
+        with mock.patch.object(
+            OrderStatusEvent.objects,
+            "create",
+            side_effect=RuntimeError("audit down"),
+        ):
+            res = self._change_form_post(order, "confirmed")
+        self.assertEqual(res.status_code, 500)
+        order.refresh_from_db()
+        self.assertEqual(order.status, "pending")
+        self.assertEqual(order.status_events.count(), 0)
+
+    # ——— admin bulk actions ———
+
+    def test_bulk_action_appends_per_row_events_with_fresh_updated_at(self):
+        confirmed = self._order_with_status(self.buyer, "confirmed")
+        pending = self._order_with_status(self.buyer, "pending")
+        # the pre-fix state: a bulk .update() bypasses auto_now, so
+        # updated_at is stranded at its insert-time value — exactly the
+        # staleness the per-row rework fixes
+        stale_updated_at = confirmed.updated_at
+
+        res = self._run_admin_action("mark_shipped", [confirmed, pending])
+        self.assertEqual(res.status_code, 200)
+        confirmed.refresh_from_db()
+        pending.refresh_from_db()
+
+        self.assertEqual(confirmed.status, "shipped")
+        # [staleness pin] per-row saves fire auto_now: updated_at is fresh
+        self.assertGreater(confirmed.updated_at, stale_updated_at)
+
+        event = confirmed.status_events.get()
+        self.assertEqual(event.from_status, "confirmed")
+        self.assertEqual(event.to_status, "shipped")
+        self.assertEqual(event.actor, self._admin_user())
+        self.assertEqual(event.trigger, order_state.TRIGGER_ADMIN_BULK_ACTION)
+
+        # the out-of-set row is skipped with no event (9-07 semantics)
+        self.assertEqual(pending.status, "pending")
+        self.assertEqual(pending.status_events.count(), 0)
+
+    def test_bulk_cancel_appends_events(self):
+        order = self.create_order()  # pending, unpaid, has creation event
+
+        res = self._run_admin_action("cancel_pending", [order])
+        self.assertEqual(res.status_code, 200)
+        order.refresh_from_db()
+        self.assertEqual(order.status, "cancelled")
+
+        cancel_event = order.status_events.exclude(
+            trigger=order_state.TRIGGER_ORDER_CREATE
+        ).get()
+        self.assertEqual(cancel_event.from_status, "pending")
+        self.assertEqual(cancel_event.to_status, "cancelled")
+        self.assertEqual(cancel_event.actor, self._admin_user())
+        self.assertEqual(cancel_event.trigger, order_state.TRIGGER_ADMIN_BULK_ACTION)
+
+    # ——— the 9-07 admin JSON seam ———
+
+    def test_json_seam_fulfil_appends_events_with_the_staff_actor(self):
+        order = self.create_order()
+        support = self._staff_client("auditsupp")
+
+        res = support.post(f"/api/admin/orders/{order.id}/fulfill/")
+        self.assertEqual(res.status_code, 200, res.data)
+        res = support.post(f"/api/admin/orders/{order.id}/fulfill/")
+        self.assertEqual(res.status_code, 200, res.data)
+
+        events = order.status_events.filter(
+            trigger=order_state.TRIGGER_ADMIN_API_FULFIL
+        ).order_by("created_at", "id")
+        self.assertEqual(
+            [(e.from_status, e.to_status) for e in events],
+            [("pending", "confirmed"), ("confirmed", "shipped")],
+        )
+        for event in events:
+            self.assertEqual(event.actor, User.objects.get(username="auditsupp"))
+
+    def test_json_seam_cancel_appends_event_and_replay_appends_nothing(self):
+        order = self.create_order()
+        support = self._staff_client("auditcancel")
+
+        res = support.post(f"/api/admin/orders/{order.id}/cancel/")
+        self.assertEqual(res.status_code, 200, res.data)
+        res = support.post(f"/api/admin/orders/{order.id}/cancel/")
+        self.assertEqual(res.status_code, 200, res.data)  # idempotent replay
+
+        cancel_events = order.status_events.filter(
+            trigger=order_state.TRIGGER_ADMIN_API_CANCEL
+        )
+        self.assertEqual(cancel_events.count(), 1)
+        event = cancel_events.get()
+        self.assertEqual(event.from_status, "pending")
+        self.assertEqual(event.to_status, "cancelled")
+        self.assertEqual(event.actor, User.objects.get(username="auditcancel"))
+
+    def test_cancel_pending_skips_a_row_flipped_after_the_snapshot(self):
+        """Deterministic cancel twin of the 9-07 race guard: a row that
+        flips pending→confirmed between the pk snapshot and the per-row
+        write is a PAID order by then — it must be skipped (cancelling a
+        paid order is impossible), with no audit row for a cancel that
+        never happened."""
+        from django.contrib.admin import site as admin_site
+        from django.contrib.messages.storage.fallback import FallbackStorage
+        from django.db import models as django_models
+        from django.test import RequestFactory
+
+        admin = OrderAdmin(Order, admin_site)
+        staff = self.make_staff()
+        request = RequestFactory().post("/admin/orders/order/")
+        request.user = staff
+        request.session = {}
+        request._messages = FallbackStorage(request)
+
+        victim = Order.objects.create(
+            user=self.buyer,
+            full_name="V", phone="1", address="a", city="c", state="s",
+            pincode="1", total_amount=Decimal("10.00"),
+        )
+        control = Order.objects.create(
+            user=self.buyer,
+            full_name="C", phone="1", address="a", city="c", state="s",
+            pincode="1", total_amount=Decimal("10.00"),
+        )
+
+        class CancellingQuerySet(django_models.QuerySet):
+            raced = False
+
+            def values_list(self, *args, **kwargs):
+                pks = list(super().values_list(*args, **kwargs))
+                if not CancellingQuerySet.raced:
+                    CancellingQuerySet.raced = True
+                    # The interleave: the snapshot above already saw both
+                    # rows pending; the victim gets paid before the write
+                    # runs.
+                    Order.objects.filter(pk=victim.pk).update(status="confirmed")
+                return pks
+
+        admin.cancel_pending(request, CancellingQuerySet(Order))
+
+        victim.refresh_from_db()
+        control.refresh_from_db()
+        self.assertEqual(victim.status, "confirmed")
+        self.assertEqual(control.status, "cancelled")
+        self.assertFalse(
+            OrderStatusEvent.objects.filter(
+                order=victim, to_status="cancelled"
+            ).exists()
+        )
+        self.assertTrue(
+            OrderStatusEvent.objects.filter(
+                order=control, to_status="cancelled"
+            ).exists()
+        )
+
+    # ——— immutability ([R-10.18]) ———
+
+    def test_events_are_append_only(self):
+        order = self.create_order()
+        event = order.status_events.get()
+        event.to_status = "confirmed"
+        with self.assertRaisesRegex(TypeError, "append-only"):
+            event.save()
+        event.refresh_from_db()
+        self.assertEqual(event.to_status, "pending")
+
+    def test_admin_surface_is_view_only(self):
+        from django.contrib.admin import site as admin_site
+        from django.test import RequestFactory
+
+        from orders.admin import OrderStatusEventAdmin
+
+        order = self.create_order()
+        event = order.status_events.get()
+        event_admin = OrderStatusEventAdmin(OrderStatusEvent, admin_site)
+
+        # staff (orders.read via the roles map): view yes, mutate no
+        staff = self.make_staff()
+        request = RequestFactory().post("/admin/")
+        request.user = staff
+        self.assertTrue(event_admin.has_view_permission(request))
+        self.assertFalse(event_admin.has_add_permission(request))
+        self.assertFalse(event_admin.has_change_permission(request, event))
+        self.assertFalse(event_admin.has_delete_permission(request, event))
+
+        # even the superuser bypass cannot add or delete: append-only
+        self._admin_login()
+        request.user = self._admin_user()
+        self.assertFalse(event_admin.has_add_permission(request))
+        self.assertFalse(event_admin.has_delete_permission(request))
+
+        # every field renders read-only: the change form is a view
+        for field in ("order", "from_status", "to_status", "actor", "trigger",
+                      "created_at"):
+            self.assertIn(field, OrderStatusEventAdmin.readonly_fields)
+
+    def test_event_model_pins(self):
+        """Meta pins + the trigger choices stay single-sourced in state.py."""
+        self.assertEqual(
+            OrderStatusEvent._meta.get_field("trigger").choices,
+            order_state.STATUS_EVENT_TRIGGERS,
+        )
+        self.assertEqual(OrderStatusEvent._meta.ordering, ("-created_at", "-id"))
+        self.assertEqual(
+            OrderStatusEvent._meta.verbose_name, "order status event"
+        )
+        order = self.create_order()
+        event = order.status_events.get()
+        self.assertEqual(
+            str(event),
+            f"{order.id}: None->pending ({order_state.TRIGGER_ORDER_CREATE})",
+        )
