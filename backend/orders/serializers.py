@@ -76,6 +76,11 @@ class OrderSerializer(serializers.ModelSerializer):
             'state',
             'pincode',
             'status',
+            # [R-10.1] The explicit lifecycle dimensions (spec 10.2) ride
+            # every order read beside the legacy ``status`` they mirror.
+            # Read-only like status itself: dimensions are machine-maintained.
+            'payment_status',
+            'fulfilment_status',
 
             'coupon',
             'discount_amount',
@@ -104,6 +109,8 @@ class OrderSerializer(serializers.ModelSerializer):
             'order_number',
             'user',
             'status',
+            'payment_status',
+            'fulfilment_status',
             'coupon',
             'discount_amount',
             'total_amount',

@@ -4,6 +4,16 @@ from django.contrib.auth.models import User
 
 from products.models import products
 
+# [R-10.1] The order machine's constants live in orders.state (single
+# source); models, admin and views all import the same objects. Named
+# imports: a plain ``from . import state`` would be shadowed inside the
+# Order class body by its address ``state`` field.
+from .state import (
+    FULFILMENT_STATUS_CHOICES,
+    PAYMENT_STATUS_CHOICES,
+    STATUS_CHOICES,
+)
+
 
 def default_currency():
     """[R-8.11] Store-config-driven currency for new money-bearing rows.
@@ -88,13 +98,9 @@ class Order(models.Model):
     ``order_number`` -- the pk never leaves server-side routing.
     """
 
-    STATUS_CHOICES = [
-        ('pending', 'Pending'),
-        ('confirmed', 'Confirmed'),
-        ('shipped', 'Shipped'),
-        ('delivered', 'Delivered'),
-        ('cancelled', 'Cancelled'),
-    ]
+    # [R-10.1] Single-sourced in orders.state; the class attribute stays so
+    # existing consumers (ops dashboard, admin filters) keep working.
+    STATUS_CHOICES = STATUS_CHOICES
 
     # [R-8.4] Customer-facing reference, minted inside create_order's atomic
     # block. Nullable by design: checkout (the only production writer) always
@@ -142,6 +148,28 @@ class Order(models.Model):
         max_length=20,
         choices=STATUS_CHOICES,
         default='pending'
+    )
+
+    # [R-10.1] SPEC-10-01a: the lifecycle split into explicit dimensions
+    # (spec 10.2). Additive by design: ``status`` above remains the compat
+    # surface; the writers keep these in sync with every status change
+    # (orders.state.LEGACY_STATUS_DIMENSIONS is the mapping). null=False
+    # with defaults so every row always answers both questions. No
+    # db_index: the §8.3 prescribed starting set (SPEC-8-05, the Meta
+    # indexes below) deliberately does not include these columns — indexes
+    # come from measured query patterns, per the same policy as the event
+    # timestamps.
+    payment_status = models.CharField(
+        max_length=20,
+        choices=PAYMENT_STATUS_CHOICES,
+        default='pending',
+        help_text="Payment dimension of the lifecycle (spec 10.2).",
+    )
+    fulfilment_status = models.CharField(
+        max_length=20,
+        choices=FULFILMENT_STATUS_CHOICES,
+        default='unfulfilled',
+        help_text="Fulfilment dimension of the lifecycle (spec 10.2).",
     )
 
     coupon = models.ForeignKey(

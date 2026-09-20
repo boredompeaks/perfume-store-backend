@@ -5,7 +5,10 @@ from django.http import HttpResponse
 from django.utils import timezone
 
 from common.admin import RoleAwareModelAdmin
+# [R-10.1] The order machine lives in orders.state (single source); this
+# module only consumes it.
 from .models import Coupon, Order, OrderItem
+from .state import ALLOWED_TRANSITIONS, transition_allowed
 
 
 class OrderItemInline(admin.TabularInline):
@@ -38,19 +41,9 @@ class OrderItemInline(admin.TabularInline):
         return False
 
 
-# Legal status flow. Cancelling a *paid* order is deliberately impossible —
-# there is no refund flow yet (V-03); reconciliation is manual by design.
-ALLOWED_TRANSITIONS = {
-    "pending": {"confirmed", "cancelled"},
-    "confirmed": {"shipped"},
-    "shipped": {"delivered"},
-    "delivered": set(),
-    "cancelled": set(),
-}
-
-
-def transition_allowed(old_status: str, new_status: str) -> bool:
-    return new_status == old_status or new_status in ALLOWED_TRANSITIONS.get(old_status, set())
+# The legal status flow (ALLOWED_TRANSITIONS) and its gate
+# (transition_allowed) live in orders.state — [R-10.1] single source. The
+# cancelling-a-paid-order rationale is documented beside the table there.
 
 
 @admin.register(Order)

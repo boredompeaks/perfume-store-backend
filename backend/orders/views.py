@@ -12,9 +12,11 @@ from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
 from rest_framework import status
 
-from .admin import ALLOWED_TRANSITIONS, transition_allowed
+# [R-10.1] The order machine (transition table, gate, fulfilment step map)
+# lives in orders.state — the single source; views only consume it.
 from .models import Order, OrderItem, Coupon
 from .serializers import OrderSerializer
+from .state import ADMIN_FULFILMENT_NEXT, ALLOWED_TRANSITIONS, transition_allowed
 
 from cart.models import Cart
 from common import notifications
@@ -1197,15 +1199,9 @@ def verify_payment(request):
 # ==================================
 
 # SPEC-9-07: the fulfilment endpoint drives the order one legal step per
-# call along the flow the admin surface's bulk actions encode. The step map
-# only NAMES the candidate edge; the state machine (transition_allowed) is
-# still the single gate — if a machine edge is ever revoked, this endpoint
-# 409s on it instead of silently widening the machine.
-ADMIN_FULFILMENT_NEXT = {
-    "pending": "confirmed",
-    "confirmed": "shipped",
-    "shipped": "delivered",
-}
+# call along the flow the admin surface's bulk actions encode.
+# ADMIN_FULFILMENT_NEXT (the step map) and transition_allowed (the gate)
+# live in orders.state — [R-10.1] single source.
 
 
 @api_view(['GET'])

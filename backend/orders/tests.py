@@ -26,6 +26,7 @@ from config.settings import _env_currency
 from orders.admin import OrderAdmin
 from orders.models import Coupon, Order, OrderItem
 from orders.serializers import OrderItemSerializer, OrderSerializer
+from orders import state as order_state
 from orders.views import apply_coupon
 from products.models import StockMovement, products
 
@@ -1915,3 +1916,153 @@ class BulkSetStatusRaceGuardTests(ApiTestCase):
         control.refresh_from_db()
         self.assertEqual(victim.status, "cancelled")
         self.assertEqual(control.status, "confirmed")
+
+
+# ==================================
+# [R-10.1] SPEC-10-01a: order lifecycle dimensions
+# ==================================
+
+@tag("orders")
+class OrderStateSourceTests(SimpleTestCase):
+    """orders.state is the single source of truth for the order machine:
+    the constants that used to live in models/admin/views are aliases of
+    the same objects, and the machine's current edges are pinned here so a
+    consolidation slip (a redefined copy anywhere) cannot go unnoticed."""
+
+    def test_machine_constants_are_single_sourced(self):
+        from orders import admin as orders_admin
+        from orders import views as orders_views
+
+        self.assertIs(Order.STATUS_CHOICES, order_state.STATUS_CHOICES)
+        self.assertIs(orders_admin.ALLOWED_TRANSITIONS, order_state.ALLOWED_TRANSITIONS)
+        self.assertIs(orders_admin.transition_allowed, order_state.transition_allowed)
+        self.assertIs(orders_views.ALLOWED_TRANSITIONS, order_state.ALLOWED_TRANSITIONS)
+        self.assertIs(orders_views.transition_allowed, order_state.transition_allowed)
+        self.assertIs(orders_views.ADMIN_FULFILMENT_NEXT, order_state.ADMIN_FULFILMENT_NEXT)
+
+    def test_transition_allowed_pins_the_current_machine(self):
+        # The legal edges (exactly one step forward, cancel from pending).
+        for old, new in [
+            ("pending", "confirmed"),
+            ("pending", "cancelled"),
+            ("confirmed", "shipped"),
+            ("shipped", "delivered"),
+        ]:
+            with self.subTest(old=old, new=new):
+                self.assertTrue(order_state.transition_allowed(old, new))
+        # Self-transitions (idempotent replays) and everything else are not.
+        for old, new in [
+            ("pending", "shipped"),
+            ("confirmed", "cancelled"),
+            ("confirmed", "delivered"),
+            ("shipped", "confirmed"),
+            ("delivered", "pending"),
+            ("cancelled", "pending"),
+            ("unknown", "confirmed"),
+        ]:
+            with self.subTest(old=old, new=new):
+                self.assertFalse(order_state.transition_allowed(old, new))
+        for old in ("pending", "confirmed", "shipped", "delivered", "cancelled"):
+            with self.subTest(old=old):
+                self.assertTrue(order_state.transition_allowed(old, old))
+
+    def test_admin_fulfilment_next_pins_the_one_step_map(self):
+        self.assertEqual(
+            order_state.ADMIN_FULFILMENT_NEXT,
+            {"pending": "confirmed", "confirmed": "shipped", "shipped": "delivered"},
+        )
+
+    def test_backfill_mapping_is_total_over_legacy_statuses(self):
+        self.assertEqual(
+            set(order_state.LEGACY_STATUS_DIMENSIONS),
+            {s for s, _ in Order.STATUS_CHOICES},
+        )
+
+
+@tag("orders")
+class LifecycleDimensionsFieldTests(OrderTestBase):
+    """[R-10.1] The additive dimension fields: initial states, the
+    legacy→dimensions mapping table, and read-only serializer exposure."""
+
+    EXPECTED_DIMENSIONS = {
+        "pending": ("pending", "unfulfilled"),
+        "confirmed": ("captured", "unfulfilled"),
+        "shipped": ("captured", "fulfilled"),
+        "delivered": ("captured", "fulfilled"),
+        "cancelled": ("pending", "unfulfilled"),
+    }
+
+    def test_every_legacy_status_maps_to_both_dimensions(self):
+        payment_values = {v for v, _ in order_state.PAYMENT_STATUS_CHOICES}
+        fulfilment_values = {v for v, _ in order_state.FULFILMENT_STATUS_CHOICES}
+        for legacy_status in [s for s, _ in Order.STATUS_CHOICES]:
+            with self.subTest(legacy_status=legacy_status):
+                payment, fulfilment = order_state.LEGACY_STATUS_DIMENSIONS[legacy_status]
+                self.assertEqual(
+                    (payment, fulfilment),
+                    self.EXPECTED_DIMENSIONS[legacy_status],
+                )
+                self.assertIn(payment, payment_values)
+                self.assertIn(fulfilment, fulfilment_values)
+
+    def test_dimension_helpers_agree_with_the_mapping(self):
+        for legacy_status, (payment, fulfilment) in self.EXPECTED_DIMENSIONS.items():
+            with self.subTest(legacy_status=legacy_status):
+                self.assertEqual(order_state.payment_for_status(legacy_status), payment)
+                self.assertEqual(order_state.fulfilment_for_status(legacy_status), fulfilment)
+
+    def test_new_orders_start_pending_and_unfulfilled(self):
+        order = self.create_order()
+
+        self.assertEqual(order.payment_status, "pending")
+        self.assertEqual(order.fulfilment_status, "unfulfilled")
+
+    def test_dimensions_exposed_read_only_in_order_serializer(self):
+        self.assertIn("payment_status", OrderSerializer.Meta.fields)
+        self.assertIn("fulfilment_status", OrderSerializer.Meta.fields)
+        self.assertIn("payment_status", OrderSerializer.Meta.read_only_fields)
+        self.assertIn("fulfilment_status", OrderSerializer.Meta.read_only_fields)
+
+        order = self.create_order()
+
+        res = self.client.get("/api/orders/")
+        self.assertEqual(res.status_code, 200, res.data)
+        row = next(r for r in res.data["results"] if r["id"] == order.id)
+        self.assertEqual(row["payment_status"], "pending")
+        self.assertEqual(row["fulfilment_status"], "unfulfilled")
+
+
+@tag("orders")
+class LifecycleBackfillMigrationTests(TransactionTestCase):
+    """[R-10.1] The 0012 backfill is total: a row with any legacy status
+    value migrates to BOTH dimensions per the state.py mapping. Same shape
+    as CurrencyBackfillMigrationTests: drop to 0011, raw-insert rows the
+    way a pre-dimension store had them, migrate to head, assert."""
+
+    def test_0012_backfills_both_dimensions_for_every_legacy_status(self):
+        call_command("migrate", "orders", "0011", verbosity=0, interactive=False)
+        user_id = User.objects.create_user(
+            "backfill10", "backfill10@example.com", "S3cure-Passphrase!"
+        ).id
+        # The dimension columns do not exist at 0011, so raw SQL is the
+        # only honest way to reproduce a pre-dimension row per legacy status.
+        with connection.cursor() as cursor:
+            for legacy_status in [s for s, _ in order_state.STATUS_CHOICES]:
+                cursor.execute(
+                    "INSERT INTO orders_order (user_id, full_name, phone, address,"
+                    " city, state, pincode, status, currency, discount_amount,"
+                    " total_amount, created_at, updated_at)"
+                    " VALUES (%s, %s, '1', 'a', 'c', 's', '1', %s, 'INR',"
+                    " 0, 100.00, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)",
+                    [user_id, f"Backfill-{legacy_status}", legacy_status],
+                )
+
+        call_command("migrate", "orders", verbosity=0, interactive=False)
+
+        for legacy_status, (payment, fulfilment) in (
+            order_state.LEGACY_STATUS_DIMENSIONS.items()
+        ):
+            with self.subTest(legacy_status=legacy_status):
+                order = Order.objects.get(full_name=f"Backfill-{legacy_status}")
+                self.assertEqual(order.payment_status, payment)
+                self.assertEqual(order.fulfilment_status, fulfilment)
