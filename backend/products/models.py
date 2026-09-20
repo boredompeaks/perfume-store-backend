@@ -81,6 +81,51 @@ class products(models.Model):
         return self.name
 
 
+class ProductVariant(models.Model):
+    """A sellable variant of a product (SPEC-8-02a [R-8.7], spec section 8).
+
+    Schema core only, mirroring spec 8.3's rules: an FK to the core product
+    entity (2483), the globally unique merchant-entered SKU (2481 —
+    ``unique=True`` is simultaneously the constraint and its backing unique
+    index, 2553), the attributes the order-item snapshot list reads (variant
+    name/options 2503, SKU 2505, unit price 2507), an on-hand count and
+    distinct created/updated timestamps (2523).
+
+    Boundaries: ``price`` is exact decimal money (2489, conventions.md:15);
+    ``NULL`` means the product's own price applies — no read-side wiring is
+    invented here (OrderItem snapshots are SPEC-8-02b's). ``stock`` is
+    deliberately inert — ``products.stock`` remains the ONLY order-time
+    authority (checkout/verify_payment never read this column); variant-stock
+    reconciliation is SPEC-6-13's inventory-depth work, admin depth (role
+    matrix, fieldsets, actions) is SPEC-6-08's. The SKU has no generation
+    path, so conventions.md:17's IntegrityError retry has nothing to wrap:
+    the DB constraint is the concurrency authority.
+    """
+
+    product = models.ForeignKey(
+        products,
+        on_delete=models.CASCADE,
+        related_name="variants",
+    )
+    name = models.CharField(max_length=100)
+    sku = models.CharField(
+        max_length=64,
+        unique=True,
+    )
+    price = models.DecimalField(
+        max_digits=10,
+        decimal_places=2,
+        null=True,
+        blank=True,
+    )
+    stock = models.PositiveBigIntegerField(default=0)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    def __str__(self):
+        return f"{self.product.name} - {self.name} ({self.sku})"
+
+
 class StockMovement(models.Model):
     """Audit ledger for inventory mutations (SPEC-6-02 [6.5.17]): manual
     admin adjustments via ``adjust_stock`` and payment-time sales via

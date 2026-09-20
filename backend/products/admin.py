@@ -7,7 +7,7 @@ from django.utils.html import format_html, mark_safe
 from django import forms
 
 from common.admin import RoleAwareModelAdmin
-from .models import StockMovement, products
+from .models import ProductVariant, StockMovement, products
 
 
 class AdjustStockForm(forms.Form):
@@ -195,3 +195,11 @@ class ProductAdmin(RoleAwareModelAdmin):
                 ]
             )
         return response
+
+
+@admin.register(ProductVariant)
+class ProductVariantAdmin(admin.ModelAdmin):
+    """Bare registration (SPEC-8-02a): the variant entity is visible with
+    default ModelAdmin behaviour, gated by Django's default per-model
+    permissions — no role holds them until SPEC-6-08 wires the capability
+    map. Fieldsets/actions/role matrix are deliberately absent."""
