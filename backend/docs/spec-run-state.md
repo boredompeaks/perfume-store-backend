@@ -4,7 +4,11 @@ Source of truth for the spec-compliance run. Updated at every status transition 
 
 ## Run pointers
 
-- active section: 9 | phase: BUILD | held audits: none
+## Run pointers
+
+- active section: 10 | phase: BUILD | held audits: none
+- gate note: S9 CLEARED 2026-09-20 — promotion PR #7 open (head 11da444), USER merges async; last-promoted stays 9054cb4 until the merge is fetch-verified at the next boundary
+- next: S10 queue SPEC-10-01..05 (section-10.md) — batching per user directive 2026-09-20
 - next: S9 queue SPEC-9-01..08 (section-09.md; compliance table backend/docs/compliance/S9.md) — SPEC-9-01 dispatching
 - hygiene note 2026-09-20: backend/docs/compliance/ does NOT exist in the worktree (builder-verified; compliance tables were never persisted as files). Durable record = per-section index summaries + run/section-NN.md rows. Final whole-spec sweep: compliance re-runs rebuild tables from spec + these summaries.
 
@@ -57,7 +61,7 @@ Statuses: `PENDING -> IN-COMPLIANCE -> BUILDING -> IN-AUDIT -> BUGS-FOUND -> SHI
 
 ## Baseline
 
-Current floor (auditor-verified FULL batch-SHIP 2026-09-20, SPEC-9-07 code `0c2bdc9` + SPEC-9-08 docs `1b67ed7`): **549 tests, OK (545 pass + 4 expectedFailure), cov 100.00%** (2286 stmts, 0 miss; test exit 0, cov gate exit 0 A+; makemigrations --check clean). Floor only moves up: never fewer passing tests, never more expected failures, never lower coverage. Progression this session: 319→333 (05b) →356 (7-01) →377 (7-02) →[F-11 flip] 377 (7-03) →[F-12 flip] 378 (7-04) →388 (19-1) →395 (21-1) →407 (21-2) →416 (8-01) →427 (8-02a) →433 (8-02b) →442 (8-03 p1) →446 (8-03 p2) →452 (8-04) →460 (8-05) →474 (9-01) ?479 (9-02) ?487 (9-03) ?499 (9-04) →510 (9-06) →528 (9-05) →549 (9-07; 9-08 docs +0); xfail ceiling 6→4 via the two legitimate pin flips.
+Current floor (auditor-verified FULL batch-SHIP 2026-09-20, SPEC-10-01a code `1286333` + SPEC-10-01b code `40540ef`): **567 tests, OK (563 pass + 4 expectedFailure), cov 100.00%** (2306 stmts, 0 miss; test exit 0, cov gate exit 0 A+; makemigrations --check clean). Floor only moves up: never fewer passing tests, never more expected failures, never lower coverage. Progression this session: 319→333 (05b) →356 (7-01) →377 (7-02) →[F-11 flip] 377 (7-03) →[F-12 flip] 378 (7-04) →388 (19-1) →395 (21-1) →407 (21-2) →416 (8-01) →427 (8-02a) →433 (8-02b) →442 (8-03 p1) →446 (8-03 p2) →452 (8-04) →460 (8-05) →474 (9-01) ?479 (9-02) ?487 (9-03) ?499 (9-04) →510 (9-06) →528 (9-05) →549 (9-07; 9-08 docs +0) →558 (10-01a) →567 (10-01b); xfail ceiling 6→4 via the two legitimate pin flips.
 last-promoted SHA: **9054cb4** (PR #6 "Merge pull request #6 from boredompeaks/spec-comp" — merged by the USER 2026-09-20T11:04:27Z after RE CLEARED; covers the full post-c986f36 stack: S8 queue 8-01/8-02a/8-02b/8-03/8-04/8-05 + queued S15-1/S19-1/S21-1/S21-2 + ledger chores + RE CI fix 7f7d67a; verified via fetch — origin/feat/add-frontend tip = 9054cb4. Next gate range: 9054cb4..tip, delta-only. Supersedes c986f36/PR #5.)
 Durability backup: **origin/spec-comp = 7f7d67a** (RE gate push b0301ef..f9443e5 docs chore + 7f7d67a secret-scan.yml `pull-requests: read` fix — BUG-1 P2 infra, gitleaks PR-mode was 403-ing pre-scan; verified green cycle 2. CI all green on 7f7d67a: backend 460=456+4xf/100.00% @1952 floor exact-matched, frontend green, gitleaks pass both modes, GitGuardian pass.) Updated 2026-09-20 auditor FULL batch-SHIP (SPEC-9-05): origin/spec-comp advanced to the 9-05 tip (code bfdf605..dcab002 + this chore commit = current backup point).
 Section-7 gate: **RESOLVED (user merged)** — PR #5 was merged by the owner with the GitGuardian check red (their prerogative; the check is a false positive, see below). The user simultaneously added an allowlist to master (commit 0afd032) — NOTE: landed as `gitguardian.yml` WITHOUT the leading dot; GitGuardian sources `.gitguardian.yml` from the default-branch root, so the allowlist is INEFFECTIVE as landed — flagged to the user 2026-09-19 for a one-line rename on master (owner-only; master frozen for agents). Next gate must verify the GitGuardian check empirically.
