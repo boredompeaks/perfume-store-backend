@@ -54,6 +54,39 @@ ADMIN_FULFILMENT_NEXT = {
     "shipped": "delivered",
 }
 
+# ——— [R-10.19]/[R-10.14] SPEC-10-03: transition preconditions ———————————
+# ALLOWED_TRANSITIONS says WHICH moves are legal; preconditions say what
+# must be TRUE about the row before the move (spec 10.3 lists
+# "Preconditions" beside allowed source/destination for every transition).
+# EXTENSION HOOK for SPEC-1-08 (shipment checks): each entry is a callable
+# receiving the Order instance and returning a list of human-readable
+# failure reasons (empty list = precondition met); register more checks
+# for "shipped" — or any status — via register_transition_preconditions.
+# This module stays dependency-free (see the module docstring), so the
+# built-in ORM-backed checks live in orders.models and register
+# themselves at import (models is imported by every writer surface, so
+# the registry is populated before any writer runs). precondition_failures
+# is the ONLY evaluation point — writers must never special-case a check.
+TRANSITION_PRECONDITIONS = {}
+
+
+def register_transition_preconditions(status, *checks):
+    """SPEC-1-08 extension point: attach precondition callables to a
+    status. Appending (not replacing) is deliberate: the built-ins and the
+    shipment section's checks compose — a row must satisfy all of them."""
+    TRANSITION_PRECONDITIONS.setdefault(status, []).extend(checks)
+
+
+def precondition_failures(order, new_status):
+    """Every unmet-precondition reason for moving ``order`` to
+    ``new_status``. Writers call this beside transition_allowed: the
+    machine gate says the edge exists, this says the row qualifies for
+    it. Empty list = clear to proceed."""
+    failures = []
+    for check in TRANSITION_PRECONDITIONS.get(new_status, ()):
+        failures.extend(check(order) or [])
+    return failures
+
 # ——— [R-10.1] explicit lifecycle dimensions (spec 10.2) —————————————————
 # The legacy single status conflates "did they pay" with "did we ship"; the
 # two dimensions below separate those questions. The spec's example states

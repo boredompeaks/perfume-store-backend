@@ -13,6 +13,7 @@ from .state import (
     PAYMENT_STATUS_CHOICES,
     STATUS_CHOICES,
     STATUS_EVENT_TRIGGERS,
+    register_transition_preconditions,
 )
 
 
@@ -347,6 +348,35 @@ class OrderItem(models.Model):
 
     def __str__(self):
         return f"{self.product_name} x {self.quantity}"
+
+
+# ——— [R-10.19]/[R-10.14] SPEC-10-03: built-in shipped preconditions ——————
+# The machine (orders.state) stays dependency-free, so the ORM-backed
+# precondition callables live here beside the model they inspect and
+# register into the state's extension hook at import. Every callable
+# returns a list of human-readable failure reasons (empty = met); the
+# writers evaluate them through state.precondition_failures only.
+
+def _require_captured_payment(order):
+    """Ship only after the money is real: a shipped order whose payment
+    later fails is un-reconcilable (no refund flow yet, V-03), and the
+    payment dimension (spec 10.2) is exactly where that truth lives."""
+    if order.payment_status != "captured":
+        return [f"payment must be captured (is '{order.payment_status}')"]
+    return []
+
+
+def _require_items_to_ship(order):
+    """Spec 10.3's mark-shipped example: the order must have
+    fulfilment-ready items — no lines, nothing to ship."""
+    if not order.items.exists():
+        return ["order has no items to ship"]
+    return []
+
+
+register_transition_preconditions(
+    "shipped", _require_captured_payment, _require_items_to_ship
+)
 
 
 class OrderStatusEvent(models.Model):

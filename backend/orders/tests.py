@@ -49,6 +49,20 @@ class OrderTestBase(ApiTestCase):
         return Order.objects.get(id=res.data["id"])
 
 
+def _attach_order_item(order, product, quantity=1):
+    """Fixture helper: give an ORM-created order the checkout lines the
+    real checkout flow always leaves behind (SPEC-10-03 makes items a
+    shipped precondition, so bare ORM rows cannot walk the shipped edge)."""
+    return OrderItem.objects.create(
+        order=order,
+        product=product,
+        product_name=product.name,
+        price=product.price,
+        quantity=quantity,
+        subtotal=product.price * quantity,
+    )
+
+
 @tag("orders")
 class CurrencyStoreConfigTests(OrderTestBase):
     """[R-8.11] Currency rides every money column, driven by store config."""
@@ -1761,6 +1775,13 @@ class AdminOrdersApiTests(ApiTestCase):
     def test_fulfill_walks_one_step_per_call(self):
         support = self._user_with_role("supp", ROLE_SUPPORT)
         self.client.force_authenticate(support)
+        # SPEC-10-03: the shipped step requires the row a real checkout
+        # leaves behind — items plus a captured payment.
+        walk_product = self.make_product(
+            name="Walk Rose", price="750.00", stock=5, category="Floral"
+        )
+        _attach_order_item(self.order, walk_product)
+        Order.objects.filter(pk=self.order.pk).update(payment_status="captured")
         for expected in ("confirmed", "shipped", "delivered"):
             res = self.client.post(f"{self.LIST_URL}{self.order.id}/fulfill/")
             self.assertEqual(res.status_code, 200, res.data)
@@ -2211,6 +2232,8 @@ class LifecycleWiringTests(OrderTestBase):
 
     def test_admin_change_form_moves_dimension_with_the_status(self):
         order = self._order_with_status(self.buyer, "confirmed")
+        # SPEC-10-03 fixture: the shipped edge now requires items.
+        _attach_order_item(order, self.product)
         admin_client = self._admin_client()
 
         res = admin_client.post(
@@ -2271,6 +2294,8 @@ class LifecycleWiringTests(OrderTestBase):
     def test_bulk_ship_syncs_dimension_per_row_and_skips_out_of_set(self):
         confirmed = self._order_with_status(self.buyer, "confirmed")
         pending = self._order_with_status(self.buyer, "pending")
+        # SPEC-10-03 fixture: the shipped edge now requires items.
+        _attach_order_item(confirmed, self.product)
 
         res = self._run_admin_action("mark_shipped", [confirmed, pending])
         self.assertEqual(res.status_code, 200)
@@ -2299,6 +2324,8 @@ class LifecycleWiringTests(OrderTestBase):
 
     def test_json_seam_fulfil_walk_syncs_fulfilment_dimension(self):
         order = self.create_order()
+        # SPEC-10-03 fixture: the shipped step requires a captured payment.
+        Order.objects.filter(pk=order.pk).update(payment_status="captured")
         support = self._staff_client("dimsupp")
 
         for expected_status, expected_fulfilment in (
@@ -2599,6 +2626,8 @@ class TransitionAuditTrailTests(OrderTestBase):
     def test_bulk_action_appends_per_row_events_with_fresh_updated_at(self):
         confirmed = self._order_with_status(self.buyer, "confirmed")
         pending = self._order_with_status(self.buyer, "pending")
+        # SPEC-10-03 fixture: the shipped edge now requires items.
+        _attach_order_item(confirmed, self.product)
         # the pre-fix state: a bulk .update() bypasses auto_now, so
         # updated_at is stranded at its insert-time value — exactly the
         # staleness the per-row rework fixes
@@ -2643,6 +2672,8 @@ class TransitionAuditTrailTests(OrderTestBase):
 
     def test_json_seam_fulfil_appends_events_with_the_staff_actor(self):
         order = self.create_order()
+        # SPEC-10-03 fixture: the shipped step requires a captured payment.
+        Order.objects.filter(pk=order.pk).update(payment_status="captured")
         support = self._staff_client("auditsupp")
 
         res = support.post(f"/api/admin/orders/{order.id}/fulfill/")
@@ -2793,4 +2824,297 @@ class TransitionAuditTrailTests(OrderTestBase):
         self.assertEqual(
             str(event),
             f"{order.id}: None->pending ({order_state.TRIGGER_ORDER_CREATE})",
+        )
+
+
+# ==================================
+# [R-10.19]/[R-10.14] SPEC-10-03: shipped-transition preconditions
+# ==================================
+
+@tag("orders")
+class ShippedPreconditionTests(OrderTestBase):
+    """[R-10.19]/[R-10.14] SPEC-10-03: the shipped edge is the first edge
+    with row preconditions (spec 10.3: a mark-shipped verifies the payment
+    is real and the order has fulfilment-ready items). The machine gate
+    (transition_allowed) still owns WHICH moves are legal; the precondition
+    registry in orders.state owns WHAT must be true about the row, and
+    EVERY writer that can reach shipped enforces it: the admin bulk action,
+    the admin change form, and the 9-07 JSON fulfil seam."""
+
+    def _admin_login(self):
+        if not User.objects.filter(username="shipboss").exists():
+            User.objects.create_superuser(
+                "shipboss", "shipboss@example.com", "S3cure-Passphrase!"
+            )
+        self.assertTrue(
+            self.client.login(username="shipboss", password="S3cure-Passphrase!")
+        )
+
+    def _run_admin_action(self, action, orders):
+        self._admin_login()
+        return self.client.post(
+            "/admin/orders/order/",
+            {
+                "action": action,
+                "_selected_action": [str(order.id) for order in orders],
+                "select_across": "0",
+            },
+            follow=True,
+        )
+
+    def _staff_client(self, username):
+        from django.contrib.auth.models import Group
+
+        user = User.objects.create_user(
+            username, f"{username}@example.com", "S3cure-Passphrase!"
+        )
+        user.groups.add(Group.objects.get_or_create(name=ROLE_SUPPORT)[0])
+        client = self.fresh_client()
+        client.force_authenticate(user)
+        return client
+
+    def _confirmed_row(self, *, paid, with_item):
+        """A confirmed row as its writers would leave it; the flags un-pay
+        / un-item it to build each rejection fixture (checkout rows always
+        carry items, so with_item=False deletes them to simulate the bare
+        ORM rows no production writer produces)."""
+        order = self.create_order()
+        updates = {"status": "confirmed"}
+        updates["payment_status"] = "captured" if paid else "pending"
+        Order.objects.filter(pk=order.pk).update(**updates)
+        if not with_item:
+            order.items.all().delete()
+        order.refresh_from_db()
+        return order
+
+    def _change_form_post(self, order, status_value):
+        return self.client.post(
+            f"/admin/orders/order/{order.id}/change/",
+            {
+                "user": order.user_id,
+                "full_name": order.full_name,
+                "phone": order.phone,
+                "address": order.address,
+                "city": order.city,
+                "state": order.state,
+                "pincode": order.pincode,
+                "status": status_value,
+                "_save": "Save",
+                "items-TOTAL_FORMS": "0",
+                "items-INITIAL_FORMS": "0",
+                "items-MIN_NUM_FORMS": "0",
+                "items-MAX_NUM_FORMS": "1000",
+            },
+            follow=True,
+        )
+
+    # ——— bulk action (the mark_shipped path) ———
+
+    def test_bulk_ship_rejects_uncaptured_payment(self):
+        from django.contrib import messages as django_messages
+
+        unpaid = self._confirmed_row(paid=False, with_item=True)
+        paid = self._confirmed_row(paid=True, with_item=True)
+
+        res = self._run_admin_action("mark_shipped", [unpaid, paid])
+        self.assertEqual(res.status_code, 200)
+        unpaid.refresh_from_db()
+        paid.refresh_from_db()
+        # the eligible row ships, the unpaid row stays confirmed
+        self.assertEqual(paid.status, "shipped")
+        self.assertEqual(unpaid.status, "confirmed")
+        # no transition, no event: the rejected row gets no audit row
+        self.assertFalse(
+            unpaid.status_events.exclude(
+                trigger=order_state.TRIGGER_ORDER_CREATE
+            ).exists()
+        )
+        self.assertTrue(
+            paid.status_events.exclude(
+                trigger=order_state.TRIGGER_ORDER_CREATE
+            ).exists()
+        )
+        # the skip names the unmet precondition, not a status problem
+        admin_warnings = [
+            str(m)
+            for m in django_messages.get_messages(res.wsgi_request)
+            if m.level_tag == "warning"
+        ]
+        self.assertTrue(
+            any("payment must be captured" in m for m in admin_warnings),
+            admin_warnings,
+        )
+
+    def test_bulk_ship_rejects_itemless_order(self):
+        itemless = self._confirmed_row(paid=True, with_item=False)
+        itemful = self._confirmed_row(paid=True, with_item=True)
+
+        res = self._run_admin_action("mark_shipped", [itemless, itemful])
+        self.assertEqual(res.status_code, 200)
+        itemless.refresh_from_db()
+        itemful.refresh_from_db()
+        self.assertEqual(itemful.status, "shipped")
+        self.assertEqual(itemless.status, "confirmed")
+        self.assertFalse(
+            itemless.status_events.exclude(
+                trigger=order_state.TRIGGER_ORDER_CREATE
+            ).exists()
+        )
+
+    def test_bulk_ship_happy_path_moves_status_dimension_and_event(self):
+        order = self._confirmed_row(paid=True, with_item=True)
+
+        res = self._run_admin_action("mark_shipped", [order])
+        self.assertEqual(res.status_code, 200)
+        order.refresh_from_db()
+        self.assertEqual(order.status, "shipped")
+        self.assertEqual(order.fulfilment_status, "fulfilled")
+        self.assertEqual(order.payment_status, "captured")
+        event = order.status_events.exclude(
+            trigger=order_state.TRIGGER_ORDER_CREATE
+        ).get()
+        self.assertEqual(event.from_status, "confirmed")
+        self.assertEqual(event.to_status, "shipped")
+        self.assertEqual(event.trigger, order_state.TRIGGER_ADMIN_BULK_ACTION)
+        self.assertEqual(event.actor.username, "shipboss")
+
+    # ——— single-object guard (the admin change form) ———
+
+    def test_change_form_rejects_uncaptured_payment(self):
+        order = self._confirmed_row(paid=False, with_item=True)
+        self._admin_login()
+
+        res = self._change_form_post(order, "shipped")
+        self.assertEqual(res.status_code, 200)
+        order.refresh_from_db()
+        self.assertEqual(order.status, "confirmed")
+        self.assertFalse(
+            order.status_events.exclude(
+                trigger=order_state.TRIGGER_ORDER_CREATE
+            ).exists()
+        )
+
+    def test_change_form_rejects_itemless_order(self):
+        order = self._confirmed_row(paid=True, with_item=False)
+        self._admin_login()
+
+        res = self._change_form_post(order, "shipped")
+        self.assertEqual(res.status_code, 200)
+        order.refresh_from_db()
+        self.assertEqual(order.status, "confirmed")
+        self.assertFalse(
+            order.status_events.exclude(
+                trigger=order_state.TRIGGER_ORDER_CREATE
+            ).exists()
+        )
+
+    def test_change_form_delivers_itemless_order_without_preconditions(self):
+        """Only the shipped edge carries preconditions: delivered (from
+        shipped) registers none, so this move still goes — the registry is
+        per-status, never a global gate."""
+        order = self._confirmed_row(paid=True, with_item=False)
+        Order.objects.filter(pk=order.pk).update(status="shipped")
+        order.refresh_from_db()
+        self._admin_login()
+
+        res = self._change_form_post(order, "delivered")
+        self.assertEqual(res.status_code, 200)
+        order.refresh_from_db()
+        self.assertEqual(order.status, "delivered")
+
+    # ——— the 9-07 JSON seam ———
+
+    def test_json_seam_rejects_unpaid_ship_with_precondition_reasons(self):
+        order = self._confirmed_row(paid=False, with_item=True)
+        support = self._staff_client("shipseam")
+
+        res = support.post(f"/api/admin/orders/{order.id}/fulfill/")
+        self.assertEqual(res.status_code, 409, res.data)
+        order.refresh_from_db()
+        self.assertEqual(order.status, "confirmed")
+        # the envelope middleware wraps the body: reasons at details
+        self.assertIn("preconditions", res.data["details"])
+        self.assertTrue(
+            any("captured" in r for r in res.data["details"]["preconditions"]),
+            res.data["details"],
+        )
+
+    def test_json_seam_ships_paid_itemful_order(self):
+        order = self._confirmed_row(paid=True, with_item=True)
+        support = self._staff_client("shipseamok")
+
+        res = support.post(f"/api/admin/orders/{order.id}/fulfill/")
+        self.assertEqual(res.status_code, 200, res.data)
+        order.refresh_from_db()
+        self.assertEqual(order.status, "shipped")
+        self.assertEqual(order.fulfilment_status, "fulfilled")
+
+    # ——— the extension hook (the SPEC-1-08 attach point) ———
+
+    def test_precondition_registry_shape_and_extension_point(self):
+        """Pin the hook: the shipped status carries exactly the two
+        built-ins, extra checks register against a status and are
+        evaluated by the same precondition_failures the writers call —
+        SPEC-1-08's shipment checks attach here without touching writers.
+        A status with no registered checks evaluates clean."""
+        def _reject_all(order):
+            return ["shipment section will replace this"]
+
+        self.assertEqual(
+            len(order_state.TRANSITION_PRECONDITIONS["shipped"]), 2
+        )
+        order = self._confirmed_row(paid=True, with_item=True)
+        self.assertEqual(order_state.precondition_failures(order, "shipped"), [])
+        self.assertEqual(order_state.precondition_failures(order, "delivered"), [])
+
+        with mock.patch.dict(
+            order_state.TRANSITION_PRECONDITIONS,
+            {"shipped": [_reject_all]},
+        ):
+            self.assertEqual(
+                order_state.precondition_failures(order, "shipped"),
+                ["shipment section will replace this"],
+            )
+        # patch.dict restored the built-ins: the registry is process state,
+        # not per-test leakage
+        self.assertEqual(
+            len(order_state.TRANSITION_PRECONDITIONS["shipped"]), 2
+        )
+
+    def test_registered_hook_blocks_ship_through_the_bulk_writer(self):
+        """The writers evaluate the registry, not hardcoded checks: a
+        SPEC-1-08 check that fails blocks an otherwise-eligible ship and
+        is reported like any other unmet precondition."""
+        from django.contrib import messages as django_messages
+        from django.contrib.admin import site as admin_site
+        from django.contrib.messages.storage.fallback import FallbackStorage
+        from django.test import RequestFactory
+
+        order = self._confirmed_row(paid=True, with_item=True)
+
+        def _no_shipment_yet(row):
+            return ["no shipment exists for this order"]
+
+        admin = OrderAdmin(Order, admin_site)
+        staff = self.make_staff()
+        request = RequestFactory().post("/admin/orders/order/")
+        request.user = staff
+        request.session = {}
+        request._messages = FallbackStorage(request)
+
+        with mock.patch.dict(
+            order_state.TRANSITION_PRECONDITIONS,
+            {
+                "shipped": order_state.TRANSITION_PRECONDITIONS["shipped"]
+                + [_no_shipment_yet],
+            },
+        ):
+            admin._bulk_set_status(request, Order.objects.all(), "shipped")
+
+        order.refresh_from_db()
+        self.assertEqual(order.status, "confirmed")
+        admin_warnings = [str(m) for m in request._messages]
+        self.assertTrue(
+            any("no shipment exists" in m for m in admin_warnings),
+            admin_warnings,
         )

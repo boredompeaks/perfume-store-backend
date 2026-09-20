@@ -16,7 +16,12 @@ from rest_framework import status
 # lives in orders.state — the single source; views only consume it.
 from .models import Order, OrderItem, Coupon
 from .serializers import OrderSerializer
-from .state import ADMIN_FULFILMENT_NEXT, ALLOWED_TRANSITIONS, transition_allowed
+from .state import (
+    ADMIN_FULFILMENT_NEXT,
+    ALLOWED_TRANSITIONS,
+    precondition_failures,
+    transition_allowed,
+)
 # [R-10.1] SPEC-10-01b: dimension mappings for the writers. Kept as its own
 # line so every hunk in this file stays insertion-only.
 from .state import fulfilment_for_status, payment_for_status
@@ -1335,6 +1340,23 @@ def admin_order_fulfill(request, order_id):
                     "error": f"Order cannot be fulfilled from status "
                              f"'{order.status}'",
                     "allowed": allowed,
+                },
+                status=status.HTTP_409_CONFLICT
+            )
+
+        # [R-10.19]/[R-10.14] SPEC-10-03: the fulfil seam advances
+        # confirmed→shipped too, so the shipped preconditions (payment
+        # captured + items present) gate it here with the same authority
+        # as the admin surface (insertion-only hunk; the 9-07 write below
+        # stays byte-identical). The envelope middleware wraps this body,
+        # so callers read the reasons at details.preconditions.
+        precondition_reasons = precondition_failures(order, target)
+        if precondition_reasons:
+            return Response(
+                {
+                    "error": f"Order cannot be fulfilled from status "
+                             f"'{order.status}'",
+                    "preconditions": precondition_reasons,
                 },
                 status=status.HTTP_409_CONFLICT
             )

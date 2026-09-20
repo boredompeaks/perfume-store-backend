@@ -12,7 +12,20 @@ from django.test import tag
 from django.utils import timezone
 
 from common.testing import ApiTestCase
-from orders.models import Order
+from orders.models import Order, OrderItem
+
+
+def _attach_order_item(order):
+    """SPEC-10-03 fixture helper: give an ORM-created order the checkout
+    line a real checkout always leaves behind (items are a shipped
+    precondition); product is nullable so no catalogue row is needed."""
+    return OrderItem.objects.create(
+        order=order,
+        product_name="Fixture perfume",
+        price=order.total_amount,
+        quantity=1,
+        subtotal=order.total_amount,
+    )
 
 
 def make_order(user, status="pending", total="100.00"):
@@ -62,6 +75,10 @@ class AdminOrderLifecycleTests(ApiTestCase):
 
     def test_legal_lifecycle_pending_confirmed_shipped_delivered(self):
         order = make_order(self.buyer)
+        # SPEC-10-03 fixture: the shipped step requires items + captured
+        # payment, i.e. the row a real checkout + verify_payment produces.
+        _attach_order_item(order)
+        Order.objects.filter(pk=order.pk).update(payment_status="captured")
 
         res = self._change_status(order, "shipped")
         self.assertEqual(res.status_code, 200)
@@ -151,6 +168,9 @@ class AdminBulkActionsTests(ApiTestCase):
 
     def test_mark_shipped_bulk_respects_transitions(self):
         confirmed = make_order(self.buyer, status="confirmed")
+        # SPEC-10-03 fixture: the shipped edge requires items + captured.
+        _attach_order_item(confirmed)
+        Order.objects.filter(pk=confirmed.pk).update(payment_status="captured")
         delivered = make_order(self.buyer, status="delivered")
 
         res = self._run_action("mark_shipped", [confirmed, delivered])
