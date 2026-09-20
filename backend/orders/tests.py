@@ -12,7 +12,7 @@ from django.conf import settings
 from django.contrib.auth.models import User
 from django.core.cache import cache
 from django.core.management import call_command
-from django.db import connection
+from django.db import IntegrityError, connection
 from django.test import SimpleTestCase, TransactionTestCase, override_settings, tag
 from django.utils import timezone
 from rest_framework.settings import api_settings
@@ -28,7 +28,7 @@ from orders import events as order_events
 from orders.models import Coupon, Order, OrderItem, OrderStatusEvent
 from orders.serializers import OrderItemSerializer, OrderSerializer
 from orders import state as order_state
-from orders.views import apply_coupon
+from orders.views import apply_coupon, create_payment
 from products.models import StockMovement, products
 
 
@@ -806,6 +806,149 @@ class CreatePaymentTests(OrderTestBase):
         res = self.client.post("/api/orders/payment/", {"order_id": order.id}, format="json")
         self.assertEqual(res.status_code, 400, res.data)
         self.assertEqual(res.data["error"], "This order cannot be paid")
+
+
+@tag("orders")
+class CreatePaymentThrottleTests(OrderTestBase):
+    """SPEC-11-01: minting a payment intent is a public mutating endpoint
+    (conventions.md:24), so it carries its own throttle scope with an
+    env-driven rate, exactly like the coupon scope."""
+
+    def test_payment_scope_and_rate_are_configured(self):
+        self.assertEqual(create_payment.view_class.throttle_scope, "payment")
+        self.assertIn(ScopedRateThrottle, create_payment.view_class.throttle_classes)
+        self.assertIn("payment", api_settings.DEFAULT_THROTTLE_RATES)
+        # Default budget when PAYMENT_THROTTLE_RATE is unset in the env.
+        self.assertEqual(api_settings.DEFAULT_THROTTLE_RATES["payment"], "10/min")
+
+    def test_rate_limit_engages_when_budget_spent(self):
+        """The scope actually enforces: a second intent mint inside a 1/min
+        budget is 429'd, even though the order already has an id. Hermetic:
+        the rate is patched on the throttle class (DRF binds THROTTLE_RATES
+        at import) and the cache is cleared around the window so no real
+        time passes and no budget leaks into other tests."""
+        self.razorpay_mock()
+        order = self.create_order()
+        rates = dict(api_settings.DEFAULT_THROTTLE_RATES)
+        rates["payment"] = "1/min"
+        with mock.patch.object(ScopedRateThrottle, "THROTTLE_RATES", rates):
+            cache.clear()
+            first = self.client.post(
+                "/api/orders/payment/", {"order_id": order.id}, format="json"
+            )
+            throttled = self.client.post(
+                "/api/orders/payment/", {"order_id": order.id}, format="json"
+            )
+            cache.clear()  # leave an empty bucket for the rest of the suite
+        self.assertEqual(first.status_code, 200, first.data)
+        self.assertEqual(throttled.status_code, 429, throttled.data)
+
+
+@tag("orders")
+class CreatePaymentAtomicityTests(OrderTestBase):
+    """SPEC-11-01 [R-11.1]: the intent persistence is race-safe. The
+    unlocked pre-check is not the concurrency authority -- the unique
+    constraint on razorpay_order_id is, backed by a locked atomic write
+    and an IntegrityError retry (conventions.md:16,17)."""
+
+    def _flaky_save(self, fail_times):
+        """Order.save that raises IntegrityError for the first
+        ``fail_times`` calls, then delegates to the real save. A plain
+        function so instance binding keeps working under patch."""
+        real_save = Order.save
+        calls = []
+
+        def save(instance, *args, **kwargs):
+            calls.append(instance.pk)
+            if len(calls) <= fail_times:
+                raise IntegrityError(
+                    "UNIQUE constraint failed: orders_order.razorpay_order_id"
+                )
+            return real_save(instance, *args, **kwargs)
+
+        return save, calls
+
+    def test_persist_retries_after_a_unique_violation(self):
+        """A unique-violated write retries instead of surfacing a 500: the
+        retry re-reads committed state, re-writes the id and commits the
+        audit trail exactly once."""
+        self.razorpay_mock(order_id="order_RETRY01")
+        order = self.create_order()
+        flaky_save, calls = self._flaky_save(fail_times=1)
+
+        with mock.patch.object(Order, "save", flaky_save):
+            res = self.client.post(
+                "/api/orders/payment/", {"order_id": order.id}, format="json"
+            )
+
+        self.assertEqual(res.status_code, 200, res.data)
+        self.assertEqual(res.data["razorpay_order_id"], "order_RETRY01")
+        self.assertEqual(len(calls), 2)  # violated once, then retried once
+        order.refresh_from_db()
+        self.assertEqual(order.razorpay_order_id, "order_RETRY01")
+        self.assertEqual(
+            AuditEvent.objects.filter(
+                order=order,
+                event_type=AuditEvent.EventType.PAYMENT_INITIATED,
+            ).count(),
+            1,
+        )
+
+    def test_persist_exhausted_retries_reraise_the_violation(self):
+        """The retry bound is a safety net, not a loop: when every attempt
+        is rejected the original IntegrityError propagates (500 semantics
+        preserved) and no intent or audit row ever commits."""
+        self.razorpay_mock(order_id="order_DOOMED")
+        order = self.create_order()
+        flaky_save, calls = self._flaky_save(fail_times=99)
+
+        with mock.patch.object(Order, "save", flaky_save):
+            with self.assertRaises(IntegrityError):
+                self.client.post(
+                    "/api/orders/payment/", {"order_id": order.id}, format="json"
+                )
+
+        order.refresh_from_db()
+        self.assertIsNone(order.razorpay_order_id)  # nothing committed
+        self.assertEqual(
+            AuditEvent.objects.filter(
+                order=order,
+                event_type=AuditEvent.EventType.PAYMENT_INITIATED,
+            ).count(),
+            0,
+        )
+
+    def test_persist_race_adopts_the_committed_winner(self):
+        """Between the unlocked pre-check and the locked re-read, another
+        connection can commit the intent first. The loser must adopt the
+        winner's id, write nothing and emit nothing -- the same contract
+        as the 9-01 reuse path. SQLite runs requests serially, so the
+        interleaving is pinned by making the locked re-read return a row
+        that already carries the winner's id."""
+        client_mock = self.razorpay_mock(order_id="order_LOSER")
+        order = self.create_order()
+        winner = Order.objects.get(pk=order.pk)
+        winner.razorpay_order_id = "order_WINNER"
+
+        locked = mock.MagicMock()
+        locked.get.return_value = winner
+        with mock.patch.object(
+            Order.objects, "select_for_update", return_value=locked
+        ):
+            res = self.client.post(
+                "/api/orders/payment/", {"order_id": order.id}, format="json"
+            )
+
+        self.assertEqual(res.status_code, 200, res.data)
+        self.assertEqual(res.data["razorpay_order_id"], "order_WINNER")
+        client_mock.order.create.assert_called_once()  # the loser minted...
+        self.assertEqual(
+            AuditEvent.objects.filter(
+                order=order,
+                event_type=AuditEvent.EventType.PAYMENT_INITIATED,
+            ).count(),
+            0,  # ...but emitted nothing
+        )
 
 
 @tag("orders")

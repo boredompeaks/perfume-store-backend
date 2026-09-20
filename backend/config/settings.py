@@ -309,6 +309,10 @@ REST_FRAMEWORK = {
         # Tighter than 'auth': the recovery views each send an email per
         # accepted request, so this budget is the outbound-mail-bomb bound.
         'recovery': os.getenv('THROTTLE_RECOVERY_RATE', '5/min'),
+        # Payment intent minting (SPEC-11-01): every accepted request calls
+        # the gateway and writes a payment event, so this budget bounds
+        # both gateway spend and order-id brute-forcing.
+        'payment': os.getenv('PAYMENT_THROTTLE_RATE', '10/min'),
     },
 }
 CORS_ALLOWED_ORIGINS = [origin for origin in os.getenv(
