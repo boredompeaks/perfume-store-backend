@@ -1,6 +1,8 @@
+from datetime import timedelta
 from decimal import Decimal
 
 from django.db import transaction
+from django.db.models import Q
 from django.utils import timezone
 
 from rest_framework.decorators import api_view, permission_classes, throttle_scope
@@ -47,6 +49,60 @@ def order_list(request):
 # ==================================
 # Create Order / Checkout
 # ==================================
+
+# The shipping fields that identify a checkout submission; must stay in step
+# with the required_fields list inside create_order (both describe the same
+# payload), which is why the duplicate guard reads them from the request
+# exactly the way create_order persists them.
+_SHIPPING_FIELDS = ("full_name", "phone", "address", "city", "state", "pincode")
+
+
+def _order_lines(cart_items):
+    """Order identity as sorted (product_id, quantity) pairs, so the
+    duplicate comparison does not depend on cart-line iteration order."""
+    return sorted((item.product_id, item.quantity) for item in cart_items)
+
+
+def _find_duplicate_pending_order(user, cart_items, coupon, payload):
+    """[R-21.2.6] The accidental-duplicate window: checkout never clears the
+    cart (cleanup happens after payment confirmation), so a double-click or
+    client retry resubmits the byte-identical payload while the first order
+    is still payable -- which used to mint a second payable order and with
+    it a second charge target. Returns the user's recent pending order with
+    the identical payload, or None to proceed with creation.
+
+    Deliberately narrower than SPEC-9-01: the header-keyed idempotency
+    (Idempotency-Key + unique-by-key store, covering cross-session
+    simultaneous duplicates) stays there. This guard only closes the
+    accidental same-session window, and only for orders that are still
+    payable -- verify_payment's already-processed gate remains the authority
+    past that point."""
+    cutoff = timezone.now() - timedelta(seconds=settings.CHECKOUT_DEDUP_WINDOW_SECONDS)
+    candidates = (
+        Order.objects.filter(
+            user=user,
+            status="pending",
+            created_at__gte=cutoff,
+        )
+        # payable gate mirrors verify_payment: a pending order with a
+        # payment id attached has already been taken past this point
+        .filter(Q(razorpay_payment_id__isnull=True) | Q(razorpay_payment_id=""))
+        .prefetch_related("items")
+        .order_by("-created_at")
+    )
+    lines = _order_lines(cart_items)
+    shipping = tuple(payload.get(field) for field in _SHIPPING_FIELDS)
+    for candidate in candidates:
+        if _order_lines(candidate.items.all()) != lines:
+            continue
+        if candidate.coupon_id != (coupon.pk if coupon else None):
+            # a deliberate coupon difference is a new purchase, not a retry
+            continue
+        if tuple(getattr(candidate, field) for field in _SHIPPING_FIELDS) != shipping:
+            continue
+        return candidate
+    return None
+
 
 @api_view(['POST'])
 @permission_classes([IsAuthenticated])
@@ -280,6 +336,36 @@ def create_order(request):
     # =========================
 
     with transaction.atomic():
+
+        # [R-21.2.6] Serialize same-session submissions on the cart row: two
+        # rapid POSTs queue here, so the loser re-runs the dedup lookup after
+        # the winner has committed and collapses onto the same order instead
+        # of minting a second payable one. The cart row is locked only on
+        # this path (verify_payment locks Order -> Products -> Coupon), so no
+        # new lock-order cycle is introduced.
+        cart = Cart.objects.select_for_update().get(pk=cart.pk)
+
+        duplicate = _find_duplicate_pending_order(
+            request.user, cart_items, coupon, request.data
+        )
+
+        if duplicate is not None:
+            # Benign double-submit retry, so INFO: a WARNING here would spam
+            # the log on every impatient re-click (same judgement as
+            # verify_payment's already-processed skip).
+            logger.info(
+                "Checkout dedup: order %s replayed for user %s "
+                "(identical pending submission)",
+                duplicate.id,
+                request.user.pk,
+            )
+
+            serializer = OrderSerializer(duplicate)
+
+            return Response(
+                serializer.data,
+                status=status.HTTP_200_OK
+            )
 
         order = Order.objects.create(
             user=request.user,

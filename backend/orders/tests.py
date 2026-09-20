@@ -7,6 +7,7 @@ from datetime import timedelta
 from decimal import Decimal
 from unittest import mock
 
+from django.conf import settings
 from django.core.cache import cache
 from django.test import tag
 from django.utils import timezone
@@ -14,6 +15,7 @@ from rest_framework.settings import api_settings
 from rest_framework.throttling import ScopedRateThrottle
 
 from cart.models import Cart, CartItem
+from common.models import AuditEvent
 from common.testing import TEST_RAZORPAY_KEY_ID, ApiTestCase
 from orders.models import Coupon, Order, OrderItem
 from orders.views import apply_coupon
@@ -381,6 +383,133 @@ class CheckoutStockGateTests(OrderTestBase):
             {"Rose Aurum", "Oud Royale"},
         )
         self.assertEqual(Order.objects.count(), 0)
+
+
+@tag("orders")
+class CheckoutDedupTests(OrderTestBase):
+    """[R-21.2.6] duplicate checkout submissions create no duplicate orders.
+
+    The accidental double-click / client retry resubmits the byte-identical
+    payload against an unchanged cart (checkout never clears the cart;
+    cleanup happens after payment confirmation), so identical still-payable
+    pending submissions collapse onto the first order instead of minting a
+    second charge target. Deliberate differences (cart lines, coupon,
+    shipping, a settled first order) always create a fresh order, and
+    cross-user contention is untouched -- the oversell decision stays at
+    verify_payment."""
+
+    def test_double_click_resubmission_replays_the_same_order(self):
+        first = self.checkout()
+        self.assertEqual(first.status_code, 201, first.data)
+
+        second = self.checkout()
+
+        # one payable order, one item snapshot, one creation trail row:
+        # the retry is a replay, not a second order
+        self.assertEqual(second.status_code, 200, second.data)
+        self.assertEqual(second.data["id"], first.data["id"])
+        self.assertEqual(second.data["total_amount"], first.data["total_amount"])
+        self.assertEqual(Order.objects.count(), 1)
+        self.assertEqual(OrderItem.objects.count(), 1)
+        self.assertEqual(
+            AuditEvent.objects.filter(
+                event_type=AuditEvent.EventType.ORDER_CREATED
+            ).count(),
+            1,
+        )
+
+    def test_replayed_order_is_the_one_that_gets_paid(self):
+        self.checkout()
+        replay = self.checkout()
+        self.assertEqual(replay.status_code, 200, replay.data)
+
+        # the client flow continues on the replayed id: exactly one gateway
+        # order is minted for it, so exactly one charge can ever follow
+        client_mock = self.razorpay_mock()
+        payment = self.client.post(
+            "/api/orders/payment/", {"order_id": replay.data["id"]}, format="json"
+        )
+        self.assertEqual(payment.status_code, 200, payment.data)
+        client_mock.order.create.assert_called_once()
+
+    def test_different_user_with_identical_cart_still_gets_own_order(self):
+        first = self.checkout()
+        self.assertEqual(first.status_code, 201, first.data)
+
+        self.make_user("other")
+        other_client = self.fresh_client()
+        self.api_login("other", client=other_client)
+        self.seed_session_cart([(self.product, 2)], client=other_client)
+        res = other_client.post(
+            "/api/orders/checkout/", self.checkout_payload(), format="json"
+        )
+
+        # the guard is keyed per user: two buyers racing the same stock keep
+        # two orders, and the oversell decision stays at verify
+        self.assertEqual(res.status_code, 201, res.data)
+        self.assertNotEqual(res.data["id"], first.data["id"])
+        self.assertEqual(Order.objects.count(), 2)
+
+    def test_deliberately_different_payload_creates_new_order(self):
+        self.make_coupon(code="SAVE10", discount_value="10")
+        first = self.checkout()
+        self.assertEqual(first.status_code, 201, first.data)
+
+        recouponed = self.checkout(coupon_code="SAVE10")
+        self.assertEqual(recouponed.status_code, 201, recouponed.data)
+        self.assertNotEqual(recouponed.data["id"], first.data["id"])
+        self.assertEqual(Order.objects.count(), 2)
+        recouponed_order = Order.objects.get(pk=recouponed.data["id"])
+        self.assertEqual(recouponed_order.coupon.code, "SAVE10")
+
+        # a deliberate shipping change is a new purchase, not a retry
+        moved = self.checkout(city="Pune")
+        self.assertEqual(moved.status_code, 201, moved.data)
+        self.assertEqual(Order.objects.count(), 3)
+
+    def test_changed_cart_lines_create_new_order(self):
+        first = self.checkout()
+        self.assertEqual(first.status_code, 201, first.data)
+        other = self.make_product(name="Oud Royale", price="250.00", stock=4)
+        cart = Cart.objects.get(session_id=self.client.session.session_key)
+        CartItem.objects.create(cart=cart, product=other, quantity=1)
+
+        res = self.checkout()
+
+        self.assertEqual(res.status_code, 201, res.data)
+        self.assertNotEqual(res.data["id"], first.data["id"])
+        self.assertEqual(Order.objects.count(), 2)
+
+    def test_window_expiry_allows_a_genuine_reorder(self):
+        first = self.checkout()
+        self.assertEqual(first.status_code, 201, first.data)
+        Order.objects.filter(pk=first.data["id"]).update(
+            created_at=timezone.now()
+            - timedelta(seconds=settings.CHECKOUT_DEDUP_WINDOW_SECONDS + 60)
+        )
+
+        res = self.checkout()
+
+        # the guard bounds the accidental window; it must never permanently
+        # block an identical second purchase
+        self.assertEqual(res.status_code, 201, res.data)
+        self.assertNotEqual(res.data["id"], first.data["id"])
+        self.assertEqual(Order.objects.count(), 2)
+
+    def test_settled_order_does_not_block_a_new_identical_checkout(self):
+        first = self.checkout()
+        self.assertEqual(first.status_code, 201, first.data)
+        # simulate a completed purchase: no longer payable, so the same cart
+        # legitimately starts a fresh order
+        Order.objects.filter(pk=first.data["id"]).update(
+            status="confirmed", razorpay_payment_id="pay_SETTLED"
+        )
+
+        res = self.checkout()
+
+        self.assertEqual(res.status_code, 201, res.data)
+        self.assertNotEqual(res.data["id"], first.data["id"])
+        self.assertEqual(Order.objects.count(), 2)
 
 
 @tag("orders")

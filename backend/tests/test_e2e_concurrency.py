@@ -26,7 +26,12 @@ class OversellRaceTests(ApiTestCase):
             self.api_login(name, client=clients[name])
             self.seed_session_cart([(product, 1)], client=clients[name])
 
-        # checkout does not reserve stock (V-10): both orders are created
+        # [R-21.2.6] deliberate contract: the checkout dedup guard (SPEC-21-1)
+        # collapses only SAME-user identical resubmissions onto one order; two
+        # DIFFERENT users keep two orders (both 201) and stock stays untouched
+        # until verify -- the oversell decision deliberately remains at
+        # verify_payment, where exactly one row-locked verify wins. The
+        # same-user collapse is pinned in orders/tests.py CheckoutDedupTests.
         order_ids = {}
         for name, client in clients.items():
             res = client.post("/api/orders/checkout/", self.checkout_payload(), format="json")

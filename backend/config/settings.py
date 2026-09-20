@@ -236,6 +236,13 @@ DASHBOARD_SALES_WINDOW_DAYS = _env_int('DASHBOARD_SALES_WINDOW_DAYS', 30)
 # ignored and the default is used instead.
 PRODUCTS_PAGE_SIZE = _env_int('PRODUCTS_PAGE_SIZE', 12)
 
+# [R-21.2.6] Duplicate checkout submissions (double-click / client retry)
+# collapse onto the still-payable pending order carrying the identical
+# payload for this many seconds, instead of minting a second charge target.
+# Tunable per deployment without a code change; non-integer values are
+# ignored and the default is used instead.
+CHECKOUT_DEDUP_WINDOW_SECONDS = _env_int('CHECKOUT_DEDUP_WINDOW_SECONDS', 300)
+
 REST_FRAMEWORK = {
     'DEFAULT_AUTHENTICATION_CLASSES': (
         'rest_framework_simplejwt.authentication.JWTAuthentication',
