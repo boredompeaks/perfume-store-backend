@@ -841,6 +841,85 @@ class VerifyPaymentTests(OrderTestBase):
         self.product.refresh_from_db()
         self.assertEqual(self.product.stock, 10)  # untouched
 
+    # ——— [R-10.4] SPEC-10-04: failed/retryable payment semantics ———
+
+    def test_failed_verify_marks_payment_failed_and_stays_retryable(self):
+        """The failed attempt marks the payment dimension failed while the
+        ORDER stays pending: no cancellation, no stock movement, no capture
+        claim — every retry precondition stays intact."""
+        client_mock, order, payload = self._prepare_paid_setup()
+        self.razorpay_fail_signature(client_mock)
+
+        res = self.client.post("/api/orders/payment/verify/", payload, format="json")
+
+        self.assertEqual(res.status_code, 400, res.data)
+        order.refresh_from_db()
+        self.assertEqual(order.payment_status, "failed")
+        self.assertEqual(order.status, "pending")
+        self.assertIsNone(order.razorpay_payment_id)
+        self.assertIsNone(order.paid_at)
+        self.product.refresh_from_db()
+        self.assertEqual(self.product.stock, 10)
+
+    def test_retry_after_failure_captures_normally(self):
+        """The retry story end to end: failed -> captured on the same
+        order — the already-processed gate passes (nothing moved on the
+        failure), and the successful verify performs the machine's retry
+        edge with the full success side effects."""
+        client_mock, order, payload = self._prepare_paid_setup()
+        self.razorpay_fail_signature(client_mock)
+        first = self.client.post("/api/orders/payment/verify/", payload, format="json")
+        self.assertEqual(first.status_code, 400, first.data)
+        self.product.refresh_from_db()
+
+        # a fresh, genuine attempt: same gateway refs, signature verifies
+        self.razorpay_mock(order_id=order.razorpay_order_id)
+        second = self.client.post("/api/orders/payment/verify/", payload, format="json")
+
+        self.assertEqual(second.status_code, 200, second.data)
+        order.refresh_from_db()
+        self.assertEqual(order.status, "confirmed")
+        self.assertEqual(order.payment_status, "captured")
+        self.assertEqual(order.razorpay_payment_id, "pay_TEST001")
+        self.assertIsNotNone(order.paid_at)
+        self.product.refresh_from_db()
+        self.assertEqual(self.product.stock, 8)  # decremented exactly once
+
+    def test_failed_verify_marks_nothing_without_a_matching_order(self):
+        """A forged or mismatched gateway reference can never write payment
+        state: the failure writer scopes to the caller's own order by
+        stored ref, and the uniform 400 leaks no existence hint."""
+        client_mock, order, payload = self._prepare_paid_setup()
+        self.razorpay_fail_signature(client_mock)
+
+        forged = dict(payload, razorpay_order_id="order_NOTYOURS")
+        res = self.client.post("/api/orders/payment/verify/", forged, format="json")
+
+        self.assertEqual(res.status_code, 400, res.data)
+        self.assertEqual(res.data["error"], "Payment verification failed")
+        order.refresh_from_db()
+        self.assertEqual(order.payment_status, "pending")
+        self.assertFalse(
+            order.status_events.exclude(
+                trigger=order_state.TRIGGER_ORDER_CREATE
+            ).exists()
+        )
+
+    def test_failed_verify_writes_nothing_on_an_already_processed_order(self):
+        """The marking guard refuses processed orders: a bad-signature
+        replay against a captured order cannot flap its payment state."""
+        client_mock, order, payload = self._prepare_paid_setup()
+        self.razorpay_mock(order_id=order.razorpay_order_id)
+        ok = self.client.post("/api/orders/payment/verify/", payload, format="json")
+        self.assertEqual(ok.status_code, 200, ok.data)
+
+        self.razorpay_fail_signature(client_mock)
+        res = self.client.post("/api/orders/payment/verify/", payload, format="json")
+
+        self.assertEqual(res.status_code, 400, res.data)
+        order.refresh_from_db()
+        self.assertEqual(order.payment_status, "captured")
+
     def test_verify_requires_all_payment_fields(self):
         self.razorpay_mock()
         full = {
@@ -2013,6 +2092,81 @@ class OrderStateSourceTests(SimpleTestCase):
             {s for s, _ in Order.STATUS_CHOICES},
         )
 
+    # ——— [R-10.4] SPEC-10-04: the payment dimension's own machine ———
+
+    def test_payment_transition_table_pins_the_retry_semantics(self):
+        """The payment dimension moves only along declared edges. The spec's
+        failure/retry requirement: a failed payment stays retryable, so
+        pending -> failed and failed -> captured are machine edges; money
+        that never arrived cannot refund and captured money cannot un-pay."""
+        for old, new in [
+            ("pending", "captured"),        # the normal verify capture
+            ("pending", "failed"),          # SPEC-10-04: the failure writer
+            ("failed", "captured"),         # SPEC-10-04: the retry capture
+            ("authorized", "captured"),     # gateway two-step (declared only)
+            ("captured", "partially_refunded"),
+            ("captured", "refunded"),
+            ("partially_refunded", "refunded"),
+        ]:
+            with self.subTest(old=old, new=new):
+                self.assertTrue(order_state.payment_transition_allowed(old, new))
+        for old, new in [
+            ("pending", "refunded"),        # never paid, nothing to refund
+            ("captured", "failed"),         # captured money cannot "un-pay"
+            ("failed", "refunded"),
+            ("refunded", "captured"),
+            ("unknown", "captured"),
+        ]:
+            with self.subTest(old=old, new=new):
+                self.assertFalse(order_state.payment_transition_allowed(old, new))
+        for old, _ in order_state.PAYMENT_STATUS_CHOICES:
+            with self.subTest(old=old):
+                self.assertTrue(order_state.payment_transition_allowed(old, old))
+
+    def test_payment_dimension_table_is_total_over_choices(self):
+        self.assertEqual(
+            set(order_state.PAYMENT_ALLOWED_TRANSITIONS),
+            {v for v, _ in order_state.PAYMENT_STATUS_CHOICES},
+        )
+
+    def test_payment_method_vocabulary_and_failure_trigger_registered(self):
+        """[R-10.2] The COD/prepaid vocabulary exists machine-side, and the
+        payment-failure trigger is registered in the audit vocabulary (the
+        trail cannot grow unregistered sources, 10-02 contract)."""
+        self.assertEqual(
+            {v for v, _ in order_state.PAYMENT_METHOD_CHOICES},
+            {order_state.PAYMENT_METHOD_PREPAID, order_state.PAYMENT_METHOD_COD},
+        )
+        self.assertIn(
+            order_state.TRIGGER_PAYMENT_FAILED,
+            [t for t, _ in order_state.STATUS_EVENT_TRIGGERS],
+        )
+
+
+@tag("orders")
+class PaymentMethodExposureTests(OrderTestBase):
+    """[R-10.2] SPEC-10-04: the payment-method marker rides order reads
+    read-only, and checkout rows default to prepaid — the store's exact
+    current behavior (the COD choice at checkout is a checkout-section
+    row; no request field exists or is added here)."""
+
+    def test_checkout_defaults_to_prepaid_and_exposes_it_read_only(self):
+        order = self.create_order()
+        self.assertEqual(order.payment_method, order_state.PAYMENT_METHOD_PREPAID)
+
+        listing = self.client.get("/api/orders/")
+        self.assertEqual(listing.status_code, 200, listing.data)
+        self.assertEqual(
+            listing.data["results"][0]["payment_method"], "prepaid"
+        )
+        detail = self.client.get(f"/api/orders/{order.id}/")
+        self.assertEqual(detail.status_code, 200, detail.data)
+        self.assertEqual(detail.data["payment_method"], "prepaid")
+
+        # read-only everywhere: the marker is machine-maintained
+        self.assertIn("payment_method", OrderSerializer.Meta.fields)
+        self.assertIn("payment_method", OrderSerializer.Meta.read_only_fields)
+
 
 @tag("orders")
 class LifecycleDimensionsFieldTests(OrderTestBase):
@@ -2506,7 +2660,11 @@ class TransitionAuditTrailTests(OrderTestBase):
         self.assertIsNone(transition.actor)
         self.assertEqual(transition.trigger, order_state.TRIGGER_PAYMENT_VERIFY)
 
-    def test_failed_verify_appends_no_event(self):
+    def test_failed_verify_appends_the_payment_failed_event(self):
+        """[R-10.4] SPEC-10-04 (supersedes the 10-02-era 'no event on
+        failure' pin): the failed attempt IS audited. The order status did
+        not move, so the row records from == to ('pending') with the
+        payment-failure trigger; actor NULL (customer flow, no admin)."""
         order = self.create_order()
         client_mock = self.razorpay_mock(order_id="order_AUDFAIL")
         res = self.client.post(
@@ -2520,10 +2678,19 @@ class TransitionAuditTrailTests(OrderTestBase):
             "/api/orders/payment/verify/", self._verify_payload(order), format="json"
         )
         self.assertEqual(res.status_code, 400, res.data)
-        # no transition, no event: the trail still holds creation only
+        events = list(order.status_events.order_by("created_at", "id"))
+        self.assertEqual(
+            [(e.from_status, e.to_status) for e in events],
+            [(None, "pending"), ("pending", "pending")],
+        )
+        failure = events[-1]
+        self.assertEqual(failure.trigger, order_state.TRIGGER_PAYMENT_FAILED)
+        self.assertIsNone(failure.actor)
+        # the retryable story keeps its shape: the trail opens with the
+        # creation event and no order-status transition was recorded
         self.assertEqual(
             list(order.status_events.values_list("to_status", flat=True)),
-            ["pending"],
+            ["pending", "pending"],
         )
 
     def test_verify_rollback_takes_the_event_with_it(self):
@@ -3049,6 +3216,67 @@ class ShippedPreconditionTests(OrderTestBase):
         order.refresh_from_db()
         self.assertEqual(order.status, "shipped")
         self.assertEqual(order.fulfilment_status, "fulfilled")
+
+    # ——— [R-10.2] SPEC-10-04: the COD branch ———
+
+    def _cod_row(self, *, with_item=True, status_value="confirmed"):
+        """A cash-on-delivery row: payment_method cod, payment dimension
+        still pending — nothing captured, the money arrives at delivery."""
+        order = self.create_order()
+        Order.objects.filter(pk=order.pk).update(
+            status=status_value, payment_method=order_state.PAYMENT_METHOD_COD
+        )
+        if not with_item:
+            order.items.all().delete()
+        order.refresh_from_db()
+        return order
+
+    def test_cod_precondition_is_items_only(self):
+        """The COD variant of the shipped precondition, evaluated through
+        the same registry the writers call: no capture required pre-ship
+        (the money is collected at/after delivery), items still required.
+        The prepaid twin of the same row still demands capture."""
+        cod = self._cod_row(with_item=True)
+        self.assertEqual(order_state.precondition_failures(cod, "shipped"), [])
+        itemless = self._cod_row(with_item=False)
+        self.assertEqual(
+            order_state.precondition_failures(itemless, "shipped"),
+            ["order has no items to ship"],
+        )
+        prepaid = self._confirmed_row(paid=False, with_item=True)
+        self.assertNotEqual(
+            order_state.precondition_failures(prepaid, "shipped"), []
+        )
+
+    def test_cod_order_ships_through_the_bulk_writer_without_capture(self):
+        """End to end: a COD confirmed row ships with payment_status still
+        pending — the machine's COD branch — and the transition rides the
+        standard audit + dimension contract (10-01b/10-02). No parallel
+        COD writer exists."""
+        order = self._cod_row()
+
+        res = self._run_admin_action("mark_shipped", [order])
+        self.assertEqual(res.status_code, 200)
+        order.refresh_from_db()
+        self.assertEqual(order.status, "shipped")
+        self.assertEqual(order.payment_status, "pending")  # NOT captured
+        self.assertEqual(order.fulfilment_status, "fulfilled")
+        event = order.status_events.exclude(
+            trigger=order_state.TRIGGER_ORDER_CREATE
+        ).get()
+        self.assertEqual(event.from_status, "confirmed")
+        self.assertEqual(event.to_status, "shipped")
+
+    def test_cod_ship_fires_the_shipped_notification_hook(self):
+        """[R-10.16] The COD branch rides the standard writers, so the
+        shipped hook contract (10-05) fires for it too."""
+        order = self._cod_row()
+
+        with mock.patch("orders.events.notifications.dispatch") as dispatch_mock:
+            res = self._run_admin_action("mark_shipped", [order])
+
+        self.assertEqual(res.status_code, 200)
+        dispatch_mock.assert_called_once_with("order.shipped", {"order": order})
 
     # ——— the extension hook (the SPEC-1-08 attach point) ———
 

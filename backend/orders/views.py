@@ -37,6 +37,11 @@ from .state import (
     TRIGGER_ORDER_CREATE,
     TRIGGER_PAYMENT_VERIFY,
 )
+# [R-10.4] SPEC-10-04: the failed-verify audit trigger + the
+# payment-dimension transition gate. Own import lines so every hunk in
+# this file stays insertion-only.
+from .state import TRIGGER_PAYMENT_FAILED
+from .state import payment_transition_allowed
 
 from cart.models import Cart
 from common import notifications
@@ -992,6 +997,47 @@ def verify_payment(request):
             razorpay_order_id,
             razorpay_payment_id,
         )
+
+        # [R-10.4] SPEC-10-04: the failure path marks the payment dimension
+        # failed (spec 10.2) while the ORDER stays pending — retryable by
+        # design: neither status nor razorpay_payment_id moves, so the
+        # already-processed gate passes and a later successful verify
+        # captures normally (failed -> captured, the machine's retry edge).
+        # Scoped to the caller's own order whose stored gateway ref equals
+        # the claimed one, with no prior capture claim: a forged or
+        # mismatched reference can never write payment state, and the
+        # response below stays byte-identical either way (no existence
+        # leak). The write and its audit row share one transaction (the
+        # 10-02 rollback-together contract).
+        with transaction.atomic():
+            failed_order = (
+                Order.objects.select_for_update()
+                .filter(
+                    razorpay_order_id=razorpay_order_id,
+                    user=request.user,
+                )
+                .first()
+            )
+            if (
+                failed_order
+                and failed_order.status == "pending"
+                and not failed_order.razorpay_payment_id
+                and payment_transition_allowed(failed_order.payment_status, "failed")
+            ):
+                failed_order.payment_status = "failed"
+                failed_order.save(update_fields=["payment_status"])
+                # [R-10.12]/[R-10.17] The audit row rides the same
+                # transaction. The order status did not move on a failed
+                # attempt, so the row records from == to ('pending') and
+                # the trigger names the failure; actor NULL — the customer
+                # flow has no admin actor.
+                OrderStatusEvent.objects.create(
+                    order=failed_order,
+                    from_status=failed_order.status,
+                    to_status=failed_order.status,
+                    actor=None,
+                    trigger=TRIGGER_PAYMENT_FAILED,
+                )
 
         return Response(
             {"error": "Payment verification failed"},

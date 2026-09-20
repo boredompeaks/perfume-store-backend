@@ -109,6 +109,48 @@ FULFILMENT_STATUS_CHOICES = [
     ("fulfilled", "Fulfilled"),
 ]
 
+# ——— [R-10.2] SPEC-10-04: payment-method vocabulary —————————————————————
+# Spec 10.1 makes COD orders and failed payments an explicit machine
+# responsibility. COD needs a payment-method marker on the order so the
+# machine can branch its preconditions; prepaid is the store's current and
+# default behavior (gateway capture before fulfilment). The checkout INPUT
+# (accepting COD as a choice) is a checkout-section row — this is only the
+# machine-side vocabulary the row carries.
+PAYMENT_METHOD_PREPAID = "prepaid"
+PAYMENT_METHOD_COD = "cod"
+
+PAYMENT_METHOD_CHOICES = [
+    (PAYMENT_METHOD_PREPAID, "Prepaid"),
+    (PAYMENT_METHOD_COD, "Cash on delivery"),
+]
+
+# ——— [R-10.4] SPEC-10-04: payment-dimension transition table ————————————
+# ALLOWED_TRANSITIONS gates the order status; the payment dimension (spec
+# 10.2) gets the same treatment so a payment value can only ever move
+# along a declared edge. The failure/retry semantics live here: the
+# failure writer moves pending -> failed, and failed -> captured is the
+# RETRY edge — a failed verification leaves the order status untouched
+# (retryable by design), so the next successful verify captures normally.
+# No writer exists yet for authorized / partially_refunded / refunded
+# (gateway two-step and the refund section's writers, SPEC-1-05/6-12);
+# their edges are declared so the machine is complete and those sections
+# pin against a table that already answers them. Mirrors
+# transition_allowed (self-transitions stay legal: idempotent replays).
+PAYMENT_ALLOWED_TRANSITIONS = {
+    "pending": {"captured", "failed"},
+    "authorized": {"captured"},
+    "captured": {"partially_refunded", "refunded"},
+    "partially_refunded": {"refunded"},
+    "failed": {"captured"},
+    "refunded": set(),
+}
+
+
+def payment_transition_allowed(old_payment: str, new_payment: str) -> bool:
+    return new_payment == old_payment or new_payment in PAYMENT_ALLOWED_TRANSITIONS.get(
+        old_payment, set()
+    )
+
 # Total legacy→dimensions mapping: EVERY legacy status value maps to BOTH
 # dimensions — this is what the 0012 data migration backfills from, so a
 # key missing here would leave a live row with un-backfilled dimensions.
@@ -149,6 +191,12 @@ TRIGGER_ADMIN_BULK_ACTION = "admin_bulk_action"
 TRIGGER_PAYMENT_VERIFY = "payment_verify"
 TRIGGER_ADMIN_API_FULFIL = "admin_api_fulfil"
 TRIGGER_ADMIN_API_CANCEL = "admin_api_cancel"
+# [R-10.4] SPEC-10-04: the failed-verify writer appends its audit row with
+# this trigger. The ORDER status does not move on a failed attempt (it
+# stays retryable), so the row records from == to ('pending') and the
+# trigger is what names the failure — spec 10.3's "Failure/retry
+# behaviour" answer for this edge.
+TRIGGER_PAYMENT_FAILED = "payment_failed"
 
 STATUS_EVENT_TRIGGERS = [
     (TRIGGER_ORDER_CREATE, "Order created"),
@@ -157,4 +205,5 @@ STATUS_EVENT_TRIGGERS = [
     (TRIGGER_PAYMENT_VERIFY, "Payment verified"),
     (TRIGGER_ADMIN_API_FULFIL, "Admin fulfilment API"),
     (TRIGGER_ADMIN_API_CANCEL, "Admin cancel API"),
+    (TRIGGER_PAYMENT_FAILED, "Payment verification failed"),
 ]
