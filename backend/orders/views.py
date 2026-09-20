@@ -12,6 +12,7 @@ from .models import Order, OrderItem, Coupon
 from .serializers import OrderSerializer
 
 from cart.models import Cart
+from common import notifications
 from common.models import AuditEvent
 from common.money import quantize_money
 from products.models import StockMovement, products
@@ -840,6 +841,15 @@ def verify_payment(request):
                 "order_id": order.id,
                 "total_amount": str(order.total_amount),
             },
+        )
+        # [R-19.0] Event-driven customer notification beside the audit
+        # hook, inside this same atomic block (rollback-together, like
+        # record). dispatch never raises: a send failure is logged on the
+        # notifications channel and the captured payment stays confirmed
+        # (the SMTP-503 account-still-created behavior, mirrored).
+        notifications.dispatch(
+            AuditEvent.EventType.ORDER_PAID,
+            {"order": order},
         )
 
     return Response({

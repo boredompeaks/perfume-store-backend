@@ -1,0 +1,6 @@
+Thank you for your order!
+
+Order number: #{{ order.id }}
+Total: {{ order.total_amount }}
+
+Track your orders at {{ frontend_url }}/orders/

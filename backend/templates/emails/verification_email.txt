@@ -1,0 +1,5 @@
+Welcome! Verify your email by opening this link:
+
+{{ base_url }}?uid={{ uid }}&token={{ token }}
+
+If you did not create this account, ignore this email.
