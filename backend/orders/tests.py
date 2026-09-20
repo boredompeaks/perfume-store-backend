@@ -22,7 +22,9 @@ from cart.models import Cart, CartItem
 from common.models import AuditEvent
 from common.testing import TEST_RAZORPAY_KEY_ID, ApiTestCase
 from config.settings import _env_currency
+from orders.admin import OrderAdmin
 from orders.models import Coupon, Order, OrderItem
+from orders.serializers import OrderItemSerializer, OrderSerializer
 from orders.views import apply_coupon
 from products.models import StockMovement, products
 
@@ -170,6 +172,71 @@ class CurrencyBackfillMigrationTests(TransactionTestCase):
         items = list(order.items.all())
         self.assertEqual(len(items), 1)
         self.assertEqual(items[0].currency, "INR")
+
+
+@tag("orders")
+class CurrencyExposureTests(OrderTestBase):
+    """[R-8.11] part 2/2: the minted currency surfaces wherever its money
+    surfaces — customer-facing serializers and the admin — and nowhere is
+    it writable."""
+
+    def test_order_currency_exposed_read_only_in_order_serializer(self):
+        self.assertIn("currency", OrderSerializer.Meta.fields)
+        self.assertIn("currency", OrderSerializer.Meta.read_only_fields)
+
+        order = self.create_order()
+
+        res = self.client.get("/api/orders/")
+        self.assertEqual(res.status_code, 200, res.data)
+        self.assertEqual(res.data[0]["currency"], "INR")
+        self.assertEqual(res.data[0]["id"], order.id)
+
+    def test_checkout_replay_and_item_bodies_carry_the_currency(self):
+        """OrderSerializer is the single surface for the checkout response,
+        the dedup replay, and every order read; OrderItemSerializer rides
+        it via ``items``, so both bodies denominate their amounts."""
+        self.assertIn("currency", OrderItemSerializer.Meta.fields)
+        self.assertIn("currency", OrderItemSerializer.Meta.read_only_fields)
+
+        checkout = self.checkout()
+        self.assertEqual(checkout.status_code, 201, checkout.data)
+        self.assertEqual(checkout.data["currency"], "INR")
+        self.assertEqual(checkout.data["items"][0]["currency"], "INR")
+
+        replay = self.checkout()
+        self.assertEqual(replay.status_code, 200, replay.data)
+        self.assertEqual(replay.data["currency"], "INR")
+
+    def test_default_currency_override_propagates_through_serialization(self):
+        with override_settings(DEFAULT_CURRENCY="USD"):
+            order = self.create_order()
+
+        res = self.client.get("/api/orders/")
+        self.assertEqual(res.status_code, 200, res.data)
+        self.assertEqual(res.data[0]["id"], order.id)
+        self.assertEqual(res.data[0]["currency"], "USD")
+        self.assertEqual(res.data[0]["items"][0]["currency"], "USD")
+
+    def test_admin_list_display_and_read_only_detail_surface_currency(self):
+        self.assertIn("currency", OrderAdmin.list_display)
+        self.assertIn("currency", OrderAdmin.readonly_fields)
+        # The order change page renders currency inside the read-only
+        # payment fieldset, beside the amounts it denominates.
+        payment_fieldset = dict(OrderAdmin.fieldsets)[
+            "Payment (server-computed — read only)"
+        ]
+        self.assertIn("currency", payment_fieldset["fields"])
+
+        order = self.create_order()
+
+        User.objects.create_superuser("opsboss", "ops@example.com", "S3cure-Passphrase!")
+        self.client.login(username="opsboss", password="S3cure-Passphrase!")
+        changelist = self.client.get("/admin/orders/order/")
+        self.assertEqual(changelist.status_code, 200)
+        self.assertContains(changelist, "Currency")  # the list column header
+        change_page = self.client.get(f"/admin/orders/order/{order.id}/change/")
+        self.assertEqual(change_page.status_code, 200)
+        self.assertContains(change_page, "INR")  # the read-only value renders
 
 
 @tag("orders")

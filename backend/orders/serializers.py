@@ -23,6 +23,10 @@ class OrderItemSerializer(serializers.ModelSerializer):
             'price',
             'quantity',
             'subtotal',
+            # [R-8.11] Denomination of price/subtotal — the label rides the
+            # money wherever the money is exposed. Read-only: currency is
+            # minted at creation from store config, never client-chosen.
+            'currency',
         ]
 
         read_only_fields = [
@@ -33,6 +37,7 @@ class OrderItemSerializer(serializers.ModelSerializer):
             'variant_name',
             'price',
             'subtotal',
+            'currency',
         ]
 
 
@@ -75,6 +80,10 @@ class OrderSerializer(serializers.ModelSerializer):
             'coupon',
             'discount_amount',
             'total_amount',
+            # [R-8.11] The denomination of total_amount/discount_amount is
+            # exposed beside them (checkout, dedup replay, and order reads
+            # all serialize through here). Read-only like the money itself.
+            'currency',
 
             'items',
             'created_at',
@@ -89,6 +98,7 @@ class OrderSerializer(serializers.ModelSerializer):
             'coupon',
             'discount_amount',
             'total_amount',
+            'currency',
             'items',
             'created_at',
             'updated_at',

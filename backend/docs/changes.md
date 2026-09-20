@@ -333,6 +333,14 @@ Per spec 8.3 "Historical snapshots" (orders must retain what was actually purcha
 - Boundary note: `verify_payment` does NOT assert the gateway amount at HEAD (the dispatch premise was stale — there is no gateway fetch/reconciliation in the verify path); adding server-side amount+currency reconciliation is a separate concern, not smuggled in here. Frontend `money.ts` INR formatting is explicitly a frontend task (formatting consumption, not schema).
 - Suite: **442 tests, OK (438 pass, 4 pre-existing `expectedFailure` unchanged — ceiling held)**, coverage **100.00%** (1938 stmts, 0 miss — grew from 1923 with the new code; gate 90), `makemigrations --check` clean.
 
+## 2026-09-20 - SPEC-8-03 (Section 8) - builder: currency surfaced in customer-facing serializers and admin ([R-8.11], part 2/2 — completes 390c7ce)
+
+- `orders/serializers.py` — `currency` added to `OrderSerializer` and `OrderItemSerializer` `fields` + `read_only_fields`, beside the money columns each denominates. `OrderSerializer` is the single surface for the checkout response, the dedup replay, and order reads, so all customer-facing money bodies now carry their denomination; `OrderItemSerializer` rides it via `items`. Explicit fields maintained (no `'__all__'`), never writable.
+- `orders/admin.py` — `OrderAdmin.list_display` gains `currency` beside `total_amount`/`discount_amount`; added to `readonly_fields` and the "Payment (server-computed — read only)" fieldset so the change page renders the denomination beside the amounts (mirrors the SPEC-8-01 `order_number` integration: minimal, read-only placements). `OrderItemInline` deliberately untouched — outside the part-2 remainder scope, and `tests/test_orderitem_snapshot.py` pins its exact tuple; item currency stays surfaced via `OrderItemSerializer` (+proposed follow-up if admin-inline exposure is wanted).
+- `orders/tests.py` (+4, `CurrencyExposureTests`): `currency` read-only in `OrderSerializer.Meta` with API-level list exposure, checkout + dedup-replay + item bodies carry it, `DEFAULT_CURRENCY=USD` override propagates creation → serialization, and admin list_display/readonly/fieldset membership with a rendered changelist ("Currency" column) + change page ("INR" value) — superuser session, in-process, no network.
+- No model/migration/settings changes (part 1 owns those); part-1 gateway-payload test (`test_gateway_payload_uses_the_order_currency`) unchanged and passing.
+- Suite: **446 tests, OK (442 pass, 4 pre-existing `expectedFailure` unchanged — ceiling held)**, coverage **100.00%** (1938 stmts, 0 miss — unchanged; the surface additions are list/field-membership lines already inside fully-covered files), `makemigrations --check` clean.
+
 ## Next (per fix-plan.md)
 
 - Phase 0 remaining: rotate Razorpay keys, add CI.
