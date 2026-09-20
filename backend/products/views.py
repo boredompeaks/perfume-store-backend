@@ -10,9 +10,9 @@ from rest_framework.response import Response
 from rest_framework import status
 
 from common.audit import log_api_action
-from common.permissions import HasProductsWriteOrReadOnly
+from common.permissions import HasInventoryAdjust, HasProductsWriteOrReadOnly
 
-from .models import products
+from .models import StockMovement, products
 from .serializers import ProductSerializer
 
 
@@ -250,3 +250,97 @@ def product_detail(request, slug):
             product.delete()
 
         return Response(status=status.HTTP_204_NO_CONTENT)
+
+
+# ==================================
+# Inventory Adjustment (SPEC-9-06 [R-9.4.7])
+# ==================================
+
+# Valid reasons for a manual adjustment, straight from the ledger model —
+# a value outside this set must be a 400 here, never a 500 at insert time.
+_VALID_ADJUSTMENT_REASONS = frozenset(StockMovement.Reason.values)
+
+
+@api_view(['POST'])
+@permission_classes([HasInventoryAdjust])
+def inventory_adjust(request):
+    """POST /admin/inventory/adjustments (spec 9.4 Inventory module):
+    a thin REST wrapper around the shipped ``products.adjust_stock``
+    service. Reuse is deliberate — the service already owns the whole
+    contract (atomic + select_for_update, the below-zero ValueError guard,
+    the StockMovement ledger row with stock_after and created_by), so the
+    view only maps HTTP onto it: permission via ``HasInventoryAdjust``
+    (conventions.md: never inline is_staff), payload validation, and the
+    service's outcomes as status codes. The movement row IS the audit
+    record, per the no-silent-inventory-edits rule [6.5.17]."""
+    product_id = request.data.get('product_id')
+    delta = request.data.get('delta')
+    reason = request.data.get('reason')
+    note = request.data.get('note', '')
+
+    if product_id is None:
+        return Response(
+            {'error': 'product_id is required'},
+            status=status.HTTP_400_BAD_REQUEST
+        )
+
+    if delta is None:
+        return Response(
+            {'error': 'delta is required'},
+            status=status.HTTP_400_BAD_REQUEST
+        )
+
+    # bool is an int subclass: True/False must not masquerade as ±1, and a
+    # float/str delta would silently truncate or slip past the service.
+    if not isinstance(delta, int) or isinstance(delta, bool):
+        return Response(
+            {'error': 'delta must be an integer'},
+            status=status.HTTP_400_BAD_REQUEST
+        )
+
+    if reason is None:
+        return Response(
+            {'error': 'reason is required'},
+            status=status.HTTP_400_BAD_REQUEST
+        )
+
+    if reason not in _VALID_ADJUSTMENT_REASONS:
+        return Response(
+            {
+                'error': 'reason must be one of: '
+                + ', '.join(StockMovement.Reason.values)
+            },
+            status=status.HTTP_400_BAD_REQUEST
+        )
+
+    try:
+        product = products.objects.get(id=product_id)
+    except products.DoesNotExist:
+        return Response(
+            {'error': 'Product not found'},
+            status=status.HTTP_404_NOT_FOUND
+        )
+
+    try:
+        product.adjust_stock(request.user, delta, reason, note)
+    except ValueError as error:
+        # The service's below-zero guard: rejected before anything was
+        # written, so the message is safe to surface verbatim.
+        return Response(
+            {'error': str(error)},
+            status=status.HTTP_400_BAD_REQUEST
+        )
+
+    movement = product.stock_movements.first()
+
+    return Response(
+        {
+            'movement_id': movement.id,
+            'product_id': product.id,
+            'delta': movement.delta,
+            'stock_after': movement.stock_after,
+            'reason': movement.reason,
+            'note': movement.note,
+        },
+        status=status.HTTP_201_CREATED
+    )

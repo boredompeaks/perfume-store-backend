@@ -20,6 +20,7 @@ from common.permissions import IsAdminUserOrReadOnly
 from common.roles import (
     ROLE_ADMIN,
     ROLE_CATALOGUE,
+    ROLE_INVENTORY,
     ROLE_SUPPORT,
     STAFF_ROLES,
     sync_role_groups,
@@ -442,6 +443,162 @@ class AdjustStockTests(ApiTestCase):
         self.assertEqual(self.product.stock_health, "low")  # 5
         self.product.adjust_stock(self.admin, -5, StockMovement.Reason.DAMAGE)
         self.assertEqual(self.product.stock_health, "out")  # 0
+
+
+@tag("products")
+class InventoryAdjustApiTests(ApiTestCase):
+    """SPEC-9-06 [R-9.4.7] (spec line 3280, `POST /admin/inventory/adjustments`
+    under the Inventory module): a thin REST endpoint that reuses the shipped
+    ``adjust_stock`` service and the ``HasInventoryAdjust`` permission. The
+    ledger assertions mirror AdjustStockTests — the view adds HTTP, nothing
+    else."""
+
+    URL = "/api/products/inventory/adjustments/"
+
+    def setUp(self):
+        self.product = products.objects.create(
+            name="Test oudh",
+            description="test",
+            price="1000.00",
+            size=50,
+            stock=10,
+            category="test",
+        )
+        self.invmgr = self._user_with_role("invmgr", ROLE_INVENTORY)
+
+    @staticmethod
+    def _user_with_role(username, role):
+        from django.contrib.auth.models import Group
+
+        user = User.objects.create_user(
+            username, f"{username}@example.com", "S3cure-Passphrase!"
+        )
+        user.groups.add(Group.objects.get_or_create(name=role)[0])
+        return user
+
+    def _post(self, payload, client=None):
+        client = client or self.client
+        return client.post(self.URL, payload, format="json")
+
+    def _payload(self, **overrides):
+        payload = {
+            "product_id": self.product.id,
+            "delta": 5,
+            "reason": StockMovement.Reason.RESTOCK,
+            "note": "monthly restock",
+        }
+        payload.update(overrides)
+        return payload
+
+    # permission matrix -------------------------------------------------------
+    def test_anonymous_caller_is_denied_403(self):
+        res = self._post(self._payload(), client=self.fresh_client())
+        self.assertEqual(res.status_code, 403, res.data)
+        self.assertEqual(StockMovement.objects.count(), 0)
+
+    def test_catalogue_role_lacks_inventory_adjust_403(self):
+        """Pin the least-privilege split: catalogue may write products but
+        NOT adjust inventory (roles.py: inventory.adjust = inventory+admin)."""
+        catmgr = self._user_with_role("catmgr", ROLE_CATALOGUE)
+        self.client.force_authenticate(catmgr)
+        res = self._post(self._payload())
+        self.assertEqual(res.status_code, 403, res.data)
+        self.assertEqual(
+            res.data["error"], "You do not have permission to perform this action."
+        )
+        self.assertEqual(StockMovement.objects.count(), 0)
+        self.product.refresh_from_db()
+        self.assertEqual(self.product.stock, 10)  # untouched
+
+    def test_inventory_role_is_allowed(self):
+        self.client.force_authenticate(self.invmgr)
+        res = self._post(self._payload())
+        self.assertEqual(res.status_code, 201, res.data)
+
+    # happy path + ledger contract ---------------------------------------------
+    def test_successful_adjustment_writes_the_service_ledger_row(self):
+        self.client.force_authenticate(self.invmgr)
+        res = self._post(self._payload())
+
+        self.assertEqual(res.status_code, 201, res.data)
+        self.assertEqual(res.data["delta"], 5)
+        self.assertEqual(res.data["stock_after"], 15)
+        self.assertEqual(res.data["reason"], "restock")
+        self.assertEqual(res.data["note"], "monthly restock")
+
+        self.product.refresh_from_db()
+        self.assertEqual(self.product.stock, 15)
+        movement = StockMovement.objects.get(product=self.product)
+        self.assertEqual(movement.delta, 5)
+        self.assertEqual(movement.stock_after, 15)
+        self.assertEqual(movement.reason, StockMovement.Reason.RESTOCK)
+        self.assertEqual(movement.note, "monthly restock")
+        self.assertEqual(movement.created_by, self.invmgr)
+
+    def test_negative_delta_within_stock_corrects_down(self):
+        self.client.force_authenticate(self.invmgr)
+        res = self._post(
+            self._payload(delta=-4, reason=StockMovement.Reason.CORRECTION, note="")
+        )
+        self.assertEqual(res.status_code, 201, res.data)
+        self.product.refresh_from_db()
+        self.assertEqual(self.product.stock, 6)
+        movement = StockMovement.objects.get()
+        self.assertEqual(movement.stock_after, 6)
+
+    def test_below_zero_adjustment_rejected_without_ledger_row(self):
+        """The service's ValueError contract surfaces as a 400 and rolls the
+        whole mutation back: stock unchanged, no movement row."""
+        self.client.force_authenticate(self.invmgr)
+        res = self._post(self._payload(delta=-11, reason=StockMovement.Reason.DAMAGE))
+        self.assertEqual(res.status_code, 400, res.data)
+        self.assertIn("below zero", res.data["error"])
+        self.product.refresh_from_db()
+        self.assertEqual(self.product.stock, 10)
+        self.assertEqual(StockMovement.objects.count(), 0)
+
+    # request validation ---------------------------------------------------
+    def test_unknown_product_is_404(self):
+        self.client.force_authenticate(self.invmgr)
+        res = self._post(self._payload(product_id=999999))
+        self.assertEqual(res.status_code, 404, res.data)
+        self.assertEqual(res.data["error"], "Product not found")
+
+    def test_missing_fields_are_400(self):
+        self.client.force_authenticate(self.invmgr)
+        for field in ("product_id", "delta", "reason"):
+            with self.subTest(missing=field):
+                payload = self._payload()
+                del payload[field]
+                res = self._post(payload)
+                self.assertEqual(res.status_code, 400, res.data)
+                self.assertEqual(res.data["error"], f"{field} is required")
+        self.assertEqual(StockMovement.objects.count(), 0)
+
+    def test_non_integer_delta_is_400(self):
+        self.client.force_authenticate(self.invmgr)
+        for bad in ("abc", 1.5, True):
+            with self.subTest(delta=bad):
+                res = self._post(self._payload(delta=bad))
+                self.assertEqual(res.status_code, 400, res.data)
+                self.assertEqual(res.data["error"], "delta must be an integer")
+        self.assertEqual(StockMovement.objects.count(), 0)
+
+    def test_invalid_reason_is_400(self):
+        self.client.force_authenticate(self.invmgr)
+        res = self._post(self._payload(reason="smuggled"))
+        self.assertEqual(res.status_code, 400, res.data)
+        self.assertIn("reason", res.data["error"])
+        self.assertEqual(StockMovement.objects.count(), 0)
+
+    def test_endpoint_served_on_the_v1_mirror(self):
+        self.client.force_authenticate(self.invmgr)
+        res = self.client.post(
+            "/api/v1/store/products/inventory/adjustments/",
+            self._payload(),
+            format="json",
+        )
+        self.assertEqual(res.status_code, 201, res.data)
 
 
 @tag("products")
