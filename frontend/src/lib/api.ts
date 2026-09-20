@@ -40,8 +40,10 @@ function csrfTokenFromCookie(): string | null {
 
 /**
  * Normalizes DRF error shapes:
- * {error: string} | {detail: string} | {field: [msgs], …} | {password: [msgs]}
- * Scalar extra keys (e.g. minimum_order_amount on coupon errors) are kept in `extras`.
+ * {error: string, code: string, details: {...}} (SPEC-9-03 envelope)
+ * | {error: string} | {detail: string} | {field: [msgs], …} | {password: [msgs]}
+ * Envelope `details` content is promoted: arrays become fieldErrors, scalars
+ * become extras (e.g. minimum_order_amount). Legacy flat shapes still parse.
  */
 function parseErrorBody(
   body: unknown,
@@ -56,7 +58,7 @@ function parseErrorBody(
     const fieldErrors: FieldErrors = {};
     const extras: Record<string, unknown> = {};
     let first = "";
-    for (const [key, value] of Object.entries(b)) {
+    const takeValue = (key: string, value: unknown) => {
       if (Array.isArray(value)) {
         const msgs = value.map(String);
         fieldErrors[key] = msgs;
@@ -68,6 +70,21 @@ function parseErrorBody(
         if (!first) first = value;
       } else {
         extras[key] = value;
+      }
+    };
+    for (const [key, value] of Object.entries(b)) {
+      if (
+        key === "details" &&
+        value &&
+        typeof value === "object" &&
+        !Array.isArray(value)
+      ) {
+        // SPEC-9-03 envelope: field errors and scalar context live here.
+        for (const [dk, dv] of Object.entries(value as Record<string, unknown>)) {
+          takeValue(dk, dv);
+        }
+      } else {
+        takeValue(key, value);
       }
     }
     const result: {

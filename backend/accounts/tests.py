@@ -134,8 +134,8 @@ class RegisterSerializerTests(ApiTestCase):
             format="json",
         )
         self.assertEqual(res.status_code, 400, res.data)
-        self.assertIn("password", res.data)
-        self.assertIn("common", " ".join(res.data["password"]).lower())
+        self.assertIn("password", res.data["details"])
+        self.assertIn("common", " ".join(res.data["details"]["password"]).lower())
 
     def test_v05_registration_rejects_numeric_only_password(self):
         """V-05 companion: all-numeric passwords are rejected by
@@ -146,8 +146,8 @@ class RegisterSerializerTests(ApiTestCase):
             format="json",
         )
         self.assertEqual(res.status_code, 400, res.data)
-        self.assertIn("password", res.data)
-        self.assertIn("numeric", " ".join(res.data["password"]).lower())
+        self.assertIn("password", res.data["details"])
+        self.assertIn("numeric", " ".join(res.data["details"]["password"]).lower())
 
     def test_password_similar_to_submitted_attributes_rejected(self):
         """User-aware parity with reset: the similarity validator runs against
@@ -184,9 +184,12 @@ class RegisterSerializerTests(ApiTestCase):
             format="json",
         )
         self.assertEqual(res.status_code, 400, res.data)
-        self.assertIsInstance(res.data["password"], list)
+        self.assertIsInstance(res.data["details"]["password"], list)
         self.assertTrue(
-            all(isinstance(message, str) for message in res.data["password"])
+            all(
+                isinstance(message, str)
+                for message in res.data["details"]["password"]
+            )
         )
         self.assertFalse(User.objects.filter(username="parity").exists())
         self.assertEqual(len(mail.outbox), 0)
@@ -202,9 +205,9 @@ class RegisterSerializerTests(ApiTestCase):
             format="json",
         )
         self.assertEqual(reset_res.status_code, 400, reset_res.data)
-        self.assertIsInstance(reset_res.data["password"], list)
+        self.assertIsInstance(reset_res.data["details"]["password"], list)
         self.assertTrue(
-            all(isinstance(message, str) for message in reset_res.data["password"])
+            all(isinstance(message, str) for message in reset_res.data["details"]["password"])
         )
 
 
@@ -421,8 +424,11 @@ class PasswordResetTests(ApiTestCase):
             with self.subTest(password=password):
                 res = self.client.post("/api/accounts/password-reset/confirm/", {**payload, "password": password}, format="json")
                 self.assertEqual(res.status_code, 400, res.data)
-                self.assertIn("password", res.data)
-                self.assertIn(expected, " ".join(res.data["password"]).lower())
+                self.assertIn("password", res.data["details"])
+                self.assertIn(
+                    expected,
+                    " ".join(res.data["details"]["password"]).lower(),
+                )
 
         user.refresh_from_db()
         self.assertTrue(user.check_password("S3cure-Passphrase!"))

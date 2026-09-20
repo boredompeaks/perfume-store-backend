@@ -32,7 +32,7 @@ class MultiUserIsolationTests(ApiTestCase):
         # Bob sees no orders at all - Alice's is not leaked
         res = self.client_b.get("/api/orders/")
         self.assertEqual(res.status_code, 200, res.data)
-        self.assertEqual(res.data, [])
+        self.assertEqual(res.data["results"], [])
 
         # Bob cannot pay Alice's order (ownership-scoped)
         self.razorpay_mock(order_id="order_SECRET")
@@ -113,7 +113,8 @@ class ProductLifecycleTests(ApiTestCase):
         self.assertEqual(res.data["price"], "149.00")
 
         res = self.client.get("/api/orders/")
-        self.assertEqual(res.data[0]["items"][0]["price"], "99.00")  # snapshot
+        # snapshot
+        self.assertEqual(res.data["results"][0]["items"][0]["price"], "99.00")
 
         # staff deletes the product - history keeps the name snapshot
         res = staff_client.delete(f"/api/products/{slug}/")
@@ -122,7 +123,7 @@ class ProductLifecycleTests(ApiTestCase):
         self.assertEqual(res.status_code, 404)
 
         res = self.client.get("/api/orders/")
-        row = res.data[0]["items"][0]
+        row = res.data["results"][0]["items"][0]
         self.assertEqual(row["product_name"], "Limited Edition")
         self.assertEqual(row["price"], "99.00")
         self.assertEqual(row["quantity"], 2)

@@ -60,7 +60,31 @@ export function verifyPayment(payload: {
   });
 }
 
-/** Unpaginated list, newest first. No single-order endpoint exists (BACKEND_REQUESTS). */
+/**
+ * Customer order history (SPEC-9-04): paginated, newest first, using the
+ * house page-number envelope (same shape as the products listing).
+ * Unwrapped here so list consumers keep working on page 1; a pager UI can
+ * adopt `fetchOrderHistoryPage` later. The single-order endpoint
+ * (GET /api/orders/<id>/, owner-checked) now exists per the same spec item.
+ */
+export type OrderHistoryPage = {
+  count: number;
+  total_pages: number;
+  current_page: number;
+  next_page: boolean;
+  previous_page: boolean;
+  results: Order[];
+};
+
+export function fetchOrderHistoryPage(
+  page = 1,
+  pageSize?: number,
+): Promise<OrderHistoryPage> {
+  const params = new URLSearchParams({ page: String(page) });
+  if (pageSize !== undefined) params.set("page_size", String(pageSize));
+  return apiFetch<OrderHistoryPage>(`/api/orders/?${params}`, { auth: true });
+}
+
 export function fetchOrders(): Promise<Order[]> {
-  return apiFetch<Order[]>("/api/orders/", { auth: true });
+  return fetchOrderHistoryPage().then((page) => page.results);
 }

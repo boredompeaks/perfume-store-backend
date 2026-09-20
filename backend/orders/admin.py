@@ -1,11 +1,23 @@
 import csv
 
 from django.contrib import admin, messages
+from django.db import transaction
 from django.http import HttpResponse
 from django.utils import timezone
 
 from common.admin import RoleAwareModelAdmin
-from .models import Coupon, Order, OrderItem
+# [R-10.1] The order machine lives in orders.state (single source); this
+# module only consumes it.
+from .models import Coupon, Order, OrderItem, OrderStatusEvent
+# [R-10.1] SPEC-10-01b: the fulfilment-dimension mapping for the writers.
+# [R-10.12] SPEC-10-02: the trigger vocabulary for the audit writers.
+from .state import (
+    ALLOWED_TRANSITIONS,
+    TRIGGER_ADMIN_BULK_ACTION,
+    TRIGGER_ADMIN_CHANGE_FORM,
+    fulfilment_for_status,
+    transition_allowed,
+)
 
 
 class OrderItemInline(admin.TabularInline):
@@ -38,19 +50,23 @@ class OrderItemInline(admin.TabularInline):
         return False
 
 
-# Legal status flow. Cancelling a *paid* order is deliberately impossible —
-# there is no refund flow yet (V-03); reconciliation is manual by design.
-ALLOWED_TRANSITIONS = {
-    "pending": {"confirmed", "cancelled"},
-    "confirmed": {"shipped"},
-    "shipped": {"delivered"},
-    "delivered": set(),
-    "cancelled": set(),
-}
+# The legal status flow (ALLOWED_TRANSITIONS) and its gate
+# (transition_allowed) live in orders.state — [R-10.1] single source. The
+# cancelling-a-paid-order rationale is documented beside the table there.
 
 
-def transition_allowed(old_status: str, new_status: str) -> bool:
-    return new_status == old_status or new_status in ALLOWED_TRANSITIONS.get(old_status, set())
+def _append_status_event(order, *, from_status, to_status, actor, trigger):
+    """[R-10.12]/[R-10.17] SPEC-10-02: one immutable audit row per
+    transition. Callers MUST run this inside the transaction that persists
+    the transition, so the two commit and roll back together ([R-10.18]) —
+    the rollback pins in the test suite hold every writer to it."""
+    return OrderStatusEvent.objects.create(
+        order=order,
+        from_status=from_status,
+        to_status=to_status,
+        actor=actor,
+        trigger=trigger,
+    )
 
 
 @admin.register(Order)
@@ -164,6 +180,7 @@ class OrderAdmin(RoleAwareModelAdmin):
     # ——— single-object guard (covers the inline status editor) ———
 
     def save_model(self, request, obj, form, change):
+        old = None
         if change:
             old = Order.objects.get(pk=obj.pk).status
             if not transition_allowed(old, obj.status):
@@ -186,7 +203,28 @@ class OrderAdmin(RoleAwareModelAdmin):
             # existing value: a set event time is never mutated.
             if obj.status == "cancelled" and obj.cancelled_at is None:
                 obj.cancelled_at = timezone.now()
-        super().save_model(request, obj, form, change)
+        # [R-10.1] SPEC-10-01b: the fulfilment dimension rides every legal
+        # status change through this form — the transition guard above is
+        # the gate, fulfilment_for_status is the mapping. Admin never
+        # touches payment_status: that dimension moves only with payment
+        # events (verify_payment; SPEC-10-04 owns the rest).
+        obj.fulfilment_status = fulfilment_for_status(obj.status)
+        # [R-10.12]/[R-10.18] SPEC-10-02: the transition and its audit row
+        # commit together. The admin changeform view already wraps this in
+        # transaction.atomic; the explicit block keeps the rollback-together
+        # guarantee local even if a future caller invokes save_model
+        # outside it. Self-transitions (old == obj.status) are replays,
+        # not transitions — no event.
+        with transaction.atomic():
+            super().save_model(request, obj, form, change)
+            if change and old != obj.status:
+                _append_status_event(
+                    obj,
+                    from_status=old,
+                    to_status=obj.status,
+                    actor=request.user,
+                    trigger=TRIGGER_ADMIN_CHANGE_FORM,
+                )
 
     # ——— bulk actions (respect the same guards) ———
 
@@ -195,7 +233,48 @@ class OrderAdmin(RoleAwareModelAdmin):
         matched_pks = list(
             queryset.filter(status__in=allowed_from).values_list("pk", flat=True)
         )
-        count = queryset.filter(pk__in=matched_pks).update(status=new_status)
+        count = 0
+        if matched_pks:
+            with transaction.atomic():
+                # SPEC-6-04 audit advisory, hardened in SPEC-9-07: the pk
+                # snapshot above and the writes below are two steps — a row
+                # whose status changes in between (e.g. a concurrent cancel
+                # of a pending order) must never be swept to the new status.
+                # The 9-07 fix made the transition predicate the final
+                # authority via the UPDATE's WHERE clause; [R-10.12]
+                # SPEC-10-02 reworks the same sweep into per-row saves (one
+                # audit event per row), and each row's status is re-checked
+                # here at write time under the row lock — the same
+                # final-authority predicate, one row at a time. An
+                # out-of-set row can never be written, only counted as
+                # skipped. Per-row saves (unlike .update()) also fire
+                # auto_now, fixing the stale updated_at the bulk path
+                # shipped with.
+                for order in (
+                    queryset.filter(pk__in=matched_pks)
+                    .select_for_update()
+                    .order_by("pk")
+                ):
+                    if order.status not in allowed_from:
+                        continue  # flipped between snapshot and save: skip
+                    _append_status_event(
+                        order,
+                        from_status=order.status,
+                        to_status=new_status,
+                        actor=request.user,
+                        trigger=TRIGGER_ADMIN_BULK_ACTION,
+                    )
+                    order.status = new_status
+                    order.fulfilment_status = fulfilment_for_status(new_status)
+                    # updated_at rides update_fields explicitly: on this
+                    # Django, save(update_fields=...) leaves auto_now
+                    # columns out unless listed, and the whole point of the
+                    # per-row rework is that the row's freshness moves with
+                    # the transition (pinned in tests).
+                    order.save(
+                        update_fields=["status", "fulfilment_status", "updated_at"]
+                    )
+                    count += 1
         skipped = queryset.count() - count
         if count:
             self.log_bulk_action(
@@ -231,13 +310,53 @@ class OrderAdmin(RoleAwareModelAdmin):
         unpaid_pks = list(
             queryset.filter(status="pending").values_list("pk", flat=True)
         )
-        # [R-8.16] The stamp rides the same update as the status transition.
-        # Every row in unpaid_pks is still pending, so its cancelled_at is
-        # necessarily NULL (only a cancel writes it) — the update can never
-        # overwrite an existing stamp, and a re-run skips cancelled rows.
-        count = queryset.filter(pk__in=unpaid_pks).update(
-            status="cancelled", cancelled_at=timezone.now()
-        )
+        count = 0
+        if unpaid_pks:
+            with transaction.atomic():
+                # [R-10.12] SPEC-10-02: per-row saves in one atomic block,
+                # each row's status re-checked at write time under the row
+                # lock (same final-authority pattern as _bulk_set_status) —
+                # a row that flipped pending→confirmed between the snapshot
+                # and this write is a PAID order now, and cancelling paid
+                # orders is impossible by design, so it is skipped, never
+                # swept. Per-row saves also fire auto_now (no stale
+                # updated_at) and carry the audit event per row.
+                for order in (
+                    queryset.filter(pk__in=unpaid_pks)
+                    .select_for_update()
+                    .order_by("pk")
+                ):
+                    if order.status != "pending":
+                        continue  # flipped between snapshot and save: skip
+                    _append_status_event(
+                        order,
+                        from_status=order.status,
+                        to_status="cancelled",
+                        actor=request.user,
+                        trigger=TRIGGER_ADMIN_BULK_ACTION,
+                    )
+                    order.status = "cancelled"
+                    # [R-8.16] The stamp rides the same save as the status
+                    # transition. A pending order's cancelled_at is
+                    # necessarily NULL (only a cancel writes it), so the
+                    # is-none guard never overwrites an existing stamp, and
+                    # a re-run skips already-cancelled rows.
+                    order.cancelled_at = order.cancelled_at or timezone.now()
+                    # [R-10.1] SPEC-10-01b: the fulfilment dimension rides
+                    # the same save (a cancelled order was never fulfilled).
+                    order.fulfilment_status = fulfilment_for_status("cancelled")
+                    # updated_at rides update_fields explicitly (see
+                    # _bulk_set_status): the freshness must move with the
+                    # transition.
+                    order.save(
+                        update_fields=[
+                            "status",
+                            "cancelled_at",
+                            "fulfilment_status",
+                            "updated_at",
+                        ]
+                    )
+                    count += 1
         skipped = queryset.count() - count
         if count:
             self.log_bulk_action(
@@ -275,6 +394,50 @@ class OrderAdmin(RoleAwareModelAdmin):
                 ]
             )
         return response
+
+
+@admin.register(OrderStatusEvent)
+class OrderStatusEventAdmin(RoleAwareModelAdmin):
+    """[R-10.18] SPEC-10-02: view-only surface for the append-only trail.
+
+    Staff holding ``orders.read`` (support/finance/admin roles) can read
+    the trail; no staff role gets add/change/delete (all capability-less),
+    and even the superuser bypass is refused at add/delete — audit history
+    is never creatable or deletable through the admin. The change form
+    renders every field read-only, so it is a view, not an editor; the
+    model save guard is the second immutable layer behind this one.
+    """
+
+    capability_map = {
+        "view": "orders.read",
+        "add": None,
+        "change": None,
+        "delete": None,
+    }
+    list_display = (
+        "order",
+        "from_status",
+        "to_status",
+        "actor",
+        "trigger",
+        "created_at",
+    )
+    list_filter = ("trigger", "to_status")
+    search_fields = ("order__order_number", "order__id", "actor__username")
+    readonly_fields = (
+        "order",
+        "from_status",
+        "to_status",
+        "actor",
+        "trigger",
+        "created_at",
+    )
+
+    def has_add_permission(self, request):
+        return False  # append-only: nobody hand-writes audit rows
+
+    def has_delete_permission(self, request, obj=None):
+        return False  # audit history is never deletable
 
 
 @admin.register(Coupon)

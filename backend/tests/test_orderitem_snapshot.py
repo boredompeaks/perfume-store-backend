@@ -68,7 +68,7 @@ class OrderItemSnapshotTests(ApiTestCase):
         # exposed read-only on the customer order payload
         res = self.client.get("/api/orders/")
         self.assertEqual(res.status_code, 200, res.data)
-        row = res.data[0]["items"][0]
+        row = res.data["results"][0]["items"][0]
         self.assertEqual(row["sku"], "")
         self.assertEqual(row["variant_name"], "Oud Royale")
 
@@ -89,7 +89,7 @@ class OrderItemSnapshotTests(ApiTestCase):
         self.assertEqual(item.price, Decimal("250.00"))
 
         res = self.client.get("/api/orders/")
-        row = res.data[0]["items"][0]
+        row = res.data["results"][0]["items"][0]
         self.assertEqual(row["variant_name"], "Oud Royale")
         self.assertEqual(row["price"], "250.00")
 
@@ -107,7 +107,7 @@ class OrderItemSnapshotTests(ApiTestCase):
         self.assertEqual(item.variant_name, "Oud Royale")
 
         res = self.client.get("/api/orders/")
-        row = res.data[0]["items"][0]
+        row = res.data["results"][0]["items"][0]
         self.assertEqual(row["product"], None)
         self.assertEqual(row["sku"], "")
         self.assertEqual(row["variant_name"], "Oud Royale")

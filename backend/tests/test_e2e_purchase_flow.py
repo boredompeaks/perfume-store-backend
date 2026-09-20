@@ -90,9 +90,9 @@ class FullPurchaseHappyPathTests(ApiTestCase):
 
         # order visible to its owner with the confirmed status
         res = self.client.get("/api/orders/")
-        self.assertEqual([row["id"] for row in res.data], [order_id])
-        self.assertEqual(res.data[0]["status"], "confirmed")
-        self.assertEqual(res.data[0]["items"][0]["quantity"], 2)
+        self.assertEqual([row["id"] for row in res.data["results"]], [order_id])
+        self.assertEqual(res.data["results"][0]["status"], "confirmed")
+        self.assertEqual(res.data["results"][0]["items"][0]["quantity"], 2)
 
 
 @tag("e2e")

@@ -20,11 +20,13 @@ from rest_framework.throttling import ScopedRateThrottle
 
 from cart.models import Cart, CartItem
 from common.models import AuditEvent
+from common.roles import ROLE_FINANCE, ROLE_SUPPORT
 from common.testing import TEST_RAZORPAY_KEY_ID, ApiTestCase
 from config.settings import _env_currency
 from orders.admin import OrderAdmin
-from orders.models import Coupon, Order, OrderItem
+from orders.models import Coupon, Order, OrderItem, OrderStatusEvent
 from orders.serializers import OrderItemSerializer, OrderSerializer
+from orders import state as order_state
 from orders.views import apply_coupon
 from products.models import StockMovement, products
 
@@ -188,8 +190,8 @@ class CurrencyExposureTests(OrderTestBase):
 
         res = self.client.get("/api/orders/")
         self.assertEqual(res.status_code, 200, res.data)
-        self.assertEqual(res.data[0]["currency"], "INR")
-        self.assertEqual(res.data[0]["id"], order.id)
+        self.assertEqual(res.data["results"][0]["currency"], "INR")
+        self.assertEqual(res.data["results"][0]["id"], order.id)
 
     def test_checkout_replay_and_item_bodies_carry_the_currency(self):
         """OrderSerializer is the single surface for the checkout response,
@@ -213,9 +215,9 @@ class CurrencyExposureTests(OrderTestBase):
 
         res = self.client.get("/api/orders/")
         self.assertEqual(res.status_code, 200, res.data)
-        self.assertEqual(res.data[0]["id"], order.id)
-        self.assertEqual(res.data[0]["currency"], "USD")
-        self.assertEqual(res.data[0]["items"][0]["currency"], "USD")
+        self.assertEqual(res.data["results"][0]["id"], order.id)
+        self.assertEqual(res.data["results"][0]["currency"], "USD")
+        self.assertEqual(res.data["results"][0]["items"][0]["currency"], "USD")
 
     def test_admin_list_display_and_read_only_detail_surface_currency(self):
         self.assertIn("currency", OrderAdmin.list_display)
@@ -278,8 +280,17 @@ class ApplyCouponTests(OrderTestBase):
                 res = self._preview(code)
                 self.assertEqual(res.status_code, 400, res.data)
                 # one body for every failure reason; no configuration detail
-                # (e.g. minimum_order_amount) may ride along
-                self.assertEqual(res.data, {"error": "Invalid coupon code"})
+                # (e.g. minimum_order_amount) may ride along (SPEC-9-03: the
+                # uniform envelope adds the status-family code + empty
+                # details, the message stays the top-level string)
+                self.assertEqual(
+                    res.data,
+                    {
+                        "error": "Invalid coupon code",
+                        "code": "validation_error",
+                        "details": {},
+                    },
+                )
 
     def test_missing_code_rejected(self):
         res = self.client.post("/api/orders/apply-coupon/", {}, format="json")
@@ -515,7 +526,7 @@ class CheckoutStockGateTests(OrderTestBase):
             "Reduce the quantity or remove the item to continue.",
         )
         self.assertEqual(
-            res.data["products"],
+            res.data["details"]["products"],
             [{"name": "Rose Aurum", "requested": 2, "available": 1}],
         )
         # nothing was created or mutated: the customer fixes the cart
@@ -560,7 +571,7 @@ class CheckoutStockGateTests(OrderTestBase):
         self.assertIn("Rose Aurum", res.data["error"])
         self.assertNotIn("Oud Royale", res.data["error"])
         self.assertEqual(
-            res.data["products"],
+            res.data["details"]["products"],
             [{"name": "Rose Aurum", "requested": 2, "available": 1}],
         )
         self.assertEqual(Order.objects.count(), 0)
@@ -580,7 +591,7 @@ class CheckoutStockGateTests(OrderTestBase):
         self.assertIn("Oud Royale", res.data["error"])
         self.assertIn("remove these items", res.data["error"])
         self.assertEqual(
-            {row["name"] for row in res.data["products"]},
+            {row["name"] for row in res.data["details"]["products"]},
             {"Rose Aurum", "Oud Royale"},
         )
         self.assertEqual(Order.objects.count(), 0)
@@ -1146,18 +1157,155 @@ class OrderListTests(OrderTestBase):
 
         res = self.client.get("/api/orders/")
         self.assertEqual(res.status_code, 200, res.data)
-        ids = [row["id"] for row in res.data]
+        ids = [row["id"] for row in res.data["results"]]
         self.assertEqual(ids, [mine.id])
         self.assertNotIn(theirs.id, ids)
         # serializer shape: coupon rendered as its code, items embedded
-        self.assertEqual(res.data[0]["coupon"], "PCT10")
-        self.assertEqual(res.data[0]["items"][0]["price"], "500.00")
+        self.assertEqual(res.data["results"][0]["coupon"], "PCT10")
+        self.assertEqual(res.data["results"][0]["items"][0]["price"], "500.00")
 
     def test_model_string_representations(self):
         order = self.create_order()
         item = order.items.first()
         self.assertEqual(str(order), f"Order #{order.id} - buyer")
         self.assertEqual(str(item), "Rose Aurum x 2")
+
+
+@tag("orders")
+class OrderDetailTests(OrderTestBase):
+    """SPEC-9-04 [R-9.2.15] (spec lines 2951-2959, `GET /account/orders/:id`
+    = "Owned order details"): the caller's OWN order only. Ownership is part
+    of the lookup, so a foreign order is a uniform 404 — never a 200 (the
+    IDOR pin) and never a 403 that would confirm existence."""
+
+    def test_owner_gets_own_order_detail(self):
+        order = self.create_order()
+        res = self.client.get(f"/api/orders/{order.id}/")
+        self.assertEqual(res.status_code, 200, res.data)
+        self.assertEqual(res.data["id"], order.id)
+        self.assertEqual(res.data["order_number"], order.order_number)
+        self.assertEqual(res.data["status"], "pending")
+        self.assertEqual(res.data["total_amount"], "1000.00")
+        self.assertEqual(res.data["items"][0]["product_name"], "Rose Aurum")
+
+    def test_other_users_order_is_404_not_200(self):
+        """The IDOR case: another user's order id must not resolve."""
+        mine = self.create_order()
+        self.make_user("intruder")
+        intruder = self.fresh_client()
+        self.api_login("intruder", client=intruder)
+        res = intruder.get(f"/api/orders/{mine.id}/")
+        self.assertEqual(res.status_code, 404, res.data)
+        self.assertEqual(res.data["error"], "Order not found")
+
+    def test_unknown_order_id_is_404(self):
+        res = self.client.get("/api/orders/999999/")
+        self.assertEqual(res.status_code, 404, res.data)
+        self.assertEqual(res.data["error"], "Order not found")
+
+    def test_order_detail_requires_authentication(self):
+        order = self.create_order()
+        res = self.fresh_client().get(f"/api/orders/{order.id}/")
+        self.assertEqual(res.status_code, 401, res.data)
+
+    def test_order_detail_served_on_the_v1_mirror(self):
+        """New app-urlconf routes are automatically served on both mounts."""
+        order = self.create_order()
+        res = self.client.get(f"/api/v1/store/orders/{order.id}/")
+        self.assertEqual(res.status_code, 200, res.data)
+        self.assertEqual(res.data["id"], order.id)
+
+
+@tag("orders")
+class OrderHistoryPaginationTests(OrderTestBase):
+    """SPEC-9-04 [R-9.2.14] (spec lines 2938-2946, `GET /account/orders`
+    = "Customer order history"). The spec pins neither a page size nor an
+    envelope shape for this endpoint, so the house page-number envelope
+    (products-listing parity, the shape the frontend's pagination UI is
+    built to) is used with env-driven defaults: ORDER_HISTORY_PAGE_SIZE,
+    capped by ORDER_HISTORY_MAX_PAGE_SIZE for ?page_size callers."""
+
+    def _checkout_distinct_orders(self, count):
+        # Distinct shipping payloads so the SPEC-21-1 dedup guard treats
+        # each checkout as a deliberate new purchase, not a replay.
+        for i in range(count):
+            res = self.checkout(city=f"City {i}")
+            self.assertEqual(res.status_code, 201, res.data)
+
+    def test_history_envelope_shape_and_default_page(self):
+        self._checkout_distinct_orders(3)
+        res = self.client.get("/api/orders/")
+        self.assertEqual(res.status_code, 200, res.data)
+        self.assertEqual(
+            set(res.data.keys()),
+            {
+                "count",
+                "total_pages",
+                "current_page",
+                "next_page",
+                "previous_page",
+                "results",
+            },
+        )
+        self.assertEqual(res.data["count"], 3)
+        self.assertEqual(res.data["total_pages"], 1)
+        self.assertEqual(res.data["current_page"], 1)
+        self.assertFalse(res.data["next_page"])
+        self.assertFalse(res.data["previous_page"])
+        self.assertEqual(len(res.data["results"]), 3)
+
+    def test_history_is_newest_first_and_page_param_selects(self):
+        older = self.create_order()
+        res = self.checkout(city="Pune")
+        newer = Order.objects.get(id=res.data["id"])
+
+        with override_settings(ORDER_HISTORY_PAGE_SIZE=1):
+            page1 = self.client.get("/api/orders/")
+            self.assertEqual(page1.data["total_pages"], 2)
+            self.assertEqual(
+                [row["id"] for row in page1.data["results"]], [newer.id]
+            )
+            self.assertTrue(page1.data["next_page"])
+            self.assertFalse(page1.data["previous_page"])
+
+            page2 = self.client.get("/api/orders/?page=2")
+            self.assertEqual(
+                [row["id"] for row in page2.data["results"]], [older.id]
+            )
+            self.assertTrue(page2.data["previous_page"])
+            self.assertFalse(page2.data["next_page"])
+
+    def test_page_size_param_overrides_default(self):
+        self._checkout_distinct_orders(3)
+        res = self.client.get("/api/orders/?page_size=2")
+        self.assertEqual(len(res.data["results"]), 2)
+        self.assertEqual(res.data["total_pages"], 2)
+        self.assertEqual(res.data["current_page"], 1)
+
+    def test_page_size_is_capped(self):
+        self._checkout_distinct_orders(3)
+        with override_settings(ORDER_HISTORY_MAX_PAGE_SIZE=2):
+            res = self.client.get("/api/orders/?page_size=1000")
+        self.assertEqual(len(res.data["results"]), 2)
+
+    def test_invalid_page_size_falls_back_to_default(self):
+        self._checkout_distinct_orders(2)
+        for raw in ("abc", "0", "-5"):
+            with self.subTest(page_size=raw):
+                res = self.client.get(f"/api/orders/?page_size={raw}")
+                self.assertEqual(len(res.data["results"]), 2)  # default (10)
+
+    def test_invalid_page_number_falls_back_to_first_page(self):
+        self._checkout_distinct_orders(2)
+        res = self.client.get("/api/orders/?page=not-a-page")
+        self.assertEqual(res.data["current_page"], 1)
+        self.assertEqual(len(res.data["results"]), 2)
+
+    def test_empty_history_is_a_valid_first_page(self):
+        res = self.client.get("/api/orders/")
+        self.assertEqual(res.data["count"], 0)
+        self.assertEqual(res.data["total_pages"], 1)
+        self.assertEqual(res.data["results"], [])
 
 
 @tag("orders")
@@ -1356,7 +1504,7 @@ class BusinessEventTimestampTests(OrderTestBase):
 
         listing = self.client.get("/api/orders/")
         self.assertEqual(listing.status_code, 200, listing.data)
-        row = listing.data[0]
+        row = listing.data["results"][0]
         self.assertEqual(row["id"], order.id)
         for field in self.BUSINESS_FIELDS:
             self.assertIsNone(row[field])  # NULL until the event
@@ -1452,3 +1600,1197 @@ class OrderIndexSchemaTests(ApiTestCase):
                     all(info["unique"] for info in covering),
                     f"{column} grew a non-unique duplicate index: {covering}",
                 )
+
+
+@tag("orders")
+class AdminOrdersApiTests(ApiTestCase):
+    """SPEC-9-07 [R-9.4.8]-[R-9.4.11] (spec lines 3285-3317, Orders module):
+    the admin orders JSON seam. Reads serve every order under ``orders.read``;
+    writes reuse the admin state machine (``transition_allowed``) and the
+    capability permission classes that were defined but unmounted. Errors
+    land in the uniform envelope (SPEC-9-03) — every error assertion pins
+    the ``error``/``code``/``details`` shape."""
+
+    LIST_URL = "/api/admin/orders/"
+    V1_LIST_URL = "/api/v1/admin/orders/"
+
+    def setUp(self):
+        self.buyer = self.make_user("buyer")
+        self.order = self._make_order(self.buyer)
+
+    @staticmethod
+    def _make_order(user, status="pending", **overrides):
+        fields = dict(
+            user=user,
+            full_name="Seam Buyer",
+            phone="9999999999",
+            address="1 Test Lane",
+            city="Indore",
+            state="MP",
+            pincode="452001",
+            total_amount=Decimal("750.00"),
+        )
+        fields.update(overrides)
+        order = Order.objects.create(**fields)
+        if status != "pending":
+            Order.objects.filter(pk=order.pk).update(status=status)
+            order.refresh_from_db()
+        return order
+
+    @staticmethod
+    def _user_with_role(username, role):
+        from django.contrib.auth.models import Group
+
+        from common.roles import ROLE_ADMIN
+
+        user = User.objects.create_user(
+            username, f"{username}@example.com", "S3cure-Passphrase!"
+        )
+        user.groups.add(Group.objects.get_or_create(name=role)[0])
+        return user
+
+    # permission matrix -------------------------------------------------------
+    def test_anonymous_list_is_403_in_the_uniform_envelope(self):
+        res = self.client.get(self.LIST_URL)
+        self.assertEqual(res.status_code, 403)
+        self.assertEqual(
+            res.data["error"], "You do not have permission to perform this action."
+        )
+        self.assertEqual(res.data["code"], "permission_denied")
+        self.assertIn("details", res.data)
+
+    def test_customer_without_staff_role_is_403_on_list(self):
+        self.client.force_authenticate(self.buyer)
+        res = self.client.get(self.LIST_URL)
+        self.assertEqual(res.status_code, 403)
+        self.assertEqual(res.data["code"], "permission_denied")
+
+    def test_finance_role_reads_every_order_unscoped(self):
+        """orders.read = support/finance/admin: a non-owner staff role still
+        sees the order — this seam is the unscoped twin of the customer list."""
+        other_buyer = self.make_user("other_buyer")
+        self._make_order(other_buyer)
+        finance = self._user_with_role("finmgr", ROLE_FINANCE)
+        self.client.force_authenticate(finance)
+        res = self.client.get(self.LIST_URL)
+        self.assertEqual(res.status_code, 200, res.data)
+        self.assertEqual(res.data["count"], 2)
+
+    def test_detail_anonymous_and_unprivileged_are_403(self):
+        for client_user in (None, self.buyer):
+            client = self.fresh_client()
+            if client_user is not None:
+                client.force_authenticate(client_user)
+            res = client.get(f"{self.LIST_URL}{self.order.id}/")
+            self.assertEqual(res.status_code, 403)
+            self.assertEqual(res.data["code"], "permission_denied")
+
+    def test_finance_role_reads_detail(self):
+        finance = self._user_with_role("finmgr", ROLE_FINANCE)
+        self.client.force_authenticate(finance)
+        res = self.client.get(f"{self.LIST_URL}{self.order.id}/")
+        self.assertEqual(res.status_code, 200, res.data)
+        self.assertEqual(res.data["id"], self.order.id)
+        self.assertEqual(res.data["order_number"], self.order.order_number)
+        self.assertEqual(res.data["status"], "pending")
+
+    def test_write_endpoints_deny_orders_read_only_role(self):
+        """The least-privilege split: finance may read but may neither fulfil
+        nor cancel — and nothing moves when they try."""
+        from django.contrib.admin.models import LogEntry
+
+        finance = self._user_with_role("finmgr", ROLE_FINANCE)
+        self.client.force_authenticate(finance)
+        for path in (
+            f"{self.LIST_URL}{self.order.id}/fulfill/",
+            f"{self.LIST_URL}{self.order.id}/cancel/",
+        ):
+            res = self.client.post(path)
+            self.assertEqual(res.status_code, 403, res.data)
+            self.assertEqual(res.data["code"], "permission_denied")
+        self.order.refresh_from_db()
+        self.assertEqual(self.order.status, "pending")
+        self.assertEqual(LogEntry.objects.count(), 0)
+
+    # list + detail -------------------------------------------------------------
+    def test_list_uses_the_house_page_number_envelope(self):
+        admin = self.make_staff()
+        self.client.force_authenticate(admin)
+        for i in range(3):
+            self._make_order(self.buyer)
+        res = self.client.get(self.LIST_URL)
+        self.assertEqual(res.status_code, 200, res.data)
+        for key in ("count", "total_pages", "current_page", "results"):
+            self.assertIn(key, res.data)
+        self.assertEqual(res.data["count"], 4)
+        self.assertEqual(len(res.data["results"]), 4)
+
+    def test_detail_unknown_id_is_uniform_404(self):
+        admin = self.make_staff()
+        self.client.force_authenticate(admin)
+        res = self.client.get(f"{self.LIST_URL}999999/")
+        self.assertEqual(res.status_code, 404)
+        self.assertEqual(res.data["error"], "Order not found")
+        self.assertEqual(res.data["code"], "not_found")
+
+    def test_list_and_detail_served_on_v1_admin_mirror(self):
+        admin = self.make_staff()
+        self.client.force_authenticate(admin)
+        res = self.client.get(self.V1_LIST_URL)
+        self.assertEqual(res.status_code, 200, res.data)
+        res = self.client.get(f"{self.V1_LIST_URL}{self.order.id}/")
+        self.assertEqual(res.status_code, 200, res.data)
+        self.assertEqual(res.data["id"], self.order.id)
+
+    # fulfilment ------------------------------------------------------------------
+    def test_fulfill_advances_pending_to_confirmed_and_audits(self):
+        from django.contrib.admin.models import CHANGE, LogEntry
+
+        support = self._user_with_role("supp", ROLE_SUPPORT)
+        self.client.force_authenticate(support)
+        res = self.client.post(f"{self.LIST_URL}{self.order.id}/fulfill/")
+        self.assertEqual(res.status_code, 200, res.data)
+        self.assertEqual(res.data["status"], "confirmed")
+        self.order.refresh_from_db()
+        self.assertEqual(self.order.status, "confirmed")
+        entry = LogEntry.objects.get(object_id=str(self.order.id))
+        self.assertEqual(entry.user, support)
+        self.assertEqual(entry.action_flag, CHANGE)
+        self.assertIn("Fulfilled via API", entry.change_message)
+
+    def test_fulfill_walks_one_step_per_call(self):
+        support = self._user_with_role("supp", ROLE_SUPPORT)
+        self.client.force_authenticate(support)
+        for expected in ("confirmed", "shipped", "delivered"):
+            res = self.client.post(f"{self.LIST_URL}{self.order.id}/fulfill/")
+            self.assertEqual(res.status_code, 200, res.data)
+            self.assertEqual(res.data["status"], expected)
+        self.order.refresh_from_db()
+        self.assertEqual(self.order.status, "delivered")
+
+    def test_fulfill_rejects_terminal_states_in_the_envelope(self):
+        support = self._user_with_role("supp", ROLE_SUPPORT)
+        self.client.force_authenticate(support)
+        for status_value in ("delivered", "cancelled"):
+            order = self._make_order(self.buyer, status=status_value)
+            res = self.client.post(f"{self.LIST_URL}{order.id}/fulfill/")
+            self.assertEqual(res.status_code, 409, res.data)
+            self.assertEqual(res.data["code"], "conflict")
+            self.assertIn(status_value, res.data["error"])
+            self.assertIn("allowed", res.data["details"])
+            order.refresh_from_db()
+            self.assertEqual(order.status, status_value)
+
+    def test_fulfill_unknown_order_is_404(self):
+        support = self._user_with_role("supp", ROLE_SUPPORT)
+        self.client.force_authenticate(support)
+        res = self.client.post(f"{self.LIST_URL}999999/fulfill/")
+        self.assertEqual(res.status_code, 404)
+        self.assertEqual(res.data["code"], "not_found")
+
+    def test_fulfill_served_on_v1_admin_mirror(self):
+        support = self._user_with_role("supp", ROLE_SUPPORT)
+        self.client.force_authenticate(support)
+        res = self.client.post(f"{self.V1_LIST_URL}{self.order.id}/fulfill/")
+        self.assertEqual(res.status_code, 200, res.data)
+        self.order.refresh_from_db()
+        self.assertEqual(self.order.status, "confirmed")
+
+    # cancellation ----------------------------------------------------------------
+    def test_cancel_marks_pending_cancelled_and_stamps_cancelled_at(self):
+        from django.contrib.admin.models import CHANGE, LogEntry
+
+        support = self._user_with_role("supp", ROLE_SUPPORT)
+        self.client.force_authenticate(support)
+        res = self.client.post(f"{self.LIST_URL}{self.order.id}/cancel/")
+        self.assertEqual(res.status_code, 200, res.data)
+        self.order.refresh_from_db()
+        self.assertEqual(self.order.status, "cancelled")
+        self.assertIsNotNone(self.order.cancelled_at)
+        entry = LogEntry.objects.get(object_id=str(self.order.id))
+        self.assertEqual(entry.action_flag, CHANGE)
+        self.assertIn("Cancelled via API", entry.change_message)
+
+    def test_cancel_rejects_paid_order_with_refund_hint(self):
+        paid = self._make_order(self.buyer, status="confirmed")
+        support = self._user_with_role("supp", ROLE_SUPPORT)
+        self.client.force_authenticate(support)
+        res = self.client.post(f"{self.LIST_URL}{paid.id}/cancel/")
+        self.assertEqual(res.status_code, 409, res.data)
+        self.assertEqual(res.data["code"], "conflict")
+        self.assertIn("refund", res.data["error"])
+        paid.refresh_from_db()
+        self.assertEqual(paid.status, "confirmed")
+        self.assertIsNone(paid.cancelled_at)
+
+    def test_cancel_rejects_delivered_order(self):
+        """The pinned illegal transition: delivered has no outgoing edges in
+        the machine, so the cancel endpoint can never sweep it."""
+        delivered = self._make_order(self.buyer, status="delivered")
+        support = self._user_with_role("supp", ROLE_SUPPORT)
+        self.client.force_authenticate(support)
+        res = self.client.post(f"{self.LIST_URL}{delivered.id}/cancel/")
+        self.assertEqual(res.status_code, 409, res.data)
+        delivered.refresh_from_db()
+        self.assertEqual(delivered.status, "delivered")
+
+    def test_cancel_is_idempotent_on_an_already_cancelled_order(self):
+        from django.contrib.admin.models import LogEntry
+
+        support = self._user_with_role("supp", ROLE_SUPPORT)
+        self.client.force_authenticate(support)
+        first = self.client.post(f"{self.LIST_URL}{self.order.id}/cancel/")
+        self.assertEqual(first.status_code, 200, first.data)
+        self.order.refresh_from_db()
+        stamped = self.order.cancelled_at
+        second = self.client.post(f"{self.LIST_URL}{self.order.id}/cancel/")
+        self.assertEqual(second.status_code, 200, second.data)
+        self.assertEqual(second.data["message"], "Order is already cancelled")
+        self.order.refresh_from_db()
+        self.assertEqual(self.order.cancelled_at, stamped)
+        self.assertEqual(LogEntry.objects.count(), 1)
+
+    def test_cancel_unknown_order_is_404(self):
+        support = self._user_with_role("supp", ROLE_SUPPORT)
+        self.client.force_authenticate(support)
+        res = self.client.post(f"{self.LIST_URL}999999/cancel/")
+        self.assertEqual(res.status_code, 404)
+        self.assertEqual(res.data["code"], "not_found")
+
+    def test_cancel_served_on_v1_admin_mirror(self):
+        support = self._user_with_role("supp", ROLE_SUPPORT)
+        self.client.force_authenticate(support)
+        res = self.client.post(f"{self.V1_LIST_URL}{self.order.id}/cancel/")
+        self.assertEqual(res.status_code, 200, res.data)
+        self.order.refresh_from_db()
+        self.assertEqual(self.order.status, "cancelled")
+
+
+@tag("orders")
+class BulkSetStatusRaceGuardTests(ApiTestCase):
+    """SPEC-6-04 audit advisory, hardened in SPEC-9-07: the bulk updater's
+    UPDATE must re-apply the status__in predicate so an out-of-set row can
+    never be swept. The race is simulated deterministically: the pk snapshot
+    materialises first, then a concurrent actor legally cancels one matched
+    pending order, and only then does the UPDATE run."""
+
+    def test_out_of_set_row_is_never_swept_by_the_bulk_update(self):
+        from django.contrib.admin import site as admin_site
+        from django.contrib.messages.storage.fallback import FallbackStorage
+        from django.db import models as django_models
+        from django.test import RequestFactory
+
+        admin = OrderAdmin(Order, admin_site)
+        staff = self.make_staff()
+        request = RequestFactory().post("/admin/orders/order/")
+        request.user = staff
+        request.session = {}
+        request._messages = FallbackStorage(request)
+
+        victim = Order.objects.create(
+            user=self.make_user("race_buyer"),
+            full_name="V", phone="1", address="a", city="c", state="s",
+            pincode="1", total_amount=Decimal("10.00"),
+        )
+        control = Order.objects.create(
+            user=victim.user,
+            full_name="C", phone="1", address="a", city="c", state="s",
+            pincode="1", total_amount=Decimal("10.00"),
+        )
+
+        class RacingQuerySet(django_models.QuerySet):
+            raced = False
+
+            def values_list(self, *args, **kwargs):
+                pks = list(super().values_list(*args, **kwargs))
+                if not RacingQuerySet.raced:
+                    RacingQuerySet.raced = True
+                    # The interleave: the snapshot above already saw both
+                    # rows pending; the victim flips before the UPDATE runs.
+                    Order.objects.filter(pk=victim.pk).update(status="cancelled")
+                return pks
+
+        admin._bulk_set_status(request, RacingQuerySet(Order), "confirmed")
+
+        victim.refresh_from_db()
+        control.refresh_from_db()
+        self.assertEqual(victim.status, "cancelled")
+        self.assertEqual(control.status, "confirmed")
+
+        # [R-10.12] SPEC-10-02: the reworked per-row path keeps the same
+        # skip semantics at the audit layer — the row it skipped gets NO
+        # event for the sweep it never underwent, the swept row gets
+        # exactly one.
+        self.assertFalse(
+            OrderStatusEvent.objects.filter(
+                order=victim, to_status="confirmed"
+            ).exists()
+        )
+        swept_event = OrderStatusEvent.objects.get(order=control)
+        self.assertEqual(swept_event.from_status, "pending")
+        self.assertEqual(swept_event.to_status, "confirmed")
+
+
+# ==================================
+# [R-10.1] SPEC-10-01a: order lifecycle dimensions
+# ==================================
+
+@tag("orders")
+class OrderStateSourceTests(SimpleTestCase):
+    """orders.state is the single source of truth for the order machine:
+    the constants that used to live in models/admin/views are aliases of
+    the same objects, and the machine's current edges are pinned here so a
+    consolidation slip (a redefined copy anywhere) cannot go unnoticed."""
+
+    def test_machine_constants_are_single_sourced(self):
+        from orders import admin as orders_admin
+        from orders import views as orders_views
+
+        self.assertIs(Order.STATUS_CHOICES, order_state.STATUS_CHOICES)
+        self.assertIs(orders_admin.ALLOWED_TRANSITIONS, order_state.ALLOWED_TRANSITIONS)
+        self.assertIs(orders_admin.transition_allowed, order_state.transition_allowed)
+        self.assertIs(orders_views.ALLOWED_TRANSITIONS, order_state.ALLOWED_TRANSITIONS)
+        self.assertIs(orders_views.transition_allowed, order_state.transition_allowed)
+        self.assertIs(orders_views.ADMIN_FULFILMENT_NEXT, order_state.ADMIN_FULFILMENT_NEXT)
+
+    def test_transition_allowed_pins_the_current_machine(self):
+        # The legal edges (exactly one step forward, cancel from pending).
+        for old, new in [
+            ("pending", "confirmed"),
+            ("pending", "cancelled"),
+            ("confirmed", "shipped"),
+            ("shipped", "delivered"),
+        ]:
+            with self.subTest(old=old, new=new):
+                self.assertTrue(order_state.transition_allowed(old, new))
+        # Self-transitions (idempotent replays) and everything else are not.
+        for old, new in [
+            ("pending", "shipped"),
+            ("confirmed", "cancelled"),
+            ("confirmed", "delivered"),
+            ("shipped", "confirmed"),
+            ("delivered", "pending"),
+            ("cancelled", "pending"),
+            ("unknown", "confirmed"),
+        ]:
+            with self.subTest(old=old, new=new):
+                self.assertFalse(order_state.transition_allowed(old, new))
+        for old in ("pending", "confirmed", "shipped", "delivered", "cancelled"):
+            with self.subTest(old=old):
+                self.assertTrue(order_state.transition_allowed(old, old))
+
+    def test_admin_fulfilment_next_pins_the_one_step_map(self):
+        self.assertEqual(
+            order_state.ADMIN_FULFILMENT_NEXT,
+            {"pending": "confirmed", "confirmed": "shipped", "shipped": "delivered"},
+        )
+
+    def test_backfill_mapping_is_total_over_legacy_statuses(self):
+        self.assertEqual(
+            set(order_state.LEGACY_STATUS_DIMENSIONS),
+            {s for s, _ in Order.STATUS_CHOICES},
+        )
+
+
+@tag("orders")
+class LifecycleDimensionsFieldTests(OrderTestBase):
+    """[R-10.1] The additive dimension fields: initial states, the
+    legacy→dimensions mapping table, and read-only serializer exposure."""
+
+    EXPECTED_DIMENSIONS = {
+        "pending": ("pending", "unfulfilled"),
+        "confirmed": ("captured", "unfulfilled"),
+        "shipped": ("captured", "fulfilled"),
+        "delivered": ("captured", "fulfilled"),
+        "cancelled": ("pending", "unfulfilled"),
+    }
+
+    def test_every_legacy_status_maps_to_both_dimensions(self):
+        payment_values = {v for v, _ in order_state.PAYMENT_STATUS_CHOICES}
+        fulfilment_values = {v for v, _ in order_state.FULFILMENT_STATUS_CHOICES}
+        for legacy_status in [s for s, _ in Order.STATUS_CHOICES]:
+            with self.subTest(legacy_status=legacy_status):
+                payment, fulfilment = order_state.LEGACY_STATUS_DIMENSIONS[legacy_status]
+                self.assertEqual(
+                    (payment, fulfilment),
+                    self.EXPECTED_DIMENSIONS[legacy_status],
+                )
+                self.assertIn(payment, payment_values)
+                self.assertIn(fulfilment, fulfilment_values)
+
+    def test_dimension_helpers_agree_with_the_mapping(self):
+        for legacy_status, (payment, fulfilment) in self.EXPECTED_DIMENSIONS.items():
+            with self.subTest(legacy_status=legacy_status):
+                self.assertEqual(order_state.payment_for_status(legacy_status), payment)
+                self.assertEqual(order_state.fulfilment_for_status(legacy_status), fulfilment)
+
+    def test_new_orders_start_pending_and_unfulfilled(self):
+        order = self.create_order()
+
+        self.assertEqual(order.payment_status, "pending")
+        self.assertEqual(order.fulfilment_status, "unfulfilled")
+
+    def test_dimensions_exposed_read_only_in_order_serializer(self):
+        self.assertIn("payment_status", OrderSerializer.Meta.fields)
+        self.assertIn("fulfilment_status", OrderSerializer.Meta.fields)
+        self.assertIn("payment_status", OrderSerializer.Meta.read_only_fields)
+        self.assertIn("fulfilment_status", OrderSerializer.Meta.read_only_fields)
+
+        order = self.create_order()
+
+        res = self.client.get("/api/orders/")
+        self.assertEqual(res.status_code, 200, res.data)
+        row = next(r for r in res.data["results"] if r["id"] == order.id)
+        self.assertEqual(row["payment_status"], "pending")
+        self.assertEqual(row["fulfilment_status"], "unfulfilled")
+
+
+@tag("orders")
+class LifecycleBackfillMigrationTests(TransactionTestCase):
+    """[R-10.1] The 0012 backfill is total: a row with any legacy status
+    value migrates to BOTH dimensions per the state.py mapping. Same shape
+    as CurrencyBackfillMigrationTests: drop to 0011, raw-insert rows the
+    way a pre-dimension store had them, migrate to head, assert."""
+
+    def test_0012_backfills_both_dimensions_for_every_legacy_status(self):
+        call_command("migrate", "orders", "0011", verbosity=0, interactive=False)
+        user_id = User.objects.create_user(
+            "backfill10", "backfill10@example.com", "S3cure-Passphrase!"
+        ).id
+        # The dimension columns do not exist at 0011, so raw SQL is the
+        # only honest way to reproduce a pre-dimension row per legacy status.
+        with connection.cursor() as cursor:
+            for legacy_status in [s for s, _ in order_state.STATUS_CHOICES]:
+                cursor.execute(
+                    "INSERT INTO orders_order (user_id, full_name, phone, address,"
+                    " city, state, pincode, status, currency, discount_amount,"
+                    " total_amount, created_at, updated_at)"
+                    " VALUES (%s, %s, '1', 'a', 'c', 's', '1', %s, 'INR',"
+                    " 0, 100.00, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)",
+                    [user_id, f"Backfill-{legacy_status}", legacy_status],
+                )
+
+        call_command("migrate", "orders", verbosity=0, interactive=False)
+
+        for legacy_status, (payment, fulfilment) in (
+            order_state.LEGACY_STATUS_DIMENSIONS.items()
+        ):
+            with self.subTest(legacy_status=legacy_status):
+                order = Order.objects.get(full_name=f"Backfill-{legacy_status}")
+                self.assertEqual(order.payment_status, payment)
+                self.assertEqual(order.fulfilment_status, fulfilment)
+
+
+@tag("orders")
+class LifecycleWiringTests(OrderTestBase):
+    """[R-10.1] SPEC-10-01b: the writers keep the two dimension fields in
+    sync with the legacy status. The payment dimension moves ONLY with
+    payment events (verify_payment — COD/failure writers are SPEC-10-04);
+    the admin surface and the 9-07 JSON seam move the fulfilment dimension
+    with every fulfilment transition, and admin never touches payment."""
+
+    def _verify_payload(self, order):
+        return {
+            "order_id": order.id,
+            "razorpay_order_id": order.razorpay_order_id,
+            "razorpay_payment_id": "pay_DIM001",
+            "razorpay_signature": "sig",
+        }
+
+    def _admin_client(self):
+        if not User.objects.filter(username="dimboss").exists():
+            User.objects.create_superuser(
+                "dimboss", "dimboss@example.com", "S3cure-Passphrase!"
+            )
+        admin_client = self.fresh_client()
+        self.assertTrue(
+            admin_client.login(username="dimboss", password="S3cure-Passphrase!")
+        )
+        return admin_client
+
+    def _run_admin_action(self, action, orders):
+        """Bulk action through the real admin UI (mirrors the 8-16 tests)."""
+        admin_client = self._admin_client()
+        return admin_client.post(
+            "/admin/orders/order/",
+            {
+                "action": action,
+                "_selected_action": [str(order.id) for order in orders],
+                "select_across": "0",
+            },
+            follow=True,
+        )
+
+    def _staff_client(self, username):
+        from django.contrib.auth.models import Group
+
+        from common.roles import ROLE_SUPPORT
+
+        user = User.objects.create_user(
+            username, f"{username}@example.com", "S3cure-Passphrase!"
+        )
+        user.groups.add(Group.objects.get_or_create(name=ROLE_SUPPORT)[0])
+        client = self.fresh_client()
+        client.force_authenticate(user)
+        return client
+
+    def _order_with_status(self, user, status):
+        """A row exactly as the writers would have left it: the status AND
+        both dimension columns per the state.py mapping (a raw status-only
+        update would strand the dimensions stale, a state no writer makes)."""
+        order = Order.objects.create(
+            user=user,
+            full_name="Dim Buyer",
+            phone="1",
+            address="a",
+            city="c",
+            state="s",
+            pincode="1",
+            total_amount=Decimal("10.00"),
+        )
+        Order.objects.filter(pk=order.pk).update(
+            status=status,
+            payment_status=order_state.payment_for_status(status),
+            fulfilment_status=order_state.fulfilment_for_status(status),
+        )
+        order.refresh_from_db()
+        return order
+
+    # ——— payment dimension: verify_payment only ————————————————
+
+    def test_verify_payment_captures_the_payment_dimension(self):
+        order = self.create_order()
+        self.razorpay_mock(order_id="order_DIM")
+        res = self.client.post(
+            "/api/orders/payment/", {"order_id": order.id}, format="json"
+        )
+        self.assertEqual(res.status_code, 200, res.data)
+        order.refresh_from_db()  # picks up the minted razorpay_order_id
+
+        res = self.client.post(
+            "/api/orders/payment/verify/", self._verify_payload(order), format="json"
+        )
+        self.assertEqual(res.status_code, 200, res.data)
+        order.refresh_from_db()
+        # the legacy status semantics are untouched (8-04 pins stay green)
+        self.assertEqual(order.status, "confirmed")
+        self.assertIsNotNone(order.paid_at)
+        # ...and the payment dimension moved with the payment event alone
+        self.assertEqual(order.payment_status, "captured")
+        self.assertEqual(order.fulfilment_status, "unfulfilled")
+
+    def test_verify_rollback_leaves_the_payment_dimension_pending(self):
+        """The dimension write sits inside verify_payment's atomic block: an
+        audit failure after it must roll the captured dimension back with
+        everything else — effect and trail never disagree."""
+        order = self.create_order()
+        self.razorpay_mock(order_id="order_DIMRB")
+        res = self.client.post(
+            "/api/orders/payment/", {"order_id": order.id}, format="json"
+        )
+        self.assertEqual(res.status_code, 200, res.data)
+        order.refresh_from_db()  # picks up the minted razorpay_order_id
+        self.client.raise_request_exception = False
+        with mock.patch.object(
+            AuditEvent, "record", side_effect=RuntimeError("down")
+        ):
+            res = self.client.post(
+                "/api/orders/payment/verify/",
+                self._verify_payload(order),
+                format="json",
+            )
+        self.assertEqual(res.status_code, 500)
+        order.refresh_from_db()
+        self.assertEqual(order.status, "pending")
+        self.assertIsNone(order.paid_at)
+        self.assertEqual(order.payment_status, "pending")
+        self.assertEqual(order.fulfilment_status, "unfulfilled")
+
+    # ——— fulfilment dimension: admin surface ————————————————————
+    # Admin syncs fulfilment_status and must NEVER set payment_status.
+
+    def test_admin_change_form_moves_dimension_with_the_status(self):
+        order = self._order_with_status(self.buyer, "confirmed")
+        admin_client = self._admin_client()
+
+        res = admin_client.post(
+            f"/admin/orders/order/{order.id}/change/",
+            {
+                "user": order.user_id,
+                "full_name": order.full_name,
+                "phone": order.phone,
+                "address": order.address,
+                "city": order.city,
+                "state": order.state,
+                "pincode": order.pincode,
+                "status": "shipped",
+                "_save": "Save",
+                "items-TOTAL_FORMS": "0",
+                "items-INITIAL_FORMS": "0",
+                "items-MIN_NUM_FORMS": "0",
+                "items-MAX_NUM_FORMS": "1000",
+            },
+            follow=True,
+        )
+        self.assertEqual(res.status_code, 200)
+        order.refresh_from_db()
+        self.assertEqual(order.status, "shipped")
+        self.assertEqual(order.fulfilment_status, "fulfilled")
+        # admin never touches the payment dimension: the captured value the
+        # row carried in stays exactly as it was
+        self.assertEqual(order.payment_status, "captured")
+
+    def test_admin_change_form_illegal_transition_moves_nothing(self):
+        order = self._order_with_status(self.buyer, "shipped")
+        admin_client = self._admin_client()
+
+        res = admin_client.post(
+            f"/admin/orders/order/{order.id}/change/",
+            {
+                "user": order.user_id,
+                "full_name": order.full_name,
+                "phone": order.phone,
+                "address": order.address,
+                "city": order.city,
+                "state": order.state,
+                "pincode": order.pincode,
+                "status": "cancelled",
+                "_save": "Save",
+                "items-TOTAL_FORMS": "0",
+                "items-INITIAL_FORMS": "0",
+                "items-MIN_NUM_FORMS": "0",
+                "items-MAX_NUM_FORMS": "1000",
+            },
+            follow=True,
+        )
+        self.assertEqual(res.status_code, 200)
+        order.refresh_from_db()
+        self.assertEqual(order.status, "shipped")
+        self.assertEqual(order.fulfilment_status, "fulfilled")
+
+    def test_bulk_ship_syncs_dimension_per_row_and_skips_out_of_set(self):
+        confirmed = self._order_with_status(self.buyer, "confirmed")
+        pending = self._order_with_status(self.buyer, "pending")
+
+        res = self._run_admin_action("mark_shipped", [confirmed, pending])
+        self.assertEqual(res.status_code, 200)
+        confirmed.refresh_from_db()
+        pending.refresh_from_db()
+        # the in-set row sweeps both columns in the SAME UPDATE...
+        self.assertEqual(confirmed.status, "shipped")
+        self.assertEqual(confirmed.fulfilment_status, "fulfilled")
+        # ...and admin never touches the payment dimension, paid row included
+        self.assertEqual(confirmed.payment_status, "captured")
+        # ...the out-of-set row is only counted as skipped (9-07 hardening)
+        self.assertEqual(pending.status, "pending")
+        self.assertEqual(pending.fulfilment_status, "unfulfilled")
+
+    def test_admin_bulk_cancel_keeps_the_payment_dimension_untouched(self):
+        order = self.create_order()  # pending, unpaid
+
+        res = self._run_admin_action("cancel_pending", [order])
+        self.assertEqual(res.status_code, 200)
+        order.refresh_from_db()
+        self.assertEqual(order.status, "cancelled")
+        self.assertEqual(order.fulfilment_status, "unfulfilled")
+        self.assertEqual(order.payment_status, "pending")
+
+    # ——— fulfilment dimension: the 9-07 JSON seam ———————————————
+
+    def test_json_seam_fulfil_walk_syncs_fulfilment_dimension(self):
+        order = self.create_order()
+        support = self._staff_client("dimsupp")
+
+        for expected_status, expected_fulfilment in (
+            ("confirmed", "unfulfilled"),
+            ("shipped", "fulfilled"),
+            ("delivered", "fulfilled"),
+        ):
+            res = support.post(f"/api/admin/orders/{order.id}/fulfill/")
+            self.assertEqual(res.status_code, 200, res.data)
+            self.assertEqual(res.data["status"], expected_status)
+            order.refresh_from_db()
+            self.assertEqual(order.status, expected_status)
+            self.assertEqual(order.fulfilment_status, expected_fulfilment)
+
+    def test_json_seam_cancel_syncs_fulfilment_dimension(self):
+        order = self.create_order()
+        support = self._staff_client("dimcancel")
+
+        res = support.post(f"/api/admin/orders/{order.id}/cancel/")
+        self.assertEqual(res.status_code, 200, res.data)
+        order.refresh_from_db()
+        self.assertEqual(order.status, "cancelled")
+        self.assertEqual(order.fulfilment_status, "unfulfilled")
+        self.assertEqual(order.payment_status, "pending")
+
+    # ——— the dimensions surface through the serializer —————————
+
+    def test_serializer_shows_updated_dimensions_after_transitions(self):
+        order = self.create_order()
+        self.razorpay_mock(order_id="order_DIMSER")
+        res = self.client.post(
+            "/api/orders/payment/", {"order_id": order.id}, format="json"
+        )
+        self.assertEqual(res.status_code, 200, res.data)
+        order.refresh_from_db()  # picks up the minted razorpay_order_id
+        res = self.client.post(
+            "/api/orders/payment/verify/", self._verify_payload(order), format="json"
+        )
+        self.assertEqual(res.status_code, 200, res.data)
+
+        support = self._staff_client("dimser")
+        for _ in range(2):  # confirmed -> shipped
+            res = support.post(f"/api/admin/orders/{order.id}/fulfill/")
+            self.assertEqual(res.status_code, 200, res.data)
+
+        detail = support.get(f"/api/admin/orders/{order.id}/")
+        self.assertEqual(detail.status_code, 200, detail.data)
+        self.assertEqual(detail.data["payment_status"], "captured")
+        self.assertEqual(detail.data["fulfilment_status"], "fulfilled")
+
+        listing = self.client.get("/api/orders/")
+        self.assertEqual(listing.status_code, 200, listing.data)
+        row = next(r for r in listing.data["results"] if r["id"] == order.id)
+        self.assertEqual(row["payment_status"], "captured")
+        self.assertEqual(row["fulfilment_status"], "fulfilled")
+
+
+# ==================================
+# [R-10.12]/[R-10.17]/[R-10.18] SPEC-10-02: transition audit trail
+# ==================================
+
+@tag("orders")
+class TransitionAuditTrailTests(OrderTestBase):
+    """[R-10.12] Every legal order-status transition appends one immutable
+    OrderStatusEvent row (from→to, actor, trigger, timestamp) inside the
+    SAME transaction as the transition it records ([R-10.18] append-only:
+    a rolled-back writer leaves no event, a committed event can never lack
+    its transition, and no writer can mutate a row afterwards). The
+    privileged-action LogEntry trail (SPEC-7-01) is a separate record and
+    is not touched here."""
+
+    def _verify_payload(self, order):
+        return {
+            "order_id": order.id,
+            "razorpay_order_id": order.razorpay_order_id,
+            "razorpay_payment_id": "pay_AUD001",
+            "razorpay_signature": "sig",
+        }
+
+    def _admin_login(self):
+        if not User.objects.filter(username="auditboss").exists():
+            User.objects.create_superuser(
+                "auditboss", "auditboss@example.com", "S3cure-Passphrase!"
+            )
+        self.assertTrue(
+            self.client.login(username="auditboss", password="S3cure-Passphrase!")
+        )
+
+    def _admin_user(self):
+        return User.objects.get(username="auditboss")
+
+    def _run_admin_action(self, action, orders):
+        """Bulk action through the real admin UI (mirrors the 8-16 tests)."""
+        self._admin_login()
+        return self.client.post(
+            "/admin/orders/order/",
+            {
+                "action": action,
+                "_selected_action": [str(order.id) for order in orders],
+                "select_across": "0",
+            },
+            follow=True,
+        )
+
+    def _staff_client(self, username):
+        from django.contrib.auth.models import Group
+
+        from common.roles import ROLE_SUPPORT
+
+        user = User.objects.create_user(
+            username, f"{username}@example.com", "S3cure-Passphrase!"
+        )
+        user.groups.add(Group.objects.get_or_create(name=ROLE_SUPPORT)[0])
+        client = self.fresh_client()
+        client.force_authenticate(user)
+        return client
+
+    def _order_with_status(self, user, status):
+        """A row exactly as the writers would have left it (status plus the
+        dimension mapping). The .update() deliberately bypasses auto_now —
+        which is the staleness the bulk path's per-row rework fixes."""
+        order = Order.objects.create(
+            user=user,
+            full_name="Audit Buyer",
+            phone="1",
+            address="a",
+            city="c",
+            state="s",
+            pincode="1",
+            total_amount=Decimal("10.00"),
+        )
+        Order.objects.filter(pk=order.pk).update(
+            status=status,
+            payment_status=order_state.payment_for_status(status),
+            fulfilment_status=order_state.fulfilment_for_status(status),
+        )
+        order.refresh_from_db()
+        return order
+
+    # ——— checkout: the trail opens with the creation event ———
+
+    def test_checkout_appends_the_creation_event(self):
+        """[R-10.12] Creation is the lifecycle's first transition (no source
+        state → pending), so the trail opens at checkout."""
+        order = self.create_order()
+        events = list(order.status_events.all())
+        self.assertEqual(len(events), 1)
+        event = events[0]
+        self.assertIsNone(event.from_status)
+        self.assertEqual(event.to_status, "pending")
+        self.assertEqual(event.actor, self.buyer)
+        self.assertEqual(event.trigger, order_state.TRIGGER_ORDER_CREATE)
+        self.assertIsNotNone(event.created_at)
+
+    # ——— verify_payment ———
+
+    def test_verify_payment_appends_the_transition_event(self):
+        order = self.create_order()
+        self.razorpay_mock(order_id="order_AUDV")
+        res = self.client.post(
+            "/api/orders/payment/", {"order_id": order.id}, format="json"
+        )
+        self.assertEqual(res.status_code, 200, res.data)
+        order.refresh_from_db()  # picks up the minted razorpay_order_id
+
+        res = self.client.post(
+            "/api/orders/payment/verify/", self._verify_payload(order), format="json"
+        )
+        self.assertEqual(res.status_code, 200, res.data)
+        events = list(order.status_events.order_by("created_at", "id"))
+        self.assertEqual([e.to_status for e in events], ["pending", "confirmed"])
+        transition = events[-1]
+        self.assertEqual(transition.from_status, "pending")
+        self.assertEqual(transition.to_status, "confirmed")
+        # [R-10.17] No admin acts on this path: the trigger records the
+        # source and the actor stays NULL — "actor OR triggering event".
+        self.assertIsNone(transition.actor)
+        self.assertEqual(transition.trigger, order_state.TRIGGER_PAYMENT_VERIFY)
+
+    def test_failed_verify_appends_no_event(self):
+        order = self.create_order()
+        client_mock = self.razorpay_mock(order_id="order_AUDFAIL")
+        res = self.client.post(
+            "/api/orders/payment/", {"order_id": order.id}, format="json"
+        )
+        self.assertEqual(res.status_code, 200, res.data)
+        order.refresh_from_db()
+        self.razorpay_fail_signature(client_mock)
+
+        res = self.client.post(
+            "/api/orders/payment/verify/", self._verify_payload(order), format="json"
+        )
+        self.assertEqual(res.status_code, 400, res.data)
+        # no transition, no event: the trail still holds creation only
+        self.assertEqual(
+            list(order.status_events.values_list("to_status", flat=True)),
+            ["pending"],
+        )
+
+    def test_verify_rollback_takes_the_event_with_it(self):
+        """[R-10.18] Rollback-together pin: the event rides verify_payment's
+        atomic block, so an audit-layer failure after it reverts both."""
+        order = self.create_order()
+        self.razorpay_mock(order_id="order_AUDRB")
+        res = self.client.post(
+            "/api/orders/payment/", {"order_id": order.id}, format="json"
+        )
+        self.assertEqual(res.status_code, 200, res.data)
+        order.refresh_from_db()
+        self.client.raise_request_exception = False
+        with mock.patch.object(
+            AuditEvent, "record", side_effect=RuntimeError("down")
+        ):
+            res = self.client.post(
+                "/api/orders/payment/verify/",
+                self._verify_payload(order),
+                format="json",
+            )
+        self.assertEqual(res.status_code, 500)
+        order.refresh_from_db()
+        self.assertEqual(order.status, "pending")
+        self.assertEqual(order.status_events.count(), 1)  # creation only
+
+    # ——— admin change form ———
+
+    def _change_form_post(self, order, status):
+        return self.client.post(
+            f"/admin/orders/order/{order.id}/change/",
+            {
+                "user": order.user_id,
+                "full_name": order.full_name,
+                "phone": order.phone,
+                "address": order.address,
+                "city": order.city,
+                "state": order.state,
+                "pincode": order.pincode,
+                "status": status,
+                "_save": "Save",
+                "items-TOTAL_FORMS": "0",
+                "items-INITIAL_FORMS": "0",
+                "items-MIN_NUM_FORMS": "0",
+                "items-MAX_NUM_FORMS": "1000",
+            },
+            follow=True,
+        )
+
+    def test_admin_change_form_appends_one_event_per_legal_transition(self):
+        self._admin_login()
+        order = self._order_with_status(self.buyer, "pending")
+
+        res = self._change_form_post(order, "cancelled")
+        self.assertEqual(res.status_code, 200)
+        order.refresh_from_db()
+        self.assertEqual(order.status, "cancelled")
+
+        event = order.status_events.exclude(
+            trigger=order_state.TRIGGER_ORDER_CREATE
+        ).get()
+        self.assertEqual(event.from_status, "pending")
+        self.assertEqual(event.to_status, "cancelled")
+        self.assertEqual(event.actor, self._admin_user())
+        self.assertEqual(event.trigger, order_state.TRIGGER_ADMIN_CHANGE_FORM)
+
+    def test_admin_change_form_skips_noop_saves_and_illegal_moves(self):
+        self._admin_login()
+        confirmed = self._order_with_status(self.buyer, "confirmed")
+        shipped = self._order_with_status(self.buyer, "shipped")
+
+        # no-op: the self-transition is not a transition, so no audit row
+        res = self._change_form_post(confirmed, "confirmed")
+        self.assertEqual(res.status_code, 200)
+        # illegal: the machine gate aborts the save entirely
+        res = self._change_form_post(shipped, "cancelled")
+        self.assertEqual(res.status_code, 200)
+
+        self.assertEqual(confirmed.status_events.count(), 0)
+        self.assertEqual(shipped.status_events.count(), 0)
+
+    def test_admin_change_form_failed_audit_write_reverts_the_transition(self):
+        """[R-10.18] Rollback-together pin for the change form: a failing
+        event write rolls the whole save back with it."""
+        self._admin_login()
+        self.client.raise_request_exception = False
+        order = self._order_with_status(self.buyer, "pending")
+        with mock.patch.object(
+            OrderStatusEvent.objects,
+            "create",
+            side_effect=RuntimeError("audit down"),
+        ):
+            res = self._change_form_post(order, "confirmed")
+        self.assertEqual(res.status_code, 500)
+        order.refresh_from_db()
+        self.assertEqual(order.status, "pending")
+        self.assertEqual(order.status_events.count(), 0)
+
+    # ——— admin bulk actions ———
+
+    def test_bulk_action_appends_per_row_events_with_fresh_updated_at(self):
+        confirmed = self._order_with_status(self.buyer, "confirmed")
+        pending = self._order_with_status(self.buyer, "pending")
+        # the pre-fix state: a bulk .update() bypasses auto_now, so
+        # updated_at is stranded at its insert-time value — exactly the
+        # staleness the per-row rework fixes
+        stale_updated_at = confirmed.updated_at
+
+        res = self._run_admin_action("mark_shipped", [confirmed, pending])
+        self.assertEqual(res.status_code, 200)
+        confirmed.refresh_from_db()
+        pending.refresh_from_db()
+
+        self.assertEqual(confirmed.status, "shipped")
+        # [staleness pin] per-row saves fire auto_now: updated_at is fresh
+        self.assertGreater(confirmed.updated_at, stale_updated_at)
+
+        event = confirmed.status_events.get()
+        self.assertEqual(event.from_status, "confirmed")
+        self.assertEqual(event.to_status, "shipped")
+        self.assertEqual(event.actor, self._admin_user())
+        self.assertEqual(event.trigger, order_state.TRIGGER_ADMIN_BULK_ACTION)
+
+        # the out-of-set row is skipped with no event (9-07 semantics)
+        self.assertEqual(pending.status, "pending")
+        self.assertEqual(pending.status_events.count(), 0)
+
+    def test_bulk_cancel_appends_events(self):
+        order = self.create_order()  # pending, unpaid, has creation event
+
+        res = self._run_admin_action("cancel_pending", [order])
+        self.assertEqual(res.status_code, 200)
+        order.refresh_from_db()
+        self.assertEqual(order.status, "cancelled")
+
+        cancel_event = order.status_events.exclude(
+            trigger=order_state.TRIGGER_ORDER_CREATE
+        ).get()
+        self.assertEqual(cancel_event.from_status, "pending")
+        self.assertEqual(cancel_event.to_status, "cancelled")
+        self.assertEqual(cancel_event.actor, self._admin_user())
+        self.assertEqual(cancel_event.trigger, order_state.TRIGGER_ADMIN_BULK_ACTION)
+
+    # ——— the 9-07 admin JSON seam ———
+
+    def test_json_seam_fulfil_appends_events_with_the_staff_actor(self):
+        order = self.create_order()
+        support = self._staff_client("auditsupp")
+
+        res = support.post(f"/api/admin/orders/{order.id}/fulfill/")
+        self.assertEqual(res.status_code, 200, res.data)
+        res = support.post(f"/api/admin/orders/{order.id}/fulfill/")
+        self.assertEqual(res.status_code, 200, res.data)
+
+        events = order.status_events.filter(
+            trigger=order_state.TRIGGER_ADMIN_API_FULFIL
+        ).order_by("created_at", "id")
+        self.assertEqual(
+            [(e.from_status, e.to_status) for e in events],
+            [("pending", "confirmed"), ("confirmed", "shipped")],
+        )
+        for event in events:
+            self.assertEqual(event.actor, User.objects.get(username="auditsupp"))
+
+    def test_json_seam_cancel_appends_event_and_replay_appends_nothing(self):
+        order = self.create_order()
+        support = self._staff_client("auditcancel")
+
+        res = support.post(f"/api/admin/orders/{order.id}/cancel/")
+        self.assertEqual(res.status_code, 200, res.data)
+        res = support.post(f"/api/admin/orders/{order.id}/cancel/")
+        self.assertEqual(res.status_code, 200, res.data)  # idempotent replay
+
+        cancel_events = order.status_events.filter(
+            trigger=order_state.TRIGGER_ADMIN_API_CANCEL
+        )
+        self.assertEqual(cancel_events.count(), 1)
+        event = cancel_events.get()
+        self.assertEqual(event.from_status, "pending")
+        self.assertEqual(event.to_status, "cancelled")
+        self.assertEqual(event.actor, User.objects.get(username="auditcancel"))
+
+    def test_cancel_pending_skips_a_row_flipped_after_the_snapshot(self):
+        """Deterministic cancel twin of the 9-07 race guard: a row that
+        flips pending→confirmed between the pk snapshot and the per-row
+        write is a PAID order by then — it must be skipped (cancelling a
+        paid order is impossible), with no audit row for a cancel that
+        never happened."""
+        from django.contrib.admin import site as admin_site
+        from django.contrib.messages.storage.fallback import FallbackStorage
+        from django.db import models as django_models
+        from django.test import RequestFactory
+
+        admin = OrderAdmin(Order, admin_site)
+        staff = self.make_staff()
+        request = RequestFactory().post("/admin/orders/order/")
+        request.user = staff
+        request.session = {}
+        request._messages = FallbackStorage(request)
+
+        victim = Order.objects.create(
+            user=self.buyer,
+            full_name="V", phone="1", address="a", city="c", state="s",
+            pincode="1", total_amount=Decimal("10.00"),
+        )
+        control = Order.objects.create(
+            user=self.buyer,
+            full_name="C", phone="1", address="a", city="c", state="s",
+            pincode="1", total_amount=Decimal("10.00"),
+        )
+
+        class CancellingQuerySet(django_models.QuerySet):
+            raced = False
+
+            def values_list(self, *args, **kwargs):
+                pks = list(super().values_list(*args, **kwargs))
+                if not CancellingQuerySet.raced:
+                    CancellingQuerySet.raced = True
+                    # The interleave: the snapshot above already saw both
+                    # rows pending; the victim gets paid before the write
+                    # runs.
+                    Order.objects.filter(pk=victim.pk).update(status="confirmed")
+                return pks
+
+        admin.cancel_pending(request, CancellingQuerySet(Order))
+
+        victim.refresh_from_db()
+        control.refresh_from_db()
+        self.assertEqual(victim.status, "confirmed")
+        self.assertEqual(control.status, "cancelled")
+        self.assertFalse(
+            OrderStatusEvent.objects.filter(
+                order=victim, to_status="cancelled"
+            ).exists()
+        )
+        self.assertTrue(
+            OrderStatusEvent.objects.filter(
+                order=control, to_status="cancelled"
+            ).exists()
+        )
+
+    # ——— immutability ([R-10.18]) ———
+
+    def test_events_are_append_only(self):
+        order = self.create_order()
+        event = order.status_events.get()
+        event.to_status = "confirmed"
+        with self.assertRaisesRegex(TypeError, "append-only"):
+            event.save()
+        event.refresh_from_db()
+        self.assertEqual(event.to_status, "pending")
+
+    def test_admin_surface_is_view_only(self):
+        from django.contrib.admin import site as admin_site
+        from django.test import RequestFactory
+
+        from orders.admin import OrderStatusEventAdmin
+
+        order = self.create_order()
+        event = order.status_events.get()
+        event_admin = OrderStatusEventAdmin(OrderStatusEvent, admin_site)
+
+        # staff (orders.read via the roles map): view yes, mutate no
+        staff = self.make_staff()
+        request = RequestFactory().post("/admin/")
+        request.user = staff
+        self.assertTrue(event_admin.has_view_permission(request))
+        self.assertFalse(event_admin.has_add_permission(request))
+        self.assertFalse(event_admin.has_change_permission(request, event))
+        self.assertFalse(event_admin.has_delete_permission(request, event))
+
+        # even the superuser bypass cannot add or delete: append-only
+        self._admin_login()
+        request.user = self._admin_user()
+        self.assertFalse(event_admin.has_add_permission(request))
+        self.assertFalse(event_admin.has_delete_permission(request))
+
+        # every field renders read-only: the change form is a view
+        for field in ("order", "from_status", "to_status", "actor", "trigger",
+                      "created_at"):
+            self.assertIn(field, OrderStatusEventAdmin.readonly_fields)
+
+    def test_event_model_pins(self):
+        """Meta pins + the trigger choices stay single-sourced in state.py."""
+        self.assertEqual(
+            OrderStatusEvent._meta.get_field("trigger").choices,
+            order_state.STATUS_EVENT_TRIGGERS,
+        )
+        self.assertEqual(OrderStatusEvent._meta.ordering, ("-created_at", "-id"))
+        self.assertEqual(
+            OrderStatusEvent._meta.verbose_name, "order status event"
+        )
+        order = self.create_order()
+        event = order.status_events.get()
+        self.assertEqual(
+            str(event),
+            f"{order.id}: None->pending ({order_state.TRIGGER_ORDER_CREATE})",
+        )

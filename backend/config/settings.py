@@ -68,6 +68,12 @@ MIDDLEWARE = [
     'django.contrib.auth.middleware.AuthenticationMiddleware',
     'django.contrib.messages.middleware.MessageMiddleware',
     'django.middleware.clickjacking.XFrameOptionsMiddleware',
+    # SPEC-9-03 (R-9.2.19, spec line 3002 "consistent error responses"):
+    # every JSON error response is rewritten into the single uniform
+    # {"error", "code", "details"} shape in one place — middleware-level,
+    # because the ad-hoc {"error": ...} view returns raise no exception a
+    # DRF EXCEPTION_HANDLER could see.
+    'common.errors.ErrorEnvelopeMiddleware',
 ]
 
 ROOT_URLCONF = 'config.urls'
@@ -243,6 +249,14 @@ PRODUCTS_PAGE_SIZE = _env_int('PRODUCTS_PAGE_SIZE', 12)
 # Tunable per deployment without a code change; non-integer values are
 # ignored and the default is used instead.
 CHECKOUT_DEDUP_WINDOW_SECONDS = _env_int('CHECKOUT_DEDUP_WINDOW_SECONDS', 300)
+
+# SPEC-9-04 [R-9.2.14] Customer order-history listing (GET /api/orders/):
+# rows per page, and the ceiling a ?page_size caller may request. The spec
+# pins no number for order history, so both are deployment config
+# (conventions.md: no hardcoded thresholds); non-integer values are ignored
+# and the defaults are used instead.
+ORDER_HISTORY_PAGE_SIZE = _env_int('ORDER_HISTORY_PAGE_SIZE', 10)
+ORDER_HISTORY_MAX_PAGE_SIZE = _env_int('ORDER_HISTORY_MAX_PAGE_SIZE', 100)
 
 
 # ISO 4217 currency codes are exactly three uppercase letters.

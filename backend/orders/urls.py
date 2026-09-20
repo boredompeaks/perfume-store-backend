@@ -2,6 +2,7 @@ from django.urls import path
 
 from .views import (
     order_list,
+    order_detail,
     create_order,
     apply_coupon,
     create_payment,
@@ -15,6 +16,12 @@ urlpatterns = [
         '',
         order_list,
         name='order-list'
+    ),
+
+    path(
+        '<int:order_id>/',
+        order_detail,
+        name='order-detail'
     ),
 
     path(

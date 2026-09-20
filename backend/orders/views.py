@@ -1,6 +1,8 @@
 from datetime import timedelta
 from decimal import Decimal
 
+from django.contrib.admin.models import CHANGE
+from django.core.paginator import Paginator
 from django.db import IntegrityError, transaction
 from django.db.models import Q
 from django.utils import timezone
@@ -10,23 +12,67 @@ from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
 from rest_framework import status
 
+# [R-10.1] The order machine (transition table, gate, fulfilment step map)
+# lives in orders.state — the single source; views only consume it.
 from .models import Order, OrderItem, Coupon
 from .serializers import OrderSerializer
+from .state import ADMIN_FULFILMENT_NEXT, ALLOWED_TRANSITIONS, transition_allowed
+# [R-10.1] SPEC-10-01b: dimension mappings for the writers. Kept as its own
+# line so every hunk in this file stays insertion-only.
+from .state import fulfilment_for_status, payment_for_status
+# [R-10.12] SPEC-10-02: transition-audit writers. Own import lines so every
+# hunk in this file stays insertion-only.
+from .models import OrderStatusEvent
+from .state import (
+    TRIGGER_ADMIN_API_CANCEL,
+    TRIGGER_ADMIN_API_FULFIL,
+    TRIGGER_ORDER_CREATE,
+    TRIGGER_PAYMENT_VERIFY,
+)
 
 from cart.models import Cart
 from common import notifications
+from common.audit import log_api_action
 from common.models import AuditEvent
 from common.money import quantize_money
+from common.permissions import HasOrdersCancel, HasOrdersFulfill, HasOrdersRead
 from products.models import StockMovement, products
 
 import logging
 import razorpay
 from django.conf import settings
+from django.contrib.auth.models import User
 
 logger = logging.getLogger(__name__)
 # ==================================
 # Order List
 # ==================================
+
+# [R-9.3.14] SPEC-9-01: header-keyed checkout idempotency. The cap mirrors
+# the Order.idempotency_key column width, so an oversized value is rejected
+# with a 400 here instead of a database error at insert time.
+IDEMPOTENCY_KEY_HEADER = "Idempotency-Key"
+IDEMPOTENCY_KEY_MAX_LENGTH = 128
+
+# SPEC-9-04 [R-9.2.14]: history page size. Spec §9.2 prescribes the
+# order-history endpoint without pinning a page size, so the default is
+# deployment config (conventions.md: no hardcoded thresholds), capped for
+# ?page_size callers so a client cannot request unbounded pages.
+HISTORY_PAGE_SIZE_QUERY_PARAM = "page_size"
+
+
+def _history_page_size(raw):
+    """Resolve the ?page_size query param: an integer in
+    [1, ORDER_HISTORY_MAX_PAGE_SIZE]; anything unparseable, non-positive or
+    over the cap falls back to the configured default / cap respectively."""
+    try:
+        value = int(raw)
+    except (TypeError, ValueError):
+        return settings.ORDER_HISTORY_PAGE_SIZE
+    if value < 1:
+        return settings.ORDER_HISTORY_PAGE_SIZE
+    return min(value, settings.ORDER_HISTORY_MAX_PAGE_SIZE)
+
 
 @api_view(['GET'])
 @permission_classes([IsAuthenticated])
@@ -36,10 +82,58 @@ def order_list(request):
         user=request.user
     ).order_by('-created_at')
 
+    # SPEC-9-04: the unique id tiebreaker makes the sort total, so a
+    # paginated partition never repeats or skips a row across requests
+    # (same reasoning as the products listing's F-12 fix).
+    orders = orders.order_by('-created_at', '-id')
+
+    paginator = Paginator(
+        orders, _history_page_size(
+            request.query_params.get(HISTORY_PAGE_SIZE_QUERY_PARAM)
+        )
+    )
+    # get_page never raises: an unparsable page falls back to 1, a page
+    # past the end to the last page — no 404 for a stale page link.
+    page = paginator.get_page(request.query_params.get('page', 1))
+
     serializer = OrderSerializer(
-        orders,
+        page.object_list,
         many=True
     )
+
+    # House page-number envelope (products-listing parity).
+    return Response({
+        'count': paginator.count,
+        'total_pages': paginator.num_pages,
+        'current_page': page.number,
+        'next_page': page.has_next(),
+        'previous_page': page.has_previous(),
+        'results': serializer.data,
+    })
+
+
+@api_view(['GET'])
+@permission_classes([IsAuthenticated])
+def order_detail(request, order_id):
+    """[R-9.2.15] GET /account/orders/:id — the caller's OWN order only.
+
+    Ownership is part of the lookup itself: a foreign user's order (and an
+    unknown id alike) gets the same uniform 404 — never a 200 (the IDOR
+    pin) and never a 403 that would confirm the id's existence
+    (conventions.md: no existence leaks)."""
+    try:
+        order = Order.objects.get(
+            id=order_id,
+            user=request.user
+        )
+
+    except Order.DoesNotExist:
+        return Response(
+            {"error": "Order not found"},
+            status=status.HTTP_404_NOT_FOUND
+        )
+
+    serializer = OrderSerializer(order)
 
     return Response(
         serializer.data
@@ -148,6 +242,24 @@ def _generate_order_number():
 @api_view(['POST'])
 @permission_classes([IsAuthenticated])
 def create_order(request):
+
+    # [R-9.3.14] Honor the Idempotency-Key header when the client sends it:
+    # every retry carrying the same value is the SAME submission, so the
+    # atomic block below dedupes on (user, key). Keyless clients keep the
+    # legacy contract (the SPEC-21-1 guard plus window). Blank means no
+    # key, since an empty value carries no submission identity.
+    idempotency_key = (
+        request.headers.get(IDEMPOTENCY_KEY_HEADER) or ""
+    ).strip() or None
+
+    if (
+        idempotency_key is not None
+        and len(idempotency_key) > IDEMPOTENCY_KEY_MAX_LENGTH
+    ):
+        return Response(
+            {"error": "Idempotency-Key is too long"},
+            status=status.HTTP_400_BAD_REQUEST
+        )
 
     # =========================
     # Get current session
@@ -274,6 +386,16 @@ def create_order(request):
     discount_amount = Decimal('0.00')
 
     coupon_code = request.data.get('coupon_code')
+
+    # [R-9.3.5/R-9.3.6] The coupon applied to the cart persists as cart
+    # state: when the checkout payload posts no explicit code, the
+    # persisted one becomes the coupon source. The pre-existing validation
+    # below still re-runs every rule at checkout time (state may have
+    # changed since apply), so an invalidated coupon is rejected here
+    # rather than silently riding the FK into the order; a deleted coupon
+    # is already gone (SET_NULL) and simply applies nothing.
+    if not coupon_code and cart.coupon_id:
+        coupon_code = cart.coupon.code
 
     if coupon_code:
 
@@ -408,6 +530,40 @@ def create_order(request):
                 status=status.HTTP_200_OK
             )
 
+        # [R-9.3.14]/[R-9.3.19] SPEC-9-01: key-based replay collapse. The
+        # user row is locked first so two cross-session submissions carrying
+        # the same key serialize here -- the loser's probe runs only after
+        # the winner committed, which makes the probe-then-bind below
+        # race-free (the (user, idempotency_key) unique constraint stays the
+        # last-resort authority). This composes behind the SPEC-21-1 guard
+        # above, which stays the first line of defence for keyless
+        # same-session double-clicks: a keyed replay collapses onto the
+        # original order regardless of payload drift, the dedup window, or
+        # a settled first attempt, and never mints a second order_number.
+        if idempotency_key is not None:
+            User.objects.select_for_update().get(pk=request.user.pk)
+
+            replay = Order.objects.filter(
+                user=request.user, idempotency_key=idempotency_key
+            ).first()
+
+            if replay is not None:
+                # Benign keyed retry, so INFO: same judgement as the dedup
+                # guard's collapse log above.
+                logger.info(
+                    "Checkout idempotency: order %s replayed for user %s "
+                    "(Idempotency-Key)",
+                    replay.id,
+                    request.user.pk,
+                )
+
+                serializer = OrderSerializer(replay)
+
+                return Response(
+                    serializer.data,
+                    status=status.HTTP_200_OK
+                )
+
         # [R-8.4] The order number is minted inside this same atomic block,
         # so a rolled-back checkout never burns a number. Each attempt runs
         # in a savepoint: a lost race (another connection committed the same
@@ -441,6 +597,31 @@ def create_order(request):
                     raise
                 continue
             break
+
+        # [R-10.12]/[R-10.17] SPEC-10-02: creation is the lifecycle's first
+        # transition (no source state -> pending), so the audit trail opens
+        # here — inside the same outer atomic block as the order row, the
+        # minted number, the snapshots and the key binding. A rolled-back
+        # checkout leaves no order and no event; the actor is the customer
+        # who placed the order.
+        OrderStatusEvent.objects.create(
+            order=order,
+            from_status=None,
+            to_status=order.status,
+            actor=request.user,
+            trigger=TRIGGER_ORDER_CREATE,
+        )
+
+        # [R-9.3.14] SPEC-9-01: bind the submission key to the freshly
+        # minted order inside this same transaction, so a later replay's
+        # probe above finds it and collapses. The write is an UPDATE of the
+        # row this transaction just created, after the probe proved no
+        # committed order holds (user, key) and with the user-row lock
+        # excluding a concurrent keyed writer -- so the unique constraint
+        # cannot reject here.
+        if idempotency_key is not None:
+            order.idempotency_key = idempotency_key
+            order.save(update_fields=['idempotency_key'])
 
         # Snapshot cart items. Inventory, coupon usage, and cart cleanup occur
         # only after the payment provider confirms this specific order.
@@ -515,6 +696,55 @@ def _uniform_coupon_rejection():
     )
 
 
+def validate_redeemable_coupon(code, cart):
+    """Shared gate for the coupon surfaces that answer against a session
+    cart: the public preview and the cart-state apply (R-9.3.5). Resolves
+    `code` case-insensitively and enforces the full redeemable rule set --
+    active, within the validity window, under the usage limit, and not
+    below the minimum order amount -- rejecting with the ONE uniform body
+    so validation state never leaks (V-11). Extracted from apply_coupon so
+    the cart endpoints delegate to the same rules instead of copying them
+    (SPEC-9-05).
+
+    Returns (coupon, subtotal, None) when redeemable -- subtotal is handed
+    back because the preview needs the exact figure the minimum check used
+    for its discount math -- or (None, None, rejection) otherwise."""
+    try:
+        coupon = Coupon.objects.get(
+            code__iexact=code
+        )
+
+    except Coupon.DoesNotExist:
+        return None, None, _uniform_coupon_rejection()
+
+    now = timezone.now()
+
+    if (
+        not coupon.active
+        or now < coupon.valid_from
+        or now > coupon.valid_until
+        or (
+            coupon.usage_limit is not None
+            and coupon.used_count >= coupon.usage_limit
+        )
+    ):
+        return None, None, _uniform_coupon_rejection()
+
+    # Calculate cart subtotal
+    subtotal = Decimal('0.00')
+
+    for item in cart.items.select_related('product'):
+        subtotal += (
+            item.product.price * item.quantity
+        )
+
+    # Check minimum order amount
+    if subtotal < coupon.minimum_order_amount:
+        return None, None, _uniform_coupon_rejection()
+
+    return coupon, subtotal, None
+
+
 @api_view(['POST'])
 @throttle_scope('coupon')
 def apply_coupon(request):
@@ -552,45 +782,10 @@ def apply_coupon(request):
 
     # From here on every rejection shares one uniform response: unknown,
     # inactive, not-yet-valid, expired, usage limit, and below minimum.
-    try:
-        coupon = Coupon.objects.get(
-            code__iexact=code
-        )
+    coupon, subtotal, rejection = validate_redeemable_coupon(code, cart)
 
-    except Coupon.DoesNotExist:
-        return _uniform_coupon_rejection()
-
-    # Check active
-    if not coupon.active:
-        return _uniform_coupon_rejection()
-
-    # Check dates
-    now = timezone.now()
-
-    if now < coupon.valid_from:
-        return _uniform_coupon_rejection()
-
-    if now > coupon.valid_until:
-        return _uniform_coupon_rejection()
-
-    # Check usage limit
-    if (
-        coupon.usage_limit is not None
-        and coupon.used_count >= coupon.usage_limit
-    ):
-        return _uniform_coupon_rejection()
-
-    # Calculate cart subtotal
-    subtotal = Decimal('0.00')
-
-    for item in cart.items.all():
-        subtotal += (
-            item.product.price * item.quantity
-        )
-
-    # Check minimum order amount
-    if subtotal < coupon.minimum_order_amount:
-        return _uniform_coupon_rejection()
+    if rejection is not None:
+        return rejection
 
     # Calculate discount
     if coupon.discount_type == 'percentage':
@@ -974,10 +1169,35 @@ def verify_payment(request):
         # block (rollback together). The already-processed gate above makes
         # a replay unreachable here; the or-guard pins "written exactly
         # once, never mutated" even if a future path re-enters.
+        # [R-10.12] SPEC-10-02: capture the pre-transition status for the
+        # audit row written below (insertion-only hunk; the byte-frozen
+        # 8-04 region below is untouched).
+        previous_status = order.status
         order.paid_at = order.paid_at or timezone.now()
         order.status = 'confirmed'
         order.razorpay_payment_id = razorpay_payment_id
         order.save(update_fields=['status', 'razorpay_payment_id', 'paid_at'])
+        # [R-10.1] SPEC-10-01b: the payment dimension is captured by the
+        # same confirmed-payment event (the only payment-dimension writer
+        # in this batch — COD/failure states are SPEC-10-04). The save
+        # above is a byte-frozen region (SPEC-8-04), so the dimension rides
+        # this second persistence of the already-locked row in the SAME
+        # atomic block: both UPDATEs commit or roll back together, and the
+        # already-processed gate keeps this path unreachable on replay.
+        order.payment_status = payment_for_status('confirmed')
+        order.save(update_fields=['payment_status'])
+        # [R-10.12]/[R-10.17] SPEC-10-02: the transition's audit row rides
+        # this same atomic block — a rolled-back verify leaves no event
+        # behind (pinned). No admin acts on this path, so the trigger
+        # records the source and the actor stays NULL (spec 10.3: "Actor
+        # or triggering event" — one of the two is enough).
+        OrderStatusEvent.objects.create(
+            order=order,
+            from_status=previous_status,
+            to_status=order.status,
+            actor=None,
+            trigger=TRIGGER_PAYMENT_VERIFY,
+        )
 
         if request.session.session_key:
             cart = Cart.objects.filter(session_id=request.session.session_key).first()
@@ -1022,4 +1242,200 @@ def verify_payment(request):
         "order_id": order.id,
         "status": order.status,
         "razorpay_payment_id": razorpay_payment_id
+    })
+
+
+# ==================================
+# Admin orders JSON seam (SPEC-9-07, spec 9.4 Orders module)
+# ==================================
+
+# SPEC-9-07: the fulfilment endpoint drives the order one legal step per
+# call along the flow the admin surface's bulk actions encode.
+# ADMIN_FULFILMENT_NEXT (the step map) and transition_allowed (the gate)
+# live in orders.state — [R-10.1] single source.
+
+
+@api_view(['GET'])
+@permission_classes([HasOrdersRead])
+def admin_order_list(request):
+    """[R-9.4.8] GET /api/admin/orders/ — every order, staff eyes only.
+
+    The customer list scopes to ``user=request.user``; this seam is reached
+    only through ``orders.read`` (support/finance/admin roles), so it serves
+    the unscoped queryset. Same house page-number envelope and page-size
+    config as the customer history — the paginator cap exists so no caller,
+    staff included, can request an unbounded page."""
+    orders = Order.objects.select_related("coupon").order_by("-created_at", "-id")
+
+    paginator = Paginator(
+        orders, _history_page_size(
+            request.query_params.get(HISTORY_PAGE_SIZE_QUERY_PARAM)
+        )
+    )
+    page = paginator.get_page(request.query_params.get('page', 1))
+
+    serializer = OrderSerializer(page.object_list, many=True)
+    return Response({
+        'count': paginator.count,
+        'total_pages': paginator.num_pages,
+        'current_page': page.number,
+        'next_page': page.has_next(),
+        'previous_page': page.has_previous(),
+        'results': serializer.data,
+    })
+
+
+@api_view(['GET'])
+@permission_classes([HasOrdersRead])
+def admin_order_detail(request, order_id):
+    """[R-9.4.9] GET /api/admin/orders/:id/ — one order, staff eyes only.
+
+    Unlike the customer detail endpoint there is no ownership scoping to
+    enforce, so an unknown id is a plain uniform 404 (never an existence
+    leak — the caller has already passed the orders.read gate)."""
+    try:
+        order = Order.objects.select_related("coupon").get(id=order_id)
+    except Order.DoesNotExist:
+        return Response(
+            {"error": "Order not found"},
+            status=status.HTTP_404_NOT_FOUND
+        )
+
+    return Response(OrderSerializer(order).data)
+
+
+@api_view(['POST'])
+@permission_classes([HasOrdersFulfill])
+def admin_order_fulfill(request, order_id):
+    """[R-9.4.10] POST /api/admin/orders/:id/fulfill — advance one step.
+
+    The gate-then-update pair runs under the row lock: two concurrent
+    fulfils cannot both pass the gate on the same stale status, so an order
+    can never skip two steps in one call. Deliberately NOT idempotent —
+    each accepted call performs one visible transition; the machine itself
+    rejects re-running a step from the new status (409). No business-event
+    stamp is written here: the admin surface's mark_shipped/mark_delivered
+    do not write shipped_at/delivered_at either, and the named-stamp
+    writers are their own later task — the JSON seam never invents a richer
+    record than the admin surface for the same transition."""
+    with transaction.atomic():
+        try:
+            order = Order.objects.select_for_update().get(id=order_id)
+        except Order.DoesNotExist:
+            return Response(
+                {"error": "Order not found"},
+                status=status.HTTP_404_NOT_FOUND
+            )
+
+        target = ADMIN_FULFILMENT_NEXT.get(order.status)
+        if target is None or not transition_allowed(order.status, target):
+            allowed = ", ".join(sorted(ALLOWED_TRANSITIONS.get(order.status, set())))
+            return Response(
+                {
+                    "error": f"Order cannot be fulfilled from status "
+                             f"'{order.status}'",
+                    "allowed": allowed,
+                },
+                status=status.HTTP_409_CONFLICT
+            )
+
+        # [R-10.12] SPEC-10-02: capture the pre-transition status for the
+        # audit row written below (insertion-only hunk).
+        previous_status = order.status
+        order.status = target
+        # [R-10.1] SPEC-10-01b: the fulfilment dimension rides the same
+        # transition. Insertion-only hunk (the 9-07 save below stays
+        # byte-identical), so the dimension persists via a second
+        # same-transaction write to the row locked above.
+        order.fulfilment_status = fulfilment_for_status(target)
+        order.save(update_fields=['status'])
+        order.save(update_fields=['fulfilment_status'])
+        # [R-10.12]/[R-10.18] SPEC-10-02: the audit row lands in this same
+        # transaction — a rolled-back fulfil never leaves a phantom event.
+        OrderStatusEvent.objects.create(
+            order=order,
+            from_status=previous_status,
+            to_status=target,
+            actor=request.user,
+            trigger=TRIGGER_ADMIN_API_FULFIL,
+        )
+        # [6.12.6] API-side staff write: land the privileged-action record
+        # the admin surface would have written (audit-log route reads it).
+        log_api_action(
+            request, order, CHANGE,
+            f"Fulfilled via API: status moved to {target}.",
+        )
+
+    return Response({
+        "message": f"Order status advanced to {target}",
+        "order_id": order.id,
+        "status": order.status,
+    })
+
+
+@api_view(['POST'])
+@permission_classes([HasOrdersCancel])
+def admin_order_cancel(request, order_id):
+    """[R-9.4.11] POST /api/admin/orders/:id/cancel — cancel an unpaid order.
+
+    The same machine gate the admin uses decides: only ``pending`` carries
+    a cancel edge (cancelling a paid order is deliberately impossible until
+    refunds exist — the 409 says so, mirroring the admin wording).
+    Idempotent: the machine's self-transition makes a re-cancel a no-op
+    200 (no second stamp, no duplicate audit row). cancelled_at rides the
+    transition exactly like admin ``cancel_pending`` — the is-none guard
+    keeps a set event time immutable ([R-8.16])."""
+    with transaction.atomic():
+        try:
+            order = Order.objects.select_for_update().get(id=order_id)
+        except Order.DoesNotExist:
+            return Response(
+                {"error": "Order not found"},
+                status=status.HTTP_404_NOT_FOUND
+            )
+
+        if order.status == "cancelled":
+            # The machine's self-transition: a replay, not a change.
+            return Response({
+                "message": "Order is already cancelled",
+                "order_id": order.id,
+                "status": order.status,
+            })
+
+        if not transition_allowed(order.status, "cancelled"):
+            return Response(
+                {
+                    "error": f"Order cannot be cancelled from status "
+                             f"'{order.status}'. Cancelling a paid order "
+                             f"needs a refund — reconcile manually.",
+                },
+                status=status.HTTP_409_CONFLICT
+            )
+
+        # [R-10.12] SPEC-10-02: capture the pre-transition status for the
+        # audit row written below (insertion-only hunk).
+        previous_status = order.status
+        order.status = "cancelled"
+        order.cancelled_at = order.cancelled_at or timezone.now()
+        # [R-10.1] SPEC-10-01b: fulfilment dimension rides the cancel
+        # transition (insertion-only; second same-transaction write).
+        order.fulfilment_status = fulfilment_for_status("cancelled")
+        order.save(update_fields=['status', 'cancelled_at'])
+        order.save(update_fields=['fulfilment_status'])
+        # [R-10.12]/[R-10.18] SPEC-10-02: the audit row lands in this same
+        # transaction; the idempotent replay above returns before reaching
+        # it, so a re-cancel never appends a second event.
+        OrderStatusEvent.objects.create(
+            order=order,
+            from_status=previous_status,
+            to_status="cancelled",
+            actor=request.user,
+            trigger=TRIGGER_ADMIN_API_CANCEL,
+        )
+        log_api_action(request, order, CHANGE, "Cancelled via API.")
+
+    return Response({
+        "message": "Order cancelled",
+        "order_id": order.id,
+        "status": order.status,
     })

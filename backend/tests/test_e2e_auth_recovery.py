@@ -35,7 +35,7 @@ class VerificationGateTests(ApiTestCase):
         self.assertTrue(access)
         res = self.client.get("/api/orders/")
         self.assertEqual(res.status_code, 200, res.data)
-        self.assertEqual(res.data, [])
+        self.assertEqual(res.data["results"], [])
 
 
 @tag("e2e")
@@ -58,7 +58,7 @@ class PasswordResetFlowTests(ApiTestCase):
             format="json",
         )
         self.assertEqual(res.status_code, 400, res.data)
-        self.assertIn("password", res.data)
+        self.assertIn("password", res.data["details"])
 
         # strong password accepted
         res = self.client.post(

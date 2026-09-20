@@ -4,6 +4,17 @@ from django.contrib.auth.models import User
 
 from products.models import products
 
+# [R-10.1] The order machine's constants live in orders.state (single
+# source); models, admin and views all import the same objects. Named
+# imports: a plain ``from . import state`` would be shadowed inside the
+# Order class body by its address ``state`` field.
+from .state import (
+    FULFILMENT_STATUS_CHOICES,
+    PAYMENT_STATUS_CHOICES,
+    STATUS_CHOICES,
+    STATUS_EVENT_TRIGGERS,
+)
+
 
 def default_currency():
     """[R-8.11] Store-config-driven currency for new money-bearing rows.
@@ -88,13 +99,9 @@ class Order(models.Model):
     ``order_number`` -- the pk never leaves server-side routing.
     """
 
-    STATUS_CHOICES = [
-        ('pending', 'Pending'),
-        ('confirmed', 'Confirmed'),
-        ('shipped', 'Shipped'),
-        ('delivered', 'Delivered'),
-        ('cancelled', 'Cancelled'),
-    ]
+    # [R-10.1] Single-sourced in orders.state; the class attribute stays so
+    # existing consumers (ops dashboard, admin filters) keep working.
+    STATUS_CHOICES = STATUS_CHOICES
 
     # [R-8.4] Customer-facing reference, minted inside create_order's atomic
     # block. Nullable by design: checkout (the only production writer) always
@@ -144,6 +151,28 @@ class Order(models.Model):
         default='pending'
     )
 
+    # [R-10.1] SPEC-10-01a: the lifecycle split into explicit dimensions
+    # (spec 10.2). Additive by design: ``status`` above remains the compat
+    # surface; the writers keep these in sync with every status change
+    # (orders.state.LEGACY_STATUS_DIMENSIONS is the mapping). null=False
+    # with defaults so every row always answers both questions. No
+    # db_index: the §8.3 prescribed starting set (SPEC-8-05, the Meta
+    # indexes below) deliberately does not include these columns — indexes
+    # come from measured query patterns, per the same policy as the event
+    # timestamps.
+    payment_status = models.CharField(
+        max_length=20,
+        choices=PAYMENT_STATUS_CHOICES,
+        default='pending',
+        help_text="Payment dimension of the lifecycle (spec 10.2).",
+    )
+    fulfilment_status = models.CharField(
+        max_length=20,
+        choices=FULFILMENT_STATUS_CHOICES,
+        default='unfulfilled',
+        help_text="Fulfilment dimension of the lifecycle (spec 10.2).",
+    )
+
     coupon = models.ForeignKey(
         Coupon,
         on_delete=models.SET_NULL,
@@ -175,6 +204,19 @@ class Order(models.Model):
 
     razorpay_order_id = models.CharField(max_length=100, blank=True, null=True, unique=True)
     razorpay_payment_id = models.CharField(max_length=100, blank=True, null=True, unique=True)
+
+    # [R-9.3.14] SPEC-9-01: header-keyed checkout idempotency. Set once by
+    # create_order when the client sent an Idempotency-Key header; NULL for
+    # keyless submissions. Uniqueness is scoped per user (a reused key on
+    # another account is an independent submission, never an existence
+    # leak), and NULLs stay distinct in the constraint, so keyless rows
+    # can never collide. No expiry: the key lives with the order row it
+    # deduped, so a retry collapses onto the original outcome forever.
+    idempotency_key = models.CharField(
+        max_length=128,
+        null=True,
+        blank=True,
+    )
 
     # [R-8.16] Business-event timeline (spec 8.3 "Timestamps": store distinct
     # timestamps for each business event; do not overload a generic
@@ -225,6 +267,17 @@ class Order(models.Model):
             models.Index(
                 fields=['status', 'created_at'],
                 name='orders_status_created_idx',
+            ),
+        ]
+        constraints = [
+            # [R-9.3.14]/[R-9.3.19] The concurrency authority for keyed
+            # checkout replays: create_order probes under the user-row lock
+            # (fast path), and this constraint is the last-resort guarantee
+            # that one user can never hold two orders for one key. The
+            # backing index also serves the replay probe lookup.
+            models.UniqueConstraint(
+                fields=['user', 'idempotency_key'],
+                name='orders_user_idem_key_uidx',
             ),
         ]
 
@@ -294,3 +347,82 @@ class OrderItem(models.Model):
 
     def __str__(self):
         return f"{self.product_name} x {self.quantity}"
+
+
+class OrderStatusEvent(models.Model):
+    """[R-10.12]/[R-10.17]/[R-10.18] One immutable row per status transition.
+
+    Every legal order-status transition (checkout creation, verify_payment,
+    the admin change form, the admin bulk actions, the 9-07 admin JSON seam)
+    appends exactly one row in the SAME transaction as the transition it
+    records: a rolled-back writer leaves no event behind, and a committed
+    event can never lack its transition ([R-10.18] rollback-together, pinned
+    per writer in tests). Append-only by design: the save guard below
+    rejects any pk-set re-save, and the admin registration is view-only
+    (no add/change/delete permission), so no code path can rewrite history.
+    ``actor`` is SET_NULL — deleting a user account must never cascade into
+    the audit trail (and verify_payment's events carry actor NULL by design:
+    the customer payment flow has no admin actor, the trigger names the
+    source). ``from_status`` is NULL exactly for creation events (no source
+    state). No backfill: rows predate the table and the transitions that
+    produced them are unknowable, so historical orders legitimately have
+    no trail before their next live transition.
+
+    This is the TRANSITION trail; the privileged-action LogEntry trail
+    (common.audit.log_api_action, SPEC-7-01) separately records who performed
+    which admin operation — the two complement, never replace, each other.
+    """
+
+    order = models.ForeignKey(
+        Order,
+        on_delete=models.CASCADE,
+        related_name='status_events'
+    )
+
+    from_status = models.CharField(
+        max_length=20,
+        choices=STATUS_CHOICES,
+        null=True,
+        blank=True,  # NULL only on creation events (no source state)
+    )
+
+    to_status = models.CharField(
+        max_length=20,
+        choices=STATUS_CHOICES,
+    )
+
+    actor = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='order_status_events',
+    )
+
+    trigger = models.CharField(
+        max_length=30,
+        choices=STATUS_EVENT_TRIGGERS,
+    )
+
+    created_at = models.DateTimeField(
+        auto_now_add=True
+    )
+
+    class Meta:
+        # Newest first: the admin surface (and any future consumer) reads
+        # the trail most-recent-first; the id breaks ties between events
+        # written in the same transaction with equal timestamps.
+        ordering = ("-created_at", "-id")
+        verbose_name = "order status event"
+        verbose_name_plural = "order status events"
+
+    def save(self, *args, **kwargs):
+        # [R-10.18] Append-only: a pk on the instance means an update path
+        # (re-save or bulk-style edit via save), which would rewrite
+        # history — reject it outright.
+        if self.pk is not None:
+            raise TypeError("OrderStatusEvent rows are append-only")
+        return super().save(*args, **kwargs)
+
+    def __str__(self):
+        return f"{self.order_id}: {self.from_status}->{self.to_status} ({self.trigger})"
