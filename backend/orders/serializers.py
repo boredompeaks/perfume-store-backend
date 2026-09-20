@@ -18,17 +18,26 @@ class OrderItemSerializer(serializers.ModelSerializer):
             'id',
             'product',
             'product_name',
+            'sku',
+            'variant_name',
             'price',
             'quantity',
             'subtotal',
+            # [R-8.11] Denomination of price/subtotal — the label rides the
+            # money wherever the money is exposed. Read-only: currency is
+            # minted at creation from store config, never client-chosen.
+            'currency',
         ]
 
         read_only_fields = [
             'id',
             'product',
             'product_name',
+            'sku',
+            'variant_name',
             'price',
             'subtotal',
+            'currency',
         ]
 
 
@@ -37,6 +46,13 @@ class OrderItemSerializer(serializers.ModelSerializer):
 # ==================================
 
 class OrderSerializer(serializers.ModelSerializer):
+    """[R-8.5] Identifier-exposure strategy: the sequential ``id`` stays the
+    internal key -- it remains the URL/admin primary key and no URL changes.
+    ``order_number`` (ORD-YYYY-NNNNNN, spec 8.3) is the read-only
+    customer-facing reference, surfaced at checkout and on every order read.
+    Guest checkout (SPEC-3-02) will key on ``order_number``; the pk never
+    leaves server-side routing.
+    """
 
     items = OrderItemSerializer(
         many=True,
@@ -51,6 +67,7 @@ class OrderSerializer(serializers.ModelSerializer):
 
         fields = [
             'id',
+            'order_number',
             'user',
             'full_name',
             'phone',
@@ -63,22 +80,43 @@ class OrderSerializer(serializers.ModelSerializer):
             'coupon',
             'discount_amount',
             'total_amount',
+            # [R-8.11] The denomination of total_amount/discount_amount is
+            # exposed beside them (checkout, dedup replay, and order reads
+            # all serialize through here). Read-only like the money itself.
+            'currency',
 
             'items',
             'created_at',
             'updated_at',
+            # [R-8.16] The business-event timeline rides every order read
+            # (checkout, dedup replay, list/detail). Read-only like the
+            # events themselves: a client can never claim an event happened.
+            'paid_at',
+            'fulfilled_at',
+            'shipped_at',
+            'delivered_at',
+            'cancelled_at',
+            'refunded_at',
         ]
 
         read_only_fields = [
             'id',
+            'order_number',
             'user',
             'status',
             'coupon',
             'discount_amount',
             'total_amount',
+            'currency',
             'items',
             'created_at',
             'updated_at',
+            'paid_at',
+            'fulfilled_at',
+            'shipped_at',
+            'delivered_at',
+            'cancelled_at',
+            'refunded_at',
         ]
 
 

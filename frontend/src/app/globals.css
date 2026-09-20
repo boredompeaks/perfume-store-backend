@@ -7,6 +7,10 @@
   --color-ink: #1c1917;
   --color-ink-muted: #57534e;
   --color-line: #e6e1d7;
+  /* Field borders only (inputs/selects). WCAG 1.4.11 needs ≥3:1 against the
+     adjacent background; `line` (≈1.25:1 on surface) stays decorative for
+     dividers/cards so the quiet look elsewhere is unchanged. */
+  --color-line-strong: #75706a;
   --color-bronze: #8a5a24;
   --color-bronze-soft: #f1e9dc;
 

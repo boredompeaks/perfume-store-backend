@@ -2,6 +2,7 @@ import csv
 
 from django.contrib import admin, messages
 from django.http import HttpResponse
+from django.utils import timezone
 
 from common.admin import RoleAwareModelAdmin
 from .models import Coupon, Order, OrderItem
@@ -11,6 +12,19 @@ class OrderItemInline(admin.TabularInline):
     model = OrderItem
     extra = 0
     can_delete = False
+    # [R-8.13] Explicit order: the frozen sku/variant_name snapshots render
+    # beside the product name they were taken from. The permission overrides
+    # below keep every snapshot column read-only -- admin edits would
+    # falsify purchase history.
+    fields = (
+        "product",
+        "product_name",
+        "sku",
+        "variant_name",
+        "price",
+        "quantity",
+        "subtotal",
+    )
     verbose_name = "Order item (snapshot)"
     verbose_name_plural = "Order items (snapshot)"
 
@@ -65,14 +79,23 @@ class OrderAdmin(RoleAwareModelAdmin):
     confirmation_required_actions = frozenset({"cancel_pending"})
     list_display = (
         "id",
+        # [R-8.5] the customer-facing reference beside the internal pk
+        "order_number",
         "user",
         "full_name",
         "status",
         "total_amount",
         "discount_amount",
+        # [R-8.11] the denomination beside the money columns it labels
+        "currency",
         "coupon",
         "payment_ref",
         "created_at",
+        # [R-8.16] the two live business-event stamps beside the row; the
+        # still-unwritten events (fulfilled/shipped/delivered/refunded) stay
+        # off the changelist until their writers land.
+        "paid_at",
+        "cancelled_at",
     )
     list_editable = ("status",)
     list_filter = ("status", "created_at")
@@ -85,8 +108,17 @@ class OrderAdmin(RoleAwareModelAdmin):
     readonly_fields = (
         "created_at",
         "updated_at",
+        # [R-8.16] the business-event timeline: admin edits would falsify
+        # the lifecycle record, so every event stamp renders read-only.
+        "paid_at",
+        "fulfilled_at",
+        "shipped_at",
+        "delivered_at",
+        "cancelled_at",
+        "refunded_at",
         "total_amount",
         "discount_amount",
+        "currency",
         "coupon",
         "razorpay_order_id",
         "razorpay_payment_id",
@@ -101,13 +133,28 @@ class OrderAdmin(RoleAwareModelAdmin):
                     "status",
                     "total_amount",
                     "discount_amount",
+                    "currency",
                     "coupon",
                     "razorpay_order_id",
                     "razorpay_payment_id",
                 )
             },
         ),
-        ("Timestamps", {"fields": ("created_at", "updated_at")}),
+        (
+            "Timestamps",
+            {
+                "fields": (
+                    "created_at",
+                    "updated_at",
+                    "paid_at",
+                    "fulfilled_at",
+                    "shipped_at",
+                    "delivered_at",
+                    "cancelled_at",
+                    "refunded_at",
+                )
+            },
+        ),
     )
 
     @admin.display(description="Payment ref")
@@ -133,6 +180,12 @@ class OrderAdmin(RoleAwareModelAdmin):
                     messages.ERROR,
                 )
                 return  # abort the save; status unchanged
+            # [R-8.16] The change form can legally move pending -> cancelled;
+            # stamp the business-event timestamp beside the transition (the
+            # bulk twin is cancel_pending below). The is-none guard keeps an
+            # existing value: a set event time is never mutated.
+            if obj.status == "cancelled" and obj.cancelled_at is None:
+                obj.cancelled_at = timezone.now()
         super().save_model(request, obj, form, change)
 
     # ——— bulk actions (respect the same guards) ———
@@ -178,7 +231,13 @@ class OrderAdmin(RoleAwareModelAdmin):
         unpaid_pks = list(
             queryset.filter(status="pending").values_list("pk", flat=True)
         )
-        count = queryset.filter(pk__in=unpaid_pks).update(status="cancelled")
+        # [R-8.16] The stamp rides the same update as the status transition.
+        # Every row in unpaid_pks is still pending, so its cancelled_at is
+        # necessarily NULL (only a cancel writes it) — the update can never
+        # overwrite an existing stamp, and a re-run skips cancelled rows.
+        count = queryset.filter(pk__in=unpaid_pks).update(
+            status="cancelled", cancelled_at=timezone.now()
+        )
         skipped = queryset.count() - count
         if count:
             self.log_bulk_action(

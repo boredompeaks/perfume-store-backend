@@ -3,9 +3,7 @@
 import { useState } from "react";
 import { ApiError } from "@/lib/api";
 import { resetPassword } from "@/lib/accounts-api";
-
-const inputClass =
-  "w-full border border-line bg-surface px-3 py-2 text-sm placeholder:text-ink-muted/70 focus:outline-none";
+import { inputClass } from "@/lib/ui";
 
 type State =
   | { kind: "form" }
@@ -107,7 +105,7 @@ export default function ResetPasswordClient({
           autoComplete="new-password"
           value={password}
           onChange={(e) => setPassword(e.target.value)}
-          className={inputClass}
+          className={`${inputClass} w-full`}
           required
           minLength={8}
         />
@@ -122,7 +120,7 @@ export default function ResetPasswordClient({
           autoComplete="new-password"
           value={confirm}
           onChange={(e) => setConfirm(e.target.value)}
-          className={inputClass}
+          className={`${inputClass} w-full`}
           required
         />
         {fieldErrors.map((msg) => (

@@ -3,19 +3,28 @@
 Razorpay is always mocked (``self.razorpay_mock``); no test touches the
 network or the real keys from ``.env`` (V-01 containment).
 """
+import os
 from datetime import timedelta
 from decimal import Decimal
 from unittest import mock
 
+from django.conf import settings
+from django.contrib.auth.models import User
 from django.core.cache import cache
-from django.test import tag
+from django.core.management import call_command
+from django.db import connection
+from django.test import SimpleTestCase, TransactionTestCase, override_settings, tag
 from django.utils import timezone
 from rest_framework.settings import api_settings
 from rest_framework.throttling import ScopedRateThrottle
 
 from cart.models import Cart, CartItem
+from common.models import AuditEvent
 from common.testing import TEST_RAZORPAY_KEY_ID, ApiTestCase
+from config.settings import _env_currency
+from orders.admin import OrderAdmin
 from orders.models import Coupon, Order, OrderItem
+from orders.serializers import OrderItemSerializer, OrderSerializer
 from orders.views import apply_coupon
 from products.models import StockMovement, products
 
@@ -36,6 +45,200 @@ class OrderTestBase(ApiTestCase):
         res = self.checkout(**payload)
         self.assertEqual(res.status_code, 201, res.data)
         return Order.objects.get(id=res.data["id"])
+
+
+@tag("orders")
+class CurrencyStoreConfigTests(OrderTestBase):
+    """[R-8.11] Currency rides every money column, driven by store config."""
+
+    def test_new_order_and_items_default_to_store_currency(self):
+        order = self.create_order()
+
+        self.assertEqual(order.currency, "INR")
+        items = list(order.items.all())
+        self.assertTrue(items)
+        for item in items:
+            self.assertEqual(item.currency, "INR")
+        # The label rides the money; it never replaces the Decimal amounts.
+        self.assertIsInstance(order.total_amount, Decimal)
+        self.assertIsInstance(order.discount_amount, Decimal)
+
+    def test_setting_override_changes_currency_of_new_rows(self):
+        with override_settings(DEFAULT_CURRENCY="USD"):
+            order = Order.objects.create(
+                user=self.buyer,
+                full_name="B", phone="1", address="a",
+                city="c", state="s", pincode="1",
+                total_amount=Decimal("10.00"),
+            )
+            item = OrderItem.objects.create(
+                order=order,
+                product=self.product,
+                product_name=self.product.name,
+                price=self.product.price,
+                quantity=1,
+                subtotal=self.product.price,
+            )
+
+        self.assertEqual(order.currency, "USD")
+        self.assertEqual(item.currency, "USD")
+
+    def test_checkout_mints_rows_in_the_configured_currency(self):
+        with override_settings(DEFAULT_CURRENCY="EUR"):
+            order = self.create_order()
+
+        self.assertEqual(order.currency, "EUR")
+        for item in order.items.all():
+            self.assertEqual(item.currency, "EUR")
+
+    def test_gateway_payload_uses_the_order_currency(self):
+        with override_settings(DEFAULT_CURRENCY="USD"):
+            order = self.create_order()
+        client_mock = self.razorpay_mock(order_id="order_USD001")
+
+        res = self.client.post(
+            "/api/orders/payment/", {"order_id": order.id}, format="json"
+        )
+
+        self.assertEqual(res.status_code, 200, res.data)
+        self.assertEqual(res.data["currency"], "USD")
+        client_mock.order.create.assert_called_once_with(
+            {"amount": 100000, "currency": "USD", "receipt": f"order_{order.id}"}
+        )
+
+    def test_recorded_currency_is_frozen_against_later_setting_changes(self):
+        order = self.create_order()  # minted under the current config
+        with override_settings(DEFAULT_CURRENCY="USD"):
+            order.refresh_from_db()
+
+        # Existing rows keep the currency they were minted with; the setting
+        # only ever steers new rows.
+        self.assertEqual(order.currency, "INR")
+
+
+class DefaultCurrencySettingTests(SimpleTestCase):
+    """[R-8.11] _env_currency: env-driven with the fail-safe INR default."""
+
+    def test_valid_code_is_normalised_to_uppercase(self):
+        with mock.patch.dict(os.environ, {"DEFAULT_CURRENCY": "usd"}):
+            self.assertEqual(_env_currency("DEFAULT_CURRENCY", "INR"), "USD")
+
+    def test_malformed_code_falls_back_with_warning(self):
+        with mock.patch.dict(os.environ, {"DEFAULT_CURRENCY": "rupees"}):
+            with self.assertLogs("config.settings", level="WARNING") as logs:
+                self.assertEqual(_env_currency("DEFAULT_CURRENCY", "INR"), "INR")
+        # The resolver upper-cases before matching, so the warning names
+        # the offending value in its normalised form.
+        self.assertIn("RUPEES", logs.output[0])
+
+    def test_missing_code_uses_the_documented_default(self):
+        env = {k: v for k, v in os.environ.items() if k != "DEFAULT_CURRENCY"}
+        with mock.patch.dict(os.environ, env, clear=True):
+            self.assertEqual(_env_currency("DEFAULT_CURRENCY", "INR"), "INR")
+
+
+@tag("orders")
+class CurrencyBackfillMigrationTests(TransactionTestCase):
+    """[R-8.11] The 0008 backfill is deterministic: rows that predate the
+    column land 'INR' regardless of the migrating environment's config."""
+
+    def test_0008_backfills_preexisting_rows_to_inr(self):
+        call_command("migrate", "orders", "0007", verbosity=0, interactive=False)
+        user_id = User.objects.create_user(
+            "backfill", "backfill@example.com", "S3cure-Passphrase!"
+        ).id
+        # The columns do not exist at 0007, so the ORM cannot write these
+        # rows: raw SQL reproduces exactly what a pre-currency store had.
+        with connection.cursor() as cursor:
+            cursor.execute(
+                "INSERT INTO orders_order (user_id, full_name, phone, address,"
+                " city, state, pincode, status, discount_amount, total_amount,"
+                " created_at, updated_at)"
+                " VALUES (%s, 'Backfill', '1', 'a', 'c', 's', '1', 'pending',"
+                " 0, 100.00, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)",
+                [user_id],
+            )
+            cursor.execute(
+                "INSERT INTO orders_orderitem (order_id, product_id, product_name,"
+                " sku, variant_name, price, quantity, subtotal)"
+                " VALUES ((SELECT MAX(id) FROM orders_order), NULL, 'Legacy',"
+                " '', 'Legacy', 100.00, 1, 100.00)"
+            )
+
+        call_command("migrate", "orders", verbosity=0, interactive=False)
+
+        order = Order.objects.get(full_name="Backfill")
+        self.assertEqual(order.currency, "INR")
+        items = list(order.items.all())
+        self.assertEqual(len(items), 1)
+        self.assertEqual(items[0].currency, "INR")
+
+
+@tag("orders")
+class CurrencyExposureTests(OrderTestBase):
+    """[R-8.11] part 2/2: the minted currency surfaces wherever its money
+    surfaces — customer-facing serializers and the admin — and nowhere is
+    it writable."""
+
+    def test_order_currency_exposed_read_only_in_order_serializer(self):
+        self.assertIn("currency", OrderSerializer.Meta.fields)
+        self.assertIn("currency", OrderSerializer.Meta.read_only_fields)
+
+        order = self.create_order()
+
+        res = self.client.get("/api/orders/")
+        self.assertEqual(res.status_code, 200, res.data)
+        self.assertEqual(res.data[0]["currency"], "INR")
+        self.assertEqual(res.data[0]["id"], order.id)
+
+    def test_checkout_replay_and_item_bodies_carry_the_currency(self):
+        """OrderSerializer is the single surface for the checkout response,
+        the dedup replay, and every order read; OrderItemSerializer rides
+        it via ``items``, so both bodies denominate their amounts."""
+        self.assertIn("currency", OrderItemSerializer.Meta.fields)
+        self.assertIn("currency", OrderItemSerializer.Meta.read_only_fields)
+
+        checkout = self.checkout()
+        self.assertEqual(checkout.status_code, 201, checkout.data)
+        self.assertEqual(checkout.data["currency"], "INR")
+        self.assertEqual(checkout.data["items"][0]["currency"], "INR")
+
+        replay = self.checkout()
+        self.assertEqual(replay.status_code, 200, replay.data)
+        self.assertEqual(replay.data["currency"], "INR")
+
+    def test_default_currency_override_propagates_through_serialization(self):
+        with override_settings(DEFAULT_CURRENCY="USD"):
+            order = self.create_order()
+
+        res = self.client.get("/api/orders/")
+        self.assertEqual(res.status_code, 200, res.data)
+        self.assertEqual(res.data[0]["id"], order.id)
+        self.assertEqual(res.data[0]["currency"], "USD")
+        self.assertEqual(res.data[0]["items"][0]["currency"], "USD")
+
+    def test_admin_list_display_and_read_only_detail_surface_currency(self):
+        self.assertIn("currency", OrderAdmin.list_display)
+        self.assertIn("currency", OrderAdmin.readonly_fields)
+        # The order change page renders currency inside the read-only
+        # payment fieldset, beside the amounts it denominates.
+        payment_fieldset = dict(OrderAdmin.fieldsets)[
+            "Payment (server-computed — read only)"
+        ]
+        self.assertIn("currency", payment_fieldset["fields"])
+
+        order = self.create_order()
+
+        User.objects.create_superuser(
+            "opsboss", "ops@example.com", "S3cure-Passphrase!"
+        )
+        self.client.login(username="opsboss", password="S3cure-Passphrase!")
+        changelist = self.client.get("/admin/orders/order/")
+        self.assertEqual(changelist.status_code, 200)
+        self.assertContains(changelist, "Currency")  # the list column header
+        change_page = self.client.get(f"/admin/orders/order/{order.id}/change/")
+        self.assertEqual(change_page.status_code, 200)
+        self.assertContains(change_page, "INR")  # the read-only value renders
 
 
 @tag("orders")
@@ -381,6 +584,133 @@ class CheckoutStockGateTests(OrderTestBase):
             {"Rose Aurum", "Oud Royale"},
         )
         self.assertEqual(Order.objects.count(), 0)
+
+
+@tag("orders")
+class CheckoutDedupTests(OrderTestBase):
+    """[R-21.2.6] duplicate checkout submissions create no duplicate orders.
+
+    The accidental double-click / client retry resubmits the byte-identical
+    payload against an unchanged cart (checkout never clears the cart;
+    cleanup happens after payment confirmation), so identical still-payable
+    pending submissions collapse onto the first order instead of minting a
+    second charge target. Deliberate differences (cart lines, coupon,
+    shipping, a settled first order) always create a fresh order, and
+    cross-user contention is untouched -- the oversell decision stays at
+    verify_payment."""
+
+    def test_double_click_resubmission_replays_the_same_order(self):
+        first = self.checkout()
+        self.assertEqual(first.status_code, 201, first.data)
+
+        second = self.checkout()
+
+        # one payable order, one item snapshot, one creation trail row:
+        # the retry is a replay, not a second order
+        self.assertEqual(second.status_code, 200, second.data)
+        self.assertEqual(second.data["id"], first.data["id"])
+        self.assertEqual(second.data["total_amount"], first.data["total_amount"])
+        self.assertEqual(Order.objects.count(), 1)
+        self.assertEqual(OrderItem.objects.count(), 1)
+        self.assertEqual(
+            AuditEvent.objects.filter(
+                event_type=AuditEvent.EventType.ORDER_CREATED
+            ).count(),
+            1,
+        )
+
+    def test_replayed_order_is_the_one_that_gets_paid(self):
+        self.checkout()
+        replay = self.checkout()
+        self.assertEqual(replay.status_code, 200, replay.data)
+
+        # the client flow continues on the replayed id: exactly one gateway
+        # order is minted for it, so exactly one charge can ever follow
+        client_mock = self.razorpay_mock()
+        payment = self.client.post(
+            "/api/orders/payment/", {"order_id": replay.data["id"]}, format="json"
+        )
+        self.assertEqual(payment.status_code, 200, payment.data)
+        client_mock.order.create.assert_called_once()
+
+    def test_different_user_with_identical_cart_still_gets_own_order(self):
+        first = self.checkout()
+        self.assertEqual(first.status_code, 201, first.data)
+
+        self.make_user("other")
+        other_client = self.fresh_client()
+        self.api_login("other", client=other_client)
+        self.seed_session_cart([(self.product, 2)], client=other_client)
+        res = other_client.post(
+            "/api/orders/checkout/", self.checkout_payload(), format="json"
+        )
+
+        # the guard is keyed per user: two buyers racing the same stock keep
+        # two orders, and the oversell decision stays at verify
+        self.assertEqual(res.status_code, 201, res.data)
+        self.assertNotEqual(res.data["id"], first.data["id"])
+        self.assertEqual(Order.objects.count(), 2)
+
+    def test_deliberately_different_payload_creates_new_order(self):
+        self.make_coupon(code="SAVE10", discount_value="10")
+        first = self.checkout()
+        self.assertEqual(first.status_code, 201, first.data)
+
+        recouponed = self.checkout(coupon_code="SAVE10")
+        self.assertEqual(recouponed.status_code, 201, recouponed.data)
+        self.assertNotEqual(recouponed.data["id"], first.data["id"])
+        self.assertEqual(Order.objects.count(), 2)
+        recouponed_order = Order.objects.get(pk=recouponed.data["id"])
+        self.assertEqual(recouponed_order.coupon.code, "SAVE10")
+
+        # a deliberate shipping change is a new purchase, not a retry
+        moved = self.checkout(city="Pune")
+        self.assertEqual(moved.status_code, 201, moved.data)
+        self.assertEqual(Order.objects.count(), 3)
+
+    def test_changed_cart_lines_create_new_order(self):
+        first = self.checkout()
+        self.assertEqual(first.status_code, 201, first.data)
+        other = self.make_product(name="Oud Royale", price="250.00", stock=4)
+        cart = Cart.objects.get(session_id=self.client.session.session_key)
+        CartItem.objects.create(cart=cart, product=other, quantity=1)
+
+        res = self.checkout()
+
+        self.assertEqual(res.status_code, 201, res.data)
+        self.assertNotEqual(res.data["id"], first.data["id"])
+        self.assertEqual(Order.objects.count(), 2)
+
+    def test_window_expiry_allows_a_genuine_reorder(self):
+        first = self.checkout()
+        self.assertEqual(first.status_code, 201, first.data)
+        Order.objects.filter(pk=first.data["id"]).update(
+            created_at=timezone.now()
+            - timedelta(seconds=settings.CHECKOUT_DEDUP_WINDOW_SECONDS + 60)
+        )
+
+        res = self.checkout()
+
+        # the guard bounds the accidental window; it must never permanently
+        # block an identical second purchase
+        self.assertEqual(res.status_code, 201, res.data)
+        self.assertNotEqual(res.data["id"], first.data["id"])
+        self.assertEqual(Order.objects.count(), 2)
+
+    def test_settled_order_does_not_block_a_new_identical_checkout(self):
+        first = self.checkout()
+        self.assertEqual(first.status_code, 201, first.data)
+        # simulate a completed purchase: no longer payable, so the same cart
+        # legitimately starts a fresh order
+        Order.objects.filter(pk=first.data["id"]).update(
+            status="confirmed", razorpay_payment_id="pay_SETTLED"
+        )
+
+        res = self.checkout()
+
+        self.assertEqual(res.status_code, 201, res.data)
+        self.assertNotEqual(res.data["id"], first.data["id"])
+        self.assertEqual(Order.objects.count(), 2)
 
 
 @tag("orders")
@@ -828,3 +1158,297 @@ class OrderListTests(OrderTestBase):
         item = order.items.first()
         self.assertEqual(str(order), f"Order #{order.id} - buyer")
         self.assertEqual(str(item), "Rose Aurum x 2")
+
+
+@tag("orders")
+class BusinessEventTimestampTests(OrderTestBase):
+    """[R-8.16] Business-event timestamps (spec 8.3 "Timestamps"): the order
+    lifecycle carries one named column per business event, NULL until the
+    event happens, written exactly once by the code path that performs it and
+    never mutated afterwards — ``updated_at`` is never overloaded to stand
+    for an event. paid_at/cancelled_at have live writers (verify_payment /
+    admin cancel); fulfilled_at/shipped_at/delivered_at/refunded_at are the
+    named pattern the later fulfilment and refund sections write.
+    """
+
+    BUSINESS_FIELDS = (
+        "paid_at",
+        "fulfilled_at",
+        "shipped_at",
+        "delivered_at",
+        "cancelled_at",
+        "refunded_at",
+    )
+
+    def _verify_payload(self, order):
+        return {
+            "order_id": order.id,
+            "razorpay_order_id": order.razorpay_order_id,
+            "razorpay_payment_id": "pay_TS001",
+            "razorpay_signature": "sig",
+        }
+
+    def _admin_client(self):
+        """Superuser session on a fresh client: logging in on the API client
+        would swap the session and drop the buyer's session cart under the
+        order being created."""
+        if not User.objects.filter(username="tsboss").exists():
+            User.objects.create_superuser(
+                "tsboss", "tsboss@example.com", "S3cure-Passphrase!"
+            )
+        admin_client = self.fresh_client()
+        self.assertTrue(
+            admin_client.login(username="tsboss", password="S3cure-Passphrase!")
+        )
+        return admin_client
+
+    def _run_admin_action(self, action, orders):
+        """Bulk action through the real admin UI (mirrors test_e2e_admin_ops)."""
+        admin_client = self._admin_client()
+        return admin_client.post(
+            "/admin/orders/order/",
+            {
+                "action": action,
+                "_selected_action": [str(order.id) for order in orders],
+                "select_across": "0",
+            },
+            follow=True,
+        )
+
+    def _admin_login(self):
+        if not User.objects.filter(username="tsboss").exists():
+            User.objects.create_superuser(
+                "tsboss", "tsboss@example.com", "S3cure-Passphrase!"
+            )
+        self.assertTrue(
+            self.client.login(username="tsboss", password="S3cure-Passphrase!")
+        )
+
+    def test_new_order_starts_with_all_business_timestamps_null(self):
+        order = self.create_order()
+        for field in self.BUSINESS_FIELDS:
+            with self.subTest(field=field):
+                self.assertIsNone(getattr(order, field))
+
+    def test_verify_writes_paid_at_once_and_replay_never_overwrites(self):
+        order = self.create_order()
+        self.razorpay_mock(order_id="order_TS")
+        res = self.client.post(
+            "/api/orders/payment/", {"order_id": order.id}, format="json"
+        )
+        self.assertEqual(res.status_code, 200, res.data)
+        order.refresh_from_db()
+
+        first = self.client.post(
+            "/api/orders/payment/verify/", self._verify_payload(order), format="json"
+        )
+        self.assertEqual(first.status_code, 200, first.data)
+        order.refresh_from_db()
+        self.assertIsNotNone(order.paid_at)
+        self.assertGreaterEqual(order.paid_at, order.created_at)
+        first_paid_at = order.paid_at
+
+        # the already-processed gate rejects the replay; paid_at must keep
+        # the exact first value — a re-verify never re-stamps the event
+        replay = self.client.post(
+            "/api/orders/payment/verify/", self._verify_payload(order), format="json"
+        )
+        self.assertEqual(replay.status_code, 400, replay.data)
+        order.refresh_from_db()
+        self.assertEqual(order.paid_at, first_paid_at)
+
+    def test_failed_verify_leaves_paid_at_null(self):
+        order = self.create_order()
+        client_mock = self.razorpay_mock(order_id="order_TSFAIL")
+        res = self.client.post(
+            "/api/orders/payment/", {"order_id": order.id}, format="json"
+        )
+        self.assertEqual(res.status_code, 200, res.data)
+        order.refresh_from_db()
+        self.razorpay_fail_signature(client_mock)
+
+        res = self.client.post(
+            "/api/orders/payment/verify/", self._verify_payload(order), format="json"
+        )
+
+        self.assertEqual(res.status_code, 400, res.data)
+        order.refresh_from_db()
+        self.assertEqual(order.status, "pending")
+        self.assertIsNone(order.paid_at)
+
+    def test_admin_cancel_bulk_stamps_cancelled_at_once(self):
+        order = self.create_order()  # pending, unpaid
+
+        res = self._run_admin_action("cancel_pending", [order])
+        self.assertEqual(res.status_code, 200)
+        order.refresh_from_db()
+        self.assertEqual(order.status, "cancelled")
+        self.assertIsNotNone(order.cancelled_at)
+        # cancelling before payment writes exactly one event timestamp:
+        # a cancelled order was never paid, shipped or refunded
+        self.assertIsNone(order.paid_at)
+        self.assertIsNone(order.fulfilled_at)
+        self.assertIsNone(order.shipped_at)
+        self.assertIsNone(order.delivered_at)
+        self.assertIsNone(order.refunded_at)
+
+        # the pending filter skips already-cancelled rows, so a re-run of
+        # the action never mutates the stamp
+        first_cancelled_at = order.cancelled_at
+        res = self._run_admin_action("cancel_pending", [order])
+        self.assertEqual(res.status_code, 200)
+        order.refresh_from_db()
+        self.assertEqual(order.cancelled_at, first_cancelled_at)
+
+    def test_admin_change_form_cancel_stamps_cancelled_at(self):
+        """The single-object path: pending -> cancelled through the change
+        form is a legal transition, so it must stamp cancelled_at too."""
+        self._admin_login()
+        order = Order.objects.create(
+            user=self.buyer,
+            full_name="TS Buyer",
+            phone="9876543210",
+            address="1 Timeline Way",
+            city="Mumbai",
+            state="Maharashtra",
+            pincode="400001",
+            total_amount=Decimal("10.00"),
+        )
+        res = self.client.post(
+            f"/admin/orders/order/{order.id}/change/",
+            {
+                "user": order.user_id,
+                "full_name": order.full_name,
+                "phone": order.phone,
+                "address": order.address,
+                "city": order.city,
+                "state": order.state,
+                "pincode": order.pincode,
+                "status": "cancelled",
+                "_save": "Save",
+                "items-TOTAL_FORMS": "0",
+                "items-INITIAL_FORMS": "0",
+                "items-MIN_NUM_FORMS": "0",
+                "items-MAX_NUM_FORMS": "1000",
+            },
+            follow=True,
+        )
+        self.assertEqual(res.status_code, 200)
+        order.refresh_from_db()
+        self.assertEqual(order.status, "cancelled")
+        self.assertIsNotNone(order.cancelled_at)
+
+    def test_business_timestamps_exposed_read_only_everywhere(self):
+        order = self.create_order()
+
+        for field in self.BUSINESS_FIELDS:
+            with self.subTest(field=field):
+                self.assertIn(field, OrderSerializer.Meta.fields)
+                self.assertIn(field, OrderSerializer.Meta.read_only_fields)
+                self.assertIn(field, OrderAdmin.readonly_fields)
+                self.assertIn(
+                    field, dict(OrderAdmin.fieldsets)["Timestamps"]["fields"]
+                )
+
+        # the changelist carries the two live event stamps beside the row
+        self.assertIn("paid_at", OrderAdmin.list_display)
+        self.assertIn("cancelled_at", OrderAdmin.list_display)
+
+        listing = self.client.get("/api/orders/")
+        self.assertEqual(listing.status_code, 200, listing.data)
+        row = listing.data[0]
+        self.assertEqual(row["id"], order.id)
+        for field in self.BUSINESS_FIELDS:
+            self.assertIsNone(row[field])  # NULL until the event
+
+
+@tag("orders")
+class OrderIndexSchemaTests(ApiTestCase):
+    """SPEC-8-05: spec 8.3 "Indexes" starting set for orders_order.
+
+    The two prescribed composites (2557 "Customer ID and order creation
+    date", 2567 "Frequently queried status/date combinations") land as
+    explicit Meta.indexes; the order-number (2555) and payment-provider
+    reference (2559) prescriptions stay satisfied by their UNIQUE
+    constraints — a unique constraint already implies a backing index, so
+    minting a second index on those columns would be a duplicate. These
+    pins make both halves conscious: the composites must exist at the DB
+    level, and the constraint-covered columns must not grow duplicates.
+    """
+
+    def _order_constraints(self):
+        with connection.cursor() as cursor:
+            return connection.introspection.get_constraints(
+                cursor, Order._meta.db_table
+            )
+
+    def _explicit_index_columns(self):
+        return [
+            info["columns"]
+            for info in self._order_constraints().values()
+            if info["index"]
+        ]
+
+    def test_meta_declares_exactly_the_spec_starting_composites(self):
+        """The model-level starting set: newest-first per customer (2557)
+        and the status/date combination (2567). Later indexes must come
+        from measured query patterns (2569), i.e. as a conscious edit to
+        this set, never by silent accretion."""
+        declared = {tuple(index.fields) for index in Order._meta.indexes}
+        self.assertEqual(
+            declared,
+            {("user", "-created_at"), ("status", "created_at")},
+        )
+
+    def test_customer_and_creation_date_composite_exists_at_db_level(self):
+        matching = [
+            columns
+            for columns in self._explicit_index_columns()
+            if columns == ["user_id", "created_at"]
+        ]
+        self.assertTrue(
+            matching, "no (user_id, created_at) index on orders_order"
+        )
+
+    def test_status_and_creation_date_composite_exists_at_db_level(self):
+        matching = [
+            columns
+            for columns in self._explicit_index_columns()
+            if columns == ["status", "created_at"]
+        ]
+        self.assertTrue(
+            matching, "no (status, created_at) index on orders_order"
+        )
+
+    def test_order_number_stays_satisfied_by_its_unique_constraint(self):
+        """2555: order_number's covering constraint(s) are all UNIQUE —
+        unique=True already provides the lookup index (and doubles as the
+        IntegrityError concurrency authority for number minting) — so no
+        duplicate explicit index is stacked on top."""
+        covering = [
+            info
+            for info in self._order_constraints().values()
+            if info["columns"] == ["order_number"]
+        ]
+        self.assertTrue(covering, "no constraint on order_number at all")
+        self.assertTrue(
+            all(info["unique"] for info in covering),
+            f"order_number grew a non-unique duplicate index: {covering}",
+        )
+
+    def test_payment_provider_references_stay_constraint_covered(self):
+        """2559: no Payment model exists — the provider references live on
+        Order (razorpay_order_id / razorpay_payment_id), each unique=True,
+        whose backing unique indexes are the prescribed starting indexes."""
+        for column in ("razorpay_order_id", "razorpay_payment_id"):
+            with self.subTest(column=column):
+                covering = [
+                    info
+                    for info in self._order_constraints().values()
+                    if info["columns"] == [column]
+                ]
+                self.assertTrue(covering, f"no constraint on {column}")
+                self.assertTrue(
+                    all(info["unique"] for info in covering),
+                    f"{column} grew a non-unique duplicate index: {covering}",
+                )

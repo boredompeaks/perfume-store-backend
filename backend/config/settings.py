@@ -11,6 +11,7 @@ https://docs.djangoproject.com/en/6.1/ref/settings/
 """
 
 import logging
+import re
 from pathlib import Path
 from urllib.parse import unquote, urlparse
 import os
@@ -235,6 +236,46 @@ DASHBOARD_SALES_WINDOW_DAYS = _env_int('DASHBOARD_SALES_WINDOW_DAYS', 30)
 # Tunable per deployment without a code change; non-integer values are
 # ignored and the default is used instead.
 PRODUCTS_PAGE_SIZE = _env_int('PRODUCTS_PAGE_SIZE', 12)
+
+# [R-21.2.6] Duplicate checkout submissions (double-click / client retry)
+# collapse onto the still-payable pending order carrying the identical
+# payload for this many seconds, instead of minting a second charge target.
+# Tunable per deployment without a code change; non-integer values are
+# ignored and the default is used instead.
+CHECKOUT_DEDUP_WINDOW_SECONDS = _env_int('CHECKOUT_DEDUP_WINDOW_SECONDS', 300)
+
+
+# ISO 4217 currency codes are exactly three uppercase letters.
+_ISO_4217 = re.compile(r"^[A-Z]{3}$")
+
+
+def _env_currency(name, default):
+    """Resolve an env-driven currency code, never crashing startup.
+
+    A value that is not exactly three letters (ISO 4217 shape, upper-cased
+    before matching) falls back to the documented default with a warning
+    instead of failing the import — the same fail-safe pattern as _env_int
+    and _env_log_level — so a typo in an env file cannot take the app down
+    or mint orders in a currency the payment gateway would reject.
+    """
+    raw = os.getenv(name, "").strip().upper()
+    if _ISO_4217.fullmatch(raw):
+        return raw
+    if raw:
+        logging.getLogger(__name__).warning(
+            "Ignoring unsupported %s value %r; using %s", name, raw, default
+        )
+    return default
+
+
+# [R-8.11] Store currency for every money column (spec 8.3: "Store the
+# currency alongside the amount"): new orders, order items, and their
+# discount amounts are minted in this code, and the payment gateway is
+# charged in it. Deliberately env-driven, not a SiteSettings column: a
+# currency that changes would reprice historical rows' meaning, so it is
+# never-changes-at-runtime config (the S16 boundary), not merchant-editable
+# runtime state. Existing rows keep the currency they were minted with.
+DEFAULT_CURRENCY = _env_currency('DEFAULT_CURRENCY', 'INR')
 
 REST_FRAMEWORK = {
     'DEFAULT_AUTHENTICATION_CLASSES': (

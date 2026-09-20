@@ -362,7 +362,9 @@ class ForgotUsernameTests(ApiTestCase):
 
     def test_smtp_failure_returns_503(self):
         self.make_user("smtpfail")
-        with mock.patch("accounts.views._send_email", side_effect=Exception("smtp down")):
+        with mock.patch(
+            "common.notifications.send_email", side_effect=Exception("smtp down")
+        ):
             res = self.client.post("/api/accounts/forgot-username/", {"email": "smtpfail@example.com"}, format="json")
         self.assertEqual(res.status_code, 503, res.data)
 
@@ -395,7 +397,9 @@ class PasswordResetTests(ApiTestCase):
 
     def test_smtp_failure_returns_503(self):
         self.make_user("smtpfail")
-        with mock.patch("accounts.views._send_email", side_effect=Exception("smtp down")):
+        with mock.patch(
+            "common.notifications.send_email", side_effect=Exception("smtp down")
+        ):
             res = self.client.post("/api/accounts/password-reset/", {"email": "smtpfail@example.com"}, format="json")
         self.assertEqual(res.status_code, 503, res.data)
         self.assertEqual(len(mail.outbox), 0)

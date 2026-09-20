@@ -8,12 +8,12 @@ from django.contrib.auth.models import User
 from django.conf import settings
 from django.contrib.auth.tokens import default_token_generator
 from django.contrib.auth.password_validation import validate_password
-from django.core.mail import send_mail
 from django.core.exceptions import ValidationError
 from django.db import transaction
 from django.utils.encoding import force_bytes, force_str
 from django.utils.http import urlsafe_base64_encode, urlsafe_base64_decode
 
+from common import notifications
 from common.models import AuditEvent
 from .serializers import RegisterSerializer
 
@@ -72,17 +72,17 @@ def _get_user(uid):
         return None
 
 
-def _send_email(subject, message, recipient):
-    send_mail(subject, message, settings.DEFAULT_FROM_EMAIL, [recipient], fail_silently=False)
-
-
 def _send_verification_email(user):
     uid = _encoded_user_id(user)
     token = default_token_generator.make_token(user)
-    url = f'{settings.FRONTEND_URL}/verify-email?uid={uid}&token={token}'
-    _send_email(
-        'Verify your Perfume Store email',
-        f'Welcome! Verify your email by opening this link:\n\n{url}\n\nIf you did not create this account, ignore this email.',
+    notifications.send_email(
+        "verification_email",
+        {
+            "base_url": f"{settings.FRONTEND_URL}/verify-email",
+            "uid": uid,
+            "token": token,
+        },
+        "Verify your Perfume Store email",
         user.email,
     )
 
@@ -205,7 +205,12 @@ def forgot_username(request):
     user = User.objects.filter(email__iexact=email).first()
     if user:
         try:
-            _send_email('Your Perfume Store username', f'Your username is: {user.username}', user.email)
+            notifications.send_email(
+                "username_reminder",
+                {"username": user.username},
+                "Your Perfume Store username",
+                user.email,
+            )
         except Exception:
             return Response({'error': 'Username email could not be sent. Check SMTP settings.'}, status=status.HTTP_503_SERVICE_UNAVAILABLE)
     return Response({'message': 'If an account exists for this email, the username has been sent.'})
@@ -219,11 +224,15 @@ def request_password_reset(request):
     if user:
         uid = _encoded_user_id(user)
         token = default_token_generator.make_token(user)
-        url = f'{settings.FRONTEND_URL}/reset-password?uid={uid}&token={token}'
         try:
-            _send_email(
-                'Reset your Perfume Store password',
-                f'Use this one-time link to choose a new password:\n\n{url}\n\nIf you did not request this, ignore this email.',
+            notifications.send_email(
+                "password_reset",
+                {
+                    "base_url": f"{settings.FRONTEND_URL}/reset-password",
+                    "uid": uid,
+                    "token": token,
+                },
+                "Reset your Perfume Store password",
                 user.email,
             )
         except Exception:

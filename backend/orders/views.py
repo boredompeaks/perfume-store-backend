@@ -1,6 +1,8 @@
+from datetime import timedelta
 from decimal import Decimal
 
-from django.db import transaction
+from django.db import IntegrityError, transaction
+from django.db.models import Q
 from django.utils import timezone
 
 from rest_framework.decorators import api_view, permission_classes, throttle_scope
@@ -12,6 +14,7 @@ from .models import Order, OrderItem, Coupon
 from .serializers import OrderSerializer
 
 from cart.models import Cart
+from common import notifications
 from common.models import AuditEvent
 from common.money import quantize_money
 from products.models import StockMovement, products
@@ -46,6 +49,101 @@ def order_list(request):
 # ==================================
 # Create Order / Checkout
 # ==================================
+
+# The shipping fields that identify a checkout submission; must stay in step
+# with the required_fields list inside create_order (both describe the same
+# payload), which is why the duplicate guard reads them from the request
+# exactly the way create_order persists them.
+_SHIPPING_FIELDS = ("full_name", "phone", "address", "city", "state", "pincode")
+
+
+def _order_lines(cart_items):
+    """Order identity as sorted (product_id, quantity) pairs, so the
+    duplicate comparison does not depend on cart-line iteration order."""
+    return sorted((item.product_id, item.quantity) for item in cart_items)
+
+
+def _find_duplicate_pending_order(user, cart_items, coupon, payload):
+    """[R-21.2.6] The accidental-duplicate window: checkout never clears the
+    cart (cleanup happens after payment confirmation), so a double-click or
+    client retry resubmits the byte-identical payload while the first order
+    is still payable -- which used to mint a second payable order and with
+    it a second charge target. Returns the user's recent pending order with
+    the identical payload, or None to proceed with creation.
+
+    Deliberately narrower than SPEC-9-01: the header-keyed idempotency
+    (Idempotency-Key + unique-by-key store, covering cross-session
+    simultaneous duplicates) stays there. This guard only closes the
+    accidental same-session window, and only for orders that are still
+    payable -- verify_payment's already-processed gate remains the authority
+    past that point."""
+    cutoff = timezone.now() - timedelta(seconds=settings.CHECKOUT_DEDUP_WINDOW_SECONDS)
+    candidates = (
+        Order.objects.filter(
+            user=user,
+            status="pending",
+            created_at__gte=cutoff,
+        )
+        # payable gate mirrors verify_payment: a pending order with a
+        # payment id attached has already been taken past this point
+        .filter(Q(razorpay_payment_id__isnull=True) | Q(razorpay_payment_id=""))
+        .prefetch_related("items")
+        .order_by("-created_at")
+    )
+    lines = _order_lines(cart_items)
+    shipping = tuple(payload.get(field) for field in _SHIPPING_FIELDS)
+    for candidate in candidates:
+        if _order_lines(candidate.items.all()) != lines:
+            continue
+        if candidate.coupon_id != (coupon.pk if coupon else None):
+            # a deliberate coupon difference is a new purchase, not a retry
+            continue
+        if tuple(getattr(candidate, field) for field in _SHIPPING_FIELDS) != shipping:
+            continue
+        return candidate
+    return None
+
+
+# ==================================
+# Order number generation (R-8.4)
+# ==================================
+
+# Bounded retries: a checkout still losing the order-number race after this
+# many attempts indicates something is deeply wrong, so it fails loudly (the
+# whole checkout transaction rolls back) instead of looping forever.
+ORDER_NUMBER_ATTEMPTS = 5
+
+
+def _current_year():
+    """The order-number year bucket: the sequence restarts each January 1st
+    (R-8.4), so this is the only clock the format depends on."""
+    return timezone.now().year
+
+
+def _next_order_sequence(year):
+    """Next sequence for the year's ORD-YYYY- prefix: the highest committed
+    number's sequence plus one. Fixed-width zero padding keeps lexicographic
+    order equal to numeric order. This lookup is check-then-act and
+    deliberately NOT the concurrency authority -- two connections can read
+    the same max before either commits -- the unique constraint on
+    Order.order_number is, and the caller retries on the IntegrityError
+    (conventions.md:17)."""
+    prefix = f"ORD-{year}-"
+    latest = (
+        Order.objects.filter(order_number__startswith=prefix)
+        .order_by("-order_number")
+        .values_list("order_number", flat=True)
+        .first()
+    )
+    if latest is None:
+        return 1
+    return int(latest.rsplit("-", 1)[1]) + 1
+
+
+def _generate_order_number():
+    year = _current_year()
+    return f"ORD-{year}-{_next_order_sequence(year):06d}"
+
 
 @api_view(['POST'])
 @permission_classes([IsAuthenticated])
@@ -280,18 +378,69 @@ def create_order(request):
 
     with transaction.atomic():
 
-        order = Order.objects.create(
-            user=request.user,
-            full_name=request.data.get('full_name'),
-            phone=request.data.get('phone'),
-            address=request.data.get('address'),
-            city=request.data.get('city'),
-            state=request.data.get('state'),
-            pincode=request.data.get('pincode'),
-            coupon=coupon,
-            discount_amount=discount_amount,
-            total_amount=total_amount
+        # [R-21.2.6] Serialize same-session submissions on the cart row: two
+        # rapid POSTs queue here, so the loser re-runs the dedup lookup after
+        # the winner has committed and collapses onto the same order instead
+        # of minting a second payable one. The cart row is locked only on
+        # this path (verify_payment locks Order -> Products -> Coupon), so no
+        # new lock-order cycle is introduced.
+        cart = Cart.objects.select_for_update().get(pk=cart.pk)
+
+        duplicate = _find_duplicate_pending_order(
+            request.user, cart_items, coupon, request.data
         )
+
+        if duplicate is not None:
+            # Benign double-submit retry, so INFO: a WARNING here would spam
+            # the log on every impatient re-click (same judgement as
+            # verify_payment's already-processed skip).
+            logger.info(
+                "Checkout dedup: order %s replayed for user %s "
+                "(identical pending submission)",
+                duplicate.id,
+                request.user.pk,
+            )
+
+            serializer = OrderSerializer(duplicate)
+
+            return Response(
+                serializer.data,
+                status=status.HTTP_200_OK
+            )
+
+        # [R-8.4] The order number is minted inside this same atomic block,
+        # so a rolled-back checkout never burns a number. Each attempt runs
+        # in a savepoint: a lost race (another connection committed the same
+        # candidate first) rolls back only the failed insert and the next
+        # turn regenerates from committed state. Same-session replays never
+        # reach this loop -- the dedup guard above returns first.
+        for attempt in range(ORDER_NUMBER_ATTEMPTS):
+            candidate = _generate_order_number()
+            try:
+                with transaction.atomic():
+                    order = Order.objects.create(
+                        user=request.user,
+                        full_name=request.data.get('full_name'),
+                        phone=request.data.get('phone'),
+                        address=request.data.get('address'),
+                        city=request.data.get('city'),
+                        state=request.data.get('state'),
+                        pincode=request.data.get('pincode'),
+                        coupon=coupon,
+                        discount_amount=discount_amount,
+                        total_amount=total_amount,
+                        order_number=candidate,
+                    )
+            except IntegrityError:
+                # Lost the number race: the unique constraint rejected the
+                # candidate, so the savepoint above rolled the failed insert
+                # back and this transaction stays usable for the retry. The
+                # bound is a safety net, not the expected path: one retry
+                # converges because the collision window is a single insert.
+                if attempt == ORDER_NUMBER_ATTEMPTS - 1:
+                    raise
+                continue
+            break
 
         # Snapshot cart items. Inventory, coupon usage, and cart cleanup occur
         # only after the payment provider confirms this specific order.
@@ -309,6 +458,14 @@ def create_order(request):
                 order=order,
                 product=product,
                 product_name=product.name,
+                # [R-8.13] Freeze the catalogue identity the customer bought:
+                # no variant-selection input exists yet (CartItem is
+                # product-only, picking rides SPEC-3-21/SPEC-6-08) and the
+                # product carries no product-level SKU, so sku snapshots
+                # empty and variant_name mirrors the product name. Set once
+                # here; no later save path mutates them.
+                sku='',
+                variant_name=product.name,
                 price=price,
                 quantity=quantity,
                 subtotal=item_subtotal
@@ -521,9 +678,11 @@ def create_payment(request):
         razorpay_order_id = order.razorpay_order_id
     else:
         try:
+            # [R-8.11] The gateway is charged in the denomination the order
+            # was minted with, read off the row — never a hardcoded code.
             razorpay_order = client.order.create({
                 'amount': amount,
-                'currency': 'INR',
+                'currency': order.currency,
                 'receipt': f'order_{order.id}',
             })
         except Exception:
@@ -557,7 +716,8 @@ def create_payment(request):
         "razorpay_order_id": razorpay_order_id,
         "amount": amount,
         "amount_in_rupees": order.total_amount,
-        "currency": "INR",
+        # [R-8.11] Same currency the gateway payload used: the order's own.
+        "currency": order.currency,
         "key_id": settings.RAZORPAY_KEY_ID,
     })
 # ==================================
@@ -809,9 +969,15 @@ def verify_payment(request):
             coupon.used_count += 1
             coupon.save(update_fields=['used_count'])
 
+        # [R-8.16] paid_at is the business-event timestamp of exactly this
+        # transition, so it is written beside it inside the same atomic
+        # block (rollback together). The already-processed gate above makes
+        # a replay unreachable here; the or-guard pins "written exactly
+        # once, never mutated" even if a future path re-enters.
+        order.paid_at = order.paid_at or timezone.now()
         order.status = 'confirmed'
         order.razorpay_payment_id = razorpay_payment_id
-        order.save(update_fields=['status', 'razorpay_payment_id'])
+        order.save(update_fields=['status', 'razorpay_payment_id', 'paid_at'])
 
         if request.session.session_key:
             cart = Cart.objects.filter(session_id=request.session.session_key).first()
@@ -840,6 +1006,15 @@ def verify_payment(request):
                 "order_id": order.id,
                 "total_amount": str(order.total_amount),
             },
+        )
+        # [R-19.0] Event-driven customer notification beside the audit
+        # hook, inside this same atomic block (rollback-together, like
+        # record). dispatch never raises: a send failure is logged on the
+        # notifications channel and the captured payment stays confirmed
+        # (the SMTP-503 account-still-created behavior, mirrored).
+        notifications.dispatch(
+            AuditEvent.EventType.ORDER_PAID,
+            {"order": order},
         )
 
     return Response({

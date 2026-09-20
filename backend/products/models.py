@@ -27,6 +27,21 @@ class products(models.Model):
     )
     created_at = models.DateTimeField(auto_now_add=True)
 
+    class Meta:
+        # [R-8.17] SPEC-8-05: spec 8.3 "Indexes" starting set for the
+        # catalogue (2551 "Product status and category relationships").
+        # Category is the public listing/filter key, so it gets the explicit
+        # index. The other catalogue prescriptions are covered without new
+        # indexes: slug (2549) is satisfied by unique=True (2479) — its
+        # backing unique index IS the slug lookup index — and the status
+        # half of 2551 is N/A because this table has no lifecycle-status
+        # column (stock health is derived by ``stock_health``, not stored
+        # state). ProductVariant.sku (2553) is likewise satisfied by its
+        # unique constraint (2481).
+        indexes = [
+            models.Index(fields=["category"], name="products_category_idx"),
+        ]
+
     def save(self, *args, **kwargs):
 
         if not self.slug:
@@ -79,6 +94,51 @@ class products(models.Model):
 
     def __str__(self):
         return self.name
+
+
+class ProductVariant(models.Model):
+    """A sellable variant of a product (SPEC-8-02a [R-8.7], spec section 8).
+
+    Schema core only, mirroring spec 8.3's rules: an FK to the core product
+    entity (2483), the globally unique merchant-entered SKU (2481 —
+    ``unique=True`` is simultaneously the constraint and its backing unique
+    index, 2553), the attributes the order-item snapshot list reads (variant
+    name/options 2503, SKU 2505, unit price 2507), an on-hand count and
+    distinct created/updated timestamps (2523).
+
+    Boundaries: ``price`` is exact decimal money (2489, conventions.md:15);
+    ``NULL`` means the product's own price applies — no read-side wiring is
+    invented here (OrderItem snapshots are SPEC-8-02b's). ``stock`` is
+    deliberately inert — ``products.stock`` remains the ONLY order-time
+    authority (checkout/verify_payment never read this column); variant-stock
+    reconciliation is SPEC-6-13's inventory-depth work, admin depth (role
+    matrix, fieldsets, actions) is SPEC-6-08's. The SKU has no generation
+    path, so conventions.md:17's IntegrityError retry has nothing to wrap:
+    the DB constraint is the concurrency authority.
+    """
+
+    product = models.ForeignKey(
+        products,
+        on_delete=models.CASCADE,
+        related_name="variants",
+    )
+    name = models.CharField(max_length=100)
+    sku = models.CharField(
+        max_length=64,
+        unique=True,
+    )
+    price = models.DecimalField(
+        max_digits=10,
+        decimal_places=2,
+        null=True,
+        blank=True,
+    )
+    stock = models.PositiveBigIntegerField(default=0)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    def __str__(self):
+        return f"{self.product.name} - {self.name} ({self.sku})"
 
 
 class StockMovement(models.Model):

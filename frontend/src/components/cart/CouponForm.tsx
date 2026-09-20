@@ -6,9 +6,7 @@ import { ApiError } from "@/lib/api";
 import { formatINR } from "@/lib/money";
 import { applyCoupon } from "@/lib/orders-api";
 import type { CouponPreview } from "@/lib/types";
-
-const inputClass =
-  "border border-line bg-surface px-3 py-2 text-sm placeholder:text-ink-muted/70 focus:outline-none";
+import { inputClass } from "@/lib/ui";
 
 const COUPON_KEY = "aurel.coupon";
 
