@@ -11,6 +11,19 @@ class OrderItemInline(admin.TabularInline):
     model = OrderItem
     extra = 0
     can_delete = False
+    # [R-8.13] Explicit order: the frozen sku/variant_name snapshots render
+    # beside the product name they were taken from. The permission overrides
+    # below keep every snapshot column read-only -- admin edits would
+    # falsify purchase history.
+    fields = (
+        "product",
+        "product_name",
+        "sku",
+        "variant_name",
+        "price",
+        "quantity",
+        "subtotal",
+    )
     verbose_name = "Order item (snapshot)"
     verbose_name_plural = "Order items (snapshot)"
 

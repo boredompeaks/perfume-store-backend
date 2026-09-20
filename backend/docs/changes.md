@@ -307,6 +307,20 @@ Per spec 8.3 ("Enforce unique SKUs where the business requires global SKU unique
 - No changes to OrderItem, checkout, verify_payment, serializers, cart or URLs; no fixture edits; no new env keys.
 - Suite: **427 tests, OK (423 pass, 4 pre-existing `expectedFailure` unchanged — ceiling held)**, coverage **100.00%** (1920 stmts, 0 miss — grew from 1798 with the new code; gate 90), `makemigrations --check` clean.
 
+## 2026-09-20 — SPEC-8-02b (Section 8) — builder: OrderItem snapshot columns sku/variant_name — the historical-order immutability pattern ([R-8.13])
+
+Per spec 8.3 "Historical snapshots" (orders must retain what was actually purchased, 2495–2515: product name 2501, variant name/options 2503, SKU 2505), order lines are now self-describing even after the catalogue changes or the product row is gone. Second half of the SPEC-8-02 split (depends on SPEC-8-02a's ProductVariant).
+
+- **Population-source decision (documented):** no variant-selection input exists at checkout — `CartItem` references products only and variant PICKING rides SPEC-3-21/SPEC-6-08 — and `products` carries no product-level SKU (verified). The honest minimal reading: `sku` snapshots empty and `variant_name` mirrors the product name at checkout (spec's intent that lines are self-describing); a matched variant's SKU/name would fabricate history the customer never chose. Variant matching becomes real with SPEC-3-21's selection input — the columns are already variant-SKU-width (64).
+- `orders/models.py` — `OrderItem.sku` (CharField(64), matches `ProductVariant.sku` width) + `OrderItem.variant_name` (CharField(200), product_name width), both `default=''`; docstring pins the frozen-at-checkout contract and the population source.
+- `orders/views.py` — line-item construction inside `create_order`'s atomic block (between the 21-1 dedup guard and the 8-01 order-number mint, byte-unchanged) sets `sku=''` and `variant_name=product.name` once; no later save path mutates them.
+- `orders/migrations/0007_orderitem_sku_orderitem_variant_name.py` — AddField ×2 + RunPython backfill (reverse: noop, mirroring 0006). Backfill strategy: deterministic single pass in id order over committed server-side state only (same strategy class as 0006 — no clock, no randomness, pure function of current data); `variant_name` copies the product's CURRENT name where the product still exists (best-effort for legacy rows — the at-purchase name already lives in `product_name`); rows whose product was deleted get empty snapshots (documented — nothing honest is left to copy, their `product_name`/`price` snapshots carry the record).
+- `orders/serializers.py` — `OrderItemSerializer` exposes `sku`/`variant_name` in `fields` + `read_only_fields` (no URL changes).
+- `orders/admin.py` — `OrderItemInline` gains an explicit `fields` ordering so the frozen columns render beside the product name they were taken from; the inline's existing deny add/change/delete keeps every snapshot column read-only (admin edits would falsify purchase history).
+- `tests/test_orderitem_snapshot.py` (new, 6 tests): checkout populates the product-identity snapshot (API + DB), snapshot survives product RENAME + reprice (extends test_e2e_isolation.py:79-131, which only pinned price change + delete), snapshot survives product DELETE (FK SET_NULL, columns carry the record, API-level), serializer exposes both read-only, admin inline surfaces the columns and refuses add/change/delete, and the 0007 backfill function pinned without DDL round-trips (populated row, orphaned row → empty, product_name preserved).
+- No changes to cart, verify_payment, stock gate, dedup guard, order-number mint or URLs; no fixture edits; no new env keys.
+- Suite: **433 tests, OK (429 pass, 4 pre-existing `expectedFailure` unchanged — ceiling held)**, coverage **100.00%** (1923 stmts, 0 miss — grew from 1920 with the new code; gate 90), `makemigrations --check` clean.
+
 ## Next (per fix-plan.md)
 
 - Phase 0 remaining: rotate Razorpay keys, add CI.

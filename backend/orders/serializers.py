@@ -18,6 +18,8 @@ class OrderItemSerializer(serializers.ModelSerializer):
             'id',
             'product',
             'product_name',
+            'sku',
+            'variant_name',
             'price',
             'quantity',
             'subtotal',
@@ -27,6 +29,8 @@ class OrderItemSerializer(serializers.ModelSerializer):
             'id',
             'product',
             'product_name',
+            'sku',
+            'variant_name',
             'price',
             'subtotal',
         ]

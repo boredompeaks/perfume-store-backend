@@ -458,6 +458,14 @@ def create_order(request):
                 order=order,
                 product=product,
                 product_name=product.name,
+                # [R-8.13] Freeze the catalogue identity the customer bought:
+                # no variant-selection input exists yet (CartItem is
+                # product-only, picking rides SPEC-3-21/SPEC-6-08) and the
+                # product carries no product-level SKU, so sku snapshots
+                # empty and variant_name mirrors the product name. Set once
+                # here; no later save path mutates them.
+                sku='',
+                variant_name=product.name,
                 price=price,
                 quantity=quantity,
                 subtotal=item_subtotal

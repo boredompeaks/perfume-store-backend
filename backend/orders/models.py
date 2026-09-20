@@ -182,6 +182,25 @@ class OrderItem(models.Model):
         default=''
     )
 
+    # [R-8.13] Frozen identity snapshots (spec 8.3 "Historical snapshots"):
+    # set once at checkout from the catalogue state the customer bought and
+    # never updated afterwards -- no save path mutates them; the customer
+    # serializer and the admin inline expose them read-only. Population
+    # source today (documented): no variant-selection input exists at
+    # checkout (CartItem is product-only -- picking rides SPEC-3-21/SPEC-6-08)
+    # and ``products`` carries no product-level SKU, so ``sku`` snapshots
+    # empty and ``variant_name`` mirrors the product name; a matched
+    # variant's SKU/name replaces both once selection input exists.
+    sku = models.CharField(
+        max_length=64,  # ProductVariant.sku width, so a later variant-matched
+        default=''      # population source fits without another migration
+    )
+
+    variant_name = models.CharField(
+        max_length=200,  # product_name width: it mirrors the product name
+        default=''
+    )
+
     price = models.DecimalField(
         max_digits=10,
         decimal_places=2
