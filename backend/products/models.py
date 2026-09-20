@@ -1,4 +1,8 @@
+from datetime import timedelta
+
+from django.conf import settings
 from django.db import models, transaction
+from django.utils import timezone
 from django.utils.text import slugify
 
 
@@ -179,3 +183,103 @@ class StockMovement(models.Model):
 
     def __str__(self):
         return f"{self.product.name}: {self.delta:+d} ({self.reason})"
+
+
+class StockReservation(models.Model):
+    """A time-limited hold on units of a product for an in-flight checkout
+    (SPEC-12-01, spec section 12.1).
+
+    Section 12.1's inventory split maps onto the schema as follows: on-hand
+    inventory stays ``products.stock`` (the only stock authority); reserved
+    inventory is the sum of a product's active reservations' ``quantity``;
+    available-to-sell is the derived difference — never stored, because the
+    reserved/safety-field accounting depth is SPEC-6-13's; expiry lives in
+    ``expires_at``; the owner/reference pair is ``owner`` + ``order``.
+
+    Boundaries: schema core only. The writers arrive later — SPEC-12-02
+    mints reservations inside create_order's atomic block and converts them
+    inside verify_payment's locked block, SPEC-12-03 expires stale ones via
+    the reconciler — so this model only carries the state they transition.
+    ``quantity`` shares the PositiveBigIntegerField domain of
+    ``products.stock`` / ``StockMovement.stock_after``: one integer domain
+    for unit counts across the inventory schema.
+    """
+
+    class Status(models.TextChoices):
+        # §12.1 "Recommended checkout behaviour" names the transitions: the
+        # backend creates a time-limited reservation at checkout (step 3),
+        # a successful confirmation converts it into a committed sale
+        # (step 5), failed/cancelled checkout releases it (step 6), and the
+        # scheduled reconciliation expires stale ones (step 7).
+        ACTIVE = "active", "Active"
+        CONVERTED = "converted", "Converted"
+        RELEASED = "released", "Released"
+        EXPIRED = "expired", "Expired"
+
+    product = models.ForeignKey(
+        products,
+        on_delete=models.CASCADE,
+        related_name="stock_reservations",
+    )
+    # Cross-app references use the file's existing string-FK pattern (see
+    # StockMovement.created_by): the products app never imports orders/auth
+    # at model load, and orders.models already imports products.models.
+    order = models.ForeignKey(
+        "orders.Order",
+        on_delete=models.CASCADE,
+        related_name="stock_reservations",
+    )
+    owner = models.ForeignKey(
+        "auth.User",
+        on_delete=models.CASCADE,
+        related_name="stock_reservations",
+    )
+    quantity = models.PositiveBigIntegerField()
+    status = models.CharField(
+        max_length=20,
+        choices=Status.choices,
+        default=Status.ACTIVE,
+    )
+    expires_at = models.DateTimeField()
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        # Checkout mints at most one reservation per order line: a duplicate
+        # (order, product) row would double-count reserved stock in the
+        # available-to-sell math, and a retried checkout must re-target the
+        # existing hold instead of minting a second one. §12.1 prescribes
+        # no explicit constraint name; this one is implied by "reserved
+        # inventory" being a per-checkout hold with an owner/reference, and
+        # it is the concurrency authority the DB enforces under races.
+        constraints = [
+            models.UniqueConstraint(
+                fields=["order", "product"],
+                name="uniq_order_product_reservation",
+            ),
+        ]
+        # The reconciler's sweep (SPEC-12-03) reads status=active AND
+        # expires_at<=now: the composite index serves exactly that shape,
+        # so expiry-based queries never scan the whole reservation table.
+        indexes = [
+            models.Index(
+                fields=["status", "expires_at"],
+                name="stockres_status_expires_idx",
+            ),
+        ]
+        verbose_name = "Stock reservation"
+        verbose_name_plural = "Stock reservations"
+
+    @classmethod
+    def expiry_from_now(cls):
+        """``expires_at`` for a reservation minted now: now + RESERVATION_TTL.
+
+        Read at call time, not import time (the ops/services.py pattern):
+        the value is env-driven (settings.RESERVATION_TTL) and overridable
+        per request/per test, so a module-level constant would freeze the
+        first-seen value for the life of the process.
+        """
+        return timezone.now() + timedelta(seconds=settings.RESERVATION_TTL)
+
+    def __str__(self):
+        return f"{self.product.name}: {self.quantity} reserved ({self.status})"

@@ -258,6 +258,15 @@ CHECKOUT_DEDUP_WINDOW_SECONDS = _env_int('CHECKOUT_DEDUP_WINDOW_SECONDS', 300)
 ORDER_HISTORY_PAGE_SIZE = _env_int('ORDER_HISTORY_PAGE_SIZE', 10)
 ORDER_HISTORY_MAX_PAGE_SIZE = _env_int('ORDER_HISTORY_MAX_PAGE_SIZE', 100)
 
+# SPEC-12-01 [R-12.2] Inventory reservation: seconds a checkout's stock
+# reservation holds units before it goes stale and becomes releasable by
+# the reconciler (SPEC-12-03). Coordinate with the payment-provider session
+# window: the customer must be able to finish paying inside the hold, so
+# the default comfortably exceeds a typical Razorpay checkout session.
+# Tunable per deployment without a code change; non-integer values are
+# ignored and the default is used instead.
+RESERVATION_TTL = _env_int('RESERVATION_TTL', 900)
+
 
 # ISO 4217 currency codes are exactly three uppercase letters.
 _ISO_4217 = re.compile(r"^[A-Z]{3}$")

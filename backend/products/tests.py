@@ -3,15 +3,27 @@ stock-adjustment feature (``adjust_stock`` / ``StockMovement``) and its
 admin surface."""
 import base64
 import math
+import os
 import re
 import unittest
+from datetime import timedelta
 from decimal import Decimal
+from unittest.mock import patch
 
 from django.conf import settings
 from django.contrib.auth.models import AnonymousUser, User
 from django.core.files.uploadedfile import SimpleUploadedFile
-from django.db import connection
+from config.settings import _env_int
+from django.db import (
+    IntegrityError,
+    connection,
+    models,
+    transaction,
+)
+from django.db.models import Sum
 from django.test import override_settings, tag
+from django.utils import timezone
+from orders.models import Order
 from rest_framework.exceptions import PermissionDenied
 from rest_framework.request import Request
 from rest_framework.test import APIRequestFactory
@@ -27,7 +39,7 @@ from common.roles import (
 )
 from common.testing import ApiTestCase
 from products.admin import ProductAdmin
-from products.models import StockMovement, products
+from products.models import StockMovement, StockReservation, products
 from products.serializers import ProductSerializer
 
 # 1x1 transparent PNG so ImageField can hold a real thumbnail
@@ -1164,3 +1176,243 @@ class ProductCatalogIndexSchemaTests(ApiTestCase):
             all(info["unique"] for info in covering),
             f"slug grew a non-unique duplicate index: {covering}",
         )
+
+
+@tag("products")
+class StockReservationModelTests(ApiTestCase):
+    """SPEC-12-01 (spec section 12.1): the reservation data model.
+
+    Schema core only — the lifecycle writers arrive later: SPEC-12-02
+    creates reservations inside create_order's atomic block and converts
+    them inside verify_payment's locked block; SPEC-12-03 expires them via
+    the reconciler. Section 12.1's inventory split maps onto the schema
+    as: on-hand inventory stays ``products.stock`` (the only authority),
+    reserved inventory is the sum of a product's active reservations'
+    quantity, available-to-sell is the derived difference (never stored —
+    the reserved/safety-field accounting depth is SPEC-6-13's), expiry is
+    ``expires_at``, and owner/reference are the ``owner``/``order`` FKs.
+    """
+
+    def setUp(self):
+        self.owner = self.make_user(username="reserver")
+        self.product = self.make_product(name="Rose Aurum", stock=10)
+
+    def make_order(self, user=None):
+        return Order.objects.create(
+            user=user or self.owner,
+            full_name="Rose Buyer",
+            phone="9999999999",
+            address="1 Rose Lane",
+            city="Pune",
+            state="MH",
+            pincode="411001",
+            total_amount=Decimal("499.99"),
+        )
+
+    def make_reservation(self, order=None, product=None, **overrides):
+        fields = dict(
+            product=product or self.product,
+            order=order or self.make_order(),
+            owner=self.owner,
+            quantity=1,
+            expires_at=timezone.now() + timedelta(seconds=900),
+        )
+        fields.update(overrides)
+        return StockReservation.objects.create(**fields)
+
+    def test_field_set_is_pinned(self):
+        """Section 12.1 prescribes exactly this core: the product the units
+        come off, the order reference and owner, the reserved quantity, the
+        status lifecycle, expiry, and distinct created/updated timestamps.
+        A new column must force a conscious decision here, never
+        auto-appear."""
+        names = {field.name for field in StockReservation._meta.concrete_fields}
+        self.assertEqual(
+            names,
+            {
+                "id",
+                "product",
+                "order",
+                "owner",
+                "quantity",
+                "status",
+                "expires_at",
+                "created_at",
+                "updated_at",
+            },
+        )
+
+    def test_status_lifecycle_carries_the_spec_vocabulary(self):
+        """§12.1 "Recommended checkout behaviour" names the transitions: a
+        reservation is minted active at checkout (step 3), converted into
+        a committed sale on payment confirmation (step 5), released by a
+        failed/cancelled checkout (step 6), and expired by the scheduled
+        reconciliation (step 7). The writers may only set these named
+        states — never free-form strings — and a minted row starts
+        active."""
+        self.assertEqual(
+            {value for value, _ in StockReservation.Status.choices},
+            {"active", "converted", "released", "expired"},
+        )
+        field = StockReservation._meta.get_field("status")
+        self.assertEqual(field.choices, StockReservation.Status.choices)
+        self.assertEqual(field.get_default(), StockReservation.Status.ACTIVE)
+        self.assertEqual(
+            self.make_reservation().status, StockReservation.Status.ACTIVE
+        )
+
+    def test_fk_targets_follow_the_cross_app_string_pattern(self):
+        """product resolves in-app; order and owner use the file's existing
+        cross-app string-FK pattern (see StockMovement.created_by) so the
+        products app never imports orders at model load. Deletion policy
+        is cascade throughout: the reservation is a checkout artifact, so
+        it is meaningless once its product or order is gone."""
+        product_field = StockReservation._meta.get_field("product")
+        order_field = StockReservation._meta.get_field("order")
+        owner_field = StockReservation._meta.get_field("owner")
+        self.assertIs(product_field.related_model, products)
+        self.assertIs(order_field.related_model, Order)
+        self.assertIs(owner_field.related_model, User)
+        for field in (product_field, order_field, owner_field):
+            self.assertIs(field.remote_field.on_delete, models.CASCADE)
+
+        reservation = self.make_reservation()
+        self.assertIn(reservation, self.product.stock_reservations.all())
+        self.assertIn(reservation, reservation.order.stock_reservations.all())
+        self.assertIn(reservation, self.owner.stock_reservations.all())
+
+        reservation.order.delete()
+        self.assertEqual(StockReservation.objects.count(), 0)
+
+    def test_order_product_pair_is_unique_at_the_db_level(self):
+        """Checkout mints at most one reservation per order line: a
+        duplicate (order, product) row would double-count reserved stock
+        in the available-to-sell math, and a retried checkout must
+        re-target the existing hold, not mint a second one. Pinned at the
+        DB level the same way ProductVariant.sku and Order.order_number
+        are (§12.1 implies the constraint: "reserved inventory" is a
+        per-checkout hold with an owner/reference)."""
+        order = self.make_order()
+        self.make_reservation(order=order)
+        self.assertEqual(StockReservation.objects.count(), 1)
+        # The duplicate create runs inside a nested atomic (savepoint): the
+        # IntegrityError rolls back to the savepoint, leaving the TestCase
+        # transaction usable for the introspection proof below.
+        with self.assertRaises(IntegrityError):
+            with transaction.atomic():
+                self.make_reservation(order=order)
+
+        with connection.cursor() as cursor:
+            constraints = connection.introspection.get_constraints(
+                cursor, StockReservation._meta.db_table
+            )
+        pair_constraints = [
+            info
+            for info in constraints.values()
+            if info["columns"] == ["order_id", "product_id"]
+        ]
+        self.assertTrue(
+            any(info["unique"] for info in pair_constraints),
+            f"no unique constraint on (order, product): {pair_constraints}",
+        )
+
+    def test_different_orders_hold_independent_reservations_on_one_product(self):
+        """Uniqueness is per (order, product), not per product: two
+        customers' concurrent checkouts each hold units of the same
+        product as independent rows, and the reserved inventory is their
+        summed quantity. The sufficiency gate is the atomic reservation
+        create in SPEC-12-02, not this constraint."""
+        first = self.make_reservation(quantity=1)
+        second = self.make_reservation(quantity=3)
+        self.assertEqual(first.product, second.product)
+        reserved = StockReservation.objects.filter(
+            product=self.product, status=StockReservation.Status.ACTIVE
+        ).aggregate(total=Sum("quantity"))["total"]
+        self.assertEqual(reserved, 4)
+
+    def test_expiry_sweep_query_reads_only_stale_active_rows(self):
+        """The reconciler's sweep (SPEC-12-03) reads status=active AND
+        expires_at<=now; it must be exact on both axes. A still-fresh
+        hold, and rows already converted/released/expired with a past
+        expiry, are all out of scope — only the stale active hold is
+        matched. This is the query shape the (status, expires_at) index
+        serves."""
+        stale = self.make_reservation(
+            expires_at=timezone.now() - timedelta(seconds=1)
+        )
+        self.make_reservation(expires_at=timezone.now() + timedelta(hours=1))
+        for status in (
+            StockReservation.Status.CONVERTED,
+            StockReservation.Status.RELEASED,
+            StockReservation.Status.EXPIRED,
+        ):
+            done = self.make_reservation(
+                expires_at=timezone.now() - timedelta(seconds=1)
+            )
+            done.status = status
+            done.save()
+
+        sweep = list(
+            StockReservation.objects.filter(
+                status=StockReservation.Status.ACTIVE,
+                expires_at__lte=timezone.now(),
+            )
+        )
+        self.assertEqual(sweep, [stale])
+
+    def test_quantity_shares_the_stock_column_type(self):
+        """Reserved units are counted in the same column type as on-hand
+        stock (products.stock, StockMovement.stock_after): one integer
+        domain for unit counts across the inventory schema."""
+        field = StockReservation._meta.get_field("quantity")
+        self.assertIs(type(field), type(products._meta.get_field("stock")))
+        reservation = self.make_reservation(quantity=999_999)
+        reservation.refresh_from_db()
+        self.assertEqual(reservation.quantity, 999_999)
+
+    def test_meta_pins_the_unique_constraint_and_expiry_index(self):
+        """The model-level starting set for §12.1: the (order, product)
+        uniqueness constraint plus the composite (status, expires_at)
+        index the expiry-based queries read through. Later inventory
+        indexes must come from measured query patterns, i.e. as a
+        conscious edit to this set, never by silent accretion."""
+        self.assertIn(
+            "uniq_order_product_reservation",
+            {constraint.name for constraint in StockReservation._meta.constraints},
+        )
+        self.assertEqual(
+            {tuple(index.fields) for index in StockReservation._meta.indexes},
+            {("status", "expires_at")},
+        )
+
+    def test_reservation_ttl_is_read_at_call_time(self):
+        """expiry_from_now() is the single place a minting writer derives
+        expires_at from: it must honour the env-driven RESERVATION_TTL at
+        call time — the ops/services.py pattern — so an override applies
+        to the very next call instead of being frozen at first import."""
+        with override_settings(RESERVATION_TTL=60):
+            before = timezone.now()
+            expires = StockReservation.expiry_from_now()
+            after = timezone.now()
+            self.assertLessEqual(before + timedelta(seconds=60), expires)
+            self.assertLessEqual(expires, after + timedelta(seconds=60))
+
+        with override_settings(RESERVATION_TTL=120):
+            later = StockReservation.expiry_from_now()
+            self.assertGreater(later, expires)
+
+    def test_reservation_ttl_env_parse_is_fail_safe(self):
+        """settings.py resolves RESERVATION_TTL through _env_int: the
+        documented default (900s — long enough to finish a payment session
+        within the hold) stands when the key is absent, and a malformed
+        value cannot crash startup."""
+        with patch.dict(os.environ, {}, clear=True):
+            self.assertEqual(_env_int("RESERVATION_TTL", 900), 900)
+        with patch.dict(os.environ, {"RESERVATION_TTL": "not-a-number"}):
+            self.assertEqual(_env_int("RESERVATION_TTL", 900), 900)
+        with patch.dict(os.environ, {"RESERVATION_TTL": "450"}):
+            self.assertEqual(_env_int("RESERVATION_TTL", 900), 450)
+
+    def test_string_representation_names_product_quantity_and_status(self):
+        reservation = self.make_reservation(quantity=2)
+        self.assertEqual(str(reservation), "Rose Aurum: 2 reserved (active)")
