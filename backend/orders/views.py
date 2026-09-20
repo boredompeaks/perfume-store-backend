@@ -22,11 +22,19 @@ from products.models import StockMovement, products
 import logging
 import razorpay
 from django.conf import settings
+from django.contrib.auth.models import User
 
 logger = logging.getLogger(__name__)
 # ==================================
 # Order List
 # ==================================
+
+# [R-9.3.14] SPEC-9-01: header-keyed checkout idempotency. The cap mirrors
+# the Order.idempotency_key column width, so an oversized value is rejected
+# with a 400 here instead of a database error at insert time.
+IDEMPOTENCY_KEY_HEADER = "Idempotency-Key"
+IDEMPOTENCY_KEY_MAX_LENGTH = 128
+
 
 @api_view(['GET'])
 @permission_classes([IsAuthenticated])
@@ -148,6 +156,24 @@ def _generate_order_number():
 @api_view(['POST'])
 @permission_classes([IsAuthenticated])
 def create_order(request):
+
+    # [R-9.3.14] Honor the Idempotency-Key header when the client sends it:
+    # every retry carrying the same value is the SAME submission, so the
+    # atomic block below dedupes on (user, key). Keyless clients keep the
+    # legacy contract (the SPEC-21-1 guard plus window). Blank means no
+    # key, since an empty value carries no submission identity.
+    idempotency_key = (
+        request.headers.get(IDEMPOTENCY_KEY_HEADER) or ""
+    ).strip() or None
+
+    if (
+        idempotency_key is not None
+        and len(idempotency_key) > IDEMPOTENCY_KEY_MAX_LENGTH
+    ):
+        return Response(
+            {"error": "Idempotency-Key is too long"},
+            status=status.HTTP_400_BAD_REQUEST
+        )
 
     # =========================
     # Get current session
@@ -408,6 +434,40 @@ def create_order(request):
                 status=status.HTTP_200_OK
             )
 
+        # [R-9.3.14]/[R-9.3.19] SPEC-9-01: key-based replay collapse. The
+        # user row is locked first so two cross-session submissions carrying
+        # the same key serialize here -- the loser's probe runs only after
+        # the winner committed, which makes the probe-then-bind below
+        # race-free (the (user, idempotency_key) unique constraint stays the
+        # last-resort authority). This composes behind the SPEC-21-1 guard
+        # above, which stays the first line of defence for keyless
+        # same-session double-clicks: a keyed replay collapses onto the
+        # original order regardless of payload drift, the dedup window, or
+        # a settled first attempt, and never mints a second order_number.
+        if idempotency_key is not None:
+            User.objects.select_for_update().get(pk=request.user.pk)
+
+            replay = Order.objects.filter(
+                user=request.user, idempotency_key=idempotency_key
+            ).first()
+
+            if replay is not None:
+                # Benign keyed retry, so INFO: same judgement as the dedup
+                # guard's collapse log above.
+                logger.info(
+                    "Checkout idempotency: order %s replayed for user %s "
+                    "(Idempotency-Key)",
+                    replay.id,
+                    request.user.pk,
+                )
+
+                serializer = OrderSerializer(replay)
+
+                return Response(
+                    serializer.data,
+                    status=status.HTTP_200_OK
+                )
+
         # [R-8.4] The order number is minted inside this same atomic block,
         # so a rolled-back checkout never burns a number. Each attempt runs
         # in a savepoint: a lost race (another connection committed the same
@@ -441,6 +501,17 @@ def create_order(request):
                     raise
                 continue
             break
+
+        # [R-9.3.14] SPEC-9-01: bind the submission key to the freshly
+        # minted order inside this same transaction, so a later replay's
+        # probe above finds it and collapses. The write is an UPDATE of the
+        # row this transaction just created, after the probe proved no
+        # committed order holds (user, key) and with the user-row lock
+        # excluding a concurrent keyed writer -- so the unique constraint
+        # cannot reject here.
+        if idempotency_key is not None:
+            order.idempotency_key = idempotency_key
+            order.save(update_fields=['idempotency_key'])
 
         # Snapshot cart items. Inventory, coupon usage, and cart cleanup occur
         # only after the payment provider confirms this specific order.

@@ -176,6 +176,19 @@ class Order(models.Model):
     razorpay_order_id = models.CharField(max_length=100, blank=True, null=True, unique=True)
     razorpay_payment_id = models.CharField(max_length=100, blank=True, null=True, unique=True)
 
+    # [R-9.3.14] SPEC-9-01: header-keyed checkout idempotency. Set once by
+    # create_order when the client sent an Idempotency-Key header; NULL for
+    # keyless submissions. Uniqueness is scoped per user (a reused key on
+    # another account is an independent submission, never an existence
+    # leak), and NULLs stay distinct in the constraint, so keyless rows
+    # can never collide. No expiry: the key lives with the order row it
+    # deduped, so a retry collapses onto the original outcome forever.
+    idempotency_key = models.CharField(
+        max_length=128,
+        null=True,
+        blank=True,
+    )
+
     # [R-8.16] Business-event timeline (spec 8.3 "Timestamps": store distinct
     # timestamps for each business event; do not overload a generic
     # ``updated_at`` to represent one). Each column is NULL until the event
@@ -225,6 +238,17 @@ class Order(models.Model):
             models.Index(
                 fields=['status', 'created_at'],
                 name='orders_status_created_idx',
+            ),
+        ]
+        constraints = [
+            # [R-9.3.14]/[R-9.3.19] The concurrency authority for keyed
+            # checkout replays: create_order probes under the user-row lock
+            # (fast path), and this constraint is the last-resort guarantee
+            # that one user can never hold two orders for one key. The
+            # backing index also serves the replay probe lookup.
+            models.UniqueConstraint(
+                fields=['user', 'idempotency_key'],
+                name='orders_user_idem_key_uidx',
             ),
         ]
 
