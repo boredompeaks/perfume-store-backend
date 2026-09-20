@@ -92,7 +92,9 @@ class OversellRaceTests(ApiTestCase):
         self.assertEqual(bob_hold.status, StockReservation.Status.RELEASED)
         self.assertEqual(bob_hold.quantity, 1)
         self.assertEqual(
-            StockReservation.objects.filter(status=StockReservation.Status.ACTIVE).count(),
+            StockReservation.objects.filter(
+                status=StockReservation.Status.ACTIVE
+            ).count(),
             0,
         )
 

@@ -3973,3 +3973,109 @@ class ReservationLifecycleTests(OrderTestBase):
         )
         self.product.refresh_from_db()
         self.assertEqual(self.product.stock, 10)  # a hold was never stock
+
+    # ——— [R-12.8] the admin surfaces release too (audit cycle 2) ———
+
+    def _admin_login(self):
+        if not User.objects.filter(username="resvboss").exists():
+            User.objects.create_superuser(
+                "resvboss", "resvboss@example.com", "S3cure-Passphrase!"
+            )
+        self.assertTrue(
+            self.client.login(username="resvboss", password="S3cure-Passphrase!")
+        )
+
+    def _change_form_post(self, order, status_value):
+        return self.client.post(
+            f"/admin/orders/order/{order.id}/change/",
+            {
+                "user": order.user_id,
+                "full_name": order.full_name,
+                "phone": order.phone,
+                "address": order.address,
+                "city": order.city,
+                "state": order.state,
+                "pincode": order.pincode,
+                "status": status_value,
+                "_save": "Save",
+                "items-TOTAL_FORMS": "0",
+                "items-INITIAL_FORMS": "0",
+                "items-MIN_NUM_FORMS": "0",
+                "items-MAX_NUM_FORMS": "1000",
+            },
+            follow=True,
+        )
+
+    def _run_admin_action(self, action, orders):
+        return self.client.post(
+            "/admin/orders/order/",
+            {
+                "action": action,
+                "_selected_action": [str(order.id) for order in orders],
+                "select_across": "0",
+            },
+            follow=True,
+        )
+
+    def test_admin_change_form_cancel_releases_holds(self):
+        """[R-12.8] admin change form: pending -> cancelled must release
+        the checkout's active holds in the save transaction — the API
+        twin cannot be the only surface that releases, or an admin cancel
+        leaves a phantom hold burning the stock until the TTL sweep."""
+        # checkout BEFORE the admin login: login() rotates the session
+        # key the cart is bound to, so the fixture order is load-bearing
+        order = self.create_order()
+        self._admin_login()
+
+        res = self._change_form_post(order, "cancelled")
+
+        self.assertEqual(res.status_code, 200)
+        order.refresh_from_db()
+        self.assertEqual(order.status, "cancelled")
+        self.assertEqual(
+            order.stock_reservations.get().status,
+            StockReservation.Status.RELEASED,
+        )
+        self.product.refresh_from_db()
+        self.assertEqual(self.product.stock, 10)  # a hold was never stock
+
+        # idempotent: the machine's cancelled self-transition replays the
+        # save without error and never resurrects the released hold
+        replay = self._change_form_post(order, "cancelled")
+        self.assertEqual(replay.status_code, 200)
+        order.refresh_from_db()
+        self.assertEqual(order.status, "cancelled")
+        self.assertEqual(
+            order.stock_reservations.get().status,
+            StockReservation.Status.RELEASED,
+        )
+
+    def test_admin_bulk_cancel_releases_holds(self):
+        """[R-12.8] admin bulk action: cancel_pending releases each
+        cancelled row's active holds inside the same per-row transaction,
+        matching the API twin — the hold never outlives its order."""
+        order = self.create_order()  # checkout first: see the note above
+        self._admin_login()
+
+        res = self._run_admin_action("cancel_pending", [order])
+
+        self.assertEqual(res.status_code, 200)
+        order.refresh_from_db()
+        self.assertEqual(order.status, "cancelled")
+        self.assertEqual(
+            order.stock_reservations.get().status,
+            StockReservation.Status.RELEASED,
+        )
+        self.product.refresh_from_db()
+        self.assertEqual(self.product.stock, 10)  # a hold was never stock
+
+        # idempotent: the pending filter skips the already-cancelled row,
+        # so a re-run neither errors nor resurrects the released hold
+        replay = self._run_admin_action("cancel_pending", [order])
+        self.assertEqual(replay.status_code, 200)
+        order.refresh_from_db()
+        self.assertEqual(order.status, "cancelled")
+        self.assertEqual(
+            order.stock_reservations.get().status,
+            StockReservation.Status.RELEASED,
+        )
