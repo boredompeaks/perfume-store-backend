@@ -6,6 +6,13 @@ from django.conf.urls.static import static
 
 from ops.views import api_settings, audit_log, dashboard, health
 
+from orders.views import (
+    admin_order_cancel,
+    admin_order_detail,
+    admin_order_fulfill,
+    admin_order_list,
+)
+
 
 # --- /api/v1/ namespace (spec §9, R-9.0) ---------------------------------
 # Spec §9 prescribes versioned routes under /api/v1/ with four
@@ -42,6 +49,14 @@ v1_account_patterns = [
 v1_admin_patterns = [
     path("dashboard/", dashboard, name="dashboard"),
     path("audit-log/", audit_log, name="audit-log"),
+    # §9.4 Orders module JSON seam (SPEC-9-07): DRF views wired exactly like
+    # the two chrome routes above — direct mounts in both families, no view
+    # duplication. The ledger's requirement names /api/admin/orders/, so the
+    # admin family (not the store family) owns these routes.
+    path("orders/", admin_order_list, name="orders-list"),
+    path("orders/<int:order_id>/", admin_order_detail, name="orders-detail"),
+    path("orders/<int:order_id>/fulfill/", admin_order_fulfill, name="orders-fulfill"),
+    path("orders/<int:order_id>/cancel/", admin_order_cancel, name="orders-cancel"),
 ]
 
 v1_urlpatterns = [
@@ -59,6 +74,25 @@ urlpatterns = [
     # Audit log (spec 6.12 route /admin/audit-log) — same before-the-admin
     # include rule as the dashboard above.
     path("admin/audit-log/", audit_log, name="admin-audit-log"),
+
+    # §9.4 Orders module JSON seam (SPEC-9-07), legacy family: the alias of
+    # the v1:admin orders mounts above (same view objects, no duplication).
+    path("api/admin/orders/", admin_order_list, name="admin-orders-list"),
+    path(
+        "api/admin/orders/<int:order_id>/",
+        admin_order_detail,
+        name="admin-orders-detail",
+    ),
+    path(
+        "api/admin/orders/<int:order_id>/fulfill/",
+        admin_order_fulfill,
+        name="admin-orders-fulfill",
+    ),
+    path(
+        "api/admin/orders/<int:order_id>/cancel/",
+        admin_order_cancel,
+        name="admin-orders-cancel",
+    ),
 
     path("admin/", admin.site.urls),
 

@@ -1,6 +1,7 @@
 from datetime import timedelta
 from decimal import Decimal
 
+from django.contrib.admin.models import CHANGE
 from django.core.paginator import Paginator
 from django.db import IntegrityError, transaction
 from django.db.models import Q
@@ -11,13 +12,16 @@ from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
 from rest_framework import status
 
+from .admin import ALLOWED_TRANSITIONS, transition_allowed
 from .models import Order, OrderItem, Coupon
 from .serializers import OrderSerializer
 
 from cart.models import Cart
 from common import notifications
+from common.audit import log_api_action
 from common.models import AuditEvent
 from common.money import quantize_money
+from common.permissions import HasOrdersCancel, HasOrdersFulfill, HasOrdersRead
 from products.models import StockMovement, products
 
 import logging
@@ -1185,4 +1189,171 @@ def verify_payment(request):
         "order_id": order.id,
         "status": order.status,
         "razorpay_payment_id": razorpay_payment_id
+    })
+
+
+# ==================================
+# Admin orders JSON seam (SPEC-9-07, spec 9.4 Orders module)
+# ==================================
+
+# SPEC-9-07: the fulfilment endpoint drives the order one legal step per
+# call along the flow the admin surface's bulk actions encode. The step map
+# only NAMES the candidate edge; the state machine (transition_allowed) is
+# still the single gate — if a machine edge is ever revoked, this endpoint
+# 409s on it instead of silently widening the machine.
+ADMIN_FULFILMENT_NEXT = {
+    "pending": "confirmed",
+    "confirmed": "shipped",
+    "shipped": "delivered",
+}
+
+
+@api_view(['GET'])
+@permission_classes([HasOrdersRead])
+def admin_order_list(request):
+    """[R-9.4.8] GET /api/admin/orders/ — every order, staff eyes only.
+
+    The customer list scopes to ``user=request.user``; this seam is reached
+    only through ``orders.read`` (support/finance/admin roles), so it serves
+    the unscoped queryset. Same house page-number envelope and page-size
+    config as the customer history — the paginator cap exists so no caller,
+    staff included, can request an unbounded page."""
+    orders = Order.objects.select_related("coupon").order_by("-created_at", "-id")
+
+    paginator = Paginator(
+        orders, _history_page_size(
+            request.query_params.get(HISTORY_PAGE_SIZE_QUERY_PARAM)
+        )
+    )
+    page = paginator.get_page(request.query_params.get('page', 1))
+
+    serializer = OrderSerializer(page.object_list, many=True)
+    return Response({
+        'count': paginator.count,
+        'total_pages': paginator.num_pages,
+        'current_page': page.number,
+        'next_page': page.has_next(),
+        'previous_page': page.has_previous(),
+        'results': serializer.data,
+    })
+
+
+@api_view(['GET'])
+@permission_classes([HasOrdersRead])
+def admin_order_detail(request, order_id):
+    """[R-9.4.9] GET /api/admin/orders/:id/ — one order, staff eyes only.
+
+    Unlike the customer detail endpoint there is no ownership scoping to
+    enforce, so an unknown id is a plain uniform 404 (never an existence
+    leak — the caller has already passed the orders.read gate)."""
+    try:
+        order = Order.objects.select_related("coupon").get(id=order_id)
+    except Order.DoesNotExist:
+        return Response(
+            {"error": "Order not found"},
+            status=status.HTTP_404_NOT_FOUND
+        )
+
+    return Response(OrderSerializer(order).data)
+
+
+@api_view(['POST'])
+@permission_classes([HasOrdersFulfill])
+def admin_order_fulfill(request, order_id):
+    """[R-9.4.10] POST /api/admin/orders/:id/fulfill — advance one step.
+
+    The gate-then-update pair runs under the row lock: two concurrent
+    fulfils cannot both pass the gate on the same stale status, so an order
+    can never skip two steps in one call. Deliberately NOT idempotent —
+    each accepted call performs one visible transition; the machine itself
+    rejects re-running a step from the new status (409). No business-event
+    stamp is written here: the admin surface's mark_shipped/mark_delivered
+    do not write shipped_at/delivered_at either, and the named-stamp
+    writers are their own later task — the JSON seam never invents a richer
+    record than the admin surface for the same transition."""
+    with transaction.atomic():
+        try:
+            order = Order.objects.select_for_update().get(id=order_id)
+        except Order.DoesNotExist:
+            return Response(
+                {"error": "Order not found"},
+                status=status.HTTP_404_NOT_FOUND
+            )
+
+        target = ADMIN_FULFILMENT_NEXT.get(order.status)
+        if target is None or not transition_allowed(order.status, target):
+            allowed = ", ".join(sorted(ALLOWED_TRANSITIONS.get(order.status, set())))
+            return Response(
+                {
+                    "error": f"Order cannot be fulfilled from status "
+                             f"'{order.status}'",
+                    "allowed": allowed,
+                },
+                status=status.HTTP_409_CONFLICT
+            )
+
+        order.status = target
+        order.save(update_fields=['status'])
+        # [6.12.6] API-side staff write: land the privileged-action record
+        # the admin surface would have written (audit-log route reads it).
+        log_api_action(
+            request, order, CHANGE,
+            f"Fulfilled via API: status moved to {target}.",
+        )
+
+    return Response({
+        "message": f"Order status advanced to {target}",
+        "order_id": order.id,
+        "status": order.status,
+    })
+
+
+@api_view(['POST'])
+@permission_classes([HasOrdersCancel])
+def admin_order_cancel(request, order_id):
+    """[R-9.4.11] POST /api/admin/orders/:id/cancel — cancel an unpaid order.
+
+    The same machine gate the admin uses decides: only ``pending`` carries
+    a cancel edge (cancelling a paid order is deliberately impossible until
+    refunds exist — the 409 says so, mirroring the admin wording).
+    Idempotent: the machine's self-transition makes a re-cancel a no-op
+    200 (no second stamp, no duplicate audit row). cancelled_at rides the
+    transition exactly like admin ``cancel_pending`` — the is-none guard
+    keeps a set event time immutable ([R-8.16])."""
+    with transaction.atomic():
+        try:
+            order = Order.objects.select_for_update().get(id=order_id)
+        except Order.DoesNotExist:
+            return Response(
+                {"error": "Order not found"},
+                status=status.HTTP_404_NOT_FOUND
+            )
+
+        if order.status == "cancelled":
+            # The machine's self-transition: a replay, not a change.
+            return Response({
+                "message": "Order is already cancelled",
+                "order_id": order.id,
+                "status": order.status,
+            })
+
+        if not transition_allowed(order.status, "cancelled"):
+            return Response(
+                {
+                    "error": f"Order cannot be cancelled from status "
+                             f"'{order.status}'. Cancelling a paid order "
+                             f"needs a refund — reconcile manually.",
+                },
+                status=status.HTTP_409_CONFLICT
+            )
+
+        order.status = "cancelled"
+        order.cancelled_at = order.cancelled_at or timezone.now()
+        order.save(update_fields=['status', 'cancelled_at'])
+        log_api_action(request, order, CHANGE, "Cancelled via API.")
+
+    return Response({
+        "message": "Order cancelled",
+        "order_id": order.id,
+        "status": order.status,
     })

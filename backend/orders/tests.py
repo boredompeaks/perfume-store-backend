@@ -20,6 +20,7 @@ from rest_framework.throttling import ScopedRateThrottle
 
 from cart.models import Cart, CartItem
 from common.models import AuditEvent
+from common.roles import ROLE_FINANCE, ROLE_SUPPORT
 from common.testing import TEST_RAZORPAY_KEY_ID, ApiTestCase
 from config.settings import _env_currency
 from orders.admin import OrderAdmin
@@ -1598,3 +1599,319 @@ class OrderIndexSchemaTests(ApiTestCase):
                     all(info["unique"] for info in covering),
                     f"{column} grew a non-unique duplicate index: {covering}",
                 )
+
+
+@tag("orders")
+class AdminOrdersApiTests(ApiTestCase):
+    """SPEC-9-07 [R-9.4.8]-[R-9.4.11] (spec lines 3285-3317, Orders module):
+    the admin orders JSON seam. Reads serve every order under ``orders.read``;
+    writes reuse the admin state machine (``transition_allowed``) and the
+    capability permission classes that were defined but unmounted. Errors
+    land in the uniform envelope (SPEC-9-03) — every error assertion pins
+    the ``error``/``code``/``details`` shape."""
+
+    LIST_URL = "/api/admin/orders/"
+    V1_LIST_URL = "/api/v1/admin/orders/"
+
+    def setUp(self):
+        self.buyer = self.make_user("buyer")
+        self.order = self._make_order(self.buyer)
+
+    @staticmethod
+    def _make_order(user, status="pending", **overrides):
+        fields = dict(
+            user=user,
+            full_name="Seam Buyer",
+            phone="9999999999",
+            address="1 Test Lane",
+            city="Indore",
+            state="MP",
+            pincode="452001",
+            total_amount=Decimal("750.00"),
+        )
+        fields.update(overrides)
+        order = Order.objects.create(**fields)
+        if status != "pending":
+            Order.objects.filter(pk=order.pk).update(status=status)
+            order.refresh_from_db()
+        return order
+
+    @staticmethod
+    def _user_with_role(username, role):
+        from django.contrib.auth.models import Group
+
+        from common.roles import ROLE_ADMIN
+
+        user = User.objects.create_user(
+            username, f"{username}@example.com", "S3cure-Passphrase!"
+        )
+        user.groups.add(Group.objects.get_or_create(name=role)[0])
+        return user
+
+    # permission matrix -------------------------------------------------------
+    def test_anonymous_list_is_403_in_the_uniform_envelope(self):
+        res = self.client.get(self.LIST_URL)
+        self.assertEqual(res.status_code, 403)
+        self.assertEqual(
+            res.data["error"], "You do not have permission to perform this action."
+        )
+        self.assertEqual(res.data["code"], "permission_denied")
+        self.assertIn("details", res.data)
+
+    def test_customer_without_staff_role_is_403_on_list(self):
+        self.client.force_authenticate(self.buyer)
+        res = self.client.get(self.LIST_URL)
+        self.assertEqual(res.status_code, 403)
+        self.assertEqual(res.data["code"], "permission_denied")
+
+    def test_finance_role_reads_every_order_unscoped(self):
+        """orders.read = support/finance/admin: a non-owner staff role still
+        sees the order — this seam is the unscoped twin of the customer list."""
+        other_buyer = self.make_user("other_buyer")
+        self._make_order(other_buyer)
+        finance = self._user_with_role("finmgr", ROLE_FINANCE)
+        self.client.force_authenticate(finance)
+        res = self.client.get(self.LIST_URL)
+        self.assertEqual(res.status_code, 200, res.data)
+        self.assertEqual(res.data["count"], 2)
+
+    def test_detail_anonymous_and_unprivileged_are_403(self):
+        for client_user in (None, self.buyer):
+            client = self.fresh_client()
+            if client_user is not None:
+                client.force_authenticate(client_user)
+            res = client.get(f"{self.LIST_URL}{self.order.id}/")
+            self.assertEqual(res.status_code, 403)
+            self.assertEqual(res.data["code"], "permission_denied")
+
+    def test_finance_role_reads_detail(self):
+        finance = self._user_with_role("finmgr", ROLE_FINANCE)
+        self.client.force_authenticate(finance)
+        res = self.client.get(f"{self.LIST_URL}{self.order.id}/")
+        self.assertEqual(res.status_code, 200, res.data)
+        self.assertEqual(res.data["id"], self.order.id)
+        self.assertEqual(res.data["order_number"], self.order.order_number)
+        self.assertEqual(res.data["status"], "pending")
+
+    def test_write_endpoints_deny_orders_read_only_role(self):
+        """The least-privilege split: finance may read but may neither fulfil
+        nor cancel — and nothing moves when they try."""
+        from django.contrib.admin.models import LogEntry
+
+        finance = self._user_with_role("finmgr", ROLE_FINANCE)
+        self.client.force_authenticate(finance)
+        for path in (
+            f"{self.LIST_URL}{self.order.id}/fulfill/",
+            f"{self.LIST_URL}{self.order.id}/cancel/",
+        ):
+            res = self.client.post(path)
+            self.assertEqual(res.status_code, 403, res.data)
+            self.assertEqual(res.data["code"], "permission_denied")
+        self.order.refresh_from_db()
+        self.assertEqual(self.order.status, "pending")
+        self.assertEqual(LogEntry.objects.count(), 0)
+
+    # list + detail -------------------------------------------------------------
+    def test_list_uses_the_house_page_number_envelope(self):
+        admin = self.make_staff()
+        self.client.force_authenticate(admin)
+        for i in range(3):
+            self._make_order(self.buyer)
+        res = self.client.get(self.LIST_URL)
+        self.assertEqual(res.status_code, 200, res.data)
+        for key in ("count", "total_pages", "current_page", "results"):
+            self.assertIn(key, res.data)
+        self.assertEqual(res.data["count"], 4)
+        self.assertEqual(len(res.data["results"]), 4)
+
+    def test_detail_unknown_id_is_uniform_404(self):
+        admin = self.make_staff()
+        self.client.force_authenticate(admin)
+        res = self.client.get(f"{self.LIST_URL}999999/")
+        self.assertEqual(res.status_code, 404)
+        self.assertEqual(res.data["error"], "Order not found")
+        self.assertEqual(res.data["code"], "not_found")
+
+    def test_list_and_detail_served_on_v1_admin_mirror(self):
+        admin = self.make_staff()
+        self.client.force_authenticate(admin)
+        res = self.client.get(self.V1_LIST_URL)
+        self.assertEqual(res.status_code, 200, res.data)
+        res = self.client.get(f"{self.V1_LIST_URL}{self.order.id}/")
+        self.assertEqual(res.status_code, 200, res.data)
+        self.assertEqual(res.data["id"], self.order.id)
+
+    # fulfilment ------------------------------------------------------------------
+    def test_fulfill_advances_pending_to_confirmed_and_audits(self):
+        from django.contrib.admin.models import CHANGE, LogEntry
+
+        support = self._user_with_role("supp", ROLE_SUPPORT)
+        self.client.force_authenticate(support)
+        res = self.client.post(f"{self.LIST_URL}{self.order.id}/fulfill/")
+        self.assertEqual(res.status_code, 200, res.data)
+        self.assertEqual(res.data["status"], "confirmed")
+        self.order.refresh_from_db()
+        self.assertEqual(self.order.status, "confirmed")
+        entry = LogEntry.objects.get(object_id=str(self.order.id))
+        self.assertEqual(entry.user, support)
+        self.assertEqual(entry.action_flag, CHANGE)
+        self.assertIn("Fulfilled via API", entry.change_message)
+
+    def test_fulfill_walks_one_step_per_call(self):
+        support = self._user_with_role("supp", ROLE_SUPPORT)
+        self.client.force_authenticate(support)
+        for expected in ("confirmed", "shipped", "delivered"):
+            res = self.client.post(f"{self.LIST_URL}{self.order.id}/fulfill/")
+            self.assertEqual(res.status_code, 200, res.data)
+            self.assertEqual(res.data["status"], expected)
+        self.order.refresh_from_db()
+        self.assertEqual(self.order.status, "delivered")
+
+    def test_fulfill_rejects_terminal_states_in_the_envelope(self):
+        support = self._user_with_role("supp", ROLE_SUPPORT)
+        self.client.force_authenticate(support)
+        for status_value in ("delivered", "cancelled"):
+            order = self._make_order(self.buyer, status=status_value)
+            res = self.client.post(f"{self.LIST_URL}{order.id}/fulfill/")
+            self.assertEqual(res.status_code, 409, res.data)
+            self.assertEqual(res.data["code"], "conflict")
+            self.assertIn(status_value, res.data["error"])
+            self.assertIn("allowed", res.data["details"])
+            order.refresh_from_db()
+            self.assertEqual(order.status, status_value)
+
+    def test_fulfill_unknown_order_is_404(self):
+        support = self._user_with_role("supp", ROLE_SUPPORT)
+        self.client.force_authenticate(support)
+        res = self.client.post(f"{self.LIST_URL}999999/fulfill/")
+        self.assertEqual(res.status_code, 404)
+        self.assertEqual(res.data["code"], "not_found")
+
+    def test_fulfill_served_on_v1_admin_mirror(self):
+        support = self._user_with_role("supp", ROLE_SUPPORT)
+        self.client.force_authenticate(support)
+        res = self.client.post(f"{self.V1_LIST_URL}{self.order.id}/fulfill/")
+        self.assertEqual(res.status_code, 200, res.data)
+        self.order.refresh_from_db()
+        self.assertEqual(self.order.status, "confirmed")
+
+    # cancellation ----------------------------------------------------------------
+    def test_cancel_marks_pending_cancelled_and_stamps_cancelled_at(self):
+        from django.contrib.admin.models import CHANGE, LogEntry
+
+        support = self._user_with_role("supp", ROLE_SUPPORT)
+        self.client.force_authenticate(support)
+        res = self.client.post(f"{self.LIST_URL}{self.order.id}/cancel/")
+        self.assertEqual(res.status_code, 200, res.data)
+        self.order.refresh_from_db()
+        self.assertEqual(self.order.status, "cancelled")
+        self.assertIsNotNone(self.order.cancelled_at)
+        entry = LogEntry.objects.get(object_id=str(self.order.id))
+        self.assertEqual(entry.action_flag, CHANGE)
+        self.assertIn("Cancelled via API", entry.change_message)
+
+    def test_cancel_rejects_paid_order_with_refund_hint(self):
+        paid = self._make_order(self.buyer, status="confirmed")
+        support = self._user_with_role("supp", ROLE_SUPPORT)
+        self.client.force_authenticate(support)
+        res = self.client.post(f"{self.LIST_URL}{paid.id}/cancel/")
+        self.assertEqual(res.status_code, 409, res.data)
+        self.assertEqual(res.data["code"], "conflict")
+        self.assertIn("refund", res.data["error"])
+        paid.refresh_from_db()
+        self.assertEqual(paid.status, "confirmed")
+        self.assertIsNone(paid.cancelled_at)
+
+    def test_cancel_rejects_delivered_order(self):
+        """The pinned illegal transition: delivered has no outgoing edges in
+        the machine, so the cancel endpoint can never sweep it."""
+        delivered = self._make_order(self.buyer, status="delivered")
+        support = self._user_with_role("supp", ROLE_SUPPORT)
+        self.client.force_authenticate(support)
+        res = self.client.post(f"{self.LIST_URL}{delivered.id}/cancel/")
+        self.assertEqual(res.status_code, 409, res.data)
+        delivered.refresh_from_db()
+        self.assertEqual(delivered.status, "delivered")
+
+    def test_cancel_is_idempotent_on_an_already_cancelled_order(self):
+        from django.contrib.admin.models import LogEntry
+
+        support = self._user_with_role("supp", ROLE_SUPPORT)
+        self.client.force_authenticate(support)
+        first = self.client.post(f"{self.LIST_URL}{self.order.id}/cancel/")
+        self.assertEqual(first.status_code, 200, first.data)
+        self.order.refresh_from_db()
+        stamped = self.order.cancelled_at
+        second = self.client.post(f"{self.LIST_URL}{self.order.id}/cancel/")
+        self.assertEqual(second.status_code, 200, second.data)
+        self.assertEqual(second.data["message"], "Order is already cancelled")
+        self.order.refresh_from_db()
+        self.assertEqual(self.order.cancelled_at, stamped)
+        self.assertEqual(LogEntry.objects.count(), 1)
+
+    def test_cancel_unknown_order_is_404(self):
+        support = self._user_with_role("supp", ROLE_SUPPORT)
+        self.client.force_authenticate(support)
+        res = self.client.post(f"{self.LIST_URL}999999/cancel/")
+        self.assertEqual(res.status_code, 404)
+        self.assertEqual(res.data["code"], "not_found")
+
+    def test_cancel_served_on_v1_admin_mirror(self):
+        support = self._user_with_role("supp", ROLE_SUPPORT)
+        self.client.force_authenticate(support)
+        res = self.client.post(f"{self.V1_LIST_URL}{self.order.id}/cancel/")
+        self.assertEqual(res.status_code, 200, res.data)
+        self.order.refresh_from_db()
+        self.assertEqual(self.order.status, "cancelled")
+
+
+@tag("orders")
+class BulkSetStatusRaceGuardTests(ApiTestCase):
+    """SPEC-6-04 audit advisory, hardened in SPEC-9-07: the bulk updater's
+    UPDATE must re-apply the status__in predicate so an out-of-set row can
+    never be swept. The race is simulated deterministically: the pk snapshot
+    materialises first, then a concurrent actor legally cancels one matched
+    pending order, and only then does the UPDATE run."""
+
+    def test_out_of_set_row_is_never_swept_by_the_bulk_update(self):
+        from django.contrib.admin import site as admin_site
+        from django.contrib.messages.storage.fallback import FallbackStorage
+        from django.db import models as django_models
+        from django.test import RequestFactory
+
+        admin = OrderAdmin(Order, admin_site)
+        staff = self.make_staff()
+        request = RequestFactory().post("/admin/orders/order/")
+        request.user = staff
+        request.session = {}
+        request._messages = FallbackStorage(request)
+
+        victim = Order.objects.create(
+            user=self.make_user("race_buyer"),
+            full_name="V", phone="1", address="a", city="c", state="s",
+            pincode="1", total_amount=Decimal("10.00"),
+        )
+        control = Order.objects.create(
+            user=victim.user,
+            full_name="C", phone="1", address="a", city="c", state="s",
+            pincode="1", total_amount=Decimal("10.00"),
+        )
+
+        class RacingQuerySet(django_models.QuerySet):
+            raced = False
+
+            def values_list(self, *args, **kwargs):
+                pks = list(super().values_list(*args, **kwargs))
+                if not RacingQuerySet.raced:
+                    RacingQuerySet.raced = True
+                    # The interleave: the snapshot above already saw both
+                    # rows pending; the victim flips before the UPDATE runs.
+                    Order.objects.filter(pk=victim.pk).update(status="cancelled")
+                return pks
+
+        admin._bulk_set_status(request, RacingQuerySet(Order), "confirmed")
+
+        victim.refresh_from_db()
+        control.refresh_from_db()
+        self.assertEqual(victim.status, "cancelled")
+        self.assertEqual(control.status, "confirmed")

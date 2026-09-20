@@ -195,7 +195,15 @@ class OrderAdmin(RoleAwareModelAdmin):
         matched_pks = list(
             queryset.filter(status__in=allowed_from).values_list("pk", flat=True)
         )
-        count = queryset.filter(pk__in=matched_pks).update(status=new_status)
+        # SPEC-6-04 audit advisory: the pk snapshot above and this UPDATE are
+        # two statements — a row whose status changes in between (e.g. a
+        # concurrent cancel of a pending order) would still match by pk and
+        # be swept to the new status. Re-applying status__in in the UPDATE's
+        # WHERE clause makes the transition predicate the final authority:
+        # an out-of-set row can never be written, only counted as skipped.
+        count = queryset.filter(
+            pk__in=matched_pks, status__in=allowed_from
+        ).update(status=new_status)
         skipped = queryset.count() - count
         if count:
             self.log_bulk_action(
