@@ -229,7 +229,9 @@ class CurrencyExposureTests(OrderTestBase):
 
         order = self.create_order()
 
-        User.objects.create_superuser("opsboss", "ops@example.com", "S3cure-Passphrase!")
+        User.objects.create_superuser(
+            "opsboss", "ops@example.com", "S3cure-Passphrase!"
+        )
         self.client.login(username="opsboss", password="S3cure-Passphrase!")
         changelist = self.client.get("/admin/orders/order/")
         self.assertEqual(changelist.status_code, 200)
