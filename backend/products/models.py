@@ -27,6 +27,21 @@ class products(models.Model):
     )
     created_at = models.DateTimeField(auto_now_add=True)
 
+    class Meta:
+        # [R-8.17] SPEC-8-05: spec 8.3 "Indexes" starting set for the
+        # catalogue (2551 "Product status and category relationships").
+        # Category is the public listing/filter key, so it gets the explicit
+        # index. The other catalogue prescriptions are covered without new
+        # indexes: slug (2549) is satisfied by unique=True (2479) — its
+        # backing unique index IS the slug lookup index — and the status
+        # half of 2551 is N/A because this table has no lifecycle-status
+        # column (stock health is derived by ``stock_health``, not stored
+        # state). ProductVariant.sku (2553) is likewise satisfied by its
+        # unique constraint (2481).
+        indexes = [
+            models.Index(fields=["category"], name="products_category_idx"),
+        ]
+
     def save(self, *args, **kwargs):
 
         if not self.slug:

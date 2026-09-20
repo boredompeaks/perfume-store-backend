@@ -205,6 +205,29 @@ class Order(models.Model):
         auto_now=True
     )
 
+    class Meta:
+        # [R-8.17] SPEC-8-05: spec 8.3 "Indexes" starting set (2557
+        # "Customer ID and order creation date", newest-first matching the
+        # customer order-history sort; 2567 "Frequently queried status/date
+        # combinations"). The remaining prescribed starting indexes are
+        # satisfied by constraints and deliberately NOT duplicated:
+        # order_number (2555) and the payment provider references
+        # razorpay_order_id / razorpay_payment_id (2559 — no Payment model
+        # exists, the provider references live on this table) each carry
+        # unique=True, whose backing unique index serves those lookups
+        # (PRAGMA index_list origin 'u'), and user_id keeps its FK
+        # auto-index for user-only joins.
+        indexes = [
+            models.Index(
+                fields=['user', '-created_at'],
+                name='orders_user_created_idx',
+            ),
+            models.Index(
+                fields=['status', 'created_at'],
+                name='orders_status_created_idx',
+            ),
+        ]
+
     def __str__(self):
         return f"Order #{self.id} - {self.user.username}"
 

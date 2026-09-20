@@ -353,6 +353,16 @@ Per spec 8.3 "Historical snapshots" (orders must retain what was actually purcha
 - Deferred writers (named pattern lands now, writers with their sections): `fulfilled_at`/`shipped_at`/`delivered_at` → fulfilment sections (SPEC-1-05/SPEC-1-08/S10); `refunded_at` → refund flow (SPEC-6-11); `mark_confirmed` deliberately stamps nothing — an unpaid admin confirmation is not a payment event.
 - Suite: **452 tests, OK (448 pass, 4 pre-existing `expectedFailure` unchanged — ceiling held)**, coverage **100.00%** (1948 stmts, 0 miss — grew from 1938 with the new code), `makemigrations --check` clean.
 
+## 2026-09-20 - SPEC-8-05 (Section 8) - builder: §8.3 "Indexes" starting set — two Order composites + Product category index, everything else satisfied-by-constraint ([R-8.17])
+
+- `orders/models.py` — `Order.Meta.indexes`: `(user, -created_at)` (2557 "Customer ID and order creation date"; newest-first matches the customer order-history sort) and `(status, created_at)` (2567 "Frequently queried status/date combinations") — `orders_user_created_idx` / `orders_status_created_idx`.
+- `products/models.py` — `products.Meta.indexes`: `("category",)` (2551 "Product status and category relationships"; category is the public listing/filter key) — `products_category_idx`. The status half of 2551 is N/A: the products table has no lifecycle-status column (stock health is derived, not stored).
+- Satisfied-by-constraint (documented in model comments; NO duplicate explicit indexes minted): Product slug 2549 ← `unique=True` (2479); ProductVariant SKU 2553 ← `unique=True` (2481, already DB-pinned by `ProductVariantSkuUniquenessTests`); Order number 2555 ← `order_number unique=True` (also the mint concurrency authority); Payment provider reference 2559 ← no Payment model exists, the provider references live on `Order` (`razorpay_order_id` / `razorpay_payment_id`, both `unique=True`). PRAGMA evidence: each column's index is a `sqlite_autoindex` of origin 'u' (unique-constraint-implied); FK single-column auto-indexes keep `user_id`-only joins covered.
+- `orders/migrations/0010_order_orders_user_created_idx_and_more.py` + `products/migrations/0008_products_products_category_idx.py` — pure `AddIndex` operations. Forward + reverse + re-apply verified on a scratch DB via `DATABASE_URL`: unapplying drops exactly the three explicit indexes and leaves constraint-implied autoindexes intact.
+- `orders/tests.py` (+6, `OrderIndexSchemaTests`) / `products/tests.py` (+3, `ProductCatalogIndexSchemaTests`): live-DB `introspection.get_constraints` pins — both composites and the category index exist physically; the Meta sets are pinned exactly so future indexes are conscious edits ("from measured query patterns", 2569); constraint-covered columns (order_number, both razorpay refs, slug) must never grow non-unique duplicate indexes.
+- Schema-only: no view/serializer/admin/settings changes; `orders/views.py` protected regions byte-untouched.
+- Suite: **460 tests, OK (456 pass, 4 pre-existing `expectedFailure` unchanged — ceiling held)**, coverage **100.00%** (1952 stmts, 0 miss — grew from 1948 with the new code), `makemigrations --check` clean.
+
 ## Next (per fix-plan.md)
 
 - Phase 0 remaining: rotate Razorpay keys, add CI.

@@ -1360,3 +1360,95 @@ class BusinessEventTimestampTests(OrderTestBase):
         self.assertEqual(row["id"], order.id)
         for field in self.BUSINESS_FIELDS:
             self.assertIsNone(row[field])  # NULL until the event
+
+
+@tag("orders")
+class OrderIndexSchemaTests(ApiTestCase):
+    """SPEC-8-05: spec 8.3 "Indexes" starting set for orders_order.
+
+    The two prescribed composites (2557 "Customer ID and order creation
+    date", 2567 "Frequently queried status/date combinations") land as
+    explicit Meta.indexes; the order-number (2555) and payment-provider
+    reference (2559) prescriptions stay satisfied by their UNIQUE
+    constraints — a unique constraint already implies a backing index, so
+    minting a second index on those columns would be a duplicate. These
+    pins make both halves conscious: the composites must exist at the DB
+    level, and the constraint-covered columns must not grow duplicates.
+    """
+
+    def _order_constraints(self):
+        with connection.cursor() as cursor:
+            return connection.introspection.get_constraints(
+                cursor, Order._meta.db_table
+            )
+
+    def _explicit_index_columns(self):
+        return [
+            info["columns"]
+            for info in self._order_constraints().values()
+            if info["index"]
+        ]
+
+    def test_meta_declares_exactly_the_spec_starting_composites(self):
+        """The model-level starting set: newest-first per customer (2557)
+        and the status/date combination (2567). Later indexes must come
+        from measured query patterns (2569), i.e. as a conscious edit to
+        this set, never by silent accretion."""
+        declared = {tuple(index.fields) for index in Order._meta.indexes}
+        self.assertEqual(
+            declared,
+            {("user", "-created_at"), ("status", "created_at")},
+        )
+
+    def test_customer_and_creation_date_composite_exists_at_db_level(self):
+        matching = [
+            columns
+            for columns in self._explicit_index_columns()
+            if columns == ["user_id", "created_at"]
+        ]
+        self.assertTrue(
+            matching, "no (user_id, created_at) index on orders_order"
+        )
+
+    def test_status_and_creation_date_composite_exists_at_db_level(self):
+        matching = [
+            columns
+            for columns in self._explicit_index_columns()
+            if columns == ["status", "created_at"]
+        ]
+        self.assertTrue(
+            matching, "no (status, created_at) index on orders_order"
+        )
+
+    def test_order_number_stays_satisfied_by_its_unique_constraint(self):
+        """2555: order_number's covering constraint(s) are all UNIQUE —
+        unique=True already provides the lookup index (and doubles as the
+        IntegrityError concurrency authority for number minting) — so no
+        duplicate explicit index is stacked on top."""
+        covering = [
+            info
+            for info in self._order_constraints().values()
+            if info["columns"] == ["order_number"]
+        ]
+        self.assertTrue(covering, "no constraint on order_number at all")
+        self.assertTrue(
+            all(info["unique"] for info in covering),
+            f"order_number grew a non-unique duplicate index: {covering}",
+        )
+
+    def test_payment_provider_references_stay_constraint_covered(self):
+        """2559: no Payment model exists — the provider references live on
+        Order (razorpay_order_id / razorpay_payment_id), each unique=True,
+        whose backing unique indexes are the prescribed starting indexes."""
+        for column in ("razorpay_order_id", "razorpay_payment_id"):
+            with self.subTest(column=column):
+                covering = [
+                    info
+                    for info in self._order_constraints().values()
+                    if info["columns"] == [column]
+                ]
+                self.assertTrue(covering, f"no constraint on {column}")
+                self.assertTrue(
+                    all(info["unique"] for info in covering),
+                    f"{column} grew a non-unique duplicate index: {covering}",
+                )

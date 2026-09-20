@@ -10,6 +10,7 @@ from decimal import Decimal
 from django.conf import settings
 from django.contrib.auth.models import AnonymousUser, User
 from django.core.files.uploadedfile import SimpleUploadedFile
+from django.db import connection
 from django.test import override_settings, tag
 from rest_framework.exceptions import PermissionDenied
 from rest_framework.request import Request
@@ -950,3 +951,59 @@ class ProductStockEditLedgerGuardTests(ApiTestCase):
         self.assertEqual(movement.delta, 5)
         self.assertEqual(movement.stock_after, 15)
         self.assertEqual(movement.created_by, self.staff)
+
+
+@tag("products")
+class ProductCatalogIndexSchemaTests(ApiTestCase):
+    """SPEC-8-05: spec 8.3 "Indexes" starting set for the catalogue tables.
+
+    2551 ("Product status and category relationships"): category is the
+    public listing/filter key and gets the explicit index. The status half
+    is N/A for this schema — the products table has no lifecycle-status
+    column (stock health is derived by ``stock_health``, not stored state),
+    so there is nothing to index there. Slug (2549) stays satisfied by its
+    UNIQUE constraint (2479) — a unique constraint already implies a
+    backing index; SKU (2553) is equally constraint-covered and already
+    pinned at the DB level by ProductVariantSkuUniquenessTests in
+    test_variant.py. The pins here keep both halves conscious: the
+    category index must exist physically, and slug must not grow a
+    duplicate index on top of its constraint.
+    """
+
+    def _table_constraints(self, model):
+        with connection.cursor() as cursor:
+            return connection.introspection.get_constraints(
+                cursor, model._meta.db_table
+            )
+
+    def test_meta_declares_the_category_index(self):
+        """The model-level starting set. Later catalogue indexes must come
+        from measured query patterns (2569), i.e. as a conscious edit to
+        this set, never by silent accretion."""
+        self.assertEqual(
+            {tuple(index.fields) for index in products._meta.indexes},
+            {("category",)},
+        )
+
+    def test_category_index_exists_at_db_level(self):
+        covering = [
+            info
+            for info in self._table_constraints(products).values()
+            if info["index"] and info["columns"] == ["category"]
+        ]
+        self.assertTrue(covering, "no index on products.category")
+
+    def test_slug_stays_satisfied_by_its_unique_constraint(self):
+        """2549: unique=True on slug (2479) already implies the lookup
+        index the spec asks to start with — the pin rejects any duplicate
+        index stacked on top of the constraint."""
+        covering = [
+            info
+            for info in self._table_constraints(products).values()
+            if info["columns"] == ["slug"]
+        ]
+        self.assertTrue(covering, "no constraint on slug at all")
+        self.assertTrue(
+            all(info["unique"] for info in covering),
+            f"slug grew a non-unique duplicate index: {covering}",
+        )
