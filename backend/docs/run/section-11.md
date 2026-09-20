@@ -4,7 +4,7 @@ Created 2026-09-19 from the S11 compliance prefetch. Spec lines: 3523–3578. Pr
 
 | Task ID | Section | Requirement summary | Spec lines | Status | Attempts |
 |---|---|---|---|---|---|
-| SPEC-11-01 | 11 | DEVIATES [R-11.1]: create_payment writes unique razorpay_order_id check-then-act OUTSIDE transaction.atomic/select_for_update, no IntegrityError retry, no @throttle_scope (orders/views.py:450-512; conventions.md:16,17,24) — wrap generation in atomic + select_for_update on the order, retry on unique-violation instead of check-then-act, add a payment throttle scope + env-driven rate key | 3523–3578 [R-11.1] + conventions.md:16,17,24 | PENDING (from S11 compliance prefetch) | 0 |
+| SPEC-11-01 | 11 | DEVIATES [R-11.1]: create_payment writes unique razorpay_order_id check-then-act OUTSIDE transaction.atomic/select_for_update, no IntegrityError retry, no @throttle_scope (orders/views.py:450-512; conventions.md:16,17,24) — wrap generation in atomic + select_for_update on the order, retry on unique-violation instead of check-then-act, add a payment throttle scope + env-driven rate key | 3523–3578 [R-11.1] + conventions.md:16,17,24 | SHIPPED (FULL 2026-09-21 @ 8fac727, dispatched 2026-09-20: 615=611+4xf cov 100.00% @2462, exit 0; regions 12- declared) | 1 |
 
 Owner attributions (no duplicate tasks):
 - R-11.3 (webhook signature verification), R-11.5 (duplicate webhook deliveries), R-11.6 (delayed payment confirmation), R-11.19 (provider event-ID store with unique constraints + idempotent processing) → **SPEC-1-06**; the webhook handler must carry R-11.16's no-duplicate-dispatch and R-11.18's unique-payment-id upsert properties, and respect SPEC-9-02's /api/v1/ namespace.
@@ -17,3 +17,7 @@ Owner attributions (no duplicate tasks):
 NOT-APPLICABLE (verified, not dodges): R-11.16 (no fulfilment-command pathway exists to duplicate; re-entry gate views.py:585-589 is the future hook) and R-11.17 (no refund capability exists; constraint recorded as a requirement of SPEC-1-05).
 
 Convention findings: create_payment atomicity/throttle breaches (→ SPEC-11-01); Decimal end-to-end COMPLIANT (paise conversion exact for 2-dp DecimalField — section-10's truncation precaution verified non-issue on this path); verify-path atomic+select_for_update COMPLIANT; env-driven config COMPLIANT (no RAZORPAY_WEBHOOK_SECRET key yet — required by SPEC-1-06); serializers explicit COMPLIANT; Razorpay fully mocked COMPLIANT. Cosmetic P3: Black would reflow orders/urls.py:38-42 and config/urls.py:30-38 — align when touched (conventions.md:3).
+
+S11 queue COMPLETE 2026-09-21 — SPEC-11-01 SHIPPED @ 8fac727; the section-boundary gate opens (RE exclusive).
+
+P3 advisory 2026-09-21 (auditor, non-blocking): verify_payment carries no throttle scope — R-11.1's ledger row scopes create_payment only and §11 (3523–3578) has no throttle bullet; conventions.md:24 repo-wide sweep item for a later loop.

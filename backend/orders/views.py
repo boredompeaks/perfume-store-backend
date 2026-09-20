@@ -220,6 +220,13 @@ def _find_duplicate_pending_order(user, cart_items, coupon, payload):
 # whole checkout transaction rolls back) instead of looping forever.
 ORDER_NUMBER_ATTEMPTS = 5
 
+# [R-11.1] SPEC-11-01: the payment-intent persistence carries the same shape
+# of safety net. The unique constraint on razorpay_order_id is the
+# concurrency authority; the bounded loop only converts a lost race into a
+# reuse of the winner's committed id (one retry converges -- the collision
+# window is a single write), and exhaustion fails loudly instead of looping.
+PAYMENT_INTENT_ATTEMPTS = 3
+
 
 def _current_year():
     """The order-number year bucket: the sequence restarts each January 1st
@@ -839,6 +846,7 @@ def apply_coupon(request):
 
 @api_view(['POST'])
 @permission_classes([IsAuthenticated])
+@throttle_scope('payment')
 def create_payment(request):
 
     order_id = request.data.get('order_id')
@@ -906,18 +914,40 @@ def create_payment(request):
         # event: the intent and its trail row commit together, so a crash
         # between the two cannot leave an intent the trail never saw. The
         # reuse path above writes nothing, so it emits nothing.
-        with transaction.atomic():
-            order.razorpay_order_id = razorpay_order_id
-            order.save(update_fields=['razorpay_order_id'])
-            AuditEvent.record(
-                AuditEvent.EventType.PAYMENT_INITIATED,
-                actor=request.user,
-                order=order,
-                detail={
-                    "razorpay_order_id": razorpay_order_id,
-                    "amount_paise": amount,
-                },
-            )
+        # [SPEC-11-01] conventions.md:16,17 -- the pre-check above is an
+        # unlocked read, not the concurrency authority. The row is
+        # re-fetched under select_for_update inside the atomic block, so
+        # the loser of a race reuses the winner's committed id instead of
+        # double-writing, and the unique constraint on razorpay_order_id
+        # stays the last-resort authority: a violated write retries rather
+        # than surfacing a 500 (that retry, like the reuse path, emits
+        # nothing of its own).
+        for attempt in range(PAYMENT_INTENT_ATTEMPTS):
+            try:
+                with transaction.atomic():
+                    locked = Order.objects.select_for_update().get(pk=order.pk)
+                    if locked.razorpay_order_id:
+                        razorpay_order_id = locked.razorpay_order_id
+                        break
+                    locked.razorpay_order_id = razorpay_order_id
+                    locked.save(update_fields=['razorpay_order_id'])
+                    AuditEvent.record(
+                        AuditEvent.EventType.PAYMENT_INITIATED,
+                        actor=request.user,
+                        order=locked,
+                        detail={
+                            "razorpay_order_id": razorpay_order_id,
+                            "amount_paise": amount,
+                        },
+                    )
+                break
+            except IntegrityError:
+                # The savepoint above rolled the violated write back, so
+                # the next turn starts from committed state. The bound is a
+                # safety net, not the expected path: one retry converges.
+                if attempt == PAYMENT_INTENT_ATTEMPTS - 1:
+                    raise
+                continue
 
     return Response({
         "order_id": order.id,
