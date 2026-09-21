@@ -26,8 +26,17 @@ from rest_framework.test import APIClient
 
 import razorpay
 
+from accounts.models import TOTPDevice
+from common import totp
+from common.permissions import is_privileged
+
 TEST_RAZORPAY_KEY_ID = "rzp_test_TESTINGONLYDO NOTUSE"
 TEST_RAZORPAY_KEY_SECRET = "TESTINGONLYSECRET-DO-NOT-USE"
+# Fixture TOTP secret (the RFC 6238 vector key, recognizably not a real
+# credential): api_login enrolls it for privileged users so the suite's
+# staff logins keep working under mandatory MFA (SPEC-17-05) without every
+# fixture growing device-setup code.
+TEST_TOTP_SECRET = "GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ"
 # Test uploads must never land in the developer's real media/ directory.
 TEST_MEDIA_ROOT = Path(mkdtemp(prefix="perfume-tests-media-"))
 
@@ -136,13 +145,37 @@ class ApiTestCase(TestCase):
 
     def api_login(self, username="buyer", password="S3cure-Passphrase!", client=None):
         """POST /api/accounts/login/ and attach the returned access token to
-        the client that performed the login (default: self.client)."""
+        the client that performed the login (default: self.client).
+
+        SPEC-17-05: privileged users (superusers / staff.manage holders)
+        cannot log in without a valid TOTP code, so the helper lazily
+        ensures the fixture device exists and attaches a fresh code for the
+        current step. The replay watermark is rewound one step first so the
+        code is always acceptable even when an earlier login in the same
+        30-second step already consumed it — that guard is production
+        behaviour being deliberately accommodated, not bypassed."""
         target = client or self.client
-        res = target.post(
-            "/api/accounts/login/",
-            {"username": username, "password": password},
-            format="json",
-        )
+        payload = {"username": username, "password": password}
+        user = User.objects.filter(username=username).first()
+        if user is not None and is_privileged(user):
+            device = TOTPDevice.objects.filter(
+                user=user, enabled=True, confirmed_at__isnull=False
+            ).first()
+            if device is None:
+                device, _ = TOTPDevice.objects.update_or_create(
+                    user=user,
+                    defaults={
+                        "secret": TEST_TOTP_SECRET,
+                        "enabled": True,
+                        "confirmed_at": timezone.now(),
+                        "last_used_counter": None,
+                    },
+                )
+            counter = totp.now() // totp.STEP
+            device.last_used_counter = counter - 1
+            device.save(update_fields=["last_used_counter"])
+            payload["totp"] = totp.totp(device.secret, counter * totp.STEP)
+        res = target.post("/api/accounts/login/", payload, format="json")
         token = res.data.get("access") if res.status_code == 200 else None
         if token:
             target.credentials(HTTP_AUTHORIZATION=f"Bearer {token}")

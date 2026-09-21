@@ -12,18 +12,25 @@ from rest_framework_simplejwt.token_blacklist.models import (
     OutstandingToken,
 )
 from rest_framework_simplejwt.views import TokenObtainPairView, TokenRefreshView
+from django.contrib.auth import authenticate
 from django.contrib.auth.models import User
 from django.conf import settings
 from django.contrib.auth.tokens import default_token_generator
 from django.contrib.auth.password_validation import validate_password
 from django.core.exceptions import ValidationError
 from django.db import transaction
+from django.utils import timezone
 from django.utils.encoding import force_bytes, force_str
 from django.utils.http import urlsafe_base64_encode, urlsafe_base64_decode
 
-from common import notifications
+from common import notifications, totp
 from common.models import AuditEvent
-from .serializers import RegisterSerializer
+from common.permissions import IsPrivilegedRole, is_privileged
+from .models import (
+    MFA_CODE_INVALID,
+    TOTPDevice,
+)
+from .serializers import MFATokenObtainPairSerializer, RegisterSerializer
 
 
 class LoginView(TokenObtainPairView):
@@ -35,9 +42,16 @@ class LoginView(TokenObtainPairView):
     cannot read it (spec §17.1). [R-7.20] successful (200) and rejected
     (400/401) attempts each land an audit event; 429 refusals are raised by
     throttling before this view runs, so they are the rate limit doing its
-    job, not an authentication outcome, and write nothing."""
+    job, not an authentication outcome, and write nothing.
+
+    SPEC-17-05 [R-17.9]: the serializer is the MFA-aware subclass —
+    privileged-role users must present a valid TOTP code (or enroll first),
+    and those rejections raise here too, so they are audited as failed
+    logins without any code path that mints tokens skipping the factor.
+    """
 
     throttle_scope = 'auth'
+    serializer_class = MFATokenObtainPairSerializer
 
     def post(self, request, *args, **kwargs):
         try:
@@ -411,3 +425,228 @@ def reset_password(request):
             detail={"username": user.username},
         )
     return Response({'message': 'Password reset successfully. You can now log in.'})
+
+
+# --- SPEC-17-05 [R-17.9]: TOTP enrollment for privileged roles ------------
+# All four endpoints are IsPrivilegedRole-gated: exactly the population
+# enforcement blocks at login may enroll/status/disable. The 'auth' scope
+# bounds brute-forcing the 6-digit code space like every other identity
+# flow. Secrets leave the server exactly once (setup response) and never
+# again; nothing below returns or logs one.
+
+
+def _body_value(request, key):
+    # request.data may be any parsed JSON (a list body has no .get) — the
+    # same defensive shape LoginView._record_login already uses.
+    payload = request.data if isinstance(request.data, dict) else {}
+    return payload.get(key)
+
+
+def _authorize_enrollment(request):
+    """Shared setup/confirm gate: privileged JWT caller, or the credential
+    bootstrap while no device is active (see MFASetupView). Returns the
+    target user, or an error response."""
+    user = request.user
+    if not user.is_authenticated:
+        payload = request.data if isinstance(request.data, dict) else {}
+        user = authenticate(
+            request=request,
+            username=str(payload.get("username", "") or ""),
+            password=str(payload.get("password", "") or ""),
+        )
+        if user is None:
+            # Uniform rejection: no signal whether username, password or
+            # both were wrong.
+            return None, Response(
+                {"error": "Invalid credentials."},
+                status=status.HTTP_401_UNAUTHORIZED,
+            )
+        if TOTPDevice.active_for(user) is not None:
+            # The bootstrap window is over once a device is active:
+            # credentials alone must never reach an enrolled account.
+            return None, Response(
+                {
+                    "error": "A device is already enrolled. Sign in and use "
+                    "the authenticated setup path."
+                },
+                status=status.HTTP_403_FORBIDDEN,
+            )
+    if not is_privileged(user):
+        return None, Response(
+            {"error": IsPrivilegedRole.message},
+            status=status.HTTP_403_FORBIDDEN,
+        )
+    return user, None
+
+
+def _consume_code(device, code):
+    """Verify `code` against `device` and persist the replay watermark.
+
+    Returns the matched counter, or None when the code is wrong/expired/
+    replayed — in which case nothing is written.
+    """
+    counter = totp.verify_code(
+        device.secret,
+        code,
+        at_time=totp.now(),
+        last_used_counter=device.last_used_counter,
+    )
+    if counter is not None:
+        device.last_used_counter = counter
+        device.save(update_fields=["last_used_counter"])
+    return counter
+
+
+class MFAStatusView(APIView):
+    """GET /api/accounts/mfa/status/ — {enabled} only, never the secret."""
+
+    permission_classes = [IsPrivilegedRole]
+    # The accounts URLConf wiring guard requires a scope on every route;
+    # 'auth' matches the sibling MFA endpoints (this one is read-only, but
+    # the budget also bounds enabled-state probing).
+    throttle_scope = 'auth'
+
+    def get(self, request):
+        return Response({"enabled": TOTPDevice.active_for(request.user) is not None})
+
+
+class MFASetupView(APIView):
+    """POST /api/accounts/mfa/setup/ — mint a fresh secret, shown once.
+
+    Returns the base32 secret and the otpauth:// URI for the user's
+    authenticator app (a URI string, not a QR image — R-17.9 demands the
+    factor, not an artefact). Two deliberate trust paths:
+
+    - JWT session (privileged): steady-state path. Re-enrolling while a
+      device is enabled must also re-prove the second factor with ``code``
+      — a session thief who could re-enroll freely would own the new
+      secret.
+    - Credential bootstrap (anonymous): the rollout path that keeps
+      blocked-at-login enforcement reachable. A privileged account with no
+      active device can never obtain a JWT (login demands the factor it
+      does not have yet), so setup additionally accepts username+password
+      — exactly the first-factor-enrollment window every mainstream
+      authenticator flow grants a password-proven identity. Once a device
+      is active this path closes: credentials alone never touch an
+      enrolled account (that is the whole point of the factor), and the
+      'auth' throttle bounds the credential attempts.
+
+    The fresh row starts unconfirmed and disabled; nothing changes until a
+    valid confirm.
+    """
+
+    permission_classes = []
+    throttle_scope = 'auth'
+
+    def post(self, request):
+        user, error = _authorize_enrollment(request)
+        if error is not None:
+            return error
+        current = TOTPDevice.objects.filter(user=user).first()
+        if current is not None and current.enabled:
+            if _consume_code(current, _body_value(request, "code")) is None:
+                return Response(
+                    {"code": [MFA_CODE_INVALID]}, status=status.HTTP_400_BAD_REQUEST
+                )
+        with transaction.atomic():
+            # get_or_create (IntegrityError-retrying) then overwrite: the
+            # row is keyed by the OneToOne user, and setup always mints a
+            # fresh secret — never reuses a stale one.
+            device, _ = TOTPDevice.objects.get_or_create(user=user)
+            device.secret = totp.generate_secret()
+            device.enabled = False
+            device.confirmed_at = None
+            device.last_used_counter = None
+            device.save(
+                update_fields=[
+                    "secret",
+                    "enabled",
+                    "confirmed_at",
+                    "last_used_counter",
+                ]
+            )
+        return Response(
+            {
+                "secret": device.secret,
+                "otpauth_uri": totp.otpauth_uri(device.secret, user.username),
+            }
+        )
+
+
+class MFAConfirmView(APIView):
+    """POST /api/accounts/mfa/confirm/ {code} — verify + enable the device.
+
+    Shares the setup view's dual trust path: the bootstrapped user still
+    holds no JWT (their device is unconfirmed, so login keeps refusing),
+    so confirm accepts the same credential proof while no device is
+    active. Only a pending (unconfirmed, disabled) device can be
+    confirmed, so a valid code flips enabled for exactly the secret the
+    user just enrolled and never for a still-active previous one.
+    """
+
+    permission_classes = []
+    throttle_scope = 'auth'
+
+    def post(self, request):
+        user, error = _authorize_enrollment(request)
+        if error is not None:
+            return error
+        device = TOTPDevice.objects.filter(
+            user=user, enabled=False, confirmed_at__isnull=True
+        ).first()
+        if device is None:
+            return Response(
+                {"code": ["No pending MFA enrollment. Request a setup first."]},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        counter = totp.verify_code(
+            device.secret,
+            _body_value(request, "code"),
+            at_time=totp.now(),
+            last_used_counter=device.last_used_counter,
+        )
+        if counter is None:
+            return Response(
+                {"code": [MFA_CODE_INVALID]}, status=status.HTTP_400_BAD_REQUEST
+            )
+        with transaction.atomic():
+            device.confirmed_at = timezone.now()
+            device.enabled = True
+            device.last_used_counter = counter
+            device.save(
+                update_fields=["confirmed_at", "enabled", "last_used_counter"]
+            )
+        return Response({"enabled": True})
+
+
+class MFADisableView(APIView):
+    """POST /api/accounts/mfa/disable/ {code} — turn MFA off.
+
+    Spec text is silent on the disable guard; the second factor is chosen
+    and declared: disabling requires a valid code from the enabled device,
+    so a stolen session or password alone cannot strip the factor (the
+    lost-device recovery path is an ops concern R-17.9 does not name).
+    The row survives (enrollment history) but the secret is dead for
+    verification; re-enrollment mints a fresh one.
+    """
+
+    permission_classes = [IsPrivilegedRole]
+    throttle_scope = 'auth'
+
+    def post(self, request):
+        device = TOTPDevice.objects.filter(
+            user=request.user, enabled=True, confirmed_at__isnull=False
+        ).first()
+        if device is None:
+            return Response(
+                {"code": ["Multi-factor authentication is not enabled."]},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        if _consume_code(device, _body_value(request, "code")) is None:
+            return Response(
+                {"code": [MFA_CODE_INVALID]}, status=status.HTTP_400_BAD_REQUEST
+            )
+        with transaction.atomic():
+            device.enabled = False
+            device.save(update_fields=["enabled"])
+        return Response({"enabled": False})

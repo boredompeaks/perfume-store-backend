@@ -22,7 +22,7 @@ type AuthStatus = "loading" | "authenticated" | "anonymous";
 type AuthContextValue = {
   status: AuthStatus;
   userId: number | null;
-  login: (username: string, password: string) => Promise<void>;
+  login: (username: string, password: string, totp?: string) => Promise<void>;
   logout: () => void;
 };
 
@@ -52,18 +52,25 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     });
   }, []);
 
-  const login = useCallback(async (username: string, password: string) => {
-    // The login response carries only the access token: the refresh token
-    // is set as an HttpOnly cookie by the backend (R-17.12) and never
-    // enters JS-readable storage.
-    const data = await apiFetch<{ access: string }>(
-      "/api/accounts/login/",
-      { method: "POST", body: { username, password } },
-    );
-    setTokens(data.access);
-    setUserId(decodeJwtUserId(data.access));
-    setStatus("authenticated");
-  }, []);
+  const login = useCallback(
+    async (username: string, password: string, totp?: string) => {
+      // The login response carries only the access token: the refresh token
+      // is set as an HttpOnly cookie by the backend (R-17.12) and never
+      // enters JS-readable storage. totp rides along only when provided —
+      // the backend demands it for privileged roles (SPEC-17-05, R-17.9).
+      const data = await apiFetch<{ access: string }>(
+        "/api/accounts/login/",
+        {
+          method: "POST",
+          body: totp ? { username, password, totp } : { username, password },
+        },
+      );
+      setTokens(data.access);
+      setUserId(decodeJwtUserId(data.access));
+      setStatus("authenticated");
+    },
+    [],
+  );
 
   const logout = useCallback(() => {
     // The refresh token lives only in an HttpOnly cookie, so the backend

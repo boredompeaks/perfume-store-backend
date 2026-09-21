@@ -48,7 +48,11 @@ if not DEBUG and not os.getenv('DJANGO_SECRET_KEY'):
 # Application definition
 
 INSTALLED_APPS = [
-    'django.contrib.admin',
+    # SPEC-17-05 [R-17.9]: the MFAAdminConfig subclass swaps the default
+    # admin site for one whose login form requires a TOTP code from
+    # privileged roles — same app (label 'admin'), same registration flow,
+    # one enforcement surface added at the admin door.
+    'config.admin.MFAAdminConfig',
     'django.contrib.auth',
     'django.contrib.contenttypes',
     'django.contrib.sessions',

@@ -551,6 +551,13 @@ class AuthThrottleTests(ApiTestCase):
             "login": "auth",
             "token-refresh": "auth",
             "logout": "auth",
+            # SPEC-17-05: the MFA enrollment surface rides the same 'auth'
+            # budget as the other identity flows (setup/confirm/disable
+            # accept codes, status bounds enabled-state probing).
+            "mfa-status": "auth",
+            "mfa-setup": "auth",
+            "mfa-confirm": "auth",
+            "mfa-disable": "auth",
         }
         found = {}
         for pattern in account_urlpatterns:
