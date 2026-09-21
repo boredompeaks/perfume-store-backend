@@ -39,17 +39,28 @@ def run_settings_import(env_overrides, snippet="import config.settings; print('I
 
 
 class DebugDefaultTests(SimpleTestCase):
-    def test_v02_debug_fails_open_currently(self):
-        """V-02: a missing DJANGO_DEBUG env var currently enables DEBUG
-        (fail-open). Pinned via subprocess because the test runner itself
-        forces DEBUG=False in-process. Flip to assert False when the default
-        flips to fail-closed."""
+    def test_v02_debug_fails_closed_by_default(self):
+        """V-02 (fixed): a missing DJANGO_DEBUG env var disables DEBUG
+        (fail-closed) — an unconfigured deployment lands in the hardened
+        configuration, never in verbose/leaky debug mode. Pinned via
+        subprocess because the test runner itself forces DEBUG=False
+        in-process; DJANGO_SECRET_KEY is provided so the import clears the
+        (now-active) DEBUG-false guard and the default itself is observed."""
         res = run_settings_import(
-            {},
+            {"DJANGO_SECRET_KEY": "x" * 50},
             snippet="import config.settings as s; print('DEBUG_IS', s.DEBUG)",
         )
         self.assertEqual(res.returncode, 0, res.stderr)
-        self.assertIn("DEBUG_IS True", res.stdout)
+        self.assertIn("DEBUG_IS False", res.stdout)
+
+    def test_v02_debug_absent_and_secret_absent_is_refused(self):
+        """The default is observed through the guard: the DEBUG-false
+        SECRET_KEY guard refuses to boot when DJANGO_DEBUG is absent —
+        which only happens if the default flipped to fail-closed (under a
+        fail-open True default the import would succeed unrefused)."""
+        res = run_settings_import({})
+        self.assertNotEqual(res.returncode, 0, res.stdout)
+        self.assertIn("DJANGO_SECRET_KEY", res.stderr)
 
 
 class SimpleJwtConfigTests(SimpleTestCase):
@@ -224,11 +235,18 @@ class DatabaseUrlParsingTests(SimpleTestCase):
 class DatabaseUrlImportTests(SimpleTestCase):
     """Import-time behaviour: DATABASE_URL drives DATABASES, and no value
     for it — not even a malformed one — may crash settings import.
+
+    Since V-02 flipped DEBUG to fail-closed, a clean-environment settings
+    import needs DJANGO_SECRET_KEY to clear the DEBUG-false guard, so each
+    subprocess here boots with a development key (the tests' subject is
+    DATABASE_URL parsing, not the DEBUG guard, which has its own class).
     """
+
+    _BOOT_ENV = {"DJANGO_SECRET_KEY": "x" * 50}
 
     def test_missing_database_url_imports_with_sqlite_default(self):
         res = run_settings_import(
-            {},
+            dict(self._BOOT_ENV),
             snippet=(
                 "import config.settings as s; "
                 "d = s.DATABASES['default']; "
@@ -244,7 +262,7 @@ class DatabaseUrlImportTests(SimpleTestCase):
 
     def test_postgres_database_url_selects_postgres_engine(self):
         res = run_settings_import(
-            {"DATABASE_URL": "postgres://u:p@h:5432/db"},
+            {**self._BOOT_ENV, "DATABASE_URL": "postgres://u:p@h:5432/db"},
             snippet=(
                 "import config.settings as s; "
                 "d = s.DATABASES['default']; "
@@ -259,7 +277,7 @@ class DatabaseUrlImportTests(SimpleTestCase):
 
     def test_malformed_database_url_imports_without_crashing(self):
         res = run_settings_import(
-            {"DATABASE_URL": "postgres://u@h:notaport/db"},
+            {**self._BOOT_ENV, "DATABASE_URL": "postgres://u@h:notaport/db"},
             snippet=(
                 "import config.settings as s; "
                 "print('ENGINE', s.DATABASES['default']['ENGINE'])"
@@ -270,7 +288,7 @@ class DatabaseUrlImportTests(SimpleTestCase):
 
     def test_unsupported_scheme_imports_without_crashing(self):
         res = run_settings_import(
-            {"DATABASE_URL": "mysql://u:p@h/db"},
+            {**self._BOOT_ENV, "DATABASE_URL": "mysql://u:p@h/db"},
             snippet=(
                 "import config.settings as s; "
                 "print('ENGINE', s.DATABASES['default']['ENGINE'])"
