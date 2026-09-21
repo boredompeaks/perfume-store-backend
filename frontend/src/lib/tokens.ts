@@ -1,4 +1,5 @@
 import { API_BASE } from "./config";
+import { csrfTokenFromCookie } from "./api";
 
 /**
  * Refresh-token storage contract (SPEC-17-02, R-17.12): the refresh token
@@ -65,9 +66,17 @@ async function doRefresh(): Promise<string | null> {
     // No token in the body: the backend reads its own HttpOnly cookie and
     // answers with the new access token (rotation re-sets the cookie
     // server-side). The auth-throttled endpoint also bounds this call.
+    // The CSRF header rides along (SPEC-17-03): a browser that built a
+    // guest cart sends its sessionid cookie on this POST too, so the
+    // backend's CSRF gate applies to it exactly like any other mutation.
+    const headers: Record<string, string> = {
+      "Content-Type": "application/json",
+    };
+    const csrfToken = csrfTokenFromCookie();
+    if (csrfToken) headers["X-CSRFToken"] = csrfToken;
     const res = await fetch(`${API_BASE}/api/accounts/token/refresh/`, {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers,
       credentials: "include",
       body: JSON.stringify({}),
     });

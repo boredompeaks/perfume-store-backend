@@ -157,3 +157,66 @@ describe("apiFetch silent refresh", () => {
     expect(err.extras?.minimum_order_amount).toBe("500.00");
   });
 });
+
+describe("CSRF header on mutations (SPEC-17-03, R-17.18)", () => {
+  /**
+   * The backend's SessionCartCSRFAuthentication gate requires the
+   * double-submit pair on every session-cookie mutation: the browser
+   * sends the csrftoken cookie itself, the SPA must send the matching
+   * X-CSRFToken header — read from the cookie, never invented.
+   */
+  function stubDocument(cookie: string) {
+    vi.stubGlobal("document", { cookie });
+  }
+
+  it("mutations attach X-CSRFToken read from the csrftoken cookie", async () => {
+    stubDocument("csrftoken=tok-123; sessionid=abc");
+    let headers: Record<string, string> = {};
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (_input: string | URL | Request, init?: RequestInit) => {
+        headers = (init?.headers ?? {}) as Record<string, string>;
+        return jsonResponse({});
+      }),
+    );
+    const { apiFetch } = await import("./api");
+
+    await apiFetch("/api/cart/", { method: "POST", body: { quantity: 1 } });
+
+    expect(headers["X-CSRFToken"]).toBe("tok-123");
+  });
+
+  it("safe methods never send the header", async () => {
+    stubDocument("csrftoken=tok-123");
+    let headers: Record<string, string> = {};
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (_input: string | URL | Request, init?: RequestInit) => {
+        headers = (init?.headers ?? {}) as Record<string, string>;
+        return jsonResponse({});
+      }),
+    );
+    const { apiFetch } = await import("./api");
+
+    await apiFetch("/api/cart/");
+
+    expect(headers["X-CSRFToken"]).toBeUndefined();
+  });
+
+  it("no csrftoken cookie means no header, not a fake one", async () => {
+    stubDocument("sessionid=abc");
+    let headers: Record<string, string> = {};
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (_input: string | URL | Request, init?: RequestInit) => {
+        headers = (init?.headers ?? {}) as Record<string, string>;
+        return jsonResponse({});
+      }),
+    );
+    const { apiFetch } = await import("./api");
+
+    await apiFetch("/api/cart/", { method: "DELETE" });
+
+    expect(headers["X-CSRFToken"]).toBeUndefined();
+  });
+});

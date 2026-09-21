@@ -123,6 +123,36 @@ class SimpleJwtConfigTests(SimpleTestCase):
         )
 
 
+class SessionCookieConfigTests(SimpleTestCase):
+    """SPEC-17-03 [R-17.18]: the cart session cookie's SameSite policy is
+    explicit deployment config, defaulting to Lax — the same reading as the
+    JWT refresh cookie (SPEC-17-02): cross-site POSTs cannot attach the
+    cookie, same-site navigation keeps the cart working. Import-time
+    setting, so pinned via the subprocess pattern like every env knob."""
+
+    def test_missing_env_yields_the_lax_default(self):
+        res = run_settings_import(
+            {"DJANGO_SECRET_KEY": "x" * 50},
+            snippet=(
+                "import config.settings as s; "
+                "print('SAMESITE', s.SESSION_COOKIE_SAMESITE)"
+            ),
+        )
+        self.assertEqual(res.returncode, 0, res.stderr)
+        self.assertIn("SAMESITE Lax", res.stdout)
+
+    def test_env_overrides_the_samesite_policy(self):
+        res = run_settings_import(
+            {"DJANGO_SECRET_KEY": "x" * 50, "SESSION_COOKIE_SAMESITE": "Strict"},
+            snippet=(
+                "import config.settings as s; "
+                "print('SAMESITE', s.SESSION_COOKIE_SAMESITE)"
+            ),
+        )
+        self.assertEqual(res.returncode, 0, res.stderr)
+        self.assertIn("SAMESITE Strict", res.stdout)
+
+
 class SettingsGuardTests(SimpleTestCase):
     def test_v02_debug_false_without_secret_key_is_refused(self):
         res = run_settings_import({"DJANGO_DEBUG": "false"})

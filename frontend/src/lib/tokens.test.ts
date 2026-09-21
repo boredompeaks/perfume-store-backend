@@ -144,3 +144,44 @@ describe("token store", () => {
     expect(tokens.decodeJwtUserId("garbage")).toBeNull();
   });
 });
+
+describe("refresh and the CSRF gate (SPEC-17-03, R-17.18)", () => {
+  it("refresh replays the csrftoken cookie as X-CSRFToken", async () => {
+    // A browser that built a guest cart sends its sessionid cookie on the
+    // refresh POST too, so the backend CSRF gate applies: the header must
+    // ride along, read from the same cookie the SPA's apiFetch uses.
+    vi.stubGlobal("document", { cookie: "csrftoken=tok-123; other=1" });
+    let headers: Record<string, string> = {};
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (_input: string | URL | Request, init?: RequestInit) => {
+        headers = (init?.headers ?? {}) as Record<string, string>;
+        return jsonResponse({ access: "access-2" });
+      }),
+    );
+    const tokens = await import("./tokens");
+
+    const refreshed = await tokens.refreshAccessToken();
+
+    expect(refreshed).toBe("access-2");
+    expect(headers["X-CSRFToken"]).toBe("tok-123");
+  });
+
+  it("refresh sends no CSRF header when no csrftoken cookie exists", async () => {
+    vi.stubGlobal("document", { cookie: "other=1" });
+    let headers: Record<string, string> = {};
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (_input: string | URL | Request, init?: RequestInit) => {
+        headers = (init?.headers ?? {}) as Record<string, string>;
+        return jsonResponse({ access: "access-2" });
+      }),
+    );
+    const tokens = await import("./tokens");
+
+    const refreshed = await tokens.refreshAccessToken();
+
+    expect(refreshed).toBe("access-2");
+    expect(headers["X-CSRFToken"]).toBeUndefined();
+  });
+});

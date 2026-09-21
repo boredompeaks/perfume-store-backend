@@ -312,6 +312,14 @@ DEFAULT_CURRENCY = _env_currency('DEFAULT_CURRENCY', 'INR')
 REST_FRAMEWORK = {
     'DEFAULT_AUTHENTICATION_CLASSES': (
         'rest_framework_simplejwt.authentication.JWTAuthentication',
+        # SPEC-17-03 [R-17.18]: CSRF gate for session-cookie mutations,
+        # AFTER the JWT authenticator so bearer-authenticated requests
+        # (checkout) short-circuit the chain and gain no CSRF friction —
+        # an Authorization header cannot be attached cross-site. Every
+        # request that does ride the session cookie (guest carts, session
+        # logins) is CSRF-checked on unsafe methods; cart_detail's GET
+        # issues the csrftoken cookie the SPA replays as X-CSRFToken.
+        'common.authentication.SessionCartCSRFAuthentication',
     ),
     # Scoped throttling: every public mutating endpoint opts in by declaring
     # a `throttle_scope`; views without a scope are left unthrottled by this
@@ -367,6 +375,14 @@ SIMPLE_JWT = {
 JWT_REFRESH_COOKIE_NAME = os.getenv('JWT_REFRESH_COOKIE_NAME', 'refresh_token')
 JWT_REFRESH_COOKIE_PATH = os.getenv('JWT_REFRESH_COOKIE_PATH', '/api/')
 JWT_REFRESH_COOKIE_SAMESITE = os.getenv('JWT_REFRESH_COOKIE_SAMESITE', 'Lax')
+
+# SPEC-17-03 [R-17.18]: the session cookie carries the cart identity, so
+# its SameSite policy is explicit deployment config rather than an implicit
+# Django default. Lax matches the JWT refresh cookie's reading (17-02):
+# cross-site POSTs cannot attach it, while same-site navigation keeps the
+# cart working. Server-side CSRF enforcement (SessionCartCSRFAuthentication
+# above) is the actual gate — this is the same-site belt to its braces.
+SESSION_COOKIE_SAMESITE = os.getenv('SESSION_COOKIE_SAMESITE', 'Lax')
 
 CORS_ALLOWED_ORIGINS = [origin for origin in os.getenv(
     'CORS_ALLOWED_ORIGINS', 'http://localhost:3000'
