@@ -1,6 +1,15 @@
 import { API_BASE } from "./config";
 
-const REFRESH_STORAGE_KEY = "aurel.refresh";
+/**
+ * Refresh-token storage contract (SPEC-17-02, R-17.12): the refresh token
+ * never enters JS-readable storage — the backend sets it as an HttpOnly
+ * cookie scoped to /api/ and reads it back on refresh/logout. Only the
+ * short-lived access token is held here, in memory. "aurel.session" is a
+ * NON-SECRET boolean hint that a refresh cookie may exist; it gates the
+ * boot-time refresh probe so anonymous page loads don't burn the 'auth'
+ * throttle budget. It must never hold a token.
+ */
+const SESSION_HINT_KEY = "aurel.session";
 
 let accessToken: string | null = null;
 let refreshInFlight: Promise<string | null> | null = null;
@@ -9,31 +18,35 @@ export function getAccessToken(): string | null {
   return accessToken;
 }
 
-export function setTokens(access: string, refresh?: string): void {
+/** Memory-only by design: no token value is ever persisted. */
+export function setTokens(access: string): void {
   accessToken = access;
-  if (refresh) {
-    try {
-      localStorage.setItem(REFRESH_STORAGE_KEY, refresh);
-    } catch {
-      // Storage unavailable (private mode) — session-only auth.
-    }
-  }
+  markSession();
 }
 
 export function clearTokens(): void {
   accessToken = null;
   try {
-    localStorage.removeItem(REFRESH_STORAGE_KEY);
+    localStorage.removeItem(SESSION_HINT_KEY);
   } catch {
     // ignore
   }
 }
 
-export function getStoredRefreshToken(): string | null {
+/** Non-secret hint that the backend may have set a refresh cookie. */
+export function hasSessionHint(): boolean {
   try {
-    return localStorage.getItem(REFRESH_STORAGE_KEY);
+    return localStorage.getItem(SESSION_HINT_KEY) === "1";
   } catch {
-    return null;
+    return false;
+  }
+}
+
+function markSession(): void {
+  try {
+    localStorage.setItem(SESSION_HINT_KEY, "1");
+  } catch {
+    // Storage unavailable (private mode) — session-only auth.
   }
 }
 
@@ -48,19 +61,26 @@ export function refreshAccessToken(): Promise<string | null> {
 }
 
 async function doRefresh(): Promise<string | null> {
-  const refresh = getStoredRefreshToken();
-  if (!refresh) return null;
   try {
+    // No token in the body: the backend reads its own HttpOnly cookie and
+    // answers with the new access token (rotation re-sets the cookie
+    // server-side). The auth-throttled endpoint also bounds this call.
     const res = await fetch(`${API_BASE}/api/accounts/token/refresh/`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       credentials: "include",
-      body: JSON.stringify({ refresh }),
+      body: JSON.stringify({}),
     });
-    if (!res.ok) return null;
+    if (!res.ok) {
+      // The server rejected the session (dead/expired cookie): the hint is
+      // a lie now — clear it. Transient network failures keep state.
+      clearTokens();
+      return null;
+    }
     const data = (await res.json()) as { access?: string };
     if (!data.access) return null;
     accessToken = data.access;
+    markSession();
     return data.access;
   } catch {
     return null;

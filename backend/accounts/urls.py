@@ -3,20 +3,8 @@ from django.urls import path
 from .views import (
     register, username_available, verify_email, resend_verification,
     forgot_username, request_password_reset, reset_password, LoginView,
-    LogoutView,
+    LogoutView, RefreshView,
 )
-from rest_framework_simplejwt.views import (
-    TokenRefreshView,
-)
-
-
-class RefreshView(TokenRefreshView):
-    """JWT refresh behind the 'auth' throttle scope.
-
-    Throttling here bounds refresh-token brute forcing (V-04 family). The
-    response contract is TokenRefreshView's, unchanged."""
-
-    throttle_scope = 'auth'
 
 
 urlpatterns = [

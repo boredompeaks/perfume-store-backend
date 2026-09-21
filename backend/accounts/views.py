@@ -11,7 +11,7 @@ from rest_framework_simplejwt.token_blacklist.models import (
     BlacklistedToken,
     OutstandingToken,
 )
-from rest_framework_simplejwt.views import TokenObtainPairView
+from rest_framework_simplejwt.views import TokenObtainPairView, TokenRefreshView
 from django.contrib.auth.models import User
 from django.conf import settings
 from django.contrib.auth.tokens import default_token_generator
@@ -30,10 +30,12 @@ class LoginView(TokenObtainPairView):
     """JWT login behind the 'auth' throttle scope.
 
     Throttling here bounds credential stuffing (V-04). The response contract
-    is TokenObtainPairView's, unchanged. [R-7.20] successful (200) and
-    rejected (400/401) attempts each land an audit event; 429 refusals are
-    raised by throttling before this view runs, so they are the rate limit
-    doing its job, not an authentication outcome, and write nothing."""
+    is TokenObtainPairView's, except that the refresh token never enters the
+    JSON body [R-17.12]: it is moved into an HttpOnly cookie, so browser JS
+    cannot read it (spec §17.1). [R-7.20] successful (200) and rejected
+    (400/401) attempts each land an audit event; 429 refusals are raised by
+    throttling before this view runs, so they are the rate limit doing its
+    job, not an authentication outcome, and write nothing."""
 
     throttle_scope = 'auth'
 
@@ -46,7 +48,7 @@ class LoginView(TokenObtainPairView):
             self._record_login(request, succeeded=False)
             raise
         self._record_login(request, succeeded=True)
-        return response
+        return _set_refresh_cookie(response)
 
     @staticmethod
     def _record_login(request, succeeded):
@@ -65,33 +67,121 @@ class LoginView(TokenObtainPairView):
         )
 
 
+def _set_refresh_cookie(response):
+    """Move the freshly minted refresh token out of the response body and
+    into the HttpOnly cookie [R-17.12]. A refresh token delivered as JSON is
+    readable by any injected script — the cookie is the only carrier the
+    browser client gets. The cookie's max-age is synced to the token
+    lifetime so the browser never presents a cookie older than the token it
+    holds."""
+    token = response.data.get('refresh')
+    if token:
+        response.set_cookie(
+            settings.JWT_REFRESH_COOKIE_NAME,
+            token,
+            max_age=int(
+                settings.SIMPLE_JWT['REFRESH_TOKEN_LIFETIME'].total_seconds()
+            ),
+            httponly=True,
+            secure=not settings.DEBUG,
+            samesite=settings.JWT_REFRESH_COOKIE_SAMESITE,
+            path=settings.JWT_REFRESH_COOKIE_PATH,
+        )
+        del response.data['refresh']
+    return response
+
+
+def _clear_refresh_cookie(response):
+    """Expire the refresh cookie in place. Name + Path must match the
+    cookie set by _set_refresh_cookie or the browser keeps the stale one."""
+    response.set_cookie(
+        settings.JWT_REFRESH_COOKIE_NAME,
+        '',
+        max_age=0,
+        expires=0,
+        httponly=True,
+        secure=not settings.DEBUG,
+        samesite=settings.JWT_REFRESH_COOKIE_SAMESITE,
+        path=settings.JWT_REFRESH_COOKIE_PATH,
+    )
+    return response
+
+
+class RefreshView(TokenRefreshView):
+    """JWT refresh behind the 'auth' throttle scope.
+
+    Throttling here bounds refresh-token brute forcing (V-04 family). The
+    refresh token is read from the HttpOnly cookie set at login [R-17.12];
+    an explicit body token still works for non-browser API clients. On
+    success the rotated token re-enters the cookie (never the body), and a
+    rejected refresh sweeps the cookie so a dead token cannot pin the
+    browser into retrying it."""
+
+    throttle_scope = 'auth'
+
+    def post(self, request, *args, **kwargs):
+        body = request.data if isinstance(request.data, dict) else None
+        if body is not None and not body.get('refresh'):
+            cookie = request.COOKIES.get(settings.JWT_REFRESH_COOKIE_NAME)
+            # JSON bodies parse to a plain mutable dict, so the cookie token
+            # merges in place — DRF 3.18 exposes no data setter. Form-encoded
+            # bodies (immutable QueryDict) are not a browser-client surface
+            # and stay untouched.
+            if cookie and type(body) is dict:
+                body['refresh'] = cookie
+        return _set_refresh_cookie(super().post(request, *args, **kwargs))
+
+    def handle_exception(self, exc):
+        # super().post signals rejection by raising (InvalidToken -> 401
+        # here), so a rejected refresh can only sweep its cookie in the
+        # exception handler. 429 throttle refusals are NOT a verdict on the
+        # token — the cookie must survive them (parallel tabs share one
+        # budget) — so only an authentication verdict sweeps.
+        response = super().handle_exception(exc)
+        if response.status_code == 401:
+            response = _clear_refresh_cookie(response)
+        return response
+
+
 class LogoutView(APIView):
     """Secure logout [R-17.8]: blacklist the presented refresh token.
 
-    POST /api/accounts/logout/ with a valid access token and the body
-    {"refresh": "<token>"}: the refresh token joins the blacklist, so the
-    browser session cannot outlive the logout — a stolen refresh token can
-    no longer mint access tokens. Authentication is required (an anonymous
-    caller has nothing to revoke and must not learn anything about token
-    validity); the 'auth' throttle scope covers the endpoint like its
-    sibling token routes.
+    POST /api/accounts/logout/ with a valid access token blacklists the
+    refresh token and clears its HttpOnly cookie, so the browser session
+    cannot outlive the logout — a stolen refresh token can no longer mint
+    access tokens. The cookie is the token source for browser clients
+    [R-17.12]; an explicit body token still works for non-browser API
+    clients. Authentication is required (an anonymous caller has nothing to
+    revoke and must not learn anything about token validity); the 'auth'
+    throttle scope covers the endpoint like its sibling token routes.
     """
 
     permission_classes = [IsAuthenticated]
     throttle_scope = 'auth'
 
     def post(self, request):
-        raw = request.data.get('refresh') if isinstance(request.data, dict) else None
+        raw = request.COOKIES.get(settings.JWT_REFRESH_COOKIE_NAME)
+        if not raw and isinstance(request.data, dict):
+            raw = request.data.get('refresh')
         if not isinstance(raw, str) or not raw:
+            # No cookie and no body token: nothing was presented, and no
+            # cookie can exist to sweep (raw would have come from it).
             raise DRFValidationError({'refresh': ['This field is required.']})
         try:
             # RefreshToken() verifies signature and expiry: an invalid or
             # already-expired token is rejected rather than recorded.
             token = RefreshToken(raw)
         except TokenError:
-            raise DRFValidationError({'refresh': ['Invalid or expired token.']})
+            # A dead cookie must not pin the browser: sweep it even while
+            # rejecting, or every future logout retries the same dead token.
+            return _clear_refresh_cookie(
+                Response(
+                    {'refresh': ['Invalid or expired token.']},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+            )
         token.blacklist()
-        return Response({'message': 'Logged out.'})
+        return _clear_refresh_cookie(Response({'message': 'Logged out.'}))
 
 
 def _blacklist_user_refresh_tokens(user):

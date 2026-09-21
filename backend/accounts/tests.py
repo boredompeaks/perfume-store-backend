@@ -14,7 +14,7 @@ from django.conf import settings
 from django.contrib.auth.models import User
 from django.contrib.auth.tokens import default_token_generator
 from django.core import mail
-from django.test import SimpleTestCase, tag
+from django.test import SimpleTestCase, override_settings, tag
 from django.utils.encoding import force_bytes
 from django.utils.http import urlsafe_base64_encode
 
@@ -576,7 +576,8 @@ class AuthThrottleTests(ApiTestCase):
     def test_login_rate_limit_engages(self):
         """The third login attempt inside a 2/min budget is 429'd — the
         credential-stuffing bound. Success responses stay the pinned
-        TokenObtainPairView contract (access/refresh issued)."""
+        TokenObtainPairView contract (access in the body; the refresh token
+        rides the HttpOnly cookie since SPEC-17-02 [R-17.12])."""
         self.make_user("ratelimited")
         rates = dict(api_settings.DEFAULT_THROTTLE_RATES)
         rates["auth"] = "2/min"
@@ -599,7 +600,7 @@ class AuthThrottleTests(ApiTestCase):
             )
         self.assertEqual(first.status_code, 200, first.data)
         self.assertIn("access", first.data)
-        self.assertIn("refresh", first.data)
+        self.assertIn(COOKIE_NAME, first.cookies)
         self.assertEqual(second.status_code, 200, second.data)
         self.assertEqual(throttled.status_code, 429, throttled.data)
 
@@ -901,6 +902,10 @@ class RefreshRotationTests(ApiTestCase):
     arrival while the legitimate client keeps a fresh pair."""
 
     def test_refresh_rotates_and_blacklists_the_presented_token(self):
+        """SPEC-17-01 semantics re-pinned by SPEC-17-02: a body-presented
+        refresh token still rotates + blacklists (non-browser API clients),
+        but the rotated token now rides the HttpOnly cookie instead of the
+        response body."""
         user = self.make_user("rotator")
         original = RefreshToken.for_user(user)
         res = self.client.post(
@@ -908,16 +913,16 @@ class RefreshRotationTests(ApiTestCase):
         )
         self.assertEqual(res.status_code, 200, res.data)
         self.assertIn("access", res.data)
-        self.assertIn("refresh", res.data)
+        self.assertNotIn("refresh", res.data)
+        rotated = self.client.cookies[COOKIE_NAME].value
+        self.assertNotEqual(rotated, str(original))
         replay = self.client.post(
             "/api/accounts/token/refresh/", {"refresh": str(original)}, format="json"
         )
         self.assertEqual(replay.status_code, 401, replay.data)
         self.assertIn("blacklisted", replay.data["error"])
         second = self.client.post(
-            "/api/accounts/token/refresh/",
-            {"refresh": res.data["refresh"]},
-            format="json",
+            "/api/accounts/token/refresh/", {"refresh": rotated}, format="json"
         )
         self.assertEqual(second.status_code, 200, second.data)
 
@@ -972,3 +977,120 @@ class SessionInvalidationOnPasswordResetTests(ApiTestCase):
         self.assertEqual(res.status_code, 200, res.data)
         user.refresh_from_db()
         self.assertTrue(user.check_password("N3w-Passphrase-77"))
+
+
+COOKIE_NAME = settings.JWT_REFRESH_COOKIE_NAME
+
+
+@tag("accounts")
+class RefreshCookieConfigTests(SimpleTestCase):
+    """SPEC-17-02 [R-17.12]: the refresh-token cookie contract is explicit,
+    not library-defaulted. Name/Path/SameSite are env-driven settings; Secure
+    follows DEBUG (V-02 fails closed), HttpOnly is unconditional — browser
+    JS must never be able to read the refresh token (spec §17.1)."""
+
+    def test_cookie_settings_have_documented_defaults(self):
+        self.assertEqual(COOKIE_NAME, "refresh_token")
+        # Path covers both mounts of accounts/urls.py: legacy /api/accounts/
+        # and the v1 namespace /api/v1/account/.
+        self.assertEqual(settings.JWT_REFRESH_COOKIE_PATH, "/api/")
+        self.assertEqual(settings.JWT_REFRESH_COOKIE_SAMESITE, "Lax")
+
+
+@tag("accounts")
+class RefreshCookieTests(ApiTestCase):
+    """SPEC-17-02 [R-17.12]: the refresh token leaves the JSON body (and
+    localStorage) and rides an HttpOnly backend-set cookie. Login sets it,
+    refresh re-sets it on rotation, logout blacklists it and clears it."""
+
+    def _login(self, username="cookiebuyer", password="S3cure-Passphrase!"):
+        self.make_user(username, password=password)
+        res = self.client.post(
+            "/api/accounts/login/",
+            {"username": username, "password": password},
+            format="json",
+        )
+        # Logout requires an authenticated caller; the login response's
+        # access token (kept memory-only per R-17.12) doubles as the
+        # fixture's auth header.
+        self.auth(res.data["access"])
+        return res
+
+    def test_login_sets_httponly_cookie_and_drops_body_refresh(self):
+        res = self._login()
+        self.assertEqual(res.status_code, 200, res.data)
+        self.assertIn("access", res.data)
+        # The body is the leak surface: a refresh token returned as JSON is
+        # readable by any injected script, exactly what R-17.12 forbids.
+        self.assertNotIn("refresh", res.data)
+        cookie = res.cookies[COOKIE_NAME]
+        self.assertTrue(cookie["httponly"])
+        self.assertTrue(cookie["secure"], "tests run with DEBUG=False")
+        self.assertEqual(cookie["samesite"], "Lax")
+        self.assertEqual(cookie["path"], settings.JWT_REFRESH_COOKIE_PATH)
+        # Cookie lifetime is synced to the refresh-token lifetime, so the
+        # browser never carries a cookie older than the token it holds.
+        self.assertEqual(
+            cookie["max-age"],
+            int(settings.SIMPLE_JWT["REFRESH_TOKEN_LIFETIME"].total_seconds()),
+        )
+
+    def test_login_cookie_omits_secure_flag_in_debug(self):
+        with override_settings(DEBUG=True):
+            res = self._login("debugbuyer")
+        self.assertEqual(res.status_code, 200, res.data)
+        self.assertFalse(res.cookies[COOKIE_NAME]["secure"])
+
+    def test_refresh_via_cookie_rotates_and_re_sets_cookie(self):
+        self._login()
+        original = self.client.cookies[COOKIE_NAME].value
+        res = self.client.post("/api/accounts/token/refresh/", {}, format="json")
+        self.assertEqual(res.status_code, 200, res.data)
+        self.assertIn("access", res.data)
+        self.assertNotIn("refresh", res.data)
+        rotated = self.client.cookies[COOKIE_NAME].value
+        self.assertNotEqual(rotated, original)
+        # The fresh cookie keeps the session alive end-to-end (empty body:
+        # the backend must find the token in its own cookie).
+        next = self.client.post("/api/accounts/token/refresh/", {}, format="json")
+        self.assertEqual(next.status_code, 200, next.data)
+        # Rotation interplay [R-17.5]: the presented cookie token dies even
+        # though it never appeared in a request body; the rejection also
+        # sweeps the now-stale cookie (401's Set-Cookie wins the jar).
+        replay = self.client.post(
+            "/api/accounts/token/refresh/", {"refresh": original}, format="json"
+        )
+        self.assertEqual(replay.status_code, 401, replay.data)
+        self.assertIn("blacklisted", replay.data["error"])
+        self.assertEqual(self.client.cookies[COOKIE_NAME].value, "")
+
+    def test_refresh_without_cookie_or_body_is_rejected(self):
+        res = self.client.post("/api/accounts/token/refresh/", {}, format="json")
+        self.assertEqual(res.status_code, 400, res.data)
+
+    def test_refresh_with_dead_cookie_sweeps_the_cookie(self):
+        self._login("sweeper")
+        self.client.cookies[COOKIE_NAME] = "not-a-jwt"
+        res = self.client.post("/api/accounts/token/refresh/", {}, format="json")
+        self.assertEqual(res.status_code, 401, res.data)
+        self.assertEqual(self.client.cookies[COOKIE_NAME].value, "")
+
+    def test_logout_with_cookie_blacklists_and_clears_it(self):
+        self._login()
+        token = self.client.cookies[COOKIE_NAME].value
+        res = self.client.post("/api/accounts/logout/", {}, format="json")
+        self.assertEqual(res.status_code, 200, res.data)
+        self.assertEqual(self.client.cookies[COOKIE_NAME].value, "")
+        replay = self.client.post(
+            "/api/accounts/token/refresh/", {"refresh": token}, format="json"
+        )
+        self.assertEqual(replay.status_code, 401, replay.data)
+        self.assertIn("blacklisted", replay.data["error"])
+
+    def test_logout_with_garbage_cookie_rejects_and_sweeps_it(self):
+        self._login("garbage-cookie")
+        self.client.cookies[COOKIE_NAME] = "not-a-jwt"
+        res = self.client.post("/api/accounts/logout/", {}, format="json")
+        self.assertEqual(res.status_code, 400, res.data)
+        self.assertIn("refresh", res.data["details"])
+        self.assertEqual(self.client.cookies[COOKIE_NAME].value, "")

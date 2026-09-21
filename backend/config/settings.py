@@ -352,6 +352,22 @@ SIMPLE_JWT = {
     'ROTATE_REFRESH_TOKENS': True,
     'BLACKLIST_AFTER_ROTATION': True,
 }
+
+# SPEC-17-02 [R-17.12]: the refresh token leaves the JSON body and browser
+# localStorage entirely and rides an HttpOnly cookie (spec §17.1: "use
+# secure, HttpOnly cookies ... Do not store long-lived authentication
+# tokens in browser local storage"). Path is scoped to the API surface:
+# accounts routes are mounted at both /api/accounts/ and /api/v1/account/,
+# so /api/ covers both families while keeping the cookie off non-API paths.
+# Secure follows DEBUG (V-02 fails closed); SameSite=Lax blocks cross-site
+# attachment on POSTs (refresh/logout are POST-only) while matching the
+# same-site deployment constraint BACKEND_REQUESTS.md already documents for
+# the session cookie — strict CSRF enforcement for cookie-authenticated
+# mutations is SPEC-17-03's follow-up.
+JWT_REFRESH_COOKIE_NAME = os.getenv('JWT_REFRESH_COOKIE_NAME', 'refresh_token')
+JWT_REFRESH_COOKIE_PATH = os.getenv('JWT_REFRESH_COOKIE_PATH', '/api/')
+JWT_REFRESH_COOKIE_SAMESITE = os.getenv('JWT_REFRESH_COOKIE_SAMESITE', 'Lax')
+
 CORS_ALLOWED_ORIGINS = [origin for origin in os.getenv(
     'CORS_ALLOWED_ORIGINS', 'http://localhost:3000'
 ).split(',') if origin]

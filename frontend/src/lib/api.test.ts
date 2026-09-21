@@ -4,6 +4,9 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
  * Silent-refresh contract tests: a 401 must trigger exactly ONE refresh
  * (single-flight, even for concurrent 401s), retry once with the new token,
  * and clear tokens on refresh failure — no loops, no silent failures.
+ * Since SPEC-17-02 the refresh token rides an HttpOnly cookie: tests seed
+ * only the in-memory access token + the non-secret session hint, never a
+ * stored token.
  */
 const storage = new Map<string, string>();
 vi.stubGlobal("localStorage", {
@@ -24,17 +27,27 @@ beforeEach(() => {
   vi.resetModules();
 });
 
+async function seedSession() {
+  const tokens = await import("./tokens");
+  tokens.setTokens("access-1");
+  return tokens;
+}
+
 describe("apiFetch silent refresh", () => {
   it("on 401: refreshes once, retries with the new token, returns data", async () => {
     let refreshCalls = 0;
     let orderCalls = 0;
     let lastAuth: string | undefined;
+    let refreshCredentials: RequestCredentials | undefined;
+    let refreshBody: string | undefined;
     vi.stubGlobal(
       "fetch",
       vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
         const url = String(input);
         if (url.includes("/token/refresh/")) {
           refreshCalls++;
+          refreshCredentials = init?.credentials;
+          refreshBody = init?.body as string;
           return jsonResponse({ access: "access-2" });
         }
         if (url.includes("/api/orders/")) {
@@ -56,13 +69,16 @@ describe("apiFetch silent refresh", () => {
       }),
     );
 
-    storage.set("aurel.refresh", "refresh-1");
+    await seedSession();
     const { fetchOrders } = await import("./orders-api");
 
     const orders = await fetchOrders();
 
     expect(orders).toEqual([{ id: 7 }]);
     expect(refreshCalls).toBe(1);
+    // R-17.12: the cookie is the credential — the body carries no token.
+    expect(refreshCredentials).toBe("include");
+    expect(JSON.parse(refreshBody ?? "{}")).toEqual({});
     expect(orderCalls).toBe(2);
     expect(lastAuth).toBe("Bearer access-2");
   });
@@ -83,7 +99,7 @@ describe("apiFetch silent refresh", () => {
       }),
     );
 
-    storage.set("aurel.refresh", "refresh-1");
+    await seedSession();
     const { fetchOrders } = await import("./orders-api");
 
     const results = await Promise.allSettled([fetchOrders(), fetchOrders()]);
@@ -110,14 +126,16 @@ describe("apiFetch silent refresh", () => {
       }),
     );
 
-    storage.set("aurel.refresh", "refresh-1");
+    await seedSession();
     const { fetchOrders } = await import("./orders-api");
-    const { getStoredRefreshToken } = await import("./tokens");
+    const tokens = await import("./tokens");
 
     await expect(fetchOrders()).rejects.toMatchObject({ status: 401 });
 
     expect(orderCalls).toBe(1);
-    expect(getStoredRefreshToken()).toBeNull();
+    expect(tokens.getAccessToken()).toBeNull();
+    expect(tokens.hasSessionHint()).toBe(false);
+    expect(storage.size).toBe(0);
   });
 
   it("4xx responses surface field errors and scalar extras", async () => {
