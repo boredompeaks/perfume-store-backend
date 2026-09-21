@@ -12,6 +12,7 @@ https://docs.djangoproject.com/en/6.1/ref/settings/
 
 import logging
 import re
+from datetime import timedelta
 from pathlib import Path
 from urllib.parse import unquote, urlparse
 import os
@@ -50,6 +51,10 @@ INSTALLED_APPS = [
     'django.contrib.messages',
     'django.contrib.staticfiles',
     'rest_framework',
+    # SPEC-17-01 [R-17.5/R-17.8/R-17.10]: token_blacklist provides the
+    # OutstandingToken/BlacklistedToken tables behind refresh rotation,
+    # secure logout, and session invalidation on critical account changes.
+    'rest_framework_simplejwt.token_blacklist',
     'products',
     'cart',
     'orders',
@@ -323,6 +328,25 @@ REST_FRAMEWORK = {
         # both gateway spend and order-id brute-forcing.
         'payment': os.getenv('PAYMENT_THROTTLE_RATE', '10/min'),
     },
+}
+
+# SPEC-17-01 [R-17.5/R-17.8/R-17.10] JWT lifecycle: the access token is a
+# short-lived bearer credential (15 minutes) carried by a rotating refresh
+# token (7 days). ROTATE_REFRESH_TOKENS + BLACKLIST_AFTER_ROTATION mean
+# every refresh mints a fresh refresh token and the presented one dies —
+# a leaked refresh token cannot be replayed, and logout/password reset can
+# revoke outstanding sessions through the blacklist tables. Lifetimes are
+# env-driven integer seconds (documented in .env.example); non-integer
+# values fall back to the documented defaults like every _env_int knob.
+SIMPLE_JWT = {
+    'ACCESS_TOKEN_LIFETIME': timedelta(
+        seconds=_env_int('JWT_ACCESS_TOKEN_LIFETIME_SECONDS', 900)
+    ),
+    'REFRESH_TOKEN_LIFETIME': timedelta(
+        seconds=_env_int('JWT_REFRESH_TOKEN_LIFETIME_SECONDS', 604800)
+    ),
+    'ROTATE_REFRESH_TOKENS': True,
+    'BLACKLIST_AFTER_ROTATION': True,
 }
 CORS_ALLOWED_ORIGINS = [origin for origin in os.getenv(
     'CORS_ALLOWED_ORIGINS', 'http://localhost:3000'

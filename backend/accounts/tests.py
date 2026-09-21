@@ -7,12 +7,14 @@ password the shared validators reject fails both paths in the same
 field-error shape.
 """
 import unittest
+from datetime import timedelta
 from unittest import mock
 
+from django.conf import settings
 from django.contrib.auth.models import User
 from django.contrib.auth.tokens import default_token_generator
 from django.core import mail
-from django.test import tag
+from django.test import SimpleTestCase, tag
 from django.utils.encoding import force_bytes
 from django.utils.http import urlsafe_base64_encode
 
@@ -548,6 +550,7 @@ class AuthThrottleTests(ApiTestCase):
             "register": "auth",
             "login": "auth",
             "token-refresh": "auth",
+            "logout": "auth",
         }
         found = {}
         for pattern in account_urlpatterns:
@@ -812,3 +815,160 @@ class AuthThrottleTests(ApiTestCase):
         # sent none, and throttling added no extra bodies or sends
         self.assertEqual(len(mail.outbox), 1)
         self.assertEqual(mail.outbox[0].to, ["uniformrate@example.com"])
+
+
+@tag("accounts")
+class JwtLifecycleConfigTests(SimpleTestCase):
+    """SPEC-17-01 [R-17.5]: the JWT lifecycle is explicitly configured, not
+    library-defaulted. Rotation + blacklist-after-rotation are mandatory
+    (a non-rotating refresh token is a long-lived bearer credential), the
+    blacklist app is installed, and both lifetimes are env-driven with the
+    documented defaults. The env-override path is pinned separately in
+    tests/test_settings_security.py (subprocess, clean environment)."""
+
+    def test_blacklist_app_is_installed(self):
+        self.assertIn(
+            "rest_framework_simplejwt.token_blacklist", settings.INSTALLED_APPS
+        )
+
+    def test_rotation_and_blacklist_after_rotation_are_enabled(self):
+        self.assertIs(settings.SIMPLE_JWT["ROTATE_REFRESH_TOKENS"], True)
+        self.assertIs(settings.SIMPLE_JWT["BLACKLIST_AFTER_ROTATION"], True)
+
+    def test_default_lifetimes_are_the_documented_defaults(self):
+        self.assertEqual(
+            settings.SIMPLE_JWT["ACCESS_TOKEN_LIFETIME"], timedelta(seconds=900)
+        )
+        self.assertEqual(
+            settings.SIMPLE_JWT["REFRESH_TOKEN_LIFETIME"],
+            timedelta(seconds=604800),
+        )
+
+
+@tag("accounts")
+class LogoutTests(ApiTestCase):
+    """SPEC-17-01 [R-17.8] Secure logout: POST /api/accounts/logout/ with a
+    valid access token blacklists the presented refresh token, so the
+    session cannot outlive the logout — a stolen refresh token cannot mint
+    new access tokens afterwards."""
+
+    def _auth_access(self, username):
+        user = self.make_user(username)
+        refresh = RefreshToken.for_user(user)
+        self.auth(str(refresh.access_token))
+        return refresh
+
+    def test_logout_requires_authentication(self):
+        res = self.client.post(
+            "/api/accounts/logout/", {"refresh": "x"}, format="json"
+        )
+        self.assertEqual(res.status_code, 401, res.data)
+
+    def test_logout_blacklists_the_presented_refresh_token(self):
+        refresh = self._auth_access("leaver")
+        res = self.client.post(
+            "/api/accounts/logout/", {"refresh": str(refresh)}, format="json"
+        )
+        self.assertEqual(res.status_code, 200, res.data)
+        replay = self.client.post(
+            "/api/accounts/token/refresh/", {"refresh": str(refresh)}, format="json"
+        )
+        self.assertEqual(replay.status_code, 401, replay.data)
+        self.assertIn("blacklisted", replay.data["error"])
+
+    def test_logout_without_refresh_token_is_rejected(self):
+        self._auth_access("nologout")
+        for payload in ({}, {"refresh": ""}, {"refresh": 123}):
+            with self.subTest(payload=payload):
+                res = self.client.post("/api/accounts/logout/", payload, format="json")
+                self.assertEqual(res.status_code, 400, res.data)
+                self.assertIn("refresh", res.data["details"])
+
+    def test_logout_garbage_refresh_token_is_rejected(self):
+        self._auth_access("garbagelogout")
+        res = self.client.post(
+            "/api/accounts/logout/", {"refresh": "not-a-jwt"}, format="json"
+        )
+        self.assertEqual(res.status_code, 400, res.data)
+        self.assertIn("refresh", res.data["details"])
+
+
+@tag("accounts")
+class RefreshRotationTests(ApiTestCase):
+    """SPEC-17-01 [R-17.5]: ROTATE_REFRESH_TOKENS + BLACKLIST_AFTER_ROTATION —
+    every refresh mints a new refresh token in the response and the
+    presented one is blacklisted, so a replayed refresh token is dead on
+    arrival while the legitimate client keeps a fresh pair."""
+
+    def test_refresh_rotates_and_blacklists_the_presented_token(self):
+        user = self.make_user("rotator")
+        original = RefreshToken.for_user(user)
+        res = self.client.post(
+            "/api/accounts/token/refresh/", {"refresh": str(original)}, format="json"
+        )
+        self.assertEqual(res.status_code, 200, res.data)
+        self.assertIn("access", res.data)
+        self.assertIn("refresh", res.data)
+        replay = self.client.post(
+            "/api/accounts/token/refresh/", {"refresh": str(original)}, format="json"
+        )
+        self.assertEqual(replay.status_code, 401, replay.data)
+        self.assertIn("blacklisted", replay.data["error"])
+        second = self.client.post(
+            "/api/accounts/token/refresh/",
+            {"refresh": res.data["refresh"]},
+            format="json",
+        )
+        self.assertEqual(second.status_code, 200, second.data)
+
+
+@tag("accounts")
+class SessionInvalidationOnPasswordResetTests(ApiTestCase):
+    """SPEC-17-01 [R-17.10] Session invalidation after critical account
+    changes: confirming a password reset blacklists every outstanding
+    refresh token issued to the account (all concurrent sessions die with
+    it), while other accounts' sessions are untouched."""
+
+    def _confirm_reset(self, user, password="N3w-Passphrase-77"):
+        return self.client.post(
+            "/api/accounts/password-reset/confirm/",
+            {
+                "uid": _encoded_user_id(user),
+                "token": default_token_generator.make_token(user),
+                "password": password,
+            },
+            format="json",
+        )
+
+    def test_password_reset_blacklists_outstanding_refresh_tokens(self):
+        user = self.make_user("resetrotator")
+        outstanding = RefreshToken.for_user(user)
+        res = self._confirm_reset(user)
+        self.assertEqual(res.status_code, 200, res.data)
+        replay = self.client.post(
+            "/api/accounts/token/refresh/",
+            {"refresh": str(outstanding)},
+            format="json",
+        )
+        self.assertEqual(replay.status_code, 401, replay.data)
+        self.assertIn("blacklisted", replay.data["error"])
+
+    def test_password_reset_leaves_other_users_sessions_intact(self):
+        reset_user = self.make_user("resetone")
+        bystander = self.make_user("bystander")
+        bystander_refresh = RefreshToken.for_user(bystander)
+        res = self._confirm_reset(reset_user)
+        self.assertEqual(res.status_code, 200, res.data)
+        ok = self.client.post(
+            "/api/accounts/token/refresh/",
+            {"refresh": str(bystander_refresh)},
+            format="json",
+        )
+        self.assertEqual(ok.status_code, 200, ok.data)
+
+    def test_password_reset_with_no_outstanding_tokens_succeeds(self):
+        user = self.make_user("tokenless")
+        res = self._confirm_reset(user)
+        self.assertEqual(res.status_code, 200, res.data)
+        user.refresh_from_db()
+        self.assertTrue(user.check_password("N3w-Passphrase-77"))

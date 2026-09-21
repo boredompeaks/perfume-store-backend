@@ -10,10 +10,12 @@ import os
 import subprocess
 import sys
 import tempfile
+from datetime import timedelta
 from pathlib import Path
 from urllib.parse import unquote
 
 import config.settings as config_settings
+from django.conf import settings
 from django.test import SimpleTestCase
 
 BACKEND_DIR = Path(__file__).resolve().parent.parent
@@ -48,6 +50,66 @@ class DebugDefaultTests(SimpleTestCase):
         )
         self.assertEqual(res.returncode, 0, res.stderr)
         self.assertIn("DEBUG_IS True", res.stdout)
+
+
+class SimpleJwtConfigTests(SimpleTestCase):
+    """SPEC-17-01 [R-17.5]: both JWT lifetimes are env-driven (integer
+    seconds). Pinned in a subprocess because the point is that a *clean*
+    environment yields the documented defaults and a populated one the
+    operator's values — settings are import-time, like the DEBUG guard
+    above. The in-process lifecycle behaviour lives in accounts/tests.py.
+    """
+
+    def test_missing_env_yields_the_documented_default_lifetimes(self):
+        res = run_settings_import(
+            {"DJANGO_SECRET_KEY": "x" * 50},
+            snippet=(
+                "import config.settings as s; "
+                "print('ACCESS', s.SIMPLE_JWT['ACCESS_TOKEN_LIFETIME']); "
+                "print('REFRESH', s.SIMPLE_JWT['REFRESH_TOKEN_LIFETIME'])"
+            ),
+        )
+        self.assertEqual(res.returncode, 0, res.stderr)
+        self.assertIn(f"ACCESS {timedelta(seconds=900)}", res.stdout)
+        self.assertIn(f"REFRESH {timedelta(seconds=604800)}", res.stdout)
+
+    def test_env_overrides_override_the_lifetimes(self):
+        res = run_settings_import(
+            {
+                "DJANGO_SECRET_KEY": "x" * 50,
+                "JWT_ACCESS_TOKEN_LIFETIME_SECONDS": "60",
+                "JWT_REFRESH_TOKEN_LIFETIME_SECONDS": "1200",
+            },
+            snippet=(
+                "import config.settings as s; "
+                "print('ACCESS', s.SIMPLE_JWT['ACCESS_TOKEN_LIFETIME']); "
+                "print('REFRESH', s.SIMPLE_JWT['REFRESH_TOKEN_LIFETIME'])"
+            ),
+        )
+        self.assertEqual(res.returncode, 0, res.stderr)
+        self.assertIn(f"ACCESS {timedelta(seconds=60)}", res.stdout)
+        self.assertIn(f"REFRESH {timedelta(seconds=1200)}", res.stdout)
+
+    def test_malformed_lifetime_falls_back_to_the_default(self):
+        res = run_settings_import(
+            {
+                "DJANGO_SECRET_KEY": "x" * 50,
+                "JWT_ACCESS_TOKEN_LIFETIME_SECONDS": "fifteen-minutes",
+            },
+            snippet=(
+                "import config.settings as s; "
+                "print('ACCESS', s.SIMPLE_JWT['ACCESS_TOKEN_LIFETIME'])"
+            ),
+        )
+        self.assertEqual(res.returncode, 0, res.stderr)
+        self.assertIn(f"ACCESS {timedelta(seconds=900)}", res.stdout)
+
+    def test_rotation_and_blacklist_after_rotation_are_enabled(self):
+        self.assertIs(settings.SIMPLE_JWT["ROTATE_REFRESH_TOKENS"], True)
+        self.assertIs(settings.SIMPLE_JWT["BLACKLIST_AFTER_ROTATION"], True)
+        self.assertIn(
+            "rest_framework_simplejwt.token_blacklist", settings.INSTALLED_APPS
+        )
 
 
 class SettingsGuardTests(SimpleTestCase):
