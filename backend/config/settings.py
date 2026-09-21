@@ -12,6 +12,7 @@ https://docs.djangoproject.com/en/6.1/ref/settings/
 
 import logging
 import re
+from datetime import timedelta
 from pathlib import Path
 from urllib.parse import unquote, urlparse
 import os
@@ -32,7 +33,11 @@ BASE_DIR = Path(__file__).resolve().parent.parent
 SECRET_KEY = os.getenv('DJANGO_SECRET_KEY', 'unsafe-development-key-change-me')
 
 # SECURITY WARNING: don't run with debug turned on in production!
-DEBUG = os.getenv('DJANGO_DEBUG', 'true').lower() == 'true'
+# V-02: fails CLOSED — an absent DJANGO_DEBUG means DEBUG=False, so an
+# unconfigured deployment (forgotten env var) lands in the hardened
+# configuration and must set a real DJANGO_SECRET_KEY to boot. Set
+# DJANGO_DEBUG=true explicitly for local development only.
+DEBUG = os.getenv('DJANGO_DEBUG', 'false').lower() == 'true'
 
 ALLOWED_HOSTS = [host for host in os.getenv('DJANGO_ALLOWED_HOSTS', 'localhost,127.0.0.1').split(',') if host]
 
@@ -50,6 +55,10 @@ INSTALLED_APPS = [
     'django.contrib.messages',
     'django.contrib.staticfiles',
     'rest_framework',
+    # SPEC-17-01 [R-17.5/R-17.8/R-17.10]: token_blacklist provides the
+    # OutstandingToken/BlacklistedToken tables behind refresh rotation,
+    # secure logout, and session invalidation on critical account changes.
+    'rest_framework_simplejwt.token_blacklist',
     'products',
     'cart',
     'orders',
@@ -258,6 +267,15 @@ CHECKOUT_DEDUP_WINDOW_SECONDS = _env_int('CHECKOUT_DEDUP_WINDOW_SECONDS', 300)
 ORDER_HISTORY_PAGE_SIZE = _env_int('ORDER_HISTORY_PAGE_SIZE', 10)
 ORDER_HISTORY_MAX_PAGE_SIZE = _env_int('ORDER_HISTORY_MAX_PAGE_SIZE', 100)
 
+# SPEC-12-01 [R-12.2] Inventory reservation: seconds a checkout's stock
+# reservation holds units before it goes stale and becomes releasable by
+# the reconciler (SPEC-12-03). Coordinate with the payment-provider session
+# window: the customer must be able to finish paying inside the hold, so
+# the default comfortably exceeds a typical Razorpay checkout session.
+# Tunable per deployment without a code change; non-integer values are
+# ignored and the default is used instead.
+RESERVATION_TTL = _env_int('RESERVATION_TTL', 900)
+
 
 # ISO 4217 currency codes are exactly three uppercase letters.
 _ISO_4217 = re.compile(r"^[A-Z]{3}$")
@@ -314,6 +332,25 @@ REST_FRAMEWORK = {
         # both gateway spend and order-id brute-forcing.
         'payment': os.getenv('PAYMENT_THROTTLE_RATE', '10/min'),
     },
+}
+
+# SPEC-17-01 [R-17.5/R-17.8/R-17.10] JWT lifecycle: the access token is a
+# short-lived bearer credential (15 minutes) carried by a rotating refresh
+# token (7 days). ROTATE_REFRESH_TOKENS + BLACKLIST_AFTER_ROTATION mean
+# every refresh mints a fresh refresh token and the presented one dies —
+# a leaked refresh token cannot be replayed, and logout/password reset can
+# revoke outstanding sessions through the blacklist tables. Lifetimes are
+# env-driven integer seconds (documented in .env.example); non-integer
+# values fall back to the documented defaults like every _env_int knob.
+SIMPLE_JWT = {
+    'ACCESS_TOKEN_LIFETIME': timedelta(
+        seconds=_env_int('JWT_ACCESS_TOKEN_LIFETIME_SECONDS', 900)
+    ),
+    'REFRESH_TOKEN_LIFETIME': timedelta(
+        seconds=_env_int('JWT_REFRESH_TOKEN_LIFETIME_SECONDS', 604800)
+    ),
+    'ROTATE_REFRESH_TOKENS': True,
+    'BLACKLIST_AFTER_ROTATION': True,
 }
 CORS_ALLOWED_ORIGINS = [origin for origin in os.getenv(
     'CORS_ALLOWED_ORIGINS', 'http://localhost:3000'

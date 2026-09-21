@@ -1,8 +1,16 @@
 from rest_framework.decorators import api_view, throttle_scope
 from rest_framework.exceptions import AuthenticationFailed
 from rest_framework.exceptions import ValidationError as DRFValidationError
+from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
 from rest_framework import status
+from rest_framework.views import APIView
+from rest_framework_simplejwt.exceptions import TokenError
+from rest_framework_simplejwt.tokens import RefreshToken
+from rest_framework_simplejwt.token_blacklist.models import (
+    BlacklistedToken,
+    OutstandingToken,
+)
 from rest_framework_simplejwt.views import TokenObtainPairView
 from django.contrib.auth.models import User
 from django.conf import settings
@@ -55,6 +63,50 @@ class LoginView(TokenObtainPairView):
             actor=User.objects.filter(username=username).first(),
             detail={"username": username},
         )
+
+
+class LogoutView(APIView):
+    """Secure logout [R-17.8]: blacklist the presented refresh token.
+
+    POST /api/accounts/logout/ with a valid access token and the body
+    {"refresh": "<token>"}: the refresh token joins the blacklist, so the
+    browser session cannot outlive the logout — a stolen refresh token can
+    no longer mint access tokens. Authentication is required (an anonymous
+    caller has nothing to revoke and must not learn anything about token
+    validity); the 'auth' throttle scope covers the endpoint like its
+    sibling token routes.
+    """
+
+    permission_classes = [IsAuthenticated]
+    throttle_scope = 'auth'
+
+    def post(self, request):
+        raw = request.data.get('refresh') if isinstance(request.data, dict) else None
+        if not isinstance(raw, str) or not raw:
+            raise DRFValidationError({'refresh': ['This field is required.']})
+        try:
+            # RefreshToken() verifies signature and expiry: an invalid or
+            # already-expired token is rejected rather than recorded.
+            token = RefreshToken(raw)
+        except TokenError:
+            raise DRFValidationError({'refresh': ['Invalid or expired token.']})
+        token.blacklist()
+        return Response({'message': 'Logged out.'})
+
+
+def _blacklist_user_refresh_tokens(user):
+    """Session invalidation after critical account changes [R-17.10].
+
+    Blacklists every refresh token still outstanding for ``user`` so a
+    pre-change session (stolen device, forgotten tab, attacker) cannot
+    mint new access tokens after the account's credentials changed. The
+    caller runs this inside the same transaction as the credential
+    change, so the sessions die exactly when the change lands. Idempotent
+    via get_or_create: re-blacklisting an already-blacklisted token is a
+    no-op, so concurrent changes cannot collide.
+    """
+    for outstanding in OutstandingToken.objects.filter(user=user):
+        BlacklistedToken.objects.get_or_create(token=outstanding)
 
 
 def _encoded_user_id(user):
@@ -258,6 +310,11 @@ def reset_password(request):
     with transaction.atomic():
         user.set_password(password)
         user.save(update_fields=['password'])
+        # [R-17.10] the password change is a critical account change: every
+        # outstanding session (refresh token) dies with it, in the same
+        # transaction — no window where old sessions outlive new
+        # credentials.
+        _blacklist_user_refresh_tokens(user)
         AuditEvent.record(
             AuditEvent.EventType.AUTH_PASSWORD_RESET,
             actor=user,

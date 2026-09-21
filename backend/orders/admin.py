@@ -12,6 +12,9 @@ from .models import Coupon, Order, OrderItem, OrderStatusEvent
 # [R-10.16] SPEC-10-05: the per-transition side-effect contract (one
 # dispatch point, shared with the JSON seam).
 from .events import notify_transition
+# [R-12.8] SPEC-12-02: the admin cancel writers release the checkout's
+# stock holds with the same vocabulary the API twin uses.
+from products.models import StockReservation
 # [R-10.1] SPEC-10-01b: the fulfilment-dimension mapping for the writers.
 # [R-10.12] SPEC-10-02: the trigger vocabulary for the audit writers.
 from .state import (
@@ -244,6 +247,16 @@ class OrderAdmin(RoleAwareModelAdmin):
                     actor=request.user,
                     trigger=TRIGGER_ADMIN_CHANGE_FORM,
                 )
+                # [R-12.8] SPEC-12-02 §12.1 step 6: a cancelled checkout
+                # releases its holds in this same transaction — cancelled
+                # units return to available-to-sell immediately, not at
+                # the TTL sweep. This is the admin twin of the release in
+                # views.admin_order_cancel; the active-only filter is a
+                # no-op on already-released holds.
+                if obj.status == "cancelled":
+                    obj.stock_reservations.filter(
+                        status=StockReservation.Status.ACTIVE
+                    ).update(status=StockReservation.Status.RELEASED)
                 # [R-10.16] SPEC-10-05: the side-effect hook rides the
                 # same atomic block, after the transition + its audit row.
                 notify_transition(obj, old, obj.status)
@@ -407,6 +420,14 @@ class OrderAdmin(RoleAwareModelAdmin):
                             "updated_at",
                         ]
                     )
+                    # [R-12.8] SPEC-12-02 §12.1 step 6: a cancelled checkout
+                    # releases its holds in this same per-row transaction —
+                    # the admin surface must behave exactly like the API
+                    # twin (views.admin_order_cancel); the active-only
+                    # filter is a no-op on already-released holds.
+                    order.stock_reservations.filter(
+                        status=StockReservation.Status.ACTIVE
+                    ).update(status=StockReservation.Status.RELEASED)
                     # [R-10.16] SPEC-10-05: the side-effect hook rides the
                     # same atomic block, after the transition + its audit
                     # row; skipped rows never reach it.

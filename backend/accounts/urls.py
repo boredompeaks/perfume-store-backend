@@ -3,6 +3,7 @@ from django.urls import path
 from .views import (
     register, username_available, verify_email, resend_verification,
     forgot_username, request_password_reset, reset_password, LoginView,
+    LogoutView,
 )
 from rest_framework_simplejwt.views import (
     TokenRefreshView,
@@ -48,6 +49,12 @@ urlpatterns = [
         'token/refresh/',
         RefreshView.as_view(),
         name='token-refresh'
+    ),
+
+    path(
+        'logout/',
+        LogoutView.as_view(),
+        name='logout'
     ),
 
 ]
