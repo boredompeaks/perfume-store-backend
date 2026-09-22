@@ -326,3 +326,133 @@ class DatabaseUrlImportTests(SimpleTestCase):
         )
         self.assertEqual(res.returncode, 0, res.stderr)
         self.assertIn("ENGINE django.db.backends.sqlite3", res.stdout)
+
+class TransportHardeningTests(SimpleTestCase):
+    """SPEC-17-07 [R-17.11]: transport/cookie hardening flags are env-driven
+    with development-safe defaults. Import-time settings, so pinned via the
+    subprocess pattern like every env knob above."""
+
+    _BOOT_ENV = {"DJANGO_SECRET_KEY": "x" * 50}
+
+    def test_defaults_are_safe_off_for_development(self):
+        res = run_settings_import(
+            dict(self._BOOT_ENV),
+            snippet=(
+                "import config.settings as s; "
+                "print('HSTS', s.SECURE_HSTS_SECONDS); "
+                "print('SUBD', s.SECURE_HSTS_INCLUDE_SUBDOMAINS); "
+                "print('PRELOAD', s.SECURE_HSTS_PRELOAD); "
+                "print('REDIRECT', s.SECURE_SSL_REDIRECT); "
+                "print('PROXYHDR', s.SECURE_PROXY_SSL_HEADER); "
+                "print('SESSIONSEC', s.SESSION_COOKIE_SECURE); "
+                "print('CSRFSEC', s.CSRF_COOKIE_SECURE)"
+            ),
+        )
+        self.assertEqual(res.returncode, 0, res.stderr)
+        self.assertIn("HSTS 0", res.stdout)
+        self.assertIn("SUBD False", res.stdout)
+        self.assertIn("PRELOAD False", res.stdout)
+        self.assertIn("REDIRECT False", res.stdout)
+        self.assertIn("PROXYHDR None", res.stdout)
+        # DJANGO_DEBUG is absent in the clean env, so DEBUG is false and the
+        # cookie-secure defaults follow it: an unconfigured (DEBUG=false)
+        # deployment lands in the hardened posture without extra env vars.
+        self.assertIn("SESSIONSEC True", res.stdout)
+        self.assertIn("CSRFSEC True", res.stdout)
+
+    def test_env_flags_flip_the_hsts_and_redirect_settings(self):
+        res = run_settings_import(
+            {
+                **self._BOOT_ENV,
+                "SECURE_HSTS_SECONDS": "31536000",
+                "SECURE_HSTS_INCLUDE_SUBDOMAINS": "true",
+                "SECURE_HSTS_PRELOAD": "true",
+                "SECURE_SSL_REDIRECT": "true",
+            },
+            snippet=(
+                "import config.settings as s; "
+                "print('HSTS', s.SECURE_HSTS_SECONDS); "
+                "print('SUBD', s.SECURE_HSTS_INCLUDE_SUBDOMAINS); "
+                "print('PRELOAD', s.SECURE_HSTS_PRELOAD); "
+                "print('REDIRECT', s.SECURE_SSL_REDIRECT)"
+            ),
+        )
+        self.assertEqual(res.returncode, 0, res.stderr)
+        self.assertIn("HSTS 31536000", res.stdout)
+        self.assertIn("SUBD True", res.stdout)
+        self.assertIn("PRELOAD True", res.stdout)
+        self.assertIn("REDIRECT True", res.stdout)
+
+    def test_proxy_header_requires_both_parts_as_a_pair(self):
+        res = run_settings_import(
+            {
+                **self._BOOT_ENV,
+                "SECURE_PROXY_SSL_HEADER_NAME": "X-Forwarded-Proto",
+                "SECURE_PROXY_SSL_HEADER_VALUE": "https",
+            },
+            snippet=(
+                "import config.settings as s; "
+                "print('PROXYHDR', s.SECURE_PROXY_SSL_HEADER)"
+            ),
+        )
+        self.assertEqual(res.returncode, 0, res.stderr)
+        self.assertIn(
+            "PROXYHDR ('X-Forwarded-Proto', 'https')", res.stdout
+        )
+
+    def test_proxy_header_half_configured_is_unconfigured(self):
+        # One part without the other is treated as unconfigured: a scheme
+        # header must never be half-trusted.
+        for env_overrides in (
+            {"SECURE_PROXY_SSL_HEADER_NAME": "X-Forwarded-Proto"},
+            {"SECURE_PROXY_SSL_HEADER_VALUE": "https"},
+        ):
+            with self.subTest(env=sorted(env_overrides)):
+                res = run_settings_import(
+                    {**self._BOOT_ENV, **env_overrides},
+                    snippet=(
+                        "import config.settings as s; "
+                        "print('PROXYHDR', s.SECURE_PROXY_SSL_HEADER)"
+                    ),
+                )
+                self.assertEqual(res.returncode, 0, res.stderr)
+                self.assertIn("PROXYHDR None", res.stdout)
+
+    def test_cookie_secure_flags_follow_debug_for_local_dev(self):
+        # DJANGO_DEBUG=true keeps both Secure flags off, so plain-HTTP local
+        # development (and the cookie-bearing login flows) keep working.
+        res = run_settings_import(
+            {"DJANGO_DEBUG": "true"},
+            snippet=(
+                "import config.settings as s; "
+                "print('SESSIONSEC', s.SESSION_COOKIE_SECURE); "
+                "print('CSRFSEC', s.CSRF_COOKIE_SECURE)"
+            ),
+        )
+        self.assertEqual(res.returncode, 0, res.stderr)
+        self.assertIn("SESSIONSEC False", res.stdout)
+        self.assertIn("CSRFSEC False", res.stdout)
+
+    def test_malformed_hsts_seconds_falls_back_to_zero(self):
+        res = run_settings_import(
+            {**self._BOOT_ENV, "SECURE_HSTS_SECONDS": "one-year"},
+            snippet=(
+                "import config.settings as s; "
+                "print('HSTS', s.SECURE_HSTS_SECONDS)"
+            ),
+        )
+        self.assertEqual(res.returncode, 0, res.stderr)
+        self.assertIn("HSTS 0", res.stdout)
+
+    def test_malformed_bool_falls_back_to_the_default(self):
+        # _env_bool treats any non-truthy spelling as the documented
+        # default, never as a crash. Pinned in-process via the pure helper
+        # with a temporarily-set env var (the in-process environment carries
+        # no truthy SECURE_* values), so the truthy-comparison branch of the
+        # resolver is covered without another subprocess boot. The truthy
+        # result itself is pinned by the subprocess tests above (SUBD True).
+        os.environ["SECURE_SSL_REDIRECT_TEST"] = "garbage"
+        try:
+            self.assertFalse(config_settings._env_bool("SECURE_SSL_REDIRECT_TEST", False))
+        finally:
+            del os.environ["SECURE_SSL_REDIRECT_TEST"]

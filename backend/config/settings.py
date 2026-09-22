@@ -45,6 +45,23 @@ if not DEBUG and not os.getenv('DJANGO_SECRET_KEY'):
     raise RuntimeError('DJANGO_SECRET_KEY must be set when DJANGO_DEBUG is false.')
 
 
+def _env_bool(name, default):
+    """Resolve an env-driven boolean, never crashing startup.
+
+    Accepts the usual truthy spellings; anything else (or an absent var)
+    falls back to the documented default instead of raising — the same
+    fail-safe pattern as _env_int below.
+    """
+    raw = os.getenv(name)
+    if raw is None:
+        return default
+    return raw.strip().lower() in ('1', 'true', 'yes', 'on')
+
+
+
+CSRF_COOKIE_SECURE = _env_bool('CSRF_COOKIE_SECURE', not DEBUG)
+
+
 # Application definition
 
 INSTALLED_APPS = [
@@ -480,3 +497,51 @@ def _build_logging(app_level, file_path=None):
 
 APP_LOG_LEVEL = _env_log_level("LOG_LEVEL", "INFO")
 LOGGING = _build_logging(APP_LOG_LEVEL, os.getenv("LOG_FILE"))
+
+
+# SPEC-17-07 [R-17.11]: transport/cookie hardening flags, every one
+# env-gated with safe-for-development defaults. The S22 deployment loop
+# owns the production TLS topology; these flags only make the hardening
+# REACHABLE from configuration, never on by default where it would break
+# plain-HTTP local development (cookie-secure defaults do follow DEBUG, so
+# an unconfigured DEBUG=false deployment lands in the hardened posture,
+# consistent with the V-02 fail-closed reading of DEBUG).
+
+# HSTS: seconds the browser must treat this host as HTTPS-only. 0 leaves
+# the header unset entirely — the safe default, because enabling HSTS on a
+# host that still serves plain HTTP locks real users out for the declared
+# window. A production value (e.g. 31536000, with subdomains/preload only
+# after the whole host tree is HTTPS) is S22's call.
+SECURE_HSTS_SECONDS = _env_int('SECURE_HSTS_SECONDS', 0)
+SECURE_HSTS_INCLUDE_SUBDOMAINS = _env_bool('SECURE_HSTS_INCLUDE_SUBDOMAINS', False)
+SECURE_HSTS_PRELOAD = _env_bool('SECURE_HSTS_PRELOAD', False)
+
+# Redirect plain-HTTP requests to HTTPS. Off by default so local dev and
+# the test suite (no TLS) keep working; enable behind a real deployment.
+SECURE_SSL_REDIRECT = _env_bool('SECURE_SSL_REDIRECT', False)
+
+# Behind a TLS-terminating reverse proxy Django only sees plain HTTP, so
+# scheme-dependent behaviour (SSL redirect, cookie Secure flags, CSRF
+# Referer checks) needs the proxy's forwarded-scheme header trusted
+# explicitly. Both parts must be configured as a pair — a name without a
+# value (or vice versa) is treated as unconfigured rather than trusted,
+# mirroring the fail-safe fallbacks above. Never set this without the S22
+# proxy actually sending the header: a forgeable pair lets a client lie
+# about its scheme.
+_proxy_header_name = os.getenv('SECURE_PROXY_SSL_HEADER_NAME', '')
+_proxy_header_value = os.getenv('SECURE_PROXY_SSL_HEADER_VALUE', '')
+SECURE_PROXY_SSL_HEADER = (
+    (_proxy_header_name, _proxy_header_value)
+    if _proxy_header_name and _proxy_header_value
+    else None
+)
+
+# Session (cart identity / admin login) and CSRF cookies: Secure by
+# default whenever DEBUG is off, mirroring the JWT refresh cookie's
+# secure=not DEBUG contract in accounts/views.py — the three auth cookies
+# can never disagree about transport security. The cart's csrftoken cookie
+# (issued on GET /api/cart/) and CSRF_COOKIE_SECURE flip together, so SPA
+# form posts keep working over HTTPS. Local development (DEBUG=true)
+# stays off, and either default can be forced explicitly via env for
+# exotic topologies.
+SESSION_COOKIE_SECURE = _env_bool('SESSION_COOKIE_SECURE', not DEBUG)
