@@ -99,7 +99,7 @@ that a deletion right exists and is documented; both hold:
     order FK only if orders are deleted with it;
   - orders to be erased outright (outside the legal window): delete the
     `Order` rows (`OrderItem`/`OrderStatusEvent` cascade with them);
-  - orders inside the legal window: blank the five address fields on
+  - orders inside the legal window: blank the six address fields on
     the `Order` (`full_name`, `phone`, `address`, `city`, `state`,
     `pincode`) and mark `user` for deletion — the financial columns
     (amounts, gateway ids, timestamps) stay reconcilable, the person is

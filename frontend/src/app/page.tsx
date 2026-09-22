@@ -3,6 +3,7 @@ import Link from "next/link";
 import GridSkeleton from "@/components/GridSkeleton";
 import ProductCard from "@/components/ProductCard";
 import { fetchProductsPage } from "@/lib/products-api";
+import { toJsonLdScriptContent } from "@/lib/json-ld";
 import { site } from "@/lib/site";
 
 // Rendered on demand with the underlying fetch cached for 60s
@@ -58,7 +59,7 @@ export default function HomePage() {
       <script
         type="application/ld+json"
         dangerouslySetInnerHTML={{
-          __html: JSON.stringify(organizationJsonLd),
+          __html: toJsonLdScriptContent(organizationJsonLd),
         }}
       />
 
