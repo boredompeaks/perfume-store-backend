@@ -24,4 +24,6 @@ useDefault = true
     '''S3cure-Passphrase!''',
     '''N3w-Passphrase-99\b''',
     '''An0ther-Pass-77\b''',
+    '''\bGEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ\b''', # 2026-09-23 RFC 6238 App-B SHA-1 test vector; SPEC-17-05 TOTP fixtures (common/testing.py, tests/test_mfa.py) - not a credential
+    '''\bGEZDGNBV234567\b''', # 2026-09-23 synthetic base32 fragment in tests/test_mfa.py otpauth-URI shape assertion - not a credential
   ]
