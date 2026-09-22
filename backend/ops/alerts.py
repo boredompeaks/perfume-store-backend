@@ -68,14 +68,24 @@ def _in_cooldown(alert_key):
     Cache-based on purpose: per-process atomicity is enough for a
     mail-bomb bound, and a race that double-sends costs one duplicate mail,
     never a business outcome.
+
+    Fail-open: a raisable cache backend must not kill the alert, so a
+    cache outage degrades to "not suppressed" (the send is attempted,
+    worst case un-deduped) with the failure logged — never a 500 in the
+    dashboard/health flow that tripped the alert.
     """
-    if cache.get(f"alerts:cooldown:{alert_key}") is not None:
-        return True
-    cache.set(
-        f"alerts:cooldown:{alert_key}",
-        True,
-        timeout=settings.ALERT_COOLDOWN_SECONDS,
-    )
+    try:
+        if cache.get(f"alerts:cooldown:{alert_key}") is not None:
+            return True
+        cache.set(
+            f"alerts:cooldown:{alert_key}",
+            True,
+            timeout=settings.ALERT_COOLDOWN_SECONDS,
+        )
+    except Exception:
+        logger.exception(
+            "alert %s cooldown check failed; failing open", alert_key
+        )
     return False
 
 
@@ -85,11 +95,15 @@ def _send(alert_key, context, subject):
     Returns True when a mail actually left (test/observability seam);
     suppressed and failed sends both return False.
     """
-    if _in_cooldown(alert_key):
-        logger.info("alert %s suppressed (cooldown)", alert_key)
-        return False
     sent = False
     try:
+        # Fail-open cooldown: the suppression check runs inside the same
+        # try as the send, so a raisable cache backend degrades to an
+        # attempted (worst case un-deduped) mail, never a 500 in the
+        # dashboard/health flow that tripped the alert.
+        if _in_cooldown(alert_key):
+            logger.info("alert %s suppressed (cooldown)", alert_key)
+            return False
         for recipient in _recipients():
             notifications.send_email(
                 f"alert_{alert_key}", context, subject, recipient

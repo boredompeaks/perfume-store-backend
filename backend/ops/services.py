@@ -131,7 +131,11 @@ def get_health() -> dict:
         out_of_stock = products.objects.filter(stock=0).count()
 
     return {
-        "status": "ok" if checks["database"] and checks["media_writable"] else "degraded",
+        "status": (
+            "ok"
+            if checks["database"] and checks["media_writable"]
+            else "degraded"
+        ),
         "checks": checks,
         "pending_orders": pending_orders,
         "carts": carts,

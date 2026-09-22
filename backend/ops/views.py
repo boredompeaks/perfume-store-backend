@@ -7,6 +7,7 @@ from django.shortcuts import render
 
 from common.permissions import capability_required
 from . import alerts
+from .alerts import check_payment_failure_spike
 from .services import (
     check_stock_alerts,
     get_health,
@@ -77,6 +78,13 @@ def dashboard(request):
     # renders); log-only + cooldown-deduped, so staff page views cannot
     # mail-bomb anyone.
     check_stock_alerts()
+    # [SPEC-19-2 audit c1 BUG-1] The spike detector's production call site:
+    # the AuditEvent trail already holds the failed-payment events, and the
+    # dashboard poll mirrors the stock-alert wiring (detector owned here,
+    # trigger beside its sibling alert — the audit-trail query itself is
+    # skipped entirely when ALERT_RECIPIENTS is empty, so the page stays
+    # cheap with alerts unconfigured).
+    check_payment_failure_spike()
 
     # Chart helpers for the template: bar heights scale against the busiest
     # day, and the aria summary gives screen readers the real totals (the

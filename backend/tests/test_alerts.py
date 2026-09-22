@@ -11,6 +11,7 @@ from datetime import timedelta
 from unittest import mock
 
 from django.conf import settings
+from django.contrib.auth.models import User
 from django.core import mail
 from django.core.cache import cache
 from django.test import override_settings, tag
@@ -234,6 +235,49 @@ class PaymentFailureSpikeTests(ApiTestCase):
 
 
 @tag("alerts")
+class SpikeDashboardWiringTests(ApiTestCase):
+    """[R-19.20] audit c1 BUG-1: the spike detector had no production
+    call site. The dashboard load is the wired seam (beside the stock
+    poll), matching the check_stock_alerts export symmetry; a hot trigger
+    site would have needed an orders/views.py edit (frozen file)."""
+
+    def setUp(self):
+        User.objects.create_superuser("boss", "boss@example.com", "boss-pass-123")
+        self.assertTrue(self.client.login(username="boss", password="boss-pass-123"))
+
+    def test_dashboard_load_fires_spike_alert_from_audit_trail(self):
+        _seed_failures(3)
+        with alert_recipients("staff@x.com"):
+            _clear_cooldowns()
+            res = self.client.get("/admin/dashboard/")
+        self.assertEqual(res.status_code, 200)
+        self.assertEqual(len(mail.outbox), 1)
+        self.assertEqual(mail.outbox[0].subject, "Payment failure spike alert")
+        self.assertIn("payment.signature_rejected", mail.outbox[0].body)
+
+    def test_dashboard_spike_alert_is_cooldown_deduped(self):
+        _seed_failures(3)
+        with alert_recipients("staff@x.com"):
+            _clear_cooldowns()
+            self.client.get("/admin/dashboard/")
+            self.client.get("/admin/dashboard/")
+        self.assertEqual(len(mail.outbox), 1)
+
+    def test_dashboard_with_no_recipients_skips_the_spike_query(self):
+        # The detector's cheap-when-disabled property must survive the new
+        # seam: with ALERT_RECIPIENTS empty the dashboard load must not
+        # touch the audit trail at all (cheap page even when alerts are off).
+        _clear_cooldowns()
+        with mock.patch(
+            "common.models.AuditEvent.objects.filter"
+        ) as filter_mock:
+            res = self.client.get("/admin/dashboard/")
+        self.assertEqual(res.status_code, 200)
+        filter_mock.assert_not_called()
+        self.assertEqual(len(mail.outbox), 0)
+
+
+@tag("alerts")
 class SecurityChangeAlertTests(ApiTestCase):
     """[R-19.27] alerting half: password reset triggers the staff alert."""
 
@@ -324,3 +368,19 @@ class SendFailureContractTests(ApiTestCase):
                     )
         self.assertFalse(sent)
         self.assertIn("smtp down", "\n".join(logs.output))
+
+    def test_cache_failure_fails_open_and_still_sends(self):
+        """A raisable cache backend must not kill the alert: the cooldown
+        check runs inside _send's try, so a cache outage degrades to an
+        attempted send (worst case one un-deduped mail), never a 500 in
+        the dashboard/health flow that tripped the alert."""
+        with alert_recipients("staff@x.com"):
+            _clear_cooldowns()
+            with mock.patch.object(
+                cache, "get", side_effect=Exception("cache down")
+            ):
+                sent = alerts.notify_low_stock(
+                    [{"id": 1, "name": "Rose Aurum", "stock": 2}]
+                )
+        self.assertTrue(sent)
+        self.assertEqual(len(mail.outbox), 1)
