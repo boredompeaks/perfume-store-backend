@@ -4,6 +4,7 @@ import { notFound } from "next/navigation";
 import AddToCartButton from "@/components/AddToCartButton";
 import ProductImage from "@/components/ProductImage";
 import { mediaUrl } from "@/lib/config";
+import { toJsonLdScriptContent } from "@/lib/json-ld";
 import { formatINR } from "@/lib/money";
 import { fetchProduct } from "@/lib/products-api";
 import { site } from "@/lib/site";
@@ -88,11 +89,13 @@ export default async function ProductPage({ params }: Props) {
     <div className="mx-auto max-w-6xl px-4 py-10 sm:px-6">
       <script
         type="application/ld+json"
-        dangerouslySetInnerHTML={{ __html: JSON.stringify(productJsonLd) }}
+        dangerouslySetInnerHTML={{ __html: toJsonLdScriptContent(productJsonLd) }}
       />
       <script
         type="application/ld+json"
-        dangerouslySetInnerHTML={{ __html: JSON.stringify(breadcrumbJsonLd) }}
+        dangerouslySetInnerHTML={{
+          __html: toJsonLdScriptContent(breadcrumbJsonLd),
+        }}
       />
 
       <nav aria-label="Breadcrumb" className="text-sm text-ink-muted">
