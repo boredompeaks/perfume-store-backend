@@ -1,7 +1,6 @@
 from decimal import Decimal
 
 from django.contrib.admin.models import LogEntry
-from django.contrib.admin.views.decorators import staff_member_required
 from django.core.paginator import Paginator
 from django.http import JsonResponse
 from django.shortcuts import render
@@ -38,8 +37,18 @@ def api_settings(request):
     )
 
 
-@staff_member_required
+@capability_required("reports.read")
 def dashboard(request):
+    """Store dashboard (spec 5 / route /admin/dashboard): revenue, order and
+    inventory aggregates. SPEC-17-10: gated by ``reports.read`` (finance,
+    marketing, admin per CAPABILITY_ROLES), not the blanket
+    @staff_member_required it replaces — every role on this page reads
+    revenue and customer rows, so "any staff account" was never the right
+    authority; the sibling audit-log route already used the capability
+    decorator and this closes the last blanket-staff chrome route. The
+    decorator's contract matches it: anonymous callers are redirected to
+    the admin login, unprivileged staff get a visible 403, superusers keep
+    their explicit bypass."""
     health = get_health()
     stats = get_stats()
     sales_series = get_sales_series()
