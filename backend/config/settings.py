@@ -545,3 +545,10 @@ SECURE_PROXY_SSL_HEADER = (
 # stays off, and either default can be forced explicitly via env for
 # exotic topologies.
 SESSION_COOKIE_SECURE = _env_bool('SESSION_COOKIE_SECURE', not DEBUG)
+
+# SPEC-17-08 [R-17.21]: product image upload size ceiling in whole MB.
+# Enforced by products.validate_image_size on every upload surface (the
+# API serializer field and the admin product form). A deployment raising
+# it should also raise the web server's own body limit, which fires
+# first and answers with its own 413.
+MAX_UPLOAD_MB = _env_int('MAX_UPLOAD_MB', 5)

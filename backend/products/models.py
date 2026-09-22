@@ -1,9 +1,49 @@
 from datetime import timedelta
+import os
 
 from django.conf import settings
+from django.core.exceptions import ValidationError
 from django.db import models, transaction
 from django.utils import timezone
 from django.utils.text import slugify
+
+
+# SPEC-17-08 [R-17.21]: "File upload abuse -> Type/size validation". The
+# type half is ImageField's Pillow verification (a non-image payload never
+# validates); the size half is this ceiling, enforced before anything is
+# written to storage. Env-driven with a 5 MB default because the right cap
+# is a per-deployment trade-off between image quality and abuse budget, not
+# a code constant. Read through django.conf.settings (not a module-level
+# literal) so deployments can override it without a code change and tests
+# can exercise the override.
+def _max_upload_bytes():
+    return settings.MAX_UPLOAD_MB * 1024 * 1024
+
+
+def validate_image_size(image):
+    """Reject image files above MAX_UPLOAD_MB with a field-level error.
+
+    Attached as a model-field validator so DRF's ModelSerializer copies it
+    onto the API form field (400 with the uniform error envelope) and
+    Django's ModelForm (the admin change/add pages) picks it up too — one
+    enforcement point covering every entry surface. The size is read via
+    seek/tell on the underlying file handle: upload wrappers vary (BytesIO
+    under the 2.5 MB in-memory threshold, TemporaryFile past it) and only
+    some expose .size themselves, while File wrappers always keep the
+    handle positioned at the start of the payload.
+    """
+    if not image or not image.file:
+        return
+    handle = image.file
+    size = getattr(handle, "size", None)
+    if size is None:
+        position = handle.tell()
+        size = handle.seek(0, os.SEEK_END)
+        handle.seek(position)
+    if size > _max_upload_bytes():
+        raise ValidationError(
+            "Image exceeds the maximum upload size of %d MB." % settings.MAX_UPLOAD_MB
+        )
 
 
 class products(models.Model):
@@ -27,7 +67,8 @@ class products(models.Model):
     image = models.ImageField(
         upload_to='products/',
         blank=True,
-        null=True
+        null=True,
+        validators=[validate_image_size],
     )
     created_at = models.DateTimeField(auto_now_add=True)
 

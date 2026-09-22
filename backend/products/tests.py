@@ -1416,3 +1416,97 @@ class StockReservationModelTests(ApiTestCase):
     def test_string_representation_names_product_quantity_and_status(self):
         reservation = self.make_reservation(quantity=2)
         self.assertEqual(str(reservation), "Rose Aurum: 2 reserved (active)")
+
+
+@tag("products")
+class ImageUploadSizeCapTests(ApiTestCase):
+    """SPEC-17-08 [R-17.21]: file upload abuse -> size validation.
+
+    The cap lives on the model field as ``validate_image_size``, so DRF's
+    ModelSerializer copies it onto the API image field and the admin's
+    ModelForm enforces the same validator - one enforcement point covering
+    every entry surface. These tests pin the oversized rejection, the
+    boundary pass, the env override, and the no-image passthrough.
+    """
+
+    def setUp(self):
+        self.staff = self.make_staff()
+        self.client = self.fresh_client()
+        self.api_login("staff", client=self.client)
+
+    def _png(self, fill_bytes):
+        return SimpleUploadedFile(
+            "big.png", TINY_PNG + b"x" * fill_bytes, content_type="image/png"
+        )
+
+    def test_oversized_api_upload_is_rejected_400(self):
+        payload = {
+            "name": "Too Big", "description": "d", "price": "10.00",
+            "size": 30, "stock": 1, "category": "Floral",
+            "image": self._png(settings.MAX_UPLOAD_MB * 1024 * 1024 + 1),
+        }
+        res = self.client.post("/api/products/", payload, format="multipart")
+        self.assertEqual(res.status_code, 400, res.data)
+        self.assertIn("image", res.data["details"])
+        self.assertIn("maximum upload size", res.data["details"]["image"][0])
+        self.assertFalse(products.objects.filter(name="Too Big").exists())
+
+    def test_boundary_api_upload_passes(self):
+        payload = {
+            "name": "Exactly At Cap", "description": "d", "price": "10.00",
+            "size": 30, "stock": 1, "category": "Floral",
+            # Cap minus the TINY_PNG header already in the buffer: the file
+            # body lands exactly at the limit, and `>` (not `>=`) admits it.
+            "image": self._png(settings.MAX_UPLOAD_MB * 1024 * 1024 - len(TINY_PNG)),
+        }
+        res = self.client.post("/api/products/", payload, format="multipart")
+        self.assertEqual(res.status_code, 201, res.data)
+        self.assertTrue(products.objects.filter(name="Exactly At Cap").exists())
+
+    def test_no_image_payload_still_passes(self):
+        payload = {
+            "name": "No Image", "description": "d", "price": "10.00",
+            "size": 30, "stock": 1, "category": "Floral",
+        }
+        res = self.client.post("/api/products/", payload, format="multipart")
+        self.assertEqual(res.status_code, 201, res.data)
+
+    def test_validator_passes_through_empty_values(self):
+        # The guard branch: no image (or a bare wrapper) must fall through
+        # the validator untouched - the empty-value half of the contract.
+        from products.models import validate_image_size
+
+        validate_image_size(None)
+        validate_image_size(SimpleUploadedFile("empty.png", b""))
+
+    def test_env_override_tightens_the_cap(self):
+        with override_settings(MAX_UPLOAD_MB=1):
+            payload = {
+                "name": "Tighter Cap", "description": "d", "price": "10.00",
+                "size": 30, "stock": 1, "category": "Floral",
+                "image": self._png(1024 * 1024 + 1),
+            }
+            res = self.client.post("/api/products/", payload, format="multipart")
+        self.assertEqual(res.status_code, 400, res.data)
+        self.assertIn("1 MB", res.data["details"]["image"][0])
+
+    def test_admin_form_rejects_oversized_upload(self):
+        product = self.make_product(name="Admin Rose")
+        admin_client = self.client_class()
+        admin_client.force_login(self.staff)
+        res = admin_client.post(
+            f"/admin/products/products/{product.id}/change/",
+            {
+                "name": "Admin Rose", "description": "d", "price": "10.00",
+                "size": 30, "stock": 1, "category": "Floral",
+                "products-stockmovement_set-TOTAL_FORMS": "0",
+                "products-stockmovement_set-INITIAL_FORMS": "0",
+                "products-stockmovement_set-MIN_NUM_FORMS": "0",
+                "products-stockmovement_set-MAX_NUM_FORMS": "1000",
+                "image": self._png(settings.MAX_UPLOAD_MB * 1024 * 1024 + 1),
+            },
+        )
+        self.assertEqual(res.status_code, 200)
+        self.assertContains(res, "maximum upload size")
+        product.refresh_from_db()
+        self.assertFalse(product.image)
