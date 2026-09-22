@@ -1,0 +1,6 @@
+An integration health check is failing:
+
+{{ detail }}
+
+The store is serving in a degraded state. Check /health/ and the platform
+logs for the failing component.

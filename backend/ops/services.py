@@ -130,16 +130,49 @@ def get_health() -> dict:
         ).count()
         out_of_stock = products.objects.filter(stock=0).count()
 
-    status = "ok" if checks["database"] and checks["media_writable"] else "degraded"
     return {
-        "status": status,
+        "status": "ok" if checks["database"] and checks["media_writable"] else "degraded",
         "checks": checks,
         "pending_orders": pending_orders,
         "carts": carts,
         "low_stock": low_stock,
         "out_of_stock": out_of_stock,
         "low_stock_threshold": threshold,
+        # [SPEC-19-2] The stock-breach alert fires from ops.services
+        # check_stock_alerts (polled beside /health/), not from inside
+        # get_health: a raise inside the probe must never flip /health/
+        # itself into a 503 — the monitor must never become the outage.
+        "stock_alert_checked": False,
     }
+
+
+def _alert_rows(queryset):
+    """Render low/out-of-stock products as the alert payload dicts."""
+    return [
+        {"id": row.id, "name": row.name, "stock": row.stock}
+        for row in queryset
+    ]
+
+
+def check_stock_alerts():
+    """[SPEC-19-2] Low/out-of-stock breach detection + admin alert.
+
+    The alerting half of [R-19.15] rides this existing detection: both
+    breach sets are computed from the same threshold definition the
+    dashboard table shows. Dispatch is log-only on failure and cooldown-
+    deduped in ops.alerts, so a poller can call this freely.
+    """
+    from products.models import products
+
+    from .alerts import notify_low_stock, notify_out_of_stock
+
+    threshold = _low_stock_threshold()
+    notify_low_stock(
+        _alert_rows(
+            products.objects.filter(stock__gt=0, stock__lte=threshold)
+        )
+    )
+    notify_out_of_stock(_alert_rows(products.objects.filter(stock=0)))
 
 
 def get_stats() -> dict:

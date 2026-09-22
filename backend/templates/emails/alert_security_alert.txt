@@ -1,0 +1,6 @@
+A security-sensitive account change was recorded:
+
+{{ detail }}
+
+If this change was not expected, investigate immediately (audit-log, role
+assignments, active sessions).

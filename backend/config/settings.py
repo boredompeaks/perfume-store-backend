@@ -267,6 +267,21 @@ LOW_STOCK_THRESHOLD = _env_int('LOW_STOCK_THRESHOLD', 5)
 # ending today. Tunable per deployment without a code change.
 DASHBOARD_SALES_WINDOW_DAYS = _env_int('DASHBOARD_SALES_WINDOW_DAYS', 30)
 
+# SPEC-19-2 [R-19.20/R-19.21] admin alerts. Comma-separated staff/admin
+# mailboxes; empty disables admin alerts entirely (no guessed recipient).
+ALERT_RECIPIENTS = os.getenv('ALERT_RECIPIENTS', '')
+# Per-alert-type dedupe window in seconds: an alert type that already sent
+# inside the window is logged instead of re-sent (mail-bomb bound for the
+# pollable /health/ and dashboard triggers).
+ALERT_COOLDOWN_SECONDS = _env_int('ALERT_COOLDOWN_SECONDS', 300)
+# "Payment-failure spike" rule (spec names the alert, not the number):
+# at least this many failed payment attempts within a trailing window of
+# this many seconds fires the spike alert (defaults: 3 in 300).
+PAYMENT_FAILURE_SPIKE_COUNT = _env_int('PAYMENT_FAILURE_SPIKE_COUNT', 3)
+PAYMENT_FAILURE_SPIKE_WINDOW_SECONDS = _env_int(
+    'PAYMENT_FAILURE_SPIKE_WINDOW_SECONDS', 300
+)
+
 # Storefront products listing: rows per page. The historical hardcoded 2
 # was a dev/test artifact (F-23); 12 is a storefront-appropriate default.
 # Tunable per deployment without a code change; non-integer values are

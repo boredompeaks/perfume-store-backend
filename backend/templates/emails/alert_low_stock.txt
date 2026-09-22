@@ -1,0 +1,5 @@
+The following products have fallen to low stock (at or below {{ threshold }} units):
+
+{% for line in product_lines %}{{ line }}
+{% endfor %}
+Restock soon — see the store dashboard for the full inventory picture.

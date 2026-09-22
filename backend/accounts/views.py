@@ -26,6 +26,7 @@ from django.utils.http import urlsafe_base64_encode, urlsafe_base64_decode
 from common import notifications, totp
 from common.models import AuditEvent
 from common.permissions import IsPrivilegedRole, is_privileged
+from ops import alerts
 from .models import (
     MFA_CODE_INVALID,
     TOTPDevice,
@@ -423,6 +424,17 @@ def reset_password(request):
             AuditEvent.EventType.AUTH_PASSWORD_RESET,
             actor=user,
             detail={"username": user.username},
+        )
+        # [SPEC-19-2] Security-sensitive account change ([R-19.27]
+        # alerting half) beside the audit hook, in the same atomic block.
+        # The identity line carries the username only — the same [R-17.32]
+        # allowlist the audit trail's log mirror already governs. Log-only
+        # on failure: an alert outage must not fail a completed password
+        # reset. The alert does not name the recipient inbox (the customer
+        # reset mail already went out) — it tells the staff the event
+        # happened, catching a mailbox compromise.
+        alerts.notify_security_change(
+            f"Password reset completed for user {user.username} (id {user.pk})."
         )
     return Response({'message': 'Password reset successfully. You can now log in.'})
 
