@@ -1,0 +1,5 @@
+Good news — {{ product.name }} is back in stock!
+
+You asked to be told when it returned. Grab it before it goes again:
+
+{{ frontend_url }}/products/{{ product.slug }}/

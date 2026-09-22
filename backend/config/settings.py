@@ -375,6 +375,10 @@ REST_FRAMEWORK = {
         # the gateway and writes a payment event, so this budget bounds
         # both gateway spend and order-id brute-forcing.
         'payment': os.getenv('PAYMENT_THROTTLE_RATE', '10/min'),
+        # SPEC-19-4 back-in-stock opt-in/opt-out: each opt-in is intent to
+        # receive an outbound email, so the budget is the same shape as
+        # the recovery bound (tighter than the generic auth budget).
+        'restock': os.getenv('THROTTLE_RESTOCK_RATE', '5/min'),
     },
 }
 

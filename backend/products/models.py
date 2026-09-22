@@ -7,6 +7,12 @@ from django.db import models, transaction
 from django.utils import timezone
 from django.utils.text import slugify
 
+import logging
+
+# A dedicated channel name (mirrors common.notifications/ops.alerts) so
+# deployments can route restock-send failures independently in log tooling.
+logger = logging.getLogger("products.restock")
+
 
 # SPEC-17-08 [R-17.21]: "File upload abuse -> Type/size validation". The
 # type half is ImageField's Pillow verification (a non-image payload never
@@ -128,6 +134,77 @@ class products(models.Model):
                 stock_after=locked.stock,
                 created_by=user if getattr(user, "is_authenticated", False) else None,
             )
+            # [SPEC-19-4] Back-in-stock trigger ([R-19.11]): fires on the
+            # exact crossing the notification is about — stock arriving
+            # at a positive count from zero (PositiveBigIntegerField
+            # makes below-zero impossible, but the guard keeps the
+            # crossing definition self-contained). The inverse crossing
+            # (positive -> 0) re-arms spent rows: the product sold out
+            # again, so last cycle's notification is relevant again and
+            # the NEXT restock re-mails. Never raises: a notification
+            # outage must not fail the inventory write, mirroring the
+            # alert/dispatch log-only contracts.
+            previous_stock = locked.stock - delta
+            if locked.stock > 0 and previous_stock <= 0:
+                self._notify_back_in_stock(locked)
+            elif locked.stock == 0 and previous_stock > 0:
+                self._rearm_restock_notifications(locked)
+
+    @staticmethod
+    def _rearm_restock_notifications(product):
+        """[SPEC-19-4] Sell-out re-arm (stock positive -> 0): clear the
+        spent stamp on the product's active preferences so the NEXT
+        0 -> positive crossing re-mails the opted-in customers. One
+        stock cycle, one email. Fires beside the restock notify site and
+        never raises (the caller guards the crossings already).
+        """
+        RestockNotification.objects.filter(
+            product=product, active=True, notified_at__isnull=False
+        ).update(notified_at=None)
+
+    @staticmethod
+    def _notify_back_in_stock(product):
+        """Email every armed opt-in for ``product`` via the single send
+        path, marking each row spent (``notified_at``) exactly once.
+
+        Runs INSIDE adjust_stock's atomic block (rollback-together, the
+        StockMovement pattern): the email hand-off happens pre-commit —
+        the documented in-process substrate cost, identical to every
+        other dispatch site — while the spent-stamp commits with the
+        stock change, so a rollback cannot leave a notified row paired
+        with stock that does not exist. ``update()`` (not per-row save)
+        makes the mark exact even under concurrent adjustments: a row is
+        stamped only when the UPDATE itself lands, and the notified_at
+        filter in the same statement re-checks armament at write time.
+        """
+        from common import notifications
+
+        armed = RestockNotification.objects.filter(
+            product=product,
+            active=True,
+            notified_at__isnull=True,
+        ).select_related("user", "product")
+        for preference in armed:
+            try:
+                notifications.send_email(
+                    "back_in_stock",
+                    {"product": product, "frontend_url": settings.FRONTEND_URL},
+                    f"Back in stock: {product.name}",
+                    preference.user.email,
+                )
+            except Exception:
+                # Log-only: one user's SMTP failure must not abort the
+                # loop for the remaining opt-ins (and the inventory write
+                # itself is unaffected by contract).
+                logger.exception(
+                    "Back-in-stock email failed: user %s, product %s",
+                    preference.user_id,
+                    product.pk,
+                )
+                continue
+            RestockNotification.objects.filter(
+                pk=preference.pk, notified_at__isnull=True
+            ).update(notified_at=timezone.now())
 
     @property
     def stock_health(self) -> str:
@@ -224,6 +301,75 @@ class StockMovement(models.Model):
 
     def __str__(self):
         return f"{self.product.name}: {self.delta:+d} ({self.reason})"
+
+
+class RestockNotification(models.Model):
+    """A customer's opt-in to one back-in-stock email for one product
+    ([R-19.11], spec 19.1 "Back-in-stock event -> Optional opt-in
+    notification", SPEC-19-4).
+
+    Lifecycle: created active when the customer opts in while the product
+    is out of stock (an opt-in to a stocked product is meaningless). The
+    restock trigger emails them once and stamps ``notified_at`` — the row
+    keeps active=True but is spent, so a second restock without an
+    intervening sell-out never re-mails (no duplicate sends). Semantics of
+    the flags and the stock cycle:
+    - ``active=False`` is an explicit opt-OUT: no mail is ever sent for
+      the row until the customer opts back in (which flips active=True
+      and clears notified_at, arming a fresh notification);
+    - re-arm on subsequent zero-out: the sell-out crossing (stock
+      positive -> 0) clears ``notified_at`` on the product's active
+      rows, so the next 0 -> positive restock mails the same customer
+      again — one email per stock cycle, the natural reading of "notify
+      me when it's back";
+    - a customer wanting a fresh mail without a sell-out opts out and
+      back in (the opt-in clears notified_at).
+
+    Unique per (user, product): at most one preference row per pair, the
+    DB constraint is the concurrency authority (two concurrent opt-ins
+    race to one row — conventions.md forbids check-then-act). Placement
+    in products/ (not a new app): the write trigger is
+    ``products.adjust_stock`` and every other customer-facing mount lives
+    under the products/cart URL namespaces; a one-model feature does not
+    earn an app.
+    """
+
+    user = models.ForeignKey(
+        "auth.User",
+        on_delete=models.CASCADE,
+        related_name="restock_notifications",
+    )
+    product = models.ForeignKey(
+        products,
+        on_delete=models.CASCADE,
+        related_name="restock_notifications",
+    )
+    active = models.BooleanField(default=True)
+    notified_at = models.DateTimeField(null=True, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        constraints = [
+            models.UniqueConstraint(
+                fields=["user", "product"],
+                name="uniq_user_product_restock_optin",
+            ),
+        ]
+        indexes = [
+            # The restock trigger's exact lookup: armed (active, unnotified)
+            # prefs for one product.
+            models.Index(
+                fields=["product", "active", "notified_at"],
+                name="restock_trigger_idx",
+            ),
+        ]
+        verbose_name = "Restock notification"
+        verbose_name_plural = "Restock notifications"
+
+    def __str__(self):
+        state = "active" if self.active else "opted out"
+        return f"{self.user_id} -> {self.product_id} ({state})"
 
 
 class StockReservation(models.Model):
