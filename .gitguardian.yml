@@ -1,67 +1,67 @@
-# GitGuardian GitHub App false-positive allowlist (scanner config, owned by
-# the release/CI engineer alongside .gitleaks.toml and .github/workflows/).
+GitGuardian GitHub App false-positive allowlist (scanner config, owned by
+the release/CI engineer alongside .gitleaks.toml and .github/workflows/).
 #
-# Scope policy: exact-literal matches only, each with a rationale. Never add
-# paths-ignore entries — full file coverage stays in force; the mandatory
-# gitleaks CI backstop (secret-scan.yml) has NO ignores at all.
+Scope policy: exact-literal matches only, each with a rationale. Never add
+paths-ignore entries — full file coverage stays in force; the mandatory
+gitleaks CI backstop (secret-scan.yml) has NO ignores at all.
 #
-# 1. Incident 37439385 (detector: Username Password) @ fac27e4,
-#    backend/tests/test_audit_trail.py:361. The literal "whatever-1A" is a
-#    dummy credential POSTed for the NONEXISTENT user "ghost"; the test
-#    asserts a 401 and an AUTH_LOGIN_FAILED audit event. Not a real secret;
-#    nothing to revoke or rotate.
+1. Incident 37439385 (detector: Username Password) @ fac27e4,
+   backend/tests/test_audit_trail.py:361. The literal "whatever-1A" is a
+   dummy credential POSTed for the NONEXISTENT user "ghost"; the test
+   asserts a 401 and an AUTH_LOGIN_FAILED audit event. Not a real secret;
+   nothing to revoke or rotate.
 #
-# 2. Incident 37423839 (detector: Password) @ 313782e,
-#    backend/tests/test_settings_security.py (DATABASE_URL parser test).
-#    The literal "p@ss" is a dummy DB password asserted in a parsed URL;
-#    the test proves the parser round-trips credentials. Removed from the
-#    tree by 0e0ed17 (SPEC-2-01 gate cycle 1); the occurrence lives only in
-#    git history. Not a real secret.
+2. Incident 37423839 (detector: Password) @ 313782e,
+   backend/tests/test_settings_security.py (DATABASE_URL parser test).
+   The literal "p@ss" is a dummy DB password asserted in a parsed URL;
+   the test proves the parser round-trips credentials. Removed from the
+   tree by 0e0ed17 (SPEC-2-01 gate cycle 1); the occurrence lives only in
+   git history. Not a real secret.
 #
-# 3. Test-fixture dummy credentials used repo-wide to create throwaway
-#    users inside the isolated test DB (pre-run commits 95d5d39/e3f235c and
-#    every later test file). Mirrors the RE-maintained .gitleaks.toml
-#    allowlist exactly; gitleaks CI stays green with no ignores of its own.
+3. Test-fixture dummy credentials used repo-wide to create throwaway
+   users inside the isolated test DB (pre-run commits 95d5d39/e3f235c and
+   every later test file). Mirrors the RE-maintained .gitleaks.toml
+   allowlist exactly; gitleaks CI stays green with no ignores of its own.
 #
-# 4. RFC 6238 Appendix-B SHA-1 TOTP test vectors (SPEC-17-05 fixtures,
-#    backend/common/testing.py + backend/tests/test_mfa.py). Public
-#    standards vectors for the HOTP/TOTP reference secret, not credentials.
+4. RFC 6238 Appendix-B SHA-1 TOTP test vectors (SPEC-17-05 fixtures,
+   backend/common/testing.py + backend/tests/test_mfa.py). Public
+   standards vectors for the HOTP/TOTP reference secret, not credentials.
 matches-ignore:
-  - match: "whatever-1A"
-    name: "dummy test credential (test_audit_trail.py: unknown-user 401 assertion, incident 37439385)"
-  - match: "p@ss"
-    name: "dummy DB password in a DATABASE_URL parser assertion (test_settings_security.py, incident 37423839; removed from tree by 0e0ed17)"
-  - match: "S3cure-Passphrase!"
-    name: "test-fixture user password (throwaway users in isolated test DB; mirrors .gitleaks.toml)"
-  - match: "Ev1l-Passphrase-9"
-    name: "test-fixture user password (throwaway users in isolated test DB; mirrors .gitleaks.toml)"
-  - match: "N3w-Passphrase-99"
-    name: "test-fixture user password (throwaway users in isolated test DB; mirrors .gitleaks.toml)"
-  - match: "An0ther-Pass-77"
-    name: "test-fixture user password (throwaway users in isolated test DB; mirrors .gitleaks.toml)"
-  - match: "boss-pass-123"
-    name: "test-fixture superuser password (throwaway users in isolated test DB; mirrors .gitleaks.toml)"
-  - match: "e2e-Customer-9"
-    name: "dummy e2e fixture credential (frontend/e2e/helpers.ts; pre-run commit 95d5d39)"
-  - match: "e2e-Staff-9"
-    name: "dummy e2e fixture credential (frontend/e2e/helpers.ts; pre-run commit 95d5d39)"
-  - match: "rzp_test_TESTINGONLYDO NOTUSE"
-    name: "dummy Razorpay test key-id fixture (common/testing.py; clearly marked DO-NOT-USE, never a real key)"
-  - match: "TESTINGONLYSECRET-DO-NOT-USE"
-    name: "dummy Razorpay test key-secret fixture (common/testing.py; clearly marked DO-NOT-USE, never a real key)"
-  - match: "GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ"
-    name: "RFC 6238 Appendix-B SHA-1 TOTP reference vector (SPEC-17-05 fixtures; public standards constant)"
-  - match: "GEZDGNBV234567"
-    name: "synthetic base32 fragment in test_mfa.py otpauth-URI shape assertion"
-  - match: "ci-dummy-secret"
-    name: "CI dummy secret literal used by workflow test fixtures (mirrors .gitleaks.toml)"
-  - match: "change-me-to-a-long-random-string"
-    name: "placeholder literal in config templates (mirrors .gitleaks.toml)"
-  - match: "rzp_test_CI_DUMMY"
-    name: "dummy Razorpay key-id literal in CI workflow fixtures (mirrors .gitleaks.toml)"
-  - match: "TESTINGONLY-DO-NOT-USE"
-    name: "generic do-not-use marker literal (mirrors .gitleaks.toml TESTINGONLY* family)"
-  - match: "GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ"
-    name: "RFC 6238 App-B SHA-1 test vector (SPEC-17-05 TOTP fixtures, backend/tests/test_mfa.py:32) - not a credential"
-  - match: "GEZDGNBV234567"
-    name: "Synthetic base32 fragment in tests/test_mfa.py otpauth-URI shape assertion - not a credential"
+- match: "whatever-1A"
+name: "dummy test credential (test_audit_trail.py: unknown-user 401 assertion, incident 37439385)"
+- match: "p@ss"
+name: "dummy DB password in a DATABASE_URL parser assertion (test_settings_security.py, incident 37423839; removed from tree by 0e0ed17)"
+- match: "S3cure-Passphrase!"
+name: "test-fixture user password (throwaway users in isolated test DB; mirrors .gitleaks.toml)"
+- match: "Ev1l-Passphrase-9"
+name: "test-fixture user password (throwaway users in isolated test DB; mirrors .gitleaks.toml)"
+- match: "N3w-Passphrase-99"
+name: "test-fixture user password (throwaway users in isolated test DB; mirrors .gitleaks.toml)"
+- match: "An0ther-Pass-77"
+name: "test-fixture user password (throwaway users in isolated test DB; mirrors .gitleaks.toml)"
+- match: "boss-pass-123"
+name: "test-fixture superuser password (throwaway users in isolated test DB; mirrors .gitleaks.toml)"
+- match: "e2e-Customer-9"
+name: "dummy e2e fixture credential (frontend/e2e/helpers.ts; pre-run commit 95d5d39)"
+- match: "e2e-Staff-9"
+name: "dummy e2e fixture credential (frontend/e2e/helpers.ts; pre-run commit 95d5d39)"
+- match: "rzp_test_TESTINGONLYDO NOTUSE"
+name: "dummy Razorpay test key-id fixture (common/testing.py; clearly marked DO-NOT-USE, never a real key)"
+- match: "TESTINGONLYSECRET-DO-NOT-USE"
+name: "dummy Razorpay test key-secret fixture (common/testing.py; clearly marked DO-NOT-USE, never a real key)"
+- match: "GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ"
+name: "RFC 6238 Appendix-B SHA-1 TOTP reference vector (SPEC-17-05 fixtures; public standards constant)"
+- match: "GEZDGNBV234567"
+name: "synthetic base32 fragment in test_mfa.py otpauth-URI shape assertion"
+- match: "ci-dummy-secret"
+name: "CI dummy secret literal used by workflow test fixtures (mirrors .gitleaks.toml)"
+- match: "change-me-to-a-long-random-string"
+name: "placeholder literal in config templates (mirrors .gitleaks.toml)"
+- match: "rzp_test_CI_DUMMY"
+name: "dummy Razorpay key-id literal in CI workflow fixtures (mirrors .gitleaks.toml)"
+- match: "TESTINGONLY-DO-NOT-USE"
+name: "generic do-not-use marker literal (mirrors .gitleaks.toml TESTINGONLY* family)"
+- match: "GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ"
+name: "RFC 6238 App-B SHA-1 test vector (SPEC-17-05 TOTP fixtures, backend/tests/test_mfa.py:32) - not a credential"
+- match: "GEZDGNBV234567"
+name: "Synthetic base32 fragment in tests/test_mfa.py otpauth-URI shape assertion - not a credential"
