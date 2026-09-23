@@ -61,3 +61,7 @@ matches-ignore:
     name: "dummy Razorpay key-id literal in CI workflow fixtures (mirrors .gitleaks.toml)"
   - match: "TESTINGONLY-DO-NOT-USE"
     name: "generic do-not-use marker literal (mirrors .gitleaks.toml TESTINGONLY* family)"
+  - match: "GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ"
+    name: "RFC 6238 App-B SHA-1 test vector (SPEC-17-05 TOTP fixtures, backend/tests/test_mfa.py:32) - not a credential"
+  - match: "GEZDGNBV234567"
+    name: "Synthetic base32 fragment in tests/test_mfa.py otpauth-URI shape assertion - not a credential"
