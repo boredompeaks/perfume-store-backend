@@ -1,16 +1,77 @@
 from django import forms
 from django.contrib import admin
+from django.contrib.admin.forms import AdminAuthenticationForm
 from django.contrib.admin.widgets import FilteredSelectMultiple
 from django.contrib.auth.admin import UserAdmin as DjangoUserAdmin
 from django.contrib.auth.forms import UserChangeForm
 from django.contrib.auth.models import Group, User
 from django.core.exceptions import PermissionDenied
 
+from common import totp
 from common.admin import RoleAwareModelAdmin
+from common.permissions import is_privileged
 from common.roles import STAFF_ROLES
 from orders.models import Order
+
+from .models import (
+    MFA_CODE_INVALID,
+    MFA_CODE_REQUIRED,
+    MFA_ENROLLMENT_REQUIRED,
+    TOTPDevice,
+)
 # Replace auth's default User admin with the store-aware one below.
 admin.site.unregister(User)
+
+
+class MFAAdminAuthenticationForm(AdminAuthenticationForm):
+    """Admin login + mandatory TOTP for privileged roles (SPEC-17-05).
+
+    The second enforcement surface for R-17.9: ``is_privileged`` users
+    (superusers and ``staff.manage`` holders) must present a valid TOTP
+    code in the login form, and an unenrolled privileged account is
+    refused with the enrollment path named — same semantics as the staff
+    API login. ``user_cache`` is set only after the password validates, so
+    MFA errors appear only for correct credentials (nothing is leaked to
+    a caller who failed the first factor). Non-privileged staff and
+    customers log in exactly as before — the field is optional and unused
+    for them.
+    """
+
+    totp = forms.CharField(
+        label="Authentication code",
+        required=False,
+        widget=forms.TextInput(
+            attrs={
+                "inputmode": "numeric",
+                "autocomplete": "one-time-code",
+            }
+        ),
+    )
+
+    def clean(self):
+        cleaned_data = super().clean()
+        user = getattr(self, "user_cache", None)
+        if user is None or not is_privileged(user):
+            return cleaned_data
+        device = TOTPDevice.active_for(user)
+        if device is None:
+            raise forms.ValidationError(MFA_ENROLLMENT_REQUIRED)
+        code = cleaned_data.get("totp")
+        if not code:
+            raise forms.ValidationError(MFA_CODE_REQUIRED)
+        counter = totp.verify_code(
+            device.secret,
+            code,
+            at_time=totp.now(),
+            last_used_counter=device.last_used_counter,
+        )
+        if counter is None:
+            raise forms.ValidationError(MFA_CODE_INVALID)
+        # RFC 6238 §5.2: consume the counter so the same code can never
+        # log in twice.
+        device.last_used_counter = counter
+        device.save(update_fields=["last_used_counter"])
+        return cleaned_data
 
 
 class StoreUserChangeForm(UserChangeForm):

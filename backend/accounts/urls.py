@@ -3,20 +3,9 @@ from django.urls import path
 from .views import (
     register, username_available, verify_email, resend_verification,
     forgot_username, request_password_reset, reset_password, LoginView,
-    LogoutView,
+    LogoutView, RefreshView,
+    MFAStatusView, MFASetupView, MFAConfirmView, MFADisableView,
 )
-from rest_framework_simplejwt.views import (
-    TokenRefreshView,
-)
-
-
-class RefreshView(TokenRefreshView):
-    """JWT refresh behind the 'auth' throttle scope.
-
-    Throttling here bounds refresh-token brute forcing (V-04 family). The
-    response contract is TokenRefreshView's, unchanged."""
-
-    throttle_scope = 'auth'
 
 
 urlpatterns = [
@@ -55,6 +44,34 @@ urlpatterns = [
         'logout/',
         LogoutView.as_view(),
         name='logout'
+    ),
+
+    # SPEC-17-05 [R-17.9]: TOTP enrollment for privileged roles. Mounted
+    # under both /api/accounts/ and /api/v1/account/ via this shared
+    # urlconf; the enrollment path named in the login-block error is the
+    # /api/accounts/ form.
+    path(
+        'mfa/status/',
+        MFAStatusView.as_view(),
+        name='mfa-status'
+    ),
+
+    path(
+        'mfa/setup/',
+        MFASetupView.as_view(),
+        name='mfa-setup'
+    ),
+
+    path(
+        'mfa/confirm/',
+        MFAConfirmView.as_view(),
+        name='mfa-confirm'
+    ),
+
+    path(
+        'mfa/disable/',
+        MFADisableView.as_view(),
+        name='mfa-disable'
     ),
 
 ]

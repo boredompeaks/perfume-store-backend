@@ -12,6 +12,7 @@ export default function LoginForm({ next }: { next?: string }) {
   const { login } = useAuth();
   const [username, setUsername] = useState("");
   const [password, setPassword] = useState("");
+  const [totp, setTotp] = useState("");
   const [error, setError] = useState<string | null>(null);
   const [pending, setPending] = useState(false);
 
@@ -20,7 +21,10 @@ export default function LoginForm({ next }: { next?: string }) {
     setPending(true);
     setError(null);
     try {
-      await login(username.trim(), password);
+      // The code is sent only when entered, so customer logins keep the
+      // exact payload they always had (SPEC-17-05: the field is mandatory
+      // server-side for privileged roles, ignored for everyone else).
+      await login(username.trim(), password, totp.trim() || undefined);
       // Cart is session-based and survives login; go where the user was
       // headed. Awaiting keeps "Signing in…" visible until the destination
       // is rendering (the backend's PBKDF2 check costs ~0.7s — honest
@@ -29,7 +33,8 @@ export default function LoginForm({ next }: { next?: string }) {
     } catch (err) {
       setError(
         err instanceof ApiError
-          ? "We couldn't sign you in with those details."
+          ? err.fieldErrors?.totp?.[0] ??
+              "We couldn't sign you in with those details."
           : "Sign-in failed. Check your connection and try again.",
       );
     } finally {
@@ -66,6 +71,23 @@ export default function LoginForm({ next }: { next?: string }) {
             onChange={(e) => setPassword(e.target.value)}
             className={`${inputClass} w-full`}
             required
+          />
+        </div>
+        <div>
+          {/* SPEC-17-05 (R-17.9): staff MFA. Only privileged roles are
+              required to fill this in; everyone else submits without it. */}
+          <label htmlFor="login-totp" className="mb-1 block text-sm">
+            Authentication code{" "}
+            <span className="text-ink-muted">(staff with MFA only)</span>
+          </label>
+          <input
+            id="login-totp"
+            type="text"
+            inputMode="numeric"
+            autoComplete="one-time-code"
+            value={totp}
+            onChange={(e) => setTotp(e.target.value)}
+            className={`${inputClass} w-full`}
           />
         </div>
 

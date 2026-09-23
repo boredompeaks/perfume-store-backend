@@ -1,4 +1,5 @@
 from django.db import transaction
+from django.views.decorators.csrf import ensure_csrf_cookie
 from rest_framework.decorators import api_view, throttle_classes, throttle_scope
 from rest_framework.response import Response
 from rest_framework import status
@@ -23,7 +24,14 @@ class CartMutationRateThrottle(ScopedRateThrottle):
         return super().allow_request(request, view)
 
 
+# SPEC-17-03 [R-17.18]: this GET is the SPA's boot call (the header's cart
+# badge runs it on every page load), so it is the natural surface to issue
+# the csrftoken cookie from: the browser has the double-submit cookie in
+# hand before the first gated mutation, and the SPA's X-CSRFToken slot
+# (api.ts) replays it on every unsafe method. CSRF enforcement itself lives
+# in common.authentication.SessionCartCSRFAuthentication.
 @api_view(['GET', 'POST'])
+@ensure_csrf_cookie
 @throttle_classes([CartMutationRateThrottle])
 @throttle_scope('cart')
 def cart_detail(request):

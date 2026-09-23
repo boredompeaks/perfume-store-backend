@@ -1,0 +1,5 @@
+{{ count }} payment attempts failed within the last {{ window_seconds }} seconds:
+
+{% for line in failure_lines %}{{ line }}
+{% endfor %}
+Check the audit log (admin/audit-log) for the full payment trail.

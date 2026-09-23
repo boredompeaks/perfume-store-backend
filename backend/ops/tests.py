@@ -12,7 +12,17 @@ from django.test.client import RequestFactory
 from django.utils import timezone
 
 from common.testing import ApiTestCase
+from common.roles import (
+    ROLE_ADMIN,
+    ROLE_CATALOGUE,
+    ROLE_FINANCE,
+    ROLE_INVENTORY,
+    ROLE_MARKETING,
+    ROLE_SUPPORT,
+)
 from ops.services import REVENUE_STATUSES, get_health, get_sales_series, get_stats
+
+TEST_PASSWORD = "S3cure-Passphrase!"
 
 
 @tag("ops")
@@ -750,3 +760,76 @@ class DashboardTemplateTagTests(ApiTestCase):
             "{% load ops_dashboard %}{% ops_dashboard_cards %}"
         ).render(RequestContext(request))
         self.assertIn("ok", html)
+
+
+@tag("ops")
+class DashboardCapabilityGateTests(ApiTestCase):
+    """SPEC-17-10: the ops dashboard carries revenue + customer rows, so a
+    blanket @staff_member_required let every staff role read them. The gate
+    is now capability_required("reports.read") (finance, marketing, admin
+    per CAPABILITY_ROLES), matching the sibling audit-log route: anonymous
+    callers are redirected to the admin login, unprivileged staff get a
+    visible 403, privileged roles and superusers render the page."""
+
+    def _dashboard_get(self, path="/admin/dashboard/"):
+        return self.client.get(path)
+
+    def test_anonymous_is_redirected_to_admin_login(self):
+        res = self._dashboard_get()
+        self.assertEqual(res.status_code, 302)
+        self.assertTrue(res.url.startswith("/admin/login/"))
+
+    def test_reports_read_roles_render_the_dashboard(self):
+        for role in (ROLE_FINANCE, ROLE_MARKETING, ROLE_ADMIN):
+            with self.subTest(role=role):
+                viewer = self._role_user(role, f"reports-{role}")
+                self.client.force_login(viewer)
+                res = self._dashboard_get()
+                self.assertEqual(res.status_code, 200)
+                self.assertContains(res, "Store dashboard")
+
+    def test_non_grantee_staff_roles_get_403(self):
+        for role in (ROLE_SUPPORT, ROLE_CATALOGUE, ROLE_INVENTORY):
+            with self.subTest(role=role):
+                viewer = self._role_user(role, f"blocked-{role}")
+                self.client.force_login(viewer)
+                res = self._dashboard_get()
+                self.assertEqual(res.status_code, 403)
+
+    def test_roleless_staff_gets_403(self):
+        viewer = User.objects.create_user(
+            username="roleless-dash",
+            email="roleless-dash@example.com",
+            password=TEST_PASSWORD,
+            is_staff=True,
+        )
+        self.client.force_login(viewer)
+        res = self._dashboard_get()
+        self.assertEqual(res.status_code, 403)
+
+    def test_superuser_bypass_renders_the_dashboard(self):
+        User.objects.create_superuser("dash-root", "dash-root@example.com", TEST_PASSWORD)
+        self.client.force_login(User.objects.get(username="dash-root"))
+        res = self._dashboard_get()
+        self.assertEqual(res.status_code, 200)
+        self.assertContains(res, "Store dashboard")
+
+    def test_gate_covers_both_mount_families(self):
+        # SPEC-9-02 dual mount: the v1 admin family reuses the same view
+        # object, so the capability gate applies there identically.
+        viewer = self._role_user(ROLE_SUPPORT, "dual-mount-support")
+        self.client.force_login(viewer)
+        res = self._dashboard_get("/api/v1/admin/dashboard/")
+        self.assertEqual(res.status_code, 403)
+
+    def _role_user(self, role, username):
+        from django.contrib.auth.models import Group
+
+        user = User.objects.create_user(
+            username=username,
+            email=f"{username}@example.com",
+            password=TEST_PASSWORD,
+            is_staff=True,
+        )
+        user.groups.add(Group.objects.get_or_create(name=role)[0])
+        return user

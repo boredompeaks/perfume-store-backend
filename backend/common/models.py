@@ -131,6 +131,14 @@ class AuditEvent(models.Model):
         # otherwise, so a log reader has no surface for it. Emitted after
         # the insert with the stored identity; the call writes no rows, so
         # the transaction placement above is untouched.
+        #
+        # [SPEC-17-09] [R-17.32] "Avoid putting personal information in
+        # logs" — decision: usernames are RETAINED here (pseudonymizing to
+        # the actor pk would keep only an unreadable id in the abuse/
+        # dispute forensics stream), because a username is the login
+        # credential, not sensitive PII, and dies with the account row's
+        # association. Email/phone/address/full name are FORBIDDEN in
+        # this output; the full rationale lives in docs/retention.md.
         audit_logger.info(
             "audit %s id=%s actor=%s order=%s detail=%s",
             event.event_type,

@@ -184,3 +184,36 @@ HasSettingsManage = capability_permission("settings.manage")
 # SPEC-6-03c: the product views are the read/write split shape — public
 # catalogue reads, writes gated by ``products.write`` (catalogue + admin).
 HasProductsWriteOrReadOnly = capability_or_read_only("products.write")
+
+
+def is_privileged(user):
+    """SPEC-17-05 [R-17.9]: the accounts mandatory MFA applies to.
+
+    The ``staff.manage`` capability holders (the ``admin`` role per
+    ``CAPABILITY_ROLES``) plus Django superusers — the trust anchor every
+    admin surface deliberately preserves a bypass for, which therefore
+    must not be able to slip past the factor that anchors it. Everything
+    else (customers, the five non-admin staff roles, role-less staff)
+    is unaffected by MFA enforcement.
+    """
+    if not (user and user.is_authenticated):
+        return False
+    return user.is_superuser or user_has_capability(user, "staff.manage")
+
+
+class IsPrivilegedRole(BasePermission):
+    """Permission twin of :func:`is_privileged` for the MFA endpoints.
+
+    Superuser bypass is preserved here on purpose, mirroring
+    ``capability_required``: the enrollment surface must reach exactly the
+    population enforcement blocks, and a superuser without the admin role
+    group is still blocked at login (superusers are privileged) — denying
+    them enrollment would dead-lock the trust anchor.
+    """
+
+    message = "Multi-factor authentication management requires privileged staff access."
+
+    def has_permission(self, request, view):
+        if is_privileged(request.user):
+            return True
+        raise PermissionDenied(self.message)

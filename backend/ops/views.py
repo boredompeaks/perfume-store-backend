@@ -1,13 +1,19 @@
 from decimal import Decimal
 
 from django.contrib.admin.models import LogEntry
-from django.contrib.admin.views.decorators import staff_member_required
 from django.core.paginator import Paginator
 from django.http import JsonResponse
 from django.shortcuts import render
 
 from common.permissions import capability_required
-from .services import get_health, get_sales_series, get_stats
+from . import alerts
+from .alerts import check_payment_failure_spike
+from .services import (
+    check_stock_alerts,
+    get_health,
+    get_sales_series,
+    get_stats,
+)
 
 # Page size for the audit-log table: a presentation constant for an
 # internal staff surface, not deployment config — named here so the route
@@ -18,8 +24,22 @@ AUDIT_PAGE_SIZE = 50
 def health(request):
     """Public health endpoint — cheap checks, no network calls."""
     health = get_health()
-    status_code = 200 if health["status"] == "ok" else 503
-    return JsonResponse(health, status=status_code)
+    # [SPEC-19-2] Integration-outage alert ([R-19.20] alerting half) beside
+    # the existing detection: a degraded probe notifies the staff mailbox
+    # once per cooldown (the probe is polled, so the rule protects the
+    # inbox). The dispatch is log-only on failure and cannot alter the
+    # response — the monitor must never become the outage it reports.
+    if health["status"] != "ok":
+        # Best-effort detail: get_health's shape is its own contract (the
+        # error-envelope seam may substitute arbitrary 503 bodies), so the
+        # alert renders whatever keys are present instead of assuming
+        # `checks` — an alert must never 500 the probe that tripped it.
+        checks = health.get("checks") or {}
+        checks_text = " ".join(f"{key}={value}" for key, value in checks.items())
+        alerts.notify_integration_outage(
+            f"status={health.get('status')} {checks_text}".rstrip()
+        )
+    return JsonResponse(health, status=200 if health["status"] == "ok" else 503)
 
 
 def api_settings(request):
@@ -38,11 +58,33 @@ def api_settings(request):
     )
 
 
-@staff_member_required
+@capability_required("reports.read")
 def dashboard(request):
+    """Store dashboard (spec 5 / route /admin/dashboard): revenue, order and
+    inventory aggregates. SPEC-17-10: gated by ``reports.read`` (finance,
+    marketing, admin per CAPABILITY_ROLES), not the blanket
+    @staff_member_required it replaces — every role on this page reads
+    revenue and customer rows, so "any staff account" was never the right
+    authority; the sibling audit-log route already used the capability
+    decorator and this closes the last blanket-staff chrome route. The
+    decorator's contract matches it: anonymous callers are redirected to
+    the admin login, unprivileged staff get a visible 403, superusers keep
+    their explicit bypass."""
     health = get_health()
     stats = get_stats()
     sales_series = get_sales_series()
+    # [SPEC-19-2] The dashboard load is a natural alert poll for the
+    # low/out-of-stock breach (same threshold definition the table below
+    # renders); log-only + cooldown-deduped, so staff page views cannot
+    # mail-bomb anyone.
+    check_stock_alerts()
+    # [SPEC-19-2 audit c1 BUG-1] The spike detector's production call site:
+    # the AuditEvent trail already holds the failed-payment events, and the
+    # dashboard poll mirrors the stock-alert wiring (detector owned here,
+    # trigger beside its sibling alert — the audit-trail query itself is
+    # skipped entirely when ALERT_RECIPIENTS is empty, so the page stays
+    # cheap with alerts unconfigured).
+    check_payment_failure_spike()
 
     # Chart helpers for the template: bar heights scale against the busiest
     # day, and the aria summary gives screen readers the real totals (the

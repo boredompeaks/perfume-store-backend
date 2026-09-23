@@ -1,34 +1,33 @@
 """[R-21.1.4] Security test layer: CSRF-enforcement truth + API XSS-output
 safety (SPEC-21-2).
 
-CSRF half -- today's truth, pinned deliberately (SPEC-17-03 owns the change):
+CSRF half -- the SPEC-17-03 truth, pinned deliberately (the original pins
+documented the pre-17-03 gap and carried the flip instruction; they were
+inverted in the same commit that closed the gap):
 
 Django's CsrfViewMiddleware IS installed (config/settings.py MIDDLEWARE), but
 DRF wraps every view it serves -- @api_view-generated and class-based alike
 -- in csrf_exempt (rest_framework.views.APIView.as_view: "session based
 authentication is explicitly CSRF validated, all other authentication is CSRF
 exempt"), and DRF re-enforces CSRF only inside
-SessionAuthentication.enforce_csrf. REST_FRAMEWORK's
-DEFAULT_AUTHENTICATION_CLASSES is JWT-only (config/settings.py), so that hook
-can never run. Net truth (live-confirmed in BACKEND_REQUESTS.md "[P1] CSRF
-enforcement for session-cart mutations"):
+SessionAuthentication.enforce_csrf. SPEC-17-03 added
+common.authentication.SessionCartCSRFAuthentication to
+DEFAULT_AUTHENTICATION_CLASSES AFTER JWTAuthentication (config/settings.py),
+extending the stock hook to the guest surface the stock class skips: every
+request that presents the session cookie (named user or anonymous guest
+cart) is CSRF-checked on unsafe methods, while JWT-bearer requests
+short-circuit the chain and gain no friction (an Authorization header cannot
+be attached cross-site). Net truth:
 
-- Session-cookie cart mutations (POST/PATCH/DELETE on /api/cart/*) are NOT
-  CSRF-enforced: a cross-site request that can attach the session cookie can
-  mutate a victim's cart.
-- JWT-authenticated money paths (checkout, apply-coupon) are not
-  CSRF-enforced either, but the JWT is not an ambient credential -- a
-  cross-site request cannot attach it -- so their exploitable surface is the
-  session cookie they ALSO require (cart resolution), same as above.
-- Mitigations: SESSION_COOKIE_SAMESITE 'Lax' (Django default --
-  browser-trust, not server enforcement) plus the same-site deployment
-  constraint documented in BACKEND_REQUESTS.md.
-
-When SPEC-17-03 lands SessionAuthentication in DEFAULT_AUTHENTICATION_CLASSES
-(SessionAuthentication.enforce_csrf then rejects tokenless unsafe requests
-that authenticate by session), the behaviour pins below flip 2xx -> 403 and
-CsrfStackWiringTests fails: updating this module is the deliberate one-line
-contract update, not an accident.
+- Session-cookie cart mutations (POST/PATCH/DELETE on /api/cart/*, and the
+  session-cookie apply-coupon in the orders family) are CSRF-enforced: a
+  tokenless cross-site request that can attach the session cookie is 403'd
+  by the gate, not just by browser SameSite trust.
+- The csrftoken cookie is issued by GET /api/cart/ (ensure_csrf_cookie) --
+  the SPA's boot call -- and replayed as X-CSRFToken by frontend/src/lib.
+- JWT-authenticated money paths (checkout, apply-coupon with a bearer) are
+  not CSRF-gated: the JWT is not an ambient credential, so there is nothing
+  for a cross-site request to forge.
 
 XSS half -- the API-boundary contract (frontend sink tests are out of scope
 here: no component-test infra yet, and the JSON-LD sink at
@@ -51,88 +50,112 @@ from common.testing import ApiTestCase
 
 
 class CsrfStackWiringTests(SimpleTestCase):
-    """The load-bearing wiring, pinned so the SPEC-17-03 flip cannot land
-    silently: changing either line must update this module in the same
-    commit."""
+    """The load-bearing wiring, pinned so the SPEC-17-03 gate cannot be
+    removed silently: changing the chain must update this module in the
+    same commit."""
 
-    def test_csrf_middleware_installed_but_drf_csrf_hook_absent(self):
+    def test_csrf_gate_installed_after_jwt(self):
         default_auth = settings.REST_FRAMEWORK["DEFAULT_AUTHENTICATION_CLASSES"]
         self.assertIn(
             "django.middleware.csrf.CsrfViewMiddleware", settings.MIDDLEWARE
         )
         self.assertEqual(
             [cls.split(".")[-1] for cls in default_auth],
-            ["JWTAuthentication"],
-            "DEFAULT_AUTHENTICATION_CLASSES changed: adding "
-            "SessionAuthentication enforces CSRF on session-cookie flows "
-            "(SPEC-17-03) -- review and update the CSRF pins in this module "
+            ["JWTAuthentication", "SessionCartCSRFAuthentication"],
+            "DEFAULT_AUTHENTICATION_CLASSES changed: the CSRF gate's "
+            "position is load-bearing (JWT first short-circuits bearer "
+            "requests away from the gate; the gate second covers session "
+            "cookies) -- review and update the CSRF pins in this module "
             "in the same commit.",
         )
 
-    def test_session_cookie_samesite_default_is_the_documented_mitigation(self):
-        """'Lax' is the relied-upon mitigation for today's enforcement gap
-        (browser-trust, not server enforcement). If a deployment hardens to
-        'Strict' or the gap closes server-side (SPEC-17-03), update this pin
-        in the same commit."""
+    def test_session_cookie_samesite_default_is_explicit_config(self):
+        """'Lax' is now an explicit, env-driven default (no longer an
+        implicit Django default leaned on as a mitigation): the server-side
+        gate is the enforcement, SameSite is the same-site belt. If a
+        deployment hardens to 'Strict', set SESSION_COOKIE_SAMESITE; the
+        default only changes with an update to this pin."""
         self.assertEqual(settings.SESSION_COOKIE_SAMESITE, "Lax")
 
 
-class SessionCartCsrfTruthTests(ApiTestCase):
+class SessionCartCsrfEnforcementTests(ApiTestCase):
     """Cart endpoints key on the session cookie alone (no JWT involved).
-    Pins today's truth: these mutations are NOT CSRF-enforced."""
+    Pins the SPEC-17-03 truth: these mutations ARE CSRF-enforced -- the
+    exact surface BACKEND_REQUESTS.md live-confirmed exploitable."""
 
-    def test_cart_add_with_session_cookie_and_no_csrf_token_succeeds(self):
-        """[Pin] POST /api/cart/ with only the session cookie, no X-CSRFToken
-        -> 201 (BACKEND_REQUESTS.md live-confirmed). SPEC-17-03 (adding
-        SessionAuthentication) flips this to 403."""
+    def _enforcing_client_with_token(self):
+        """Django's hermetic CSRF recipe: enforce_csrf_checks=True plus the
+        token pair acquired through the API itself (GET issues the cookie,
+        the mutation replays it as the header)."""
+        client = APIClient(enforce_csrf_checks=True)
+        res = client.get("/api/cart/")
+        self.assertEqual(res.status_code, 200, res.data)
+        return client, client.cookies[settings.CSRF_COOKIE_NAME].value
+
+    def test_cart_get_issues_the_csrf_cookie(self):
+        """[Pin, flipped] The API DOES issue a CSRF token now, on the SPA's
+        boot surface: GET /api/cart/ sets the csrftoken cookie the frontend
+        replays as X-CSRFToken."""
+        client = APIClient(enforce_csrf_checks=True)
+        res = client.get("/api/cart/")
+        self.assertEqual(res.status_code, 200)
+        self.assertIn(settings.CSRF_COOKIE_NAME, client.cookies)
+
+    def test_cart_add_with_session_cookie_and_no_csrf_token_is_403(self):
+        """[Pin, flipped] POST /api/cart/ with only the session cookie, no
+        X-CSRFToken -> 403 (was the live-confirmed 201 in
+        BACKEND_REQUESTS.md; SPEC-17-03 closed it)."""
         product = self.make_product()
-        self.assertEqual(self.client.get("/api/cart/").status_code, 200)
-        res = self.client.post(
+        client, _token = self._enforcing_client_with_token()
+        res = client.post(
             "/api/cart/",
             {"product_id": product.id, "quantity": 2},
             format="json",
         )
+        self.assertEqual(res.status_code, 403)
+
+    def test_cart_add_with_valid_token_succeeds(self):
+        """[Pin, flipped] The legitimate client -- cookie pair replayed as
+        the header, exactly the SPA's flow -- still gets its 201."""
+        product = self.make_product()
+        client, token = self._enforcing_client_with_token()
+        res = client.post(
+            "/api/cart/",
+            {"product_id": product.id, "quantity": 2},
+            format="json",
+            HTTP_X_CSRFTOKEN=token,
+        )
         self.assertEqual(res.status_code, 201, res.data)
         self.assertEqual(len(res.data["items"]), 1)
 
-    def test_cart_item_update_and_remove_without_csrf_token_succeed(self):
-        """[Pin] PATCH/DELETE /api/cart/{id}/ with only the session cookie,
-        no X-CSRFToken -> 200/200 (BACKEND_REQUESTS.md live-confirmed)."""
-        product = self.make_product(stock=5)
-        cart = self.seed_session_cart([(product, 1)])
-        item_id = cart["items"][0]["id"]
-        res = self.client.patch(
-            f"/api/cart/{item_id}/", {"quantity": 3}, format="json"
-        )
-        self.assertEqual(res.status_code, 200, res.data)
-        res = self.client.delete(f"/api/cart/{item_id}/")
-        self.assertEqual(res.status_code, 200, res.data)
-        self.assertEqual(res.data["items"], [])
-
-    def test_cart_mutations_still_succeed_under_enforced_csrf_checks(self):
-        """[Pin + differential] A client that asks CsrfViewMiddleware to
-        fully enforce (enforce_csrf_checks=True) cannot get the cart
-        rejected either: DRF marks its views csrf_exempt, so the middleware
-        short-circuits before any token check. The exemption is server-side,
-        not a test-client artifact."""
+    def test_default_client_succeeds_because_checks_are_suppressed(self):
+        """[Pin + differential] Two clients in identical cookie state
+        (sessionid + csrftoken from a cart GET), differing only in the
+        suppression flag: the enforcing one is 403'd, the suppressed one
+        (the suite default, _dont_enforce_csrf_checks) gets 201. The gate
+        rides the DRF authentication hook and honours the same suppression
+        flag Django's middleware does -- so the suite's 2xx pins are the
+        test-client artifact, and the enforcing pins above prove the
+        server-side check itself."""
         product = self.make_product()
+
         enforced = APIClient(enforce_csrf_checks=True)
+        self.assertEqual(enforced.get("/api/cart/").status_code, 200)
         res = enforced.post(
             "/api/cart/",
             {"product_id": product.id, "quantity": 1},
             format="json",
         )
-        self.assertEqual(res.status_code, 201, res.data)
+        self.assertEqual(res.status_code, 403)
 
-    def test_api_never_issues_a_csrf_cookie(self):
-        """[Pin] No API response hands a client a CSRF token
-        (BACKEND_REQUESTS.md: no CSRF token can be sent because the API-only
-        backend never issues a CSRF cookie) -- the SameSite mitigation is all
-        that stands between a cross-site request and a session-cart mutation
-        today."""
-        res = self.client.get("/api/cart/")
-        self.assertEqual(res.status_code, 200)
-        self.assertNotIn("csrftoken", res.cookies)
+        suppressed = APIClient(enforce_csrf_checks=False)
+        self.assertEqual(suppressed.get("/api/cart/").status_code, 200)
+        res = suppressed.post(
+            "/api/cart/",
+            {"product_id": product.id, "quantity": 1},
+            format="json",
+        )
+        self.assertEqual(res.status_code, 201, res.data)
 
 
 class CsrfMiddlewareDifferentialTests(ApiTestCase):
@@ -151,18 +174,19 @@ class CsrfMiddlewareDifferentialTests(ApiTestCase):
 
 
 class TokenAuthMutationCsrfTruthTests(ApiTestCase):
-    """DRF's enforce_csrf runs only from SessionAuthentication; with
-    JWT-only defaults it never runs, and the middleware skips the
-    csrf_exempt DRF views. Pins that the money paths named in
-    BACKEND_REQUESTS.md answer 2xx with no CSRF token."""
+    """JWT-bearer requests short-circuit the authentication chain before
+    the CSRF gate (first successful authenticator wins), and an
+    Authorization header is not an ambient credential -- a cross-site
+    request cannot attach it -- so the money paths named in
+    BACKEND_REQUESTS.md answer 2xx with no CSRF token by design. Pins that
+    the gate adds no friction to bearer-authenticated flows."""
 
     def test_checkout_with_jwt_and_no_csrf_token_succeeds(self):
         """[Pin] POST /api/orders/checkout/ -- session cart + JWT, no
-        X-CSRFToken -> 201. The session cookie checkout requires for cart
-        resolution rides the ambient-credential path CSRF protects; a
-        cross-site request still cannot checkout without the (non-ambient)
-        JWT. SPEC-17-03 makes SessionAuthentication enforce_csrf reject
-        tokenless submissions that authenticate by session."""
+        X-CSRFToken -> 201. The gate sits AFTER JWTAuthentication in
+        DEFAULT_AUTHENTICATION_CLASSES, so this request never reaches it;
+        the session cookie checkout requires rides along but the credential
+        that authorizes the order is the non-ambient JWT."""
         product = self.make_product()
         self.seed_session_cart([(product, 1)])
         self.make_user()
@@ -172,8 +196,11 @@ class TokenAuthMutationCsrfTruthTests(ApiTestCase):
         self.assertEqual(res.status_code, 201, res.data)
 
     def test_apply_coupon_with_jwt_and_no_csrf_token_succeeds(self):
-        """[Pin] POST /api/orders/apply-coupon/ -- no X-CSRFToken -> 200
-        preview. Same JWT-only truth as checkout."""
+        """[Pin] POST /api/orders/apply-coupon/ with a bearer -- no
+        X-CSRFToken -> 200 preview. Same JWT-first truth as checkout: the
+        tokenless session-cookie variant is the one the gate rejects (see
+        SessionCartCsrfEnforcementTests and cart/test_csrf.py for the
+        guest surface)."""
         product = self.make_product(price="200.00")
         self.seed_session_cart([(product, 1)])
         self.make_coupon(

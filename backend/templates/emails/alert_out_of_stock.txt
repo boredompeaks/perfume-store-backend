@@ -1,0 +1,5 @@
+The following products are out of stock (0 units):
+
+{% for line in product_lines %}{{ line }}
+{% endfor %}
+Every sale on these items is currently lost — restock as soon as possible.

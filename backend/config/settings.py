@@ -45,10 +45,31 @@ if not DEBUG and not os.getenv('DJANGO_SECRET_KEY'):
     raise RuntimeError('DJANGO_SECRET_KEY must be set when DJANGO_DEBUG is false.')
 
 
+def _env_bool(name, default):
+    """Resolve an env-driven boolean, never crashing startup.
+
+    Accepts the usual truthy spellings; anything else (or an absent var)
+    falls back to the documented default instead of raising — the same
+    fail-safe pattern as _env_int below.
+    """
+    raw = os.getenv(name)
+    if raw is None:
+        return default
+    return raw.strip().lower() in ('1', 'true', 'yes', 'on')
+
+
+
+CSRF_COOKIE_SECURE = _env_bool('CSRF_COOKIE_SECURE', not DEBUG)
+
+
 # Application definition
 
 INSTALLED_APPS = [
-    'django.contrib.admin',
+    # SPEC-17-05 [R-17.9]: the MFAAdminConfig subclass swaps the default
+    # admin site for one whose login form requires a TOTP code from
+    # privileged roles — same app (label 'admin'), same registration flow,
+    # one enforcement surface added at the admin door.
+    'config.admin.MFAAdminConfig',
     'django.contrib.auth',
     'django.contrib.contenttypes',
     'django.contrib.sessions',
@@ -246,6 +267,21 @@ LOW_STOCK_THRESHOLD = _env_int('LOW_STOCK_THRESHOLD', 5)
 # ending today. Tunable per deployment without a code change.
 DASHBOARD_SALES_WINDOW_DAYS = _env_int('DASHBOARD_SALES_WINDOW_DAYS', 30)
 
+# SPEC-19-2 [R-19.20/R-19.21] admin alerts. Comma-separated staff/admin
+# mailboxes; empty disables admin alerts entirely (no guessed recipient).
+ALERT_RECIPIENTS = os.getenv('ALERT_RECIPIENTS', '')
+# Per-alert-type dedupe window in seconds: an alert type that already sent
+# inside the window is logged instead of re-sent (mail-bomb bound for the
+# pollable /health/ and dashboard triggers).
+ALERT_COOLDOWN_SECONDS = _env_int('ALERT_COOLDOWN_SECONDS', 300)
+# "Payment-failure spike" rule (spec names the alert, not the number):
+# at least this many failed payment attempts within a trailing window of
+# this many seconds fires the spike alert (defaults: 3 in 300).
+PAYMENT_FAILURE_SPIKE_COUNT = _env_int('PAYMENT_FAILURE_SPIKE_COUNT', 3)
+PAYMENT_FAILURE_SPIKE_WINDOW_SECONDS = _env_int(
+    'PAYMENT_FAILURE_SPIKE_WINDOW_SECONDS', 300
+)
+
 # Storefront products listing: rows per page. The historical hardcoded 2
 # was a dev/test artifact (F-23); 12 is a storefront-appropriate default.
 # Tunable per deployment without a code change; non-integer values are
@@ -312,6 +348,14 @@ DEFAULT_CURRENCY = _env_currency('DEFAULT_CURRENCY', 'INR')
 REST_FRAMEWORK = {
     'DEFAULT_AUTHENTICATION_CLASSES': (
         'rest_framework_simplejwt.authentication.JWTAuthentication',
+        # SPEC-17-03 [R-17.18]: CSRF gate for session-cookie mutations,
+        # AFTER the JWT authenticator so bearer-authenticated requests
+        # (checkout) short-circuit the chain and gain no CSRF friction —
+        # an Authorization header cannot be attached cross-site. Every
+        # request that does ride the session cookie (guest carts, session
+        # logins) is CSRF-checked on unsafe methods; cart_detail's GET
+        # issues the csrftoken cookie the SPA replays as X-CSRFToken.
+        'common.authentication.SessionCartCSRFAuthentication',
     ),
     # Scoped throttling: every public mutating endpoint opts in by declaring
     # a `throttle_scope`; views without a scope are left unthrottled by this
@@ -331,6 +375,10 @@ REST_FRAMEWORK = {
         # the gateway and writes a payment event, so this budget bounds
         # both gateway spend and order-id brute-forcing.
         'payment': os.getenv('PAYMENT_THROTTLE_RATE', '10/min'),
+        # SPEC-19-4 back-in-stock opt-in/opt-out: each opt-in is intent to
+        # receive an outbound email, so the budget is the same shape as
+        # the recovery bound (tighter than the generic auth budget).
+        'restock': os.getenv('THROTTLE_RESTOCK_RATE', '5/min'),
     },
 }
 
@@ -352,6 +400,30 @@ SIMPLE_JWT = {
     'ROTATE_REFRESH_TOKENS': True,
     'BLACKLIST_AFTER_ROTATION': True,
 }
+
+# SPEC-17-02 [R-17.12]: the refresh token leaves the JSON body and browser
+# localStorage entirely and rides an HttpOnly cookie (spec §17.1: "use
+# secure, HttpOnly cookies ... Do not store long-lived authentication
+# tokens in browser local storage"). Path is scoped to the API surface:
+# accounts routes are mounted at both /api/accounts/ and /api/v1/account/,
+# so /api/ covers both families while keeping the cookie off non-API paths.
+# Secure follows DEBUG (V-02 fails closed); SameSite=Lax blocks cross-site
+# attachment on POSTs (refresh/logout are POST-only) while matching the
+# same-site deployment constraint BACKEND_REQUESTS.md already documents for
+# the session cookie — strict CSRF enforcement for cookie-authenticated
+# mutations is SPEC-17-03's follow-up.
+JWT_REFRESH_COOKIE_NAME = os.getenv('JWT_REFRESH_COOKIE_NAME', 'refresh_token')
+JWT_REFRESH_COOKIE_PATH = os.getenv('JWT_REFRESH_COOKIE_PATH', '/api/')
+JWT_REFRESH_COOKIE_SAMESITE = os.getenv('JWT_REFRESH_COOKIE_SAMESITE', 'Lax')
+
+# SPEC-17-03 [R-17.18]: the session cookie carries the cart identity, so
+# its SameSite policy is explicit deployment config rather than an implicit
+# Django default. Lax matches the JWT refresh cookie's reading (17-02):
+# cross-site POSTs cannot attach it, while same-site navigation keeps the
+# cart working. Server-side CSRF enforcement (SessionCartCSRFAuthentication
+# above) is the actual gate — this is the same-site belt to its braces.
+SESSION_COOKIE_SAMESITE = os.getenv('SESSION_COOKIE_SAMESITE', 'Lax')
+
 CORS_ALLOWED_ORIGINS = [origin for origin in os.getenv(
     'CORS_ALLOWED_ORIGINS', 'http://localhost:3000'
 ).split(',') if origin]
@@ -444,3 +516,58 @@ def _build_logging(app_level, file_path=None):
 
 APP_LOG_LEVEL = _env_log_level("LOG_LEVEL", "INFO")
 LOGGING = _build_logging(APP_LOG_LEVEL, os.getenv("LOG_FILE"))
+
+
+# SPEC-17-07 [R-17.11]: transport/cookie hardening flags, every one
+# env-gated with safe-for-development defaults. The S22 deployment loop
+# owns the production TLS topology; these flags only make the hardening
+# REACHABLE from configuration, never on by default where it would break
+# plain-HTTP local development (cookie-secure defaults do follow DEBUG, so
+# an unconfigured DEBUG=false deployment lands in the hardened posture,
+# consistent with the V-02 fail-closed reading of DEBUG).
+
+# HSTS: seconds the browser must treat this host as HTTPS-only. 0 leaves
+# the header unset entirely — the safe default, because enabling HSTS on a
+# host that still serves plain HTTP locks real users out for the declared
+# window. A production value (e.g. 31536000, with subdomains/preload only
+# after the whole host tree is HTTPS) is S22's call.
+SECURE_HSTS_SECONDS = _env_int('SECURE_HSTS_SECONDS', 0)
+SECURE_HSTS_INCLUDE_SUBDOMAINS = _env_bool('SECURE_HSTS_INCLUDE_SUBDOMAINS', False)
+SECURE_HSTS_PRELOAD = _env_bool('SECURE_HSTS_PRELOAD', False)
+
+# Redirect plain-HTTP requests to HTTPS. Off by default so local dev and
+# the test suite (no TLS) keep working; enable behind a real deployment.
+SECURE_SSL_REDIRECT = _env_bool('SECURE_SSL_REDIRECT', False)
+
+# Behind a TLS-terminating reverse proxy Django only sees plain HTTP, so
+# scheme-dependent behaviour (SSL redirect, cookie Secure flags, CSRF
+# Referer checks) needs the proxy's forwarded-scheme header trusted
+# explicitly. Both parts must be configured as a pair — a name without a
+# value (or vice versa) is treated as unconfigured rather than trusted,
+# mirroring the fail-safe fallbacks above. Never set this without the S22
+# proxy actually sending the header: a forgeable pair lets a client lie
+# about its scheme.
+_proxy_header_name = os.getenv('SECURE_PROXY_SSL_HEADER_NAME', '')
+_proxy_header_value = os.getenv('SECURE_PROXY_SSL_HEADER_VALUE', '')
+SECURE_PROXY_SSL_HEADER = (
+    (_proxy_header_name, _proxy_header_value)
+    if _proxy_header_name and _proxy_header_value
+    else None
+)
+
+# Session (cart identity / admin login) and CSRF cookies: Secure by
+# default whenever DEBUG is off, mirroring the JWT refresh cookie's
+# secure=not DEBUG contract in accounts/views.py — the three auth cookies
+# can never disagree about transport security. The cart's csrftoken cookie
+# (issued on GET /api/cart/) and CSRF_COOKIE_SECURE flip together, so SPA
+# form posts keep working over HTTPS. Local development (DEBUG=true)
+# stays off, and either default can be forced explicitly via env for
+# exotic topologies.
+SESSION_COOKIE_SECURE = _env_bool('SESSION_COOKIE_SECURE', not DEBUG)
+
+# SPEC-17-08 [R-17.21]: product image upload size ceiling in whole MB.
+# Enforced by products.validate_image_size on every upload surface (the
+# API serializer field and the admin product form). A deployment raising
+# it should also raise the web server's own body limit, which fires
+# first and answers with its own 413.
+MAX_UPLOAD_MB = _env_int('MAX_UPLOAD_MB', 5)

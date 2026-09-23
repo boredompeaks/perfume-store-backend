@@ -12,7 +12,7 @@ import { forgetShipping } from "./shipping-store";
 import {
   clearTokens,
   decodeJwtUserId,
-  getStoredRefreshToken,
+  hasSessionHint,
   refreshAccessToken,
   setTokens,
 } from "./tokens";
@@ -22,7 +22,7 @@ type AuthStatus = "loading" | "authenticated" | "anonymous";
 type AuthContextValue = {
   status: AuthStatus;
   userId: number | null;
-  login: (username: string, password: string) => Promise<void>;
+  login: (username: string, password: string, totp?: string) => Promise<void>;
   logout: () => void;
 };
 
@@ -32,9 +32,12 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   const [status, setStatus] = useState<AuthStatus>("loading");
   const [userId, setUserId] = useState<number | null>(null);
 
-  // Bootstrap: exchange a stored refresh token for a fresh access token.
+  // Bootstrap: the refresh token lives in an HttpOnly cookie we cannot
+  // read, so a non-secret hint decides whether a refresh probe is worth
+  // one throttled call. No hint (first visit, logged out) = anonymous
+  // without any request.
   useEffect(() => {
-    if (!getStoredRefreshToken()) {
+    if (!hasSessionHint()) {
       setStatus("anonymous");
       return;
     }
@@ -49,17 +52,34 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     });
   }, []);
 
-  const login = useCallback(async (username: string, password: string) => {
-    const data = await apiFetch<{ access: string; refresh: string }>(
-      "/api/accounts/login/",
-      { method: "POST", body: { username, password } },
-    );
-    setTokens(data.access, data.refresh);
-    setUserId(decodeJwtUserId(data.access));
-    setStatus("authenticated");
-  }, []);
+  const login = useCallback(
+    async (username: string, password: string, totp?: string) => {
+      // The login response carries only the access token: the refresh token
+      // is set as an HttpOnly cookie by the backend (R-17.12) and never
+      // enters JS-readable storage. totp rides along only when provided —
+      // the backend demands it for privileged roles (SPEC-17-05, R-17.9).
+      const data = await apiFetch<{ access: string }>(
+        "/api/accounts/login/",
+        {
+          method: "POST",
+          body: totp ? { username, password, totp } : { username, password },
+        },
+      );
+      setTokens(data.access);
+      setUserId(decodeJwtUserId(data.access));
+      setStatus("authenticated");
+    },
+    [],
+  );
 
   const logout = useCallback(() => {
+    // The refresh token lives only in an HttpOnly cookie, so the backend
+    // must do the revoking: this call blacklists the cookie token and
+    // clears the cookie. Best-effort — local state clears regardless of
+    // the outcome (dead cookie, offline) so the UI never traps the user.
+    void apiFetch("/api/accounts/logout/", { method: "POST", auth: true }).catch(
+      () => {},
+    );
     clearTokens();
     // PII: never leave saved checkout details behind on a logged-out device.
     forgetShipping();

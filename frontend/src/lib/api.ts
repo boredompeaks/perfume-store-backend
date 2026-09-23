@@ -27,12 +27,16 @@ type Opts = {
 const MUTATION_METHODS = new Set(["POST", "PATCH", "PUT", "DELETE"]);
 
 /**
- * CSRF slot: if the backend ever starts issuing a `csrftoken` cookie
- * (e.g. SessionAuthentication lands per BACKEND_REQUESTS), mutations attach
- * `X-CSRFToken` automatically. Today the backend never issues one, so this is
- * a no-op — but it means the CSRF fix needs zero frontend retrofit.
+ * CSRF pair (SPEC-17-03, R-17.18): the backend issues the `csrftoken`
+ * cookie on the cart GET (the header's boot call) and its
+ * SessionCartCSRFAuthentication gate requires the matching `X-CSRFToken`
+ * header on unsafe methods for every request that rides the session
+ * cookie — including guest carts, whose identity IS the cookie. The token
+ * is replayed from the cookie (double-submit), so mutations below attach
+ * the header whenever the cookie exists; GETs never need it. Exported for
+ * the token refresh call in tokens.ts, which bypasses apiFetch.
  */
-function csrfTokenFromCookie(): string | null {
+export function csrfTokenFromCookie(): string | null {
   if (typeof document === "undefined") return null;
   const match = document.cookie.match(/(?:^|;\s*)csrftoken=([^;]+)/);
   return match ? decodeURIComponent(match[1]) : null;
