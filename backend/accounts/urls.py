@@ -4,7 +4,7 @@ from .views import (
     register, username_available, verify_email, resend_verification,
     forgot_username, request_password_reset, reset_password, LoginView,
     LogoutView, RefreshView, StorefrontLoginView,
-    MFAStatusView, MFASetupView, MFAConfirmView, MFADisableView,
+    MFAStatusView, MFASetupView, MFAConfirmView, MFADisableView, MFATrustDeviceView,
 )
 
 
@@ -82,6 +82,14 @@ urlpatterns = [
         'mfa/disable/',
         MFADisableView.as_view(),
         name='mfa-disable'
+    ),
+
+    # SPEC-20-8: the opt-in "trust this device for MFA_TRUST_DAYS days",
+    # beside the enrollment surface it belongs to.
+    path(
+        'mfa/trust/',
+        MFATrustDeviceView.as_view(),
+        name='mfa-trust'
     ),
 
 ]

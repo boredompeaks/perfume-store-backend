@@ -274,6 +274,19 @@ LOW_STOCK_THRESHOLD = _env_int('LOW_STOCK_THRESHOLD', 5)
 # ending today. Tunable per deployment without a code change.
 DASHBOARD_SALES_WINDOW_DAYS = _env_int('DASHBOARD_SALES_WINDOW_DAYS', 30)
 
+# SPEC-20-8: "trust this device for N days" on the privileged MFA door. The
+# TTL is the only knob: 30 days is the window the user directive asks for,
+# and 0 is a safe kill switch that puts every privileged login straight back
+# behind a fresh code, no code change needed. Trust is opt-in per device (no
+# login can grant it), so this can only lengthen or shorten a grant the user
+# already made — it cannot grant one.
+MFA_TRUST_DAYS = _env_int('MFA_TRUST_DAYS', 30)
+# The signed marker binding a trusted device to the browser that asked for
+# it (HttpOnly, SameSite=Strict): a stolen password from any other browser
+# still earns the challenge.
+MFA_TRUST_COOKIE_NAME = os.getenv('MFA_TRUST_COOKIE_NAME', 'mfa_trusted_device')
+MFA_TRUST_COOKIE_SAMESITE = os.getenv('MFA_TRUST_COOKIE_SAMESITE', 'Strict')
+
 # SPEC-19-2 [R-19.20/R-19.21] admin alerts. Comma-separated staff/admin
 # mailboxes; empty disables admin alerts entirely (no guessed recipient).
 ALERT_RECIPIENTS = os.getenv('ALERT_RECIPIENTS', '')

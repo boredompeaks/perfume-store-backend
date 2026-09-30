@@ -25,6 +25,14 @@ class TOTPDevice(models.Model):
     Secret exposure discipline: ``secret`` is returned by the setup
     endpoint exactly once (enrollment) and by nothing else — not this
     model's str, not the status endpoint, never logged.
+
+    SPEC-20-8: ``trusted_until`` is the "trust this device" opt-in. It is
+    NULL on every device until the privileged user asks for it explicitly
+    (never silently, never as a side effect of any other action), and it
+    only ever *raises* how long the existing factor is challenged — it
+    cannot stand in for the code. Setup (re-enrollment) and disable clear
+    it, because a rotated secret or a stripped factor is a different device
+    state than the one that was trusted.
     """
 
     user = models.OneToOneField(
@@ -39,6 +47,9 @@ class TOTPDevice(models.Model):
     # RFC 6238 §5.2 replay guard: the counter of the last accepted code;
     # codes at or below it never verify again. None until first use.
     last_used_counter = models.BigIntegerField(null=True, blank=True)
+    # SPEC-20-8 "trust this device for N days": the instant the opt-in stops
+    # covering this device. NULL = never trusted = challenged every login.
+    trusted_until = models.DateTimeField(null=True, blank=True)
     created_at = models.DateTimeField(auto_now_add=True)
 
     class Meta:

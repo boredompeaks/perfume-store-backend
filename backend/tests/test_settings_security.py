@@ -41,6 +41,7 @@ _LEAKED_ENV_NAMES = frozenset(
         "JWT_REFRESH_TOKEN_LIFETIME_SECONDS",
         "LOW_STOCK_THRESHOLD",
         "MAX_UPLOAD_MB",
+        "MFA_TRUST_DAYS",
         "SECURE_HSTS_INCLUDE_SUBDOMAINS",
         "SECURE_HSTS_PRELOAD",
         "SECURE_HSTS_SECONDS",
@@ -184,6 +185,44 @@ class SessionCookieConfigTests(SimpleTestCase):
         )
         self.assertEqual(res.returncode, 0, res.stderr)
         self.assertIn("SAMESITE Strict", res.stdout)
+
+
+class MfaTrustConfigTests(SimpleTestCase):
+    """SPEC-20-8: the "trust this device" TTL is deployment config, not code.
+
+    30 days is the documented window, 0 is the documented kill switch that
+    puts every privileged login back behind a fresh code, and a malformed
+    value falls back to the default instead of crashing settings import.
+    Import-time setting, so pinned via the subprocess pattern like every
+    other env knob."""
+
+    _BOOT_ENV = {"DJANGO_SECRET_KEY": "x" * 50}
+    _SNIPPET = (
+        "import config.settings as s; "
+        "print('DAYS', s.MFA_TRUST_DAYS); "
+        "print('COOKIE', s.MFA_TRUST_COOKIE_NAME); "
+        "print('SAMESITE', s.MFA_TRUST_COOKIE_SAMESITE)"
+    )
+
+    def test_defaults_are_thirty_days_and_a_strict_marker(self):
+        res = run_settings_import(dict(self._BOOT_ENV), snippet=self._SNIPPET)
+        self.assertEqual(res.returncode, 0, res.stderr)
+        self.assertIn("DAYS 30", res.stdout)
+        self.assertIn("COOKIE mfa_trusted_device", res.stdout)
+        self.assertIn("SAMESITE Strict", res.stdout)
+
+    def test_env_drives_the_ttl_and_a_malformed_value_falls_back(self):
+        for env_overrides, expected in (
+            ({"MFA_TRUST_DAYS": "0"}, "DAYS 0"),
+            ({"MFA_TRUST_DAYS": "7"}, "DAYS 7"),
+            ({"MFA_TRUST_DAYS": "thirty"}, "DAYS 30"),
+        ):
+            with self.subTest(env=sorted(env_overrides)):
+                res = run_settings_import(
+                    {**self._BOOT_ENV, **env_overrides}, snippet=self._SNIPPET
+                )
+                self.assertEqual(res.returncode, 0, res.stderr)
+                self.assertIn(expected, res.stdout)
 
 
 class SettingsGuardTests(SimpleTestCase):

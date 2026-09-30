@@ -561,6 +561,9 @@ class AuthThrottleTests(ApiTestCase):
             "mfa-setup": "auth",
             "mfa-confirm": "auth",
             "mfa-disable": "auth",
+            # SPEC-20-8: the "trust this device" opt-in spends a TOTP code
+            # like its siblings, so it rides the same 'auth' budget.
+            "mfa-trust": "auth",
         }
         found = {}
         for pattern in account_urlpatterns:

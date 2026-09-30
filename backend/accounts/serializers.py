@@ -8,6 +8,7 @@ from rest_framework_simplejwt.serializers import TokenObtainPairSerializer
 from common import totp
 from common.permissions import is_privileged
 
+from . import mfa_trust
 from .models import (
     MFA_CODE_INVALID,
     MFA_CODE_REQUIRED,
@@ -95,6 +96,13 @@ class MFATokenObtainPairSerializer(TokenObtainPairSerializer):
     are ever minted without the second factor. Rollout: a privileged user
     with no confirmed device is blocked at login (mandatory means
     mandatory) with the enrollment path named in the message.
+
+    SPEC-20-8: the ONLY change to the rule above is the guard around it —
+    a device the user explicitly trusted, whose TTL has not lapsed, and that
+    this very request is coming from, skips the challenge. Everything inside
+    that guard (require a code, verify, consume the replay counter) is
+    byte-for-byte the pre-SPEC-20-8 code path, so an untrusted device cannot
+    be made to skip a code, and trust can never make a code replayable.
     """
 
     # Optional at the field level so non-privileged logins stay
@@ -107,20 +115,23 @@ class MFATokenObtainPairSerializer(TokenObtainPairSerializer):
             device = TOTPDevice.active_for(self.user)
             if device is None:
                 raise serializers.ValidationError({"totp": [MFA_ENROLLMENT_REQUIRED]})
-            code = attrs.get("totp")
-            if not code:
-                raise serializers.ValidationError({"totp": [MFA_CODE_REQUIRED]})
-            counter = totp.verify_code(
-                device.secret,
-                code,
-                at_time=totp.now(),
-                last_used_counter=device.last_used_counter,
-            )
-            if counter is None:
-                raise serializers.ValidationError({"totp": [MFA_CODE_INVALID]})
-            # RFC 6238 §5.2: the consumed counter is the replay watermark.
-            device.last_used_counter = counter
-            device.save(update_fields=["last_used_counter"])
+            if not mfa_trust.is_trusted_device(
+                self.context["request"], self.user, device
+            ):
+                code = attrs.get("totp")
+                if not code:
+                    raise serializers.ValidationError({"totp": [MFA_CODE_REQUIRED]})
+                counter = totp.verify_code(
+                    device.secret,
+                    code,
+                    at_time=totp.now(),
+                    last_used_counter=device.last_used_counter,
+                )
+                if counter is None:
+                    raise serializers.ValidationError({"totp": [MFA_CODE_INVALID]})
+                # RFC 6238 §5.2: the consumed counter is the replay watermark.
+                device.last_used_counter = counter
+                device.save(update_fields=["last_used_counter"])
         return data
 
 

@@ -19,17 +19,25 @@ Pins the whole feature end to end:
   spending the factor;
 - rollout semantics: unenrolled privileged accounts are blocked with the
   enrollment path named; customers and non-admin staff are untouched;
+- SPEC-20-8 "trust this device for N days": the opt-in is explicit, is bound
+  to the browser that asked for it, lapses on the env-driven TTL, is dropped
+  by disable/re-enrollment, and never touches the challenge path, the replay
+  guard or the customer door;
 - secret exposure: shown exactly once at setup, never returned again.
 """
 import base64
+from datetime import timedelta
+from unittest import mock
 from xml.etree import ElementTree
 
 import segno
 from django.conf import settings
 from django.contrib.auth.models import Group, User
+from django.core import signing
 from django.test import SimpleTestCase, override_settings
 from django.utils import timezone
 
+from accounts import mfa_trust
 from accounts.models import TOTPDevice
 from accounts.serializers import StorefrontTokenObtainPairSerializer
 from common import qr, totp
@@ -795,6 +803,324 @@ class MFALoginEnforcementTests(ApiTestCase):
             format="json",
         )
         self.assertEqual(res.status_code, 200, res.data)
+
+
+class MfaTrustDeviceTests(ApiTestCase):
+    """SPEC-20-8: "trust this device for 30 days" - opt-in, per browser.
+
+    A fresh code on every privileged login is a burden the user directive
+    rejects, but R-17.9 still stands for everyone who does not opt in. These
+    pins cover both halves of that promise, in the order the feature makes
+    them:
+
+    - the opt-in is explicit and hard to reach by accident: it needs a
+      privileged session, a FRESH code and an enabled factor, and nothing
+      else in the system (no login, no enrollment, no default) can set it;
+    - what it buys is narrow: this browser, this device row, this user, until
+      the TTL lapses. Every other login is challenged exactly as before;
+    - what it never buys: a way around the factor. Trust cannot spend a
+      one-time code, cannot resurrect one already spent, and cannot outlive
+      the TTL (nor survive a disable or a secret rotation);
+    - non-privileged logins and the customer door are untouched throughout.
+    """
+
+    TRUST_PATH = "/api/accounts/mfa/trust/"
+    LOGIN_PATH = "/api/accounts/login/"
+
+    def setUp(self):
+        self.boss = make_privileged("boss")
+        self.device = enroll_via_model(self.boss)
+
+    def grant(self):
+        """The opt-in exactly as a staff UI drives it: a privileged session
+        (which itself demanded the factor) plus a fresh code here.
+
+        The watermark rewind is the same accommodation ``api_login``
+        documents: it leaves the device unable to spend this step's code, so
+        without the rewind the trust call could only burn the NEXT step's and
+        nothing could authenticate until the clock moved on. No sleeps, no
+        clock patching.
+        """
+        self.api_login("boss")
+        device = TOTPDevice.objects.get(user=self.boss)
+        counter = totp.now() // totp.STEP
+        device.last_used_counter = counter - 1
+        device.save(update_fields=["last_used_counter"])
+        res = self.client.post(
+            self.TRUST_PATH,
+            {"code": totp.hotp(device.secret, counter)},
+            format="json",
+        )
+        self.assertEqual(res.status_code, 200, res.data)
+        return res
+
+    def login(self, client=None, **extra):
+        return (client or self.client).post(
+            self.LOGIN_PATH, login_payload("boss", **extra), format="json"
+        )
+
+    def challenge(self, res):
+        """Assert the R-17.9 challenge came back (and no tokens rode with it)."""
+        self.assertEqual(res.status_code, 400, res.data)
+        self.assertNotIn("access", res.data)
+        self.assertIn("totp", res.data["details"])
+        return res.data["details"]["totp"][0]
+
+    # -- 1. the promise: no fresh code on the trusted device ---------------
+
+    def test_trusted_device_logs_in_without_a_fresh_code(self):
+        self.grant()
+        res = self.login()
+        self.assertEqual(res.status_code, 200, res.data)
+        self.assertIn("access", res.data)
+
+    def test_another_browser_is_still_challenged(self):
+        # The grant belongs to the browser that asked for it, not to the
+        # account: a password reused elsewhere still earns the code.
+        self.grant()
+        message = self.challenge(self.login(client=self.fresh_client()))
+        self.assertIn("authentication code", message)
+
+    def test_a_trusted_login_spends_no_code_and_ignores_a_posted_one(self):
+        # On a trusted device the client is never asked for a code, so a
+        # posted value is not a factor: it is neither verified nor consumed,
+        # and it can neither move the watermark nor block the login.
+        self.grant()
+        device = TOTPDevice.objects.get(user=self.boss)
+        watermark = device.last_used_counter
+        res = self.login(totp="000000")
+        self.assertEqual(res.status_code, 200, res.data)
+        device.refresh_from_db()
+        self.assertEqual(device.last_used_counter, watermark)
+
+    # -- 2. nothing grants trust implicitly --------------------------------
+
+    def test_an_untrusted_device_is_challenged(self):
+        message = self.challenge(self.login())
+        self.assertIn("authentication code", message)
+
+    def test_a_login_with_a_valid_code_still_grants_nothing(self):
+        code = totp.hotp(self.device.secret, totp.now() // totp.STEP)
+        res = self.login(totp=code)
+        self.assertEqual(res.status_code, 200, res.data)
+        self.device.refresh_from_db()
+        self.assertIsNone(self.device.trusted_until)
+        self.assertNotIn(settings.MFA_TRUST_COOKIE_NAME, res.cookies)
+        # ...and the NEXT login, from any browser, is still challenged.
+        self.challenge(self.login(client=self.fresh_client()))
+
+    def test_enrollment_never_grants_trust(self):
+        # Neither bootstrap step of a fresh enrollment writes the TTL: a new
+        # device starts untrusted, so enrollment is not a trust side effect.
+        newbie = make_privileged("newbie")
+        res = self.client.post(
+            "/api/accounts/mfa/setup/",
+            {"username": "newbie", "password": PASSWORD},
+            format="json",
+        )
+        self.client.post(
+            "/api/accounts/mfa/confirm/",
+            {
+                "username": "newbie",
+                "password": PASSWORD,
+                "code": totp.hotp(res.data["secret"], totp.now() // totp.STEP),
+            },
+            format="json",
+        )
+        device = TOTPDevice.objects.get(user=newbie)
+        self.assertIsNone(device.trusted_until)
+        res = self.client.post(
+            self.LOGIN_PATH, login_payload("newbie"), format="json"
+        )
+        self.assertEqual(res.status_code, 400, res.data)
+        self.assertIn("authentication code", res.data["details"]["totp"][0])
+
+    def test_trust_requires_privilege_a_session_and_a_fresh_code(self):
+        # Anonymous gets the same JWT-only 403 as status/disable, and a
+        # customer session is refused outright.
+        self.assertEqual(
+            self.client.post(self.TRUST_PATH, {}, format="json").status_code, 403
+        )
+        self.make_user("buyer")
+        _, token = self.api_login("buyer")
+        self.auth(token)
+        self.assertEqual(
+            self.client.post(self.TRUST_PATH, {}, format="json").status_code, 403
+        )
+        self.auth(None)
+        # A privileged session is still not enough: the second factor must be
+        # re-proved here, so a stolen session cannot convert itself into
+        # thirty days of challenge-free logins.
+        self.api_login("boss")
+        for payload in ({}, {"code": "000000"}):
+            res = self.client.post(self.TRUST_PATH, payload, format="json")
+            self.assertEqual(res.status_code, 400, payload)
+            self.assertIn("Invalid or expired", res.data["details"]["code"][0])
+        self.device.refresh_from_db()
+        self.assertIsNone(self.device.trusted_until)
+
+    def test_trust_needs_an_enrolled_factor(self):
+        self.api_login("boss")
+        TOTPDevice.objects.filter(user=self.boss).update(
+            enabled=False, confirmed_at=None
+        )
+        res = self.client.post(self.TRUST_PATH, {"code": "000000"}, format="json")
+        self.assertEqual(res.status_code, 400)
+        self.assertIn("not enabled", res.data["details"]["code"][0])
+
+    # -- 3. the marker must genuinely identify this device -----------------
+
+    def test_a_forged_marker_is_refused(self):
+        self.grant()
+        real = self.client.cookies[settings.MFA_TRUST_COOKIE_NAME].value
+        self.client.cookies[settings.MFA_TRUST_COOKIE_NAME] = real[:-1] + (
+            "A" if real[-1] != "A" else "B"
+        )
+        self.challenge(self.login())
+
+    def test_another_users_marker_does_not_carry_over(self):
+        # Shared/kiosk browser: the marker names (user, device), so one
+        # user's grant can never answer a different user's challenge. BOTH
+        # devices are genuinely trusted, so the (user, device) pair is the
+        # only thing left that can refuse.
+        chief = make_privileged("chief")
+        chief_device = enroll_via_model(chief)
+        chief_device.trusted_until = mfa_trust.trust_deadline()
+        chief_device.save(update_fields=["trusted_until"])
+        self.device.trusted_until = mfa_trust.trust_deadline()
+        self.device.save(update_fields=["trusted_until"])
+        self.client.cookies[settings.MFA_TRUST_COOKIE_NAME] = signing.dumps(
+            {"user": chief.pk, "device": chief_device.pk}, salt=mfa_trust.TRUST_SALT
+        )
+        self.challenge(self.login())
+
+    def test_a_marker_for_another_device_row_is_refused(self):
+        self.grant()
+        self.client.cookies[settings.MFA_TRUST_COOKIE_NAME] = signing.dumps(
+            {"user": self.boss.pk, "device": self.device.pk + 999},
+            salt=mfa_trust.TRUST_SALT,
+        )
+        self.challenge(self.login())
+
+    def test_a_marker_signed_before_the_ttl_is_refused(self):
+        # Belt to the DB deadline's braces: the signed marker cannot outlive
+        # MFA_TRUST_DAYS even while trusted_until is still in the future.
+        self.grant()
+        stale = totp.now() - (settings.MFA_TRUST_DAYS + 1) * mfa_trust.SECONDS_PER_DAY
+        with mock.patch("django.core.signing.time.time", return_value=stale):
+            cookie = signing.dumps(
+                {"user": self.boss.pk, "device": self.device.pk},
+                salt=mfa_trust.TRUST_SALT,
+            )
+        self.client.cookies[settings.MFA_TRUST_COOKIE_NAME] = cookie
+        with mock.patch("django.core.signing.time.time", return_value=totp.now()):
+            self.challenge(self.login())
+
+    def test_the_marker_cookie_is_locked_down(self):
+        res = self.grant()
+        cookie = res.cookies[settings.MFA_TRUST_COOKIE_NAME]
+        self.assertTrue(cookie["httponly"])
+        self.assertEqual(cookie["samesite"], settings.MFA_TRUST_COOKIE_SAMESITE)
+        budget = settings.MFA_TRUST_DAYS * mfa_trust.SECONDS_PER_DAY
+        self.assertGreater(cookie["max-age"], budget - 60)
+        self.assertLessEqual(cookie["max-age"], budget)
+
+    # -- 4. the TTL ---------------------------------------------------------
+
+    def test_the_grant_lasts_the_env_driven_ttl(self):
+        with override_settings(MFA_TRUST_DAYS=7):
+            res = self.grant()
+        self.assertEqual(res.data["trust_days"], 7)
+        self.device.refresh_from_db()
+        remaining = self.device.trusted_until - timezone.now()
+        self.assertGreater(remaining, timedelta(days=6, hours=23))
+        self.assertLess(remaining, timedelta(days=7, minutes=1))
+        self.assertEqual(self.login().status_code, 200)
+
+    def test_zero_days_is_the_kill_switch(self):
+        # The documented emergency off-switch: the opt-in still resolves, but
+        # the grant is already over, so the challenge is straight back.
+        with override_settings(MFA_TRUST_DAYS=0):
+            res = self.grant()
+        self.assertEqual(res.data["trust_days"], 0)
+        self.device.refresh_from_db()
+        self.assertLessEqual(self.device.trusted_until, timezone.now())
+        message = self.challenge(self.login())
+        self.assertIn("authentication code", message)
+
+    def test_an_expired_grant_returns_the_challenge(self):
+        self.grant()
+        self.device.trusted_until = timezone.now() - timedelta(seconds=1)
+        self.device.save(update_fields=["trusted_until"])
+        message = self.challenge(self.login())
+        self.assertIn("authentication code", message)
+
+    def test_an_expired_grant_does_not_resurrect_a_spent_code(self):
+        # The replay guard across the trust boundary: the code the trust call
+        # spent stays spent once the challenge returns, and the next unused
+        # code is the one that works.
+        self.grant()
+        device = TOTPDevice.objects.get(user=self.boss)
+        spent = totp.hotp(device.secret, device.last_used_counter)
+        self.assertEqual(self.login().status_code, 200)
+        self.device.trusted_until = timezone.now() - timedelta(seconds=1)
+        self.device.save(update_fields=["trusted_until"])
+        message = self.challenge(self.login(totp=spent))
+        self.assertIn("Invalid or expired", message)
+        self.assertEqual(self.login(totp=code_after(device)).status_code, 200)
+
+    # -- 5. losing the device or the factor drops the trust ----------------
+
+    def test_disabling_mfa_drops_the_trust(self):
+        self.grant()
+        device = TOTPDevice.objects.get(user=self.boss)
+        res = self.client.post(
+            "/api/accounts/mfa/disable/",
+            {"code": code_after(device)},
+            format="json",
+        )
+        self.assertEqual(res.status_code, 200, res.data)
+        self.assertFalse(res.data["enabled"])
+        self.device.refresh_from_db()
+        self.assertFalse(self.device.enabled)
+        self.assertIsNone(self.device.trusted_until)
+        # The stale marker cannot re-open anything: with the factor off the
+        # login demands enrollment again rather than answering the challenge.
+        self.auth(None)
+        self.assertIn("Multi-factor", self.challenge(self.login()))
+
+    def test_re_enrolling_drops_the_trust(self):
+        # A rotation is the lost-device path, so trust collected by the old
+        # secret must not ride along with the new one, and the leftover marker
+        # must not admit the freshly confirmed factor either.
+        self.grant()
+        device = TOTPDevice.objects.get(user=self.boss)
+        res = self.client.post(
+            "/api/accounts/mfa/setup/", {"code": code_after(device)}, format="json"
+        )
+        self.assertEqual(res.status_code, 200, res.data)
+        self.assertNotIn(settings.MFA_TRUST_COOKIE_NAME, res.cookies)
+        self.device.refresh_from_db()
+        self.assertIsNone(self.device.trusted_until)
+        res = self.client.post(
+            "/api/accounts/mfa/confirm/",
+            {"code": totp.hotp(res.data["secret"], totp.now() // totp.STEP)},
+            format="json",
+        )
+        self.assertEqual(res.status_code, 200, res.data)
+        self.auth(None)
+        self.assertIn("authentication code", self.challenge(self.login()))
+
+    # -- 6. nobody else is affected ----------------------------------------
+
+    def test_customers_are_untouched_by_trust(self):
+        self.make_user("buyer")
+        res = self.client.post(self.LOGIN_PATH, login_payload("buyer"), format="json")
+        self.assertEqual(res.status_code, 200, res.data)
+        self.assertNotIn(settings.MFA_TRUST_COOKIE_NAME, res.cookies)
+        self.assertFalse(
+            TOTPDevice.objects.filter(trusted_until__isnull=False).exists()
+        )
 
 
 class StorefrontLoginSplitTests(ApiTestCase):
