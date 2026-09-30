@@ -1,7 +1,8 @@
 """Settings security tests - V-02 (DEBUG fails open) and V-01 containment.
 
 The DEBUG guard lives at settings-import time, so it is exercised in a
-subprocess with a clean environment (no .env is loaded from a neutral cwd).
+subprocess with a clean environment (no .env is loaded from a neutral cwd,
+and _LEAKED_ENV_NAMES strips what this process inherited from its own .env).
 The same subprocess pattern pins the env-driven DATABASE_URL behaviour
 (SPEC-2-01); its parser is additionally tested as a pure function so every
 branch is covered in-process.
@@ -20,12 +21,44 @@ from django.test import SimpleTestCase
 
 BACKEND_DIR = Path(__file__).resolve().parent.parent
 
+# Env names the settings module reads outside the DJANGO_/RAZORPAY_/EMAIL_
+# families. config.settings calls load_dotenv() at import, so an untracked,
+# git-ignored backend/.env has already injected these into this process's
+# os.environ before the harness builds its supposedly "clean" child
+# environment. Inheriting them made the documented-default assertions below
+# depend on the developer's local file rather than on the code under test
+# (e.g. a local SESSION_COOKIE_SECURE=false defeated the hardened-cookie
+# default). Scrubbing by name keeps the subprocess hermetic without touching
+# production settings logic. Add a name here whenever a test pins a
+# documented default for it.
+_LEAKED_ENV_NAMES = frozenset(
+    {
+        "CSRF_COOKIE_SECURE",
+        "DASHBOARD_SALES_WINDOW_DAYS",
+        "DATABASE_URL",
+        "DB_LOCAL_URL",
+        "JWT_ACCESS_TOKEN_LIFETIME_SECONDS",
+        "JWT_REFRESH_TOKEN_LIFETIME_SECONDS",
+        "LOW_STOCK_THRESHOLD",
+        "MAX_UPLOAD_MB",
+        "SECURE_HSTS_INCLUDE_SUBDOMAINS",
+        "SECURE_HSTS_PRELOAD",
+        "SECURE_HSTS_SECONDS",
+        "SECURE_PROXY_SSL_HEADER_NAME",
+        "SECURE_PROXY_SSL_HEADER_VALUE",
+        "SECURE_SSL_REDIRECT",
+        "SESSION_COOKIE_SAMESITE",
+        "SESSION_COOKIE_SECURE",
+    }
+)
+
 
 def run_settings_import(env_overrides, snippet="import config.settings; print('IMPORT_OK')"):
     env = {
-        k: v for k, v in os.environ.items()
+        k: v
+        for k, v in os.environ.items()
         if not k.startswith(("DJANGO_", "RAZORPAY_", "EMAIL_"))
-        and k != "DATABASE_URL"
+        and k not in _LEAKED_ENV_NAMES
     }
     env.update(env_overrides)
     return subprocess.run(
@@ -327,6 +360,7 @@ class DatabaseUrlImportTests(SimpleTestCase):
         self.assertEqual(res.returncode, 0, res.stderr)
         self.assertIn("ENGINE django.db.backends.sqlite3", res.stdout)
 
+
 class TransportHardeningTests(SimpleTestCase):
     """SPEC-17-07 [R-17.11]: transport/cookie hardening flags are env-driven
     with development-safe defaults. Import-time settings, so pinned via the
@@ -456,3 +490,36 @@ class TransportHardeningTests(SimpleTestCase):
             self.assertFalse(config_settings._env_bool("SECURE_SSL_REDIRECT_TEST", False))
         finally:
             del os.environ["SECURE_SSL_REDIRECT_TEST"]
+
+    def test_dotenv_leaked_flags_cannot_defeat_the_hardened_defaults(self):
+        # Regression: settings.py runs load_dotenv() at import, so an
+        # untracked backend/.env has already pushed these names into this
+        # process's os.environ. The harness must scrub them, otherwise the
+        # documented defaults observed above are really the developer's
+        # local file: a local SESSION_COOKIE_SECURE=false turned the
+        # hardened-cookie default off and failed the defaults test on a
+        # clean checkout.
+        leaked = {
+            "SESSION_COOKIE_SECURE": "false",
+            "CSRF_COOKIE_SECURE": "false",
+            "SECURE_HSTS_SECONDS": "31536000",
+        }
+        for name, value in leaked.items():
+            os.environ[name] = value
+        try:
+            res = run_settings_import(
+                dict(self._BOOT_ENV),
+                snippet=(
+                    "import config.settings as s; "
+                    "print('HSTS', s.SECURE_HSTS_SECONDS); "
+                    "print('SESSIONSEC', s.SESSION_COOKIE_SECURE); "
+                    "print('CSRFSEC', s.CSRF_COOKIE_SECURE)"
+                ),
+            )
+        finally:
+            for name in leaked:
+                del os.environ[name]
+        self.assertEqual(res.returncode, 0, res.stderr)
+        self.assertIn("HSTS 0", res.stdout)
+        self.assertIn("SESSIONSEC True", res.stdout)
+        self.assertIn("CSRFSEC True", res.stdout)
