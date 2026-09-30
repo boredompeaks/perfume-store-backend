@@ -24,11 +24,24 @@ from django.views.static import serve as serve_media
 
 BACKEND_DIR = Path(__file__).resolve().parent.parent
 
-# A non-debug boot — the production shape. config.settings refuses to import
-# one that is incompletely configured, so every subprocess test that boots
-# that shape starts from here and each missing key stays visible instead of
-# hiding behind a harness default.
-_NON_DEBUG_ENV = {"DJANGO_SECRET_KEY": "x" * 50}
+# A complete non-debug boot - the production shape. config.settings refuses to
+# import an incomplete one (SPEC-22-03 [R-22.3]): the secret key, a declared
+# DJANGO_ENV, a usable DATABASE_URL and explicit hosts/origins are all
+# required. Every subprocess test that boots that shape starts from here, so
+# each missing key stays visible instead of hiding behind a harness default.
+_NON_DEBUG_ENV = {
+    "DJANGO_SECRET_KEY": "x" * 50,
+    "DJANGO_ENV": "production",
+    "DATABASE_URL": "postgres://u:p@db.example.com:5432/perfume_store",
+    "DJANGO_ALLOWED_HOSTS": "example.test",
+    "CSRF_TRUSTED_ORIGINS": "https://example.test",
+}
+
+# The same environment declared as staging: only the name differs.
+_STAGING_ENV = {**_NON_DEBUG_ENV, "DJANGO_ENV": "staging"}
+
+# Local development: DEBUG on, nothing declared, sqlite by default.
+_DEV_ENV = {"DJANGO_DEBUG": "true"}
 
 # Env names the settings module reads outside the DJANGO_/RAZORPAY_/EMAIL_
 # families. config.settings calls load_dotenv() at import, so an untracked,
@@ -41,8 +54,13 @@ _NON_DEBUG_ENV = {"DJANGO_SECRET_KEY": "x" * 50}
 # production settings logic. Add a name here whenever a test pins a
 # documented default for it.
 _LEAKED_ENV_NAMES = frozenset(
-    {
+{
         "CSRF_COOKIE_SECURE",
+        # Outside the DJANGO_ family, and a documented default this module
+        # pins: without the scrub, an untracked local .env value reached the
+        # child and the SPEC-22-03 refusal for a non-debug boot without it
+        # could never fire.
+        "CSRF_TRUSTED_ORIGINS",
         "DASHBOARD_SALES_WINDOW_DAYS",
         "DATABASE_URL",
         "DB_LOCAL_URL",
@@ -90,7 +108,7 @@ class DebugDefaultTests(SimpleTestCase):
         in-process; DJANGO_SECRET_KEY is provided so the import clears the
         (now-active) DEBUG-false guard and the default itself is observed."""
         res = run_settings_import(
-            {"DJANGO_SECRET_KEY": "x" * 50},
+            dict(_NON_DEBUG_ENV),
             snippet="import config.settings as s; print('DEBUG_IS', s.DEBUG)",
         )
         self.assertEqual(res.returncode, 0, res.stderr)
@@ -116,7 +134,7 @@ class SimpleJwtConfigTests(SimpleTestCase):
 
     def test_missing_env_yields_the_documented_default_lifetimes(self):
         res = run_settings_import(
-            {"DJANGO_SECRET_KEY": "x" * 50},
+            dict(_NON_DEBUG_ENV),
             snippet=(
                 "import config.settings as s; "
                 "print('ACCESS', s.SIMPLE_JWT['ACCESS_TOKEN_LIFETIME']); "
@@ -130,7 +148,7 @@ class SimpleJwtConfigTests(SimpleTestCase):
     def test_env_overrides_override_the_lifetimes(self):
         res = run_settings_import(
             {
-                "DJANGO_SECRET_KEY": "x" * 50,
+                **dict(_NON_DEBUG_ENV),
                 "JWT_ACCESS_TOKEN_LIFETIME_SECONDS": "60",
                 "JWT_REFRESH_TOKEN_LIFETIME_SECONDS": "1200",
             },
@@ -147,7 +165,7 @@ class SimpleJwtConfigTests(SimpleTestCase):
     def test_malformed_lifetime_falls_back_to_the_default(self):
         res = run_settings_import(
             {
-                "DJANGO_SECRET_KEY": "x" * 50,
+                **dict(_NON_DEBUG_ENV),
                 "JWT_ACCESS_TOKEN_LIFETIME_SECONDS": "fifteen-minutes",
             },
             snippet=(
@@ -175,7 +193,7 @@ class SessionCookieConfigTests(SimpleTestCase):
 
     def test_missing_env_yields_the_lax_default(self):
         res = run_settings_import(
-            {"DJANGO_SECRET_KEY": "x" * 50},
+            dict(_NON_DEBUG_ENV),
             snippet=(
                 "import config.settings as s; "
                 "print('SAMESITE', s.SESSION_COOKIE_SAMESITE)"
@@ -186,7 +204,7 @@ class SessionCookieConfigTests(SimpleTestCase):
 
     def test_env_overrides_the_samesite_policy(self):
         res = run_settings_import(
-            {"DJANGO_SECRET_KEY": "x" * 50, "SESSION_COOKIE_SAMESITE": "Strict"},
+            {**dict(_NON_DEBUG_ENV), "SESSION_COOKIE_SAMESITE": "Strict"},
             snippet=(
                 "import config.settings as s; "
                 "print('SAMESITE', s.SESSION_COOKIE_SAMESITE)"
@@ -205,7 +223,7 @@ class MfaTrustConfigTests(SimpleTestCase):
     Import-time setting, so pinned via the subprocess pattern like every
     other env knob."""
 
-    _BOOT_ENV = {"DJANGO_SECRET_KEY": "x" * 50}
+    _BOOT_ENV = _NON_DEBUG_ENV
     _SNIPPET = (
         "import config.settings as s; "
         "print('DAYS', s.MFA_TRUST_DAYS); "
@@ -240,10 +258,12 @@ class SettingsGuardTests(SimpleTestCase):
         self.assertNotEqual(res.returncode, 0, res.stdout)
         self.assertIn("DJANGO_SECRET_KEY", res.stderr)
 
-    def test_debug_false_with_secret_key_imports_cleanly(self):
-        res = run_settings_import(
-            {"DJANGO_DEBUG": "false", "DJANGO_SECRET_KEY": "x" * 50}
-        )
+    def test_debug_false_with_a_complete_env_imports_cleanly(self):
+        # The V-02 guard cleared (a secret key is present) and nothing else
+        # refuses the boot - the production shape every other class here
+        # builds on (SPEC-22-03 added the env, database and hosts keys to
+        # what a non-debug boot must declare).
+        res = run_settings_import({"DJANGO_DEBUG": "false", **_NON_DEBUG_ENV})
         self.assertEqual(res.returncode, 0, res.stderr)
         self.assertIn("IMPORT_OK", res.stdout)
 
@@ -395,8 +415,11 @@ class DatabaseUrlParsingTests(SimpleTestCase):
 
 
 class DatabaseUrlImportTests(SimpleTestCase):
-    """Import-time behaviour: DATABASE_URL drives DATABASES, and no value
-    for it — not even a malformed one — may crash settings import.
+    """Import-time behaviour: DATABASE_URL drives DATABASES, and an unusable
+    one falls back to sqlite in DEVELOPMENT while refusing the boot in
+    production (SPEC-22-03 [R-22.3] - the refusal half is pinned by
+    NonDebugFailClosedTests below, this class pins the convenience and the
+    parsing wiring).
 
     Since V-02 flipped DEBUG to fail-closed, a clean-environment settings
     import needs DJANGO_SECRET_KEY to clear the DEBUG-false guard, so each
@@ -404,11 +427,13 @@ class DatabaseUrlImportTests(SimpleTestCase):
     DATABASE_URL parsing, not the DEBUG guard, which has its own class).
     """
 
-    _BOOT_ENV = {"DJANGO_SECRET_KEY": "x" * 50}
+    _BOOT_ENV = _NON_DEBUG_ENV
 
-    def test_missing_database_url_imports_with_sqlite_default(self):
+    def test_missing_database_url_imports_with_sqlite_default_in_development(self):
+        # DJANGO_DEBUG=true is what keeps the sqlite convenience alive; the
+        # production refusal for the same missing var is pinned below.
         res = run_settings_import(
-            dict(self._BOOT_ENV),
+            _DEV_ENV,
             snippet=(
                 "import config.settings as s; "
                 "d = s.DATABASES['default']; "
@@ -455,9 +480,10 @@ class DatabaseUrlImportTests(SimpleTestCase):
         self.assertEqual(res.returncode, 0, res.stderr)
         self.assertIn("OPTIONS {'sslmode': 'require'}", res.stdout)
 
-    def test_malformed_database_url_imports_without_crashing(self):
+    def test_malformed_database_url_falls_back_in_development(self):
+        # The developer convenience that production no longer gets.
         res = run_settings_import(
-            {**self._BOOT_ENV, "DATABASE_URL": "postgres://u@h:notaport/db"},
+            {**_DEV_ENV, "DATABASE_URL": "postgres://u@h:notaport/db"},
             snippet=(
                 "import config.settings as s; "
                 "print('ENGINE', s.DATABASES['default']['ENGINE'])"
@@ -466,9 +492,9 @@ class DatabaseUrlImportTests(SimpleTestCase):
         self.assertEqual(res.returncode, 0, res.stderr)
         self.assertIn("ENGINE django.db.backends.sqlite3", res.stdout)
 
-    def test_unsupported_scheme_imports_without_crashing(self):
+    def test_unsupported_scheme_falls_back_in_development(self):
         res = run_settings_import(
-            {**self._BOOT_ENV, "DATABASE_URL": "mysql://u:p@h/db"},
+            {**_DEV_ENV, "DATABASE_URL": "mysql://u:p@h/db"},
             snippet=(
                 "import config.settings as s; "
                 "print('ENGINE', s.DATABASES['default']['ENGINE'])"
@@ -476,6 +502,169 @@ class DatabaseUrlImportTests(SimpleTestCase):
         )
         self.assertEqual(res.returncode, 0, res.stderr)
         self.assertIn("ENGINE django.db.backends.sqlite3", res.stdout)
+
+
+class NonDebugFailClosedTests(SimpleTestCase):
+    """SPEC-22-03 [R-22.3]: a non-debug boot must be COMPLETE, or it must not
+    happen at all.
+
+    The blocker was a silent one: a production host with a missing or
+    typo'd DATABASE_URL booted perfectly on the local sqlite developer
+    database - no error, no log line, developer data in front of customers -
+    and there was no way to tell staging from production at all. Each boot
+    below is one key short of the production shape and must refuse by name;
+    the matching development boot must still come up on sqlite.
+    """
+
+    def _refuses(self, env, expected):
+        """Boot with exactly this environment and require a named refusal."""
+        res = run_settings_import(env)
+        self.assertNotEqual(res.returncode, 0, res.stdout)
+        self.assertIn(expected, res.stderr)
+
+    def _without(self, key):
+        """The production shape minus one required key."""
+        self.assertIn(key, self._BASE)
+        return {k: v for k, v in self._BASE.items() if k != key}
+
+    _BASE = {
+        "DJANGO_SECRET_KEY": "x" * 50,
+        "DJANGO_ENV": "production",
+        "DATABASE_URL": "postgres://u:p@h:5432/db",
+        "DJANGO_ALLOWED_HOSTS": "example.test",
+        "CSRF_TRUSTED_ORIGINS": "https://example.test",
+    }
+
+    def test_missing_database_url_refuses_to_boot(self):
+        self._refuses(self._without("DATABASE_URL"), "DATABASE_URL")
+
+    def test_malformed_database_url_refuses_to_boot(self):
+        self._refuses(
+            {**self._BASE, "DATABASE_URL": "postgres://u@h:notaport/db"},
+            "DATABASE_URL",
+        )
+
+    def test_unparseable_database_url_refuses_to_boot(self):
+        self._refuses(
+            {**self._BASE, "DATABASE_URL": "postgres://[::1"}, "DATABASE_URL"
+        )
+
+    def test_unsupported_database_scheme_refuses_to_boot(self):
+        # The message names the scheme, never the URL: it carries a password.
+        self._refuses({**self._BASE, "DATABASE_URL": "mysql://u:p@h/db"}, "mysql")
+
+    def test_staging_is_refused_just_like_production(self):
+        # Staging is a real deployment with real data of its own, so it
+        # gets exactly the production treatment - no debug-shaped escape.
+        res = run_settings_import({**_STAGING_ENV, "DATABASE_URL": ""})
+        self.assertNotEqual(res.returncode, 0, res.stdout)
+        self.assertIn("DATABASE_URL", res.stderr)
+
+    def test_explicit_sqlite_url_is_honoured_outside_development(self):
+        # An EXPLICIT sqlite:// URL is a deliberate choice (a single-box
+        # staging install), not a silent substitution, so it still boots.
+        res = run_settings_import(
+            {**self._BASE, "DATABASE_URL": "sqlite:////tmp/staging.sqlite3"},
+            snippet=(
+                "import config.settings as s; "
+                "print('ENGINE', s.DATABASES['default']['ENGINE']); "
+                "print('NAME', s.DATABASES['default']['NAME'].as_posix())"
+            ),
+        )
+        self.assertEqual(res.returncode, 0, res.stderr)
+        self.assertIn("ENGINE django.db.backends.sqlite3", res.stdout)
+        self.assertIn("NAME /tmp/staging.sqlite3", res.stdout)
+
+    def test_debug_true_without_database_url_still_boots_on_sqlite(self):
+        # The other half of the contract: the developer convenience is
+        # intact, so local work and the test suite are unaffected.
+        res = run_settings_import(
+            _DEV_ENV,
+            snippet=(
+                "import config.settings as s; "
+                "print('ENV', s.DJANGO_ENV); "
+                "print('ENGINE', s.DATABASES['default']['ENGINE']); "
+                "print('HOSTS', s.ALLOWED_HOSTS)"
+            ),
+        )
+        self.assertEqual(res.returncode, 0, res.stderr)
+        self.assertIn("ENGINE django.db.backends.sqlite3", res.stdout)
+        self.assertIn("ENV local", res.stdout)
+        # The dev host defaults stay a development-only convenience.
+        self.assertIn("HOSTS ['localhost', '127.0.0.1']", res.stdout)
+
+    def test_debug_false_without_a_declared_environment_refuses_to_boot(self):
+        # Which environment is this? An undeclared one cannot be isolated
+        # from the others, so it is refused instead of assumed.
+        self._refuses(self._without("DJANGO_ENV"), "DJANGO_ENV")
+
+    def test_unknown_environment_name_refuses_to_boot(self):
+        # A typo must not quietly become "whatever the default was".
+        self._refuses(
+            {**self._BASE, "DJANGO_ENV": "productionn"}, "productionn"
+        )
+
+    def test_non_debug_without_allowed_hosts_refuses_to_boot(self):
+        self._refuses(self._without("DJANGO_ALLOWED_HOSTS"), "DJANGO_ALLOWED_HOSTS")
+
+    def test_non_debug_without_csrf_trusted_origins_refuses_to_boot(self):
+        self._refuses(
+            self._without("CSRF_TRUSTED_ORIGINS"), "CSRF_TRUSTED_ORIGINS"
+        )
+
+    def test_every_declared_environment_boots(self):
+        # The isolation story is only useful if each environment is a
+        # configuration this project can actually boot.
+        for name in ("local", "ci", "staging", "production"):
+            with self.subTest(env=name):
+                res = run_settings_import(
+                    {**self._BASE, "DJANGO_ENV": name},
+                    snippet="import config.settings as s; print('ENV', s.DJANGO_ENV)",
+                )
+                self.assertEqual(res.returncode, 0, res.stderr)
+                self.assertIn(f"ENV {name}", res.stdout)
+
+    def test_resolver_refusals_name_the_problem_in_process(self):
+        # The pure resolvers behind the boot guards, so the refusal branches
+        # are covered in-process too (a subprocess cannot be).
+        with self.assertRaises(ImproperlyConfigured) as caught:
+            config_settings._databases_from_url(None, False)
+        self.assertIn("DATABASE_URL", str(caught.exception))
+        with self.assertRaises(ImproperlyConfigured) as caught:
+            config_settings._databases_from_url("mysql://u:p@h/db", False)
+        self.assertIn("mysql", str(caught.exception))
+        with self.assertRaises(ImproperlyConfigured) as caught:
+            config_settings._deployment_environment(False)
+        self.assertIn("DJANGO_ENV", str(caught.exception))
+        # The resolver reads the one documented key, so an invalid value is
+        # set there (and restored) rather than through a test-only name.
+        os.environ["DJANGO_ENV"] = "prod"
+        try:
+            with self.assertRaises(ImproperlyConfigured) as caught:
+                config_settings._deployment_environment(True)
+            self.assertIn("'prod'", str(caught.exception))
+            # A declared value is honoured, in development too.
+            os.environ["DJANGO_ENV"] = "staging"
+            self.assertEqual(config_settings._deployment_environment(True), "staging")
+        finally:
+            del os.environ["DJANGO_ENV"]
+        for resolver in (
+            lambda: config_settings._env_hosts("MISSING_HOSTS_TEST", "x", False),
+            lambda: config_settings._env_hosts("MISSING_ORIGINS_TEST", "x", False),
+        ):
+            with self.assertRaises(ImproperlyConfigured):
+                resolver()
+        # The permitted branches: development keeps its defaults, and a
+        # declared value is honoured.
+        self.assertEqual(config_settings._deployment_environment(True), "local")
+        self.assertEqual(
+            config_settings._env_hosts("MISSING_HOSTS_TEST", "localhost", True),
+            ["localhost"],
+        )
+        self.assertEqual(
+            config_settings._databases_from_url(None, True)["default"]["ENGINE"],
+            "django.db.backends.sqlite3",
+        )
 
 
 class StaticFilesProductionTests(SimpleTestCase):
@@ -486,7 +675,7 @@ class StaticFilesProductionTests(SimpleTestCase):
     (the subprocess pattern keeps a developer's local .env out of it).
     """
 
-    _BOOT_ENV = {"DJANGO_SECRET_KEY": "x" * 50}
+    _BOOT_ENV = _NON_DEBUG_ENV
 
     def test_static_root_defaults_to_the_conventional_directory(self):
         res = run_settings_import(
@@ -715,7 +904,7 @@ class TransportHardeningTests(SimpleTestCase):
     with development-safe defaults. Import-time settings, so pinned via the
     subprocess pattern like every env knob above."""
 
-    _BOOT_ENV = {"DJANGO_SECRET_KEY": "x" * 50}
+    _BOOT_ENV = _NON_DEBUG_ENV
 
     def test_defaults_are_safe_off_for_development(self):
         res = run_settings_import(

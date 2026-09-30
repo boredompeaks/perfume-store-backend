@@ -40,10 +40,73 @@ SECRET_KEY = os.getenv('DJANGO_SECRET_KEY', 'unsafe-development-key-change-me')
 # DJANGO_DEBUG=true explicitly for local development only.
 DEBUG = os.getenv('DJANGO_DEBUG', 'false').lower() == 'true'
 
-ALLOWED_HOSTS = [host for host in os.getenv('DJANGO_ALLOWED_HOSTS', 'localhost,127.0.0.1').split(',') if host]
-
 if not DEBUG and not os.getenv('DJANGO_SECRET_KEY'):
     raise RuntimeError('DJANGO_SECRET_KEY must be set when DJANGO_DEBUG is false.')
+
+
+# SPEC-22-03 [R-22.3]: the environments this deployment separates itself from.
+# A deployment that cannot name its own environment cannot be isolated from
+# the others - staging must never be a copy of production's database, and
+# production must never be reached with a staging credential - so the value is
+# DECLARED, validated, and mandatory outside development.
+_VALID_DEPLOY_ENVIRONMENTS = frozenset({'local', 'ci', 'staging', 'production'})
+
+
+def _deployment_environment(debug):
+    """Return the declared deployment environment (SPEC-22-03 [R-22.3]).
+
+    Development may stay undeclared (`local`): the developer conveniences
+    below key off it. Every non-debug boot must say which environment it is,
+    and an unknown value is refused rather than guessed at - a typo must not
+    quietly become "whatever the default was".
+    """
+    raw = (os.getenv('DJANGO_ENV') or '').strip().lower()
+    if not raw:
+        if debug:
+            return 'local'
+        raise ImproperlyConfigured(
+            'DJANGO_ENV must name the deployment environment ('
+            + ', '.join(sorted(_VALID_DEPLOY_ENVIRONMENTS))
+            + ') when DJANGO_DEBUG is false: an environment that cannot be '
+            'named cannot be isolated from the others.'
+        )
+    if raw not in _VALID_DEPLOY_ENVIRONMENTS:
+        raise ImproperlyConfigured(
+            f'Unsupported DJANGO_ENV {raw!r}; expected one of '
+            + ', '.join(sorted(_VALID_DEPLOY_ENVIRONMENTS))
+            + '.'
+        )
+    return raw
+
+
+DJANGO_ENV = _deployment_environment(DEBUG)
+
+
+def _env_hosts(name, default, debug):
+    """Return a comma-separated host/origin list, refusing the dev default
+    outside development (SPEC-22-03 [R-22.3]).
+
+    The localhost defaults are a development convenience that a deployed
+    environment must state for itself: an unconfigured production host either
+    rejects every real request (ALLOWED_HOSTS) or trusts a hardcoded origin
+    for CSRF checks. Either way the environment was never configured, so the
+    boot is refused and named instead.
+    """
+    raw = (os.getenv(name) or '').strip()
+    if not raw:
+        if not debug:
+            raise ImproperlyConfigured(
+                f'{name} must be set explicitly when DJANGO_DEBUG is false '
+                f'(comma-separated); the development default {default!r} is '
+                f'never a deployed environment\'s configuration.'
+            )
+        raw = default
+    return [entry for entry in raw.split(',') if entry]
+
+
+ALLOWED_HOSTS = _env_hosts(
+    'DJANGO_ALLOWED_HOSTS', 'localhost,127.0.0.1', DEBUG
+)
 
 
 def _env_bool(name, default):
@@ -167,35 +230,39 @@ def _query_options(query):
     return options
 
 
-def _database_from_url(url):
-    """Return a DATABASES['default'] entry for a DATABASE_URL, fail-safely.
+def _parse_database_url(url):
+    """Return a (DATABASES entry, resolved, reason) triple for a DATABASE_URL.
 
     Parsed with stdlib urllib.parse rather than dj-database-url because that
     dependency (with psycopg) is deliberately deferred to the S22 deployment
     work, and the supported surface is only the two schemes this project
-    needs. A missing, malformed, or unsupported URL falls back to the sqlite
-    dev database instead of crashing startup — the same fail-safe pattern
-    as _env_int below.
+    needs.
+
+    `resolved` is False for a missing, malformed or unsupported URL, in which
+    case the entry is the sqlite dev database and `reason` names what was
+    wrong with the URL (never the URL itself - it carries credentials). The
+    caller decides whether that fallback is acceptable: it is convenient in
+    development and refused in production (_databases_from_url below).
     """
     fallback = {
         'ENGINE': 'django.db.backends.sqlite3',
         'NAME': BASE_DIR / 'db.sqlite3',
     }
     if not url:
-        return fallback
+        return fallback, False, 'is not set'
     try:
         parsed = urlparse(url)
         # Accessing .port validates it: a malformed port raises ValueError.
         port = parsed.port
     except ValueError:
-        return fallback
+        return fallback, False, 'is not a parseable URL (malformed host or port)'
     scheme = parsed.scheme.lower()
     if scheme in ('postgres', 'postgresql'):
         # The db name is never a filesystem path, so stripping all leading
         # slashes is safe here and accepts both /name and name forms.
         name = parsed.path.lstrip('/')
         if not name:
-            return fallback
+            return fallback, False, 'names no database'
         config = {
             'ENGINE': 'django.db.backends.postgresql',
             'NAME': name,
@@ -214,7 +281,7 @@ def _database_from_url(url):
         options = _query_options(parsed.query)
         if options:
             config['OPTIONS'] = options
-        return config
+        return config, True, ''
     if scheme == 'sqlite':
         # Exactly one leading slash is stripped so that sqlite:///db.sqlite3
         # names a file relative to BASE_DIR while the four-slash form
@@ -225,18 +292,58 @@ def _database_from_url(url):
         if raw.startswith('/'):
             raw = raw[1:]
         if not raw:
-            return fallback
+            return fallback, False, 'names no sqlite file'
         name = Path(raw)
         is_absolute = raw.startswith('/') or (len(raw) > 1 and raw[1] == ':')
         return {
             'ENGINE': 'django.db.backends.sqlite3',
             'NAME': name if is_absolute else BASE_DIR / name,
-        }
-    # Unsupported scheme (mysql://, ...): fall back rather than crash.
-    return fallback
+        }, True, ''
+    # Unsupported scheme (mysql://, ...): reported, never silently accepted.
+    return (
+        fallback,
+        False,
+        f'has unsupported scheme {scheme!r} '
+        f'(supported: postgres, postgresql, sqlite)',
+    )
 
 
-DATABASES = {'default': _database_from_url(os.getenv('DATABASE_URL'))}
+def _database_from_url(url):
+    """Return just the DATABASES['default'] entry for a DATABASE_URL.
+
+    Kept as the parser's single-value face for the pure-function tests; the
+    boot decision (fail closed outside development) lives in
+    _databases_from_url.
+    """
+    return _parse_database_url(url)[0]
+
+
+def _databases_from_url(url, debug):
+    """SPEC-22-03 [R-22.3]: resolve DATABASES, failing CLOSED in production.
+
+    A missing, malformed or unsupported DATABASE_URL used to fall back to the
+    sqlite development database no matter what: a production host configured
+    with a typo'd or absent URL came up perfectly healthy on developer data,
+    with no signal anywhere (R-22.3's correctness blocker). Outside
+    development that boot is now refused by name. An EXPLICIT sqlite URL is
+    still honoured in any environment - that is a deliberate, visible choice,
+    not a silent substitution - and so is a parsed URL of any supported
+    scheme.
+    """
+    config, resolved, reason = _parse_database_url(url)
+    if not resolved and not debug:
+        raise ImproperlyConfigured(
+            f'DATABASE_URL {reason}. With DJANGO_DEBUG=false the app refuses '
+            f'to fall back to the local sqlite development database '
+            f'({BASE_DIR / "db.sqlite3"}): a production or staging host '
+            f'serving developer data is worse than a failed boot. Set '
+            f'DATABASE_URL (see backend/.env.example), or run with '
+            f'DJANGO_DEBUG=true for local development.'
+        )
+    return {'default': config}
+
+
+DATABASES = _databases_from_url(os.getenv('DATABASE_URL'), DEBUG)
 
 
 # Password validation
@@ -552,9 +659,9 @@ SESSION_COOKIE_SAMESITE = os.getenv('SESSION_COOKIE_SAMESITE', 'Lax')
 CORS_ALLOWED_ORIGINS = [origin for origin in os.getenv(
     'CORS_ALLOWED_ORIGINS', 'http://localhost:3000'
 ).split(',') if origin]
-CSRF_TRUSTED_ORIGINS = [origin for origin in os.getenv(
-    'CSRF_TRUSTED_ORIGINS', 'http://localhost:3000'
-).split(',') if origin]
+CSRF_TRUSTED_ORIGINS = _env_hosts(
+    'CSRF_TRUSTED_ORIGINS', 'http://localhost:3000', DEBUG
+)
 
 CORS_ALLOW_CREDENTIALS = True
 

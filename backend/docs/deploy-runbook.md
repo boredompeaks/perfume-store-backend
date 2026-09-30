@@ -41,3 +41,52 @@ With the route in place a missing front-door rule degrades to a file served by
 the app, never to a 404. The app process must therefore have read access to
 `DJANGO_MEDIA_ROOT` (`/health/` already reports degraded when it is not
 writable).
+
+## Environments and the database (SPEC-22-03, closes R-22.3)
+
+`DJANGO_ENV` names the deployment: `local`, `ci`, `staging` or `production`.
+It is **required** whenever `DJANGO_DEBUG=false`, and an unknown value is
+refused at boot instead of being guessed at.
+
+A non-debug boot must be complete, or the app refuses to start by name:
+
+| Key | Non-debug requirement |
+| --- | --- |
+| `DJANGO_SECRET_KEY` | required (pre-existing V-02 guard) |
+| `DJANGO_ENV` | required - `staging` or `production` |
+| `DATABASE_URL` | required and parseable - missing, malformed or unsupported **refuses to boot** instead of silently using `backend/db.sqlite3` |
+| `DJANGO_ALLOWED_HOSTS` | required, explicit (no localhost default) |
+| `CSRF_TRUSTED_ORIGINS` | required, explicit (no localhost default) |
+
+The refusal names the problem and never echoes the URL, which carries a
+password. An **explicit** `sqlite:///` URL is still honoured in any
+environment: a single-box staging install is a deliberate choice, not a
+silent substitution.
+
+`DJANGO_DEBUG=true` keeps the developer conveniences: the sqlite fallback,
+the localhost host/origin defaults, and an undeclared `DJANGO_ENV` (`local`).
+CI runs the suite with `DJANGO_DEBUG=true`
+(`.github/workflows/backend-tests.yml`), which is why the fail-closed branches
+never fire there.
+
+**Staging.** A staging deployment is an ordinary deployment of this same
+image with its own env file: `DJANGO_ENV=staging`, its own
+`DJANGO_SECRET_KEY`, its own `DJANGO_ALLOWED_HOSTS` / `CSRF_TRUSTED_ORIGINS`,
+and its own Postgres. It gets exactly the production treatment - there is no
+debug-shaped escape - so nothing in it can silently fall back to developer
+data.
+
+**Data / credential isolation (R-22.3).** One database and one secret key per
+environment. Nothing in this app shares a database across environments, so a
+staging run can neither read nor migrate production rows, and a value signed
+with staging's key (session, signed cookie) is not honoured in production.
+The staging database is disposable: it is restored from a sanitised dump or
+seeded fresh, never pointed at production for convenience.
+
+**Known gap (follow-up for the Dockerfile owner, SPEC-2-10a).** The image's
+build-time `collectstatic` runs with `DJANGO_DEBUG=false` and no
+`DATABASE_URL`, so the SPEC-22-03 guard makes `docker build` refuse until
+that `RUN` gains an explicit build-time `DATABASE_URL` (e.g.
+`sqlite:////tmp/build.sqlite3`). The guard is the correct behaviour and the
+build line is what has to change; `backend/Dockerfile` was out of scope for
+this task.
