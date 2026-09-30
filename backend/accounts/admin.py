@@ -10,6 +10,8 @@ from django.urls import reverse
 
 from common import totp
 from common.admin import CONFIRM_FIELD, CONFIRMATION_YES, RoleAwareModelAdmin
+from common.audit import log_mutation
+from common.models import AuditEvent
 from common.permissions import is_privileged
 from common.roles import STAFF_ROLES
 from orders.models import Order
@@ -288,6 +290,12 @@ class StoreUserAdmin(RoleAwareModelAdmin, DjangoUserAdmin):
         membership is not this surface's business and survives the save.
         Each direction logs separately via ``log_change``, which records
         the acting user (``request.user``) and the role changed ([6.12.5]).
+
+        SPEC-20-4 [R-20.27]/[R-20.29]: those per-direction messages are
+        prose, so they cannot answer what the account's authority was before
+        and after. One structured event records the real before -> after role
+        sets and states the surface as ``admin``; the per-direction LogEntry
+        rows are unchanged, so the shipped audit contract still holds.
         """
         if "staff_roles" not in form.cleaned_data:
             return
@@ -299,6 +307,24 @@ class StoreUserAdmin(RoleAwareModelAdmin, DjangoUserAdmin):
         for group in sorted(desired - held, key=lambda g: g.name):
             obj.groups.add(group)
             self.log_change(request, obj, f'Added role "{group.name}".')
+        if held == desired:
+            return
+        # The changeform view wraps this save in its own atomic block, so the
+        # event commits with the group membership or rolls back with it.
+        log_mutation(
+            request,
+            obj,
+            AuditEvent.EventType.STAFF_ROLES_UPDATED,
+            "staff_roles_updated",
+            AuditEvent.Source.ADMIN,
+            changes=[
+                (
+                    "staff_roles",
+                    sorted(group.name for group in held),
+                    sorted(group.name for group in desired),
+                )
+            ],
+        )
 
     # ——— SPEC-20-2 [R-20.18]: the explicit confirm step ———
 

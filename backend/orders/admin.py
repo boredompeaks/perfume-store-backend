@@ -7,6 +7,8 @@ from django.http import HttpResponse
 from django.utils import timezone
 
 from common.admin import RoleAwareModelAdmin
+from common.audit import log_mutation, model_field_changes
+from common.models import AuditEvent
 # [R-10.1] The order machine lives in orders.state (single source); this
 # module only consumes it.
 from .models import Coupon, Order, OrderItem, OrderStatusEvent
@@ -614,6 +616,42 @@ class CouponAdmin(RoleAwareModelAdmin):
     list_filter = ("active", "discount_type")
     search_fields = ("code",)
     readonly_fields = ("used_count",)
+
+    def save_model(self, request, obj, form, change):
+        """Record the real before -> after value of a promotion edit.
+
+        SPEC-20-4 [R-20.27]: Django's own changelist-edit LogEntry names the
+        column ("Changed Active.") but not what it changed FROM or TO, so a
+        deactivated coupon cannot be reconstructed from the trail. This is
+        the ``list_editable`` ``active`` toggle, the only field editable
+        outside the change form; the change form's own structured LogEntry
+        already carries its old/new values.
+
+        The snapshot is read from the DATABASE, not off the instance:
+        ``save_form`` has already applied the submitted values by the time
+        ``save_model`` runs, so the instance holds the new state and would
+        report no change at all.
+        """
+        if not change:
+            return
+        stored = (
+            type(obj)
+            .objects.filter(pk=obj.pk)
+            .values_list(*self.list_editable)
+            .first()
+        )
+        before = dict(zip(self.list_editable, stored or ()))
+        super().save_model(request, obj, form, change)
+        changes = model_field_changes(obj, self.list_editable, before=before)
+        if changes:
+            log_mutation(
+                request,
+                obj,
+                AuditEvent.EventType.CATALOGUE_UPDATED,
+                "coupon_updated",
+                AuditEvent.Source.ADMIN,
+                changes=changes,
+            )
 
     @admin.display(description="Usage")
     def usage_display(self, obj):

@@ -20,6 +20,7 @@ import logging
 
 from django.db import models
 
+from common.audit import clean_audit_payload
 from common.middleware import (
     NO_REQUEST_ID,
     REQUEST_ID_MAX_LENGTH,
@@ -46,6 +47,19 @@ class AuditEvent(models.Model):
         ORDER = "order", "Order"
         PAYMENT = "payment", "Payment"
         AUTH = "auth", "Authentication"
+        CATALOGUE = "catalogue", "Catalogue"
+        STAFF = "staff", "Staff"
+
+    # SPEC-20-4 [R-20.29]: which surface the mutation arrived through. A real
+    # field, not prose in a change message, so "did staff do this in the admin
+    # or through the API" is a filter rather than a text search. ``SYSTEM`` is
+    # the honest label for a business event whose writer does not attribute
+    # itself to a staff surface (checkout, payment verification, auth) — it
+    # says "not attributable", never "admin".
+    class Source(models.TextChoices):
+        ADMIN = "admin", "Admin"
+        API = "api", "API"
+        SYSTEM = "system", "System"
 
     class EventType(models.TextChoices):
         # Order lifecycle. Further per-transition events ride section 10
@@ -85,6 +99,15 @@ class AuditEvent(models.Model):
         AUTH_LOGIN_FAILED = "auth.login_failed", "Login failed"
         AUTH_EMAIL_VERIFIED = "auth.email_verified", "Email verified"
         AUTH_PASSWORD_RESET = "auth.password_reset", "Password reset"
+        # Catalogue mutations with their structured before -> after values
+        # (SPEC-20-4 [R-20.27]) — the API surface, which could previously
+        # only say "Updated via API.".
+        CATALOGUE_CREATED = "catalogue.created", "Catalogue item created"
+        CATALOGUE_UPDATED = "catalogue.updated", "Catalogue item updated"
+        CATALOGUE_DELETED = "catalogue.deleted", "Catalogue item deleted"
+        # A staff-role grant/revoke: the most consequential mutation the admin
+        # performs, and previously recorded only as per-direction prose.
+        STAFF_ROLES_UPDATED = "staff.roles_updated", "Staff roles updated"
 
     category = models.CharField(max_length=20, choices=Category.choices, db_index=True)
     event_type = models.CharField(
@@ -105,6 +128,16 @@ class AuditEvent(models.Model):
         related_name="audit_events",
     )
     detail = models.JSONField(default=dict, blank=True)
+    # SPEC-20-4 [R-20.29]: the surface the mutation arrived through — a field
+    # so an audit query can separate admin work from API work instead of
+    # pattern-matching change messages. Defaults to SYSTEM, meaning the writer
+    # makes no staff-surface claim (see ``Source``).
+    source = models.CharField(
+        max_length=10,
+        choices=Source.choices,
+        default=Source.SYSTEM,
+        db_index=True,
+    )
     # SPEC-20-3 [R-20.26]: the correlation id of the request that produced
     # the event, so an audit row can be joined to the request's log lines and
     # to the id echoed on the response. Blank (never NULL) for events written
@@ -124,22 +157,33 @@ class AuditEvent(models.Model):
         return f"{self.created_at:%Y-%m-%d %H:%M:%S} {self.event_type}"
 
     @classmethod
-    def record(cls, event_type, actor=None, order=None, detail=None):
+    def record(cls, event_type, actor=None, order=None, detail=None, source=None):
         """Append one event; the single sanctioned write path.
 
         Call inside the same ``transaction.atomic()`` block as the side
         effect being recorded. ``category`` derives from the event-type's
-        dotted prefix (``order.``/``payment.``/``auth.``), so an unknown or
-        unprefixed identifier fails loudly instead of writing a row that no
-        category query will ever find. Anonymous/system actors store NULL,
-        mirroring ``StockMovement.created_by``.
+        dotted prefix (``order.``/``payment.``/``auth.``/``catalogue.``/
+        ``staff.``), so an unknown or unprefixed identifier fails loudly
+        instead of writing a row that no category query will ever find.
+        Anonymous/system actors store NULL, mirroring
+        ``StockMovement.created_by``.
+
+        ``source`` defaults to :attr:`Source.SYSTEM` — a writer that does not
+        name its surface makes no claim about one. The guarded staff
+        mutations state it explicitly (``Source.ADMIN`` / ``Source.API``).
+
+        The detail is passed through ``common.audit.clean_audit_payload``
+        here rather than at each call site: since SPEC-20-4 began storing
+        real before/after values, this is the one place that decides what may
+        be written, so no caller can bypass it.
         """
         event = cls.objects.create(
             category=cls.Category(event_type.split(".", 1)[0]),
             event_type=event_type,
             actor=actor if getattr(actor, "is_authenticated", False) else None,
             order=order,
-            detail=detail or {},
+            detail=clean_audit_payload(detail or {}),
+            source=source or cls.Source.SYSTEM,
             request_id=current_request_id(),
         )
         # [SPEC-7-02] Observability baseline: the trail is DB-only
