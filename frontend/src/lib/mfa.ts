@@ -20,7 +20,6 @@
 
 export const MFA_SETUP_PATH = "/api/accounts/mfa/setup/";
 export const MFA_CONFIRM_PATH = "/api/accounts/mfa/confirm/";
-export const MFA_STATUS_PATH = "/api/accounts/mfa/status/";
 
 /** RFC 6238 codes are 6 digits; the backend accepts them space-separated. */
 export const TOTP_DIGITS = 6;
