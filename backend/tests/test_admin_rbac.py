@@ -421,6 +421,27 @@ class RoleAwareAdminSurfaceTests(ApiTestCase):
         self.pending.refresh_from_db()
         self.assertEqual(self.pending.status, "pending")
 
+    def test_already_cancelled_row_is_not_told_it_is_paid(self):
+        # SPEC-20-1b: the reason clause, not the resulting state, was wrong.
+        # An already-cancelled row lands in "unchanged" either way; calling
+        # it "paid" told the operator something false about their selection.
+        cancelled = make_order(self.buyer, status="cancelled")
+        self.client.force_login(make_role_user("support", "surf-cancelled"))
+        res = self.client.post(
+            "/admin/orders/order/",
+            {
+                "action": "cancel_pending",
+                "_selected_action": [str(cancelled.id)],
+            },
+        )
+        self.assertEqual(res.status_code, 200)
+        row = res.context["details"]["rows"][0]
+        self.assertEqual(
+            row["fields"][2],
+            ("Resulting state", "cancelled → unchanged (already cancelled)"),
+        )
+        self.assertNotIn("paid", row["fields"][2][1])
+
     def test_confirmation_details_are_empty_without_a_declared_payload(self):
         # Only a declared financial action spells out its consequences; the
         # generic default must stay empty so no other confirmation grows an

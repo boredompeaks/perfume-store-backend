@@ -410,6 +410,16 @@ class OrderAdmin(RoleAwareModelAdmin):
 
     def _cancel_confirmation_row(self, order):
         pending = order.status == "pending"
+        # SPEC-20-1b: a row is skipped because it is NOT pending, and only
+        # one of those reasons is "it is paid". An already-cancelled order
+        # used to be told "paid, never cancelled here", which is false on
+        # screen and in the operator's decision. The resulting state
+        # ("-> unchanged") was always right; only the reason clause moves.
+        unchanged_reason = (
+            "(already cancelled)"
+            if order.status == "cancelled"
+            else "(paid, never cancelled here)"
+        )
         return {
             "label": str(order),
             "fields": [
@@ -419,7 +429,7 @@ class OrderAdmin(RoleAwareModelAdmin):
                     "Resulting state",
                     f"{order.status} → cancelled"
                     if pending
-                    else f"{order.status} → unchanged (paid, never cancelled here)",
+                    else f"{order.status} → unchanged {unchanged_reason}",
                 ),
             ],
             "items": [str(item) for item in order.items.all()],
