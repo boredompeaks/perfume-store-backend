@@ -9,11 +9,7 @@ from django.core.exceptions import PermissionDenied
 from django.urls import reverse
 
 from common import totp
-from common.admin import (
-    CONFIRMATION_YES,
-    CONFIRM_FIELD,
-    RoleAwareModelAdmin,
-)
+from common.admin import CONFIRM_FIELD, CONFIRMATION_YES, RoleAwareModelAdmin
 from common.permissions import is_privileged
 from common.roles import STAFF_ROLES
 from orders.models import Order

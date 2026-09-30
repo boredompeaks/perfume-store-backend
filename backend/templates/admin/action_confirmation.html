@@ -36,6 +36,12 @@
     <ul>
       {% for obj in objects %}<li>{{ obj }}</li>{% endfor %}
     </ul>
+    {# SPEC-20-5 [R-20.28]: optional reason, offered only where declared #}
+    {% if note_form %}
+      <fieldset class="module aligned">
+        {{ note_form.confirmation_note }}
+      </fieldset>
+    {% endif %}
     <div class="submit-row">
       <input type="submit" class="default" value="Yes, proceed" />
       <a href="{{ cancel_url }}" class="button cancel-link">Cancel</a>

@@ -509,15 +509,20 @@ class StaffRoleConfirmationTests(StaffRoleChangeMixin, ApiTestCase):
         # the action gate reads, and a Cancel that returns to the change page
         # (not to the admin index, which is where a bulk action belongs).
         self.assertEqual(res.context["action_name"], "staff_role_change")
-        self.assertIn(f'name="confirm" value="{CONFIRMATION_YES}"', res.content.decode())
-        self.assertIn(f'href="{self.url}"', res.content.decode())
+        content = res.content.decode()
+        self.assertIn(f'name="confirm" value="{CONFIRMATION_YES}"', content)
+        self.assertIn(f'href="{self.url}"', content)
         # The interrupted submission travels through the page so the commit
         # leg re-runs the ordinary save instead of a second, looser one.
         pending = dict(res.context["pending_fields"])
+        marketing = str(Group.objects.get(name=ROLE_MARKETING).pk)
         self.assertEqual(pending["username"], self.staff_target.username)
-        self.assertEqual(pending["staff_roles"], str(Group.objects.get(name=ROLE_MARKETING).pk))
+        self.assertEqual(pending["staff_roles"], marketing)
         self.assertNotIn(CONFIRM_FIELD, pending)  # the template owns the marker
         self.assertFalse([name for name in pending if name.startswith("csrf")])
+        # SPEC-20-5 gates reason capture to cancel_pending: a role change
+        # offers no textarea, so the extra declaration cannot leak here.
+        self.assertIsNone(res.context["note_form"])
         self.assert_roles_unchanged()
 
     def assert_roles_unchanged(self):
@@ -627,6 +632,7 @@ class StaffRoleConfirmationTests(StaffRoleChangeMixin, ApiTestCase):
 
 
 class StaffRoleGuardUnitTests(ApiTestCase):
+    """Direct-call pins: the guard holds even off the normal view flow."""
 
     def test_save_model_refuses_role_changes_without_staff_manage(self):
         target = User.objects.create_user(

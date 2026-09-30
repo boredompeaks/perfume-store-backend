@@ -30,11 +30,15 @@ resulting state) and the shared template renders it above the object list.
 SPEC-20-2 [R-20.18] then reuses the very same page as the confirm step for a
 mutation that is not a bulk action (a staff-role change on the user change
 form): the interstitial re-drives the submission it interrupted, so there is
-one confirmation contract, one template and one commit gate.
+one confirmation contract, one template and one commit gate. SPEC-20-5
+[R-20.28] finally lets an action ask WHY on that page — an optional
+reason/note, declared per action (``confirmation_reason_actions``) and read
+back off the same POST by the action body.
 """
 from dataclasses import replace
 from functools import wraps
 
+from django import forms
 from django.contrib import admin
 from django.contrib.admin.options import ActionLocation
 from django.shortcuts import render
@@ -43,17 +47,44 @@ from django.urls import reverse
 from common.permissions import user_has_capability
 
 # The POST contract of the interstitial. Module constants, not inline
-# literals, because three places have to agree on them: the render path
-# (emits them), the commit gate (refuses to act without the confirm) and the
-# re-submission path for a non-bulk confirmation.
+# literals, because four places have to agree on them: the render path (emits
+# them), the commit gate (refuses to act without the confirm), the note
+# capture, and the re-submission path for a non-bulk confirmation.
 CONFIRM_FIELD = "confirm"
 CONFIRMATION_YES = "yes"
+# Namespaced field name, not a bare "note": the interstitial also re-drives
+# other surfaces' POSTs (see ``_repost_fields``), and a short generic key
+# could collide with a field those forms own.
+CONFIRMATION_NOTE_FIELD = "confirmation_note"
+CONFIRMATION_NOTE_MAX_LENGTH = 500
 
 # The prompt the delivered bulk-action interstitial has always shown, kept
 # verbatim as the default so rendering one stays byte-identical to before.
 DEFAULT_CONFIRM_WARNING = (
     "is a sensitive action and cannot be undone. Confirm to continue."
 )
+
+
+class ConfirmationNoteForm(forms.Form):
+    """The optional reason/note a confirmation may ask for (SPEC-20-5).
+
+    Same shape as the inventory path's capture (products.admin
+    .AdjustStockForm's optional note): one free-text field, recorded with the
+    mutation. Orders carry no reason *vocabulary* — there is no ledger enum
+    like ``StockMovement.Reason`` — so free text is the whole capture; minting
+    an enum here would mean a model change and a migration for an audit
+    string, which the spec does not ask for.
+    """
+
+    confirmation_note = forms.CharField(
+        label="Reason / note",
+        required=False,
+        max_length=CONFIRMATION_NOTE_MAX_LENGTH,
+        help_text=(
+            "Optional. Recorded verbatim in the admin audit trail beside the action."
+        ),
+        widget=forms.Textarea(attrs={"rows": 2}),
+    )
 
 
 def _repost_fields(post):
@@ -92,11 +123,14 @@ class RoleAwareModelAdmin(admin.ModelAdmin):
       suite pins that invariant so a new action cannot ship ungated.
     - ``confirmation_required_actions``: bulk action names that must not
       execute until the user explicitly confirms on the interstitial page.
+    - ``confirmation_reason_actions``: names (from the set above) whose
+      interstitial also asks for an optional reason/note.
     """
 
     capability_map = {}
     action_capabilities = {}
     confirmation_required_actions = frozenset()
+    confirmation_reason_actions = frozenset()
 
     # ——— capability plumbing ———
 
@@ -193,6 +227,33 @@ class RoleAwareModelAdmin(admin.ModelAdmin):
         """
         return {}
 
+    def confirmation_reason_form(self, action_name, data=None):
+        """The reason/note form this action's interstitial offers, or None.
+
+        None is the gate: a reason is asked for only where the admin
+        declared one, so the textarea cannot appear on a confirmation with no
+        audit slot to put it in.
+        """
+        if action_name not in self.confirmation_reason_actions:
+            return None
+        if data is None:
+            return ConfirmationNoteForm()
+        return ConfirmationNoteForm(data)
+
+    def confirmation_note(self, request, action_name):
+        """The validated optional reason captured on the interstitial.
+
+        Empty when the action asks for no reason, when none was typed, or
+        when the submitted value fails the form (an over-long crafted note).
+        The mutation is never blocked by an optional field, and a note is
+        never truncated into the audit trail: dropping it lands on exactly the
+        same outcome as supplying none.
+        """
+        form = self.confirmation_reason_form(action_name, request.POST)
+        if form is None or not form.is_valid():
+            return ""
+        return form.cleaned_data[CONFIRMATION_NOTE_FIELD].strip()
+
     def render_confirmation(
         self,
         request,
@@ -228,6 +289,7 @@ class RoleAwareModelAdmin(admin.ModelAdmin):
                     else self.confirmation_details(request, action_name, objects)
                 ),
                 "pending_fields": _repost_fields(request.POST) if re_post else (),
+                "note_form": self.confirmation_reason_form(action_name),
                 "cancel_url": cancel_url or reverse("admin:index"),
             },
         )

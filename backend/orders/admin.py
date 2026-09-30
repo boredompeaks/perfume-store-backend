@@ -101,6 +101,12 @@ class OrderAdmin(RoleAwareModelAdmin):
     # irreversible status change on a financial record, so it must be
     # explicitly confirmed before it executes.
     confirmation_required_actions = frozenset({"cancel_pending"})
+    # SPEC-20-5 [R-20.28]: the only confirmed action that asks why. The
+    # reason rides the interstitial and is merged into the cancel's change
+    # message, mirroring the inventory path's reason/note capture
+    # (AdjustStockForm) so a cancellation is audited with the operator's own
+    # words instead of only the fact that it happened.
+    confirmation_reason_actions = frozenset({"cancel_pending"})
     list_display = (
         "id",
         # [R-8.5] the customer-facing reference beside the internal pk
@@ -391,10 +397,11 @@ class OrderAdmin(RoleAwareModelAdmin):
         total = sum(
             (order.total_amount for order in cancelable), Decimal("0")
         ).quantize(Decimal("0.01"))
+        currencies = sorted({order.currency for order in orders})
         return {
             "summary": (
                 f"{len(cancelable)} of {len(orders)} selected order(s) will be "
-                f"cancelled, totalling {total} {'/'.join(sorted({o.currency for o in orders}))}"
+                f"cancelled, totalling {total} {'/'.join(currencies)}"
             ),
             "rows": [self._cancel_confirmation_row(order) for order in orders],
         }
@@ -415,6 +422,21 @@ class OrderAdmin(RoleAwareModelAdmin):
             ],
             "items": [str(item) for item in order.items.all()],
         }
+
+    def _cancel_change_message(self, request):
+        """The audit change message for a cancelled selection.
+
+        SPEC-20-5 [R-20.28]: the operator's optional reason from the
+        interstitial is merged in, so the trail carries WHY an order was
+        cancelled and not only that it was. With no reason typed the message
+        is exactly the one shipped since SPEC-6-04 — the capture is additive
+        and never rewrites the audit contract.
+        """
+        message = "Bulk action: order cancelled."
+        note = self.confirmation_note(request, "cancel_pending")
+        if note:
+            message = f"{message} Reason: {note}"
+        return message
 
     @admin.action(description="Cancel selected (unpaid only)")
     def cancel_pending(self, request, queryset):
@@ -486,7 +508,7 @@ class OrderAdmin(RoleAwareModelAdmin):
             self.log_bulk_action(
                 request,
                 self.get_queryset(request).filter(pk__in=unpaid_pks),
-                "Bulk action: order cancelled.",
+                self._cancel_change_message(request),
             )
             self.message_user(request, f"{count} unpaid order(s) cancelled.", messages.SUCCESS)
         if skipped:
