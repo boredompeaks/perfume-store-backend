@@ -16,7 +16,7 @@ from django.contrib.admin.models import LogEntry
 from django.contrib.auth.models import Group, User
 from django.test import RequestFactory, tag
 
-from common.admin import RoleAwareModelAdmin
+from common.admin import CONFIRMATION_NOTE_MAX_LENGTH, RoleAwareModelAdmin
 from common.permissions import user_has_capability
 from common.roles import CAPABILITY_ROLES, ROLE_ADMIN, STAFF_ROLES
 from common.testing import ApiTestCase
@@ -360,6 +360,177 @@ class RoleAwareAdminSurfaceTests(ApiTestCase):
         self.assertEqual(res.status_code, 302)  # executed, back to the changelist
         self.pending.refresh_from_db()
         self.assertEqual(self.pending.status, "cancelled")
+
+    # ——— SPEC-20-1 [R-20.20]: the interstitial states the consequences ———
+
+    def test_cancel_confirmation_names_amount_currency_items_and_state(self):
+        # The delivered interstitial only rendered description + count +
+        # str(obj); a financially significant confirmation has to name the
+        # money, the lines and the state each row lands in. Values are
+        # pinned, not just the presence of a section.
+        OrderItem.objects.create(
+            order=self.pending,
+            product_name="Oud Nocturne",
+            price=self.pending.total_amount,
+            quantity=2,
+            subtotal=self.pending.total_amount,
+        )
+        self.client.force_login(make_role_user("support", "surf-detail"))
+        res = self.client.post(
+            "/admin/orders/order/",
+            {
+                "action": "cancel_pending",
+                "_selected_action": [str(self.pending.id), str(self.confirmed.id)],
+            },
+        )
+        self.assertEqual(res.status_code, 200)
+        self.assertTemplateUsed(res, "admin/action_confirmation.html")
+        details = res.context["details"]
+        # One pending row of 2 is cancellable; the roll-up names both facts.
+        self.assertEqual(
+            details["summary"],
+            f"1 of 2 selected order(s) will be cancelled, totalling 100.00 "
+            f"{self.pending.currency}",
+        )
+        rows = {row["label"]: row for row in details["rows"]}
+        pending_row = rows[f"Order #{self.pending.id} - {self.buyer.username}"]
+        confirmed_row = rows[f"Order #{self.confirmed.id} - {self.buyer.username}"]
+        self.assertEqual(
+            pending_row["fields"],
+            [
+                ("Amount", self.pending.total_amount),
+                ("Currency", self.pending.currency),
+                ("Resulting state", "pending → cancelled"),
+            ],
+        )
+        self.assertEqual(pending_row["items"], ["Oud Nocturne x 2"])
+        self.assertEqual(
+            confirmed_row["fields"][2],
+            ("Resulting state", "confirmed → unchanged (paid, never cancelled here)"),
+        )
+        self.assertEqual(confirmed_row["items"], ["Fixture perfume x 1"])
+        # ...and the payload actually reaches the page, not just the context.
+        self.assertContains(res, "100.00")
+        self.assertContains(res, self.pending.currency)
+        self.assertContains(res, "Oud Nocturne x 2")
+        self.assertContains(res, "pending → cancelled")
+        # The delivered description/count/object list still renders.
+        self.assertContains(res, "Affected (2)")
+        self.assertContains(res, "Yes, proceed")
+        # Nothing committed on the interstitial.
+        self.pending.refresh_from_db()
+        self.assertEqual(self.pending.status, "pending")
+
+    def test_already_cancelled_row_is_not_told_it_is_paid(self):
+        # SPEC-20-1b: the reason clause, not the resulting state, was wrong.
+        # An already-cancelled row lands in "unchanged" either way; calling
+        # it "paid" told the operator something false about their selection.
+        cancelled = make_order(self.buyer, status="cancelled")
+        self.client.force_login(make_role_user("support", "surf-cancelled"))
+        res = self.client.post(
+            "/admin/orders/order/",
+            {
+                "action": "cancel_pending",
+                "_selected_action": [str(cancelled.id)],
+            },
+        )
+        self.assertEqual(res.status_code, 200)
+        row = res.context["details"]["rows"][0]
+        self.assertEqual(
+            row["fields"][2],
+            ("Resulting state", "cancelled → unchanged (already cancelled)"),
+        )
+        self.assertNotIn("paid", row["fields"][2][1])
+
+    def test_confirmation_details_are_empty_without_a_declared_payload(self):
+        # Only a declared financial action spells out its consequences; the
+        # generic default must stay empty so no other confirmation grows an
+        # invented payload.
+        request = request_for(make_role_user("support", "surf-nodefault"))
+        order_admin = admin.site._registry[Order]
+        self.assertEqual(
+            order_admin.confirmation_details(request, "mark_shipped", []), {}
+        )
+        # An admin that declares no payload at all — the base default —
+        # renders the delivered interstitial unchanged.
+        coupon_admin = admin.site._registry[Coupon]
+        self.assertEqual(coupon_admin.confirmation_details(request, "export", []), {})
+
+    # ——— SPEC-20-5 [R-20.28]: optional reason on cancel_pending ———
+
+    def test_cancel_reason_is_merged_into_the_change_message(self):
+        self.client.force_login(make_role_user("support", "log-reason"))
+        selected = {"_selected_action": [str(self.pending.id)]}
+        step = self.client.post(
+            "/admin/orders/order/", {"action": "cancel_pending", **selected}
+        )
+        self.assertEqual(step.status_code, 200)
+        # The textarea is offered here, and it is optional.
+        note_field = step.context["note_form"].fields["confirmation_note"]
+        self.assertFalse(note_field.required)
+        self.assertIn('name="confirmation_note"', step.content.decode())
+        # ...and what is typed there rides the commit into the audit trail.
+        self.client.post(
+            "/admin/orders/order/",
+            {
+                "action": "cancel_pending",
+                "confirm": "yes",
+                "confirmation_note": "Customer called to cancel",
+                **selected,
+            },
+        )
+        entry = LogEntry.objects.get(object_id=str(self.pending.id))
+        self.assertIn("order cancelled", entry.change_message)
+        self.assertIn("Reason: Customer called to cancel", entry.change_message)
+        self.assertEqual(entry.user.username, "log-reason")
+        self.pending.refresh_from_db()
+        self.assertEqual(self.pending.status, "cancelled")
+
+    def test_cancel_without_a_reason_keeps_the_shipped_message(self):
+        self.client.force_login(make_role_user("support", "log-noreason"))
+        selected = {"_selected_action": [str(self.pending.id)]}
+        self.client.post(
+            "/admin/orders/order/", {"action": "cancel_pending", **selected}
+        )
+        self.client.post(
+            "/admin/orders/order/",
+            {"action": "cancel_pending", "confirm": "yes", **selected},
+        )
+        entry = LogEntry.objects.get(object_id=str(self.pending.id))
+        self.assertIn("order cancelled", entry.change_message)
+        self.assertNotIn("Reason:", entry.change_message)
+        self.pending.refresh_from_db()
+        self.assertEqual(self.pending.status, "cancelled")
+
+    def test_reason_capture_is_gated_to_cancel_pending(self):
+        order_admin = admin.site._registry[Order]
+        request = request_for(make_role_user("support", "surf-gate"), method="post")
+        request.POST = {
+            "action": "cancel_pending",
+            "confirm": "yes",
+            "confirmation_note": "  Customer asked  ",
+        }
+        # Declared and supplied -> the trimmed reason comes back...
+        self.assertEqual(
+            order_admin.confirmation_note(request, "cancel_pending"),
+            "Customer asked",
+        )
+        # ...while any other action reads no reason at all, whatever was
+        # posted: the gate is the action name, not the presence of the key.
+        self.assertEqual(order_admin.confirmation_note(request, "mark_shipped"), "")
+        self.assertIsNone(order_admin.confirmation_reason_form("mark_shipped"))
+        # An over-long (crafted) note is dropped, never truncated into the
+        # audit trail, and never blocks the mutation.
+        request.POST["confirmation_note"] = "x" * (CONFIRMATION_NOTE_MAX_LENGTH + 1)
+        self.assertEqual(order_admin.confirmation_note(request, "cancel_pending"), "")
+        # The declaration cannot drift: a reason is only ever asked for on an
+        # action that is itself behind an interstitial.
+        for model_admin in store_admins().values():
+            with self.subTest(model=model_admin.model.__name__):
+                self.assertLessEqual(
+                    model_admin.confirmation_reason_actions,
+                    model_admin.confirmation_required_actions,
+                )
 
     def test_bulk_status_change_leaves_a_log_entry(self):
         # [6.12.5]: bulk actions bypass save_model, so the base must log the

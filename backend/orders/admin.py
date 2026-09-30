@@ -1,4 +1,5 @@
 import csv
+from decimal import Decimal
 
 from django.contrib import admin, messages
 from django.db import transaction
@@ -6,6 +7,9 @@ from django.http import HttpResponse
 from django.utils import timezone
 
 from common.admin import RoleAwareModelAdmin
+from common.audit import log_mutation, model_field_changes
+from common.models import AuditEvent
+from common.saved_filters import SavedFilterMixin
 # [R-10.1] The order machine lives in orders.state (single source); this
 # module only consumes it.
 from .models import Coupon, Order, OrderItem, OrderStatusEvent
@@ -77,7 +81,11 @@ def _append_status_event(order, *, from_status, to_status, actor, trigger):
 
 
 @admin.register(Order)
-class OrderAdmin(RoleAwareModelAdmin):
+class OrderAdmin(SavedFilterMixin, RoleAwareModelAdmin):
+    # SPEC-20-6 [R-20.11]: the saved-view bar rides first in the bases so it
+    # wraps whichever changelist_view branch runs (this admin's transition
+    # guards are on save_model, not on the view, so the merge is the only
+    # thing in front of the grid).
     # Role-aware least privilege (spec 6.12): support fulfils and cancels,
     # finance reads. Add/delete stay capability-less on purpose — orders
     # originate from checkout (manual rows would bypass payment), and hard
@@ -100,6 +108,12 @@ class OrderAdmin(RoleAwareModelAdmin):
     # irreversible status change on a financial record, so it must be
     # explicitly confirmed before it executes.
     confirmation_required_actions = frozenset({"cancel_pending"})
+    # SPEC-20-5 [R-20.28]: the only confirmed action that asks why. The
+    # reason rides the interstitial and is merged into the cancel's change
+    # message, mirroring the inventory path's reason/note capture
+    # (AdjustStockForm) so a cancellation is audited with the operator's own
+    # words instead of only the fact that it happened.
+    confirmation_reason_actions = frozenset({"cancel_pending"})
     list_display = (
         "id",
         # [R-8.5] the customer-facing reference beside the internal pk
@@ -368,6 +382,79 @@ class OrderAdmin(RoleAwareModelAdmin):
     def mark_delivered(self, request, queryset):
         self._bulk_set_status(request, queryset, "delivered")
 
+    # ——— the confirmation detail payload (SPEC-20-1 [R-20.20]) ———
+
+    def confirmation_details(self, request, action_name, objects):
+        """What cancelling this selection actually costs, before it happens.
+
+        The amount and its currency, the lines affected and the state each
+        selected row ends in. Rows the action will *not* touch (paid orders
+        — cancelling those needs a refund, which does not exist here) are
+        spelled out too: skipping them is part of what the operator is
+        confirming, and "3 orders, only 1 cancelled" is exactly the surprise
+        this payload exists to prevent.
+        """
+        if action_name != "cancel_pending":
+            return {}
+        orders = list(objects)
+        cancelable = [order for order in orders if order.status == "pending"]
+        # Money stays Decimal end to end (conventions.md:15) and the
+        # roll-up is quantized before it is rendered. Currencies are listed
+        # rather than assumed: the denomination is a setting, not a constant.
+        total = sum(
+            (order.total_amount for order in cancelable), Decimal("0")
+        ).quantize(Decimal("0.01"))
+        currencies = sorted({order.currency for order in orders})
+        return {
+            "summary": (
+                f"{len(cancelable)} of {len(orders)} selected order(s) will be "
+                f"cancelled, totalling {total} {'/'.join(currencies)}"
+            ),
+            "rows": [self._cancel_confirmation_row(order) for order in orders],
+        }
+
+    def _cancel_confirmation_row(self, order):
+        pending = order.status == "pending"
+        # SPEC-20-1b: a row is skipped because it is NOT pending, and only
+        # one of those reasons is "it is paid". An already-cancelled order
+        # used to be told "paid, never cancelled here", which is false on
+        # screen and in the operator's decision. The resulting state
+        # ("-> unchanged") was always right; only the reason clause moves.
+        unchanged_reason = (
+            "(already cancelled)"
+            if order.status == "cancelled"
+            else "(paid, never cancelled here)"
+        )
+        return {
+            "label": str(order),
+            "fields": [
+                ("Amount", order.total_amount),
+                ("Currency", order.currency),
+                (
+                    "Resulting state",
+                    f"{order.status} → cancelled"
+                    if pending
+                    else f"{order.status} → unchanged {unchanged_reason}",
+                ),
+            ],
+            "items": [str(item) for item in order.items.all()],
+        }
+
+    def _cancel_change_message(self, request):
+        """The audit change message for a cancelled selection.
+
+        SPEC-20-5 [R-20.28]: the operator's optional reason from the
+        interstitial is merged in, so the trail carries WHY an order was
+        cancelled and not only that it was. With no reason typed the message
+        is exactly the one shipped since SPEC-6-04 — the capture is additive
+        and never rewrites the audit contract.
+        """
+        message = "Bulk action: order cancelled."
+        note = self.confirmation_note(request, "cancel_pending")
+        if note:
+            message = f"{message} Reason: {note}"
+        return message
+
     @admin.action(description="Cancel selected (unpaid only)")
     def cancel_pending(self, request, queryset):
         unpaid_pks = list(
@@ -438,7 +525,7 @@ class OrderAdmin(RoleAwareModelAdmin):
             self.log_bulk_action(
                 request,
                 self.get_queryset(request).filter(pk__in=unpaid_pks),
-                "Bulk action: order cancelled.",
+                self._cancel_change_message(request),
             )
             self.message_user(request, f"{count} unpaid order(s) cancelled.", messages.SUCCESS)
         if skipped:
@@ -544,6 +631,42 @@ class CouponAdmin(RoleAwareModelAdmin):
     list_filter = ("active", "discount_type")
     search_fields = ("code",)
     readonly_fields = ("used_count",)
+
+    def save_model(self, request, obj, form, change):
+        """Record the real before -> after value of a promotion edit.
+
+        SPEC-20-4 [R-20.27]: Django's own changelist-edit LogEntry names the
+        column ("Changed Active.") but not what it changed FROM or TO, so a
+        deactivated coupon cannot be reconstructed from the trail. This is
+        the ``list_editable`` ``active`` toggle, the only field editable
+        outside the change form; the change form's own structured LogEntry
+        already carries its old/new values.
+
+        The snapshot is read from the DATABASE, not off the instance:
+        ``save_form`` has already applied the submitted values by the time
+        ``save_model`` runs, so the instance holds the new state and would
+        report no change at all.
+        """
+        if not change:
+            return
+        stored = (
+            type(obj)
+            .objects.filter(pk=obj.pk)
+            .values_list(*self.list_editable)
+            .first()
+        )
+        before = dict(zip(self.list_editable, stored or ()))
+        super().save_model(request, obj, form, change)
+        changes = model_field_changes(obj, self.list_editable, before=before)
+        if changes:
+            log_mutation(
+                request,
+                obj,
+                AuditEvent.EventType.CATALOGUE_UPDATED,
+                "coupon_updated",
+                AuditEvent.Source.ADMIN,
+                changes=changes,
+            )
 
     @admin.display(description="Usage")
     def usage_display(self, obj):

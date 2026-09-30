@@ -20,6 +20,13 @@ import logging
 
 from django.db import models
 
+from common.audit import clean_audit_payload
+from common.middleware import (
+    NO_REQUEST_ID,
+    REQUEST_ID_MAX_LENGTH,
+    current_request_id,
+)
+
 # A dedicated channel name (not this module's __name__) so deployments can
 # route or filter the business trail in log tooling independently of model
 # noise; settings.LOGGING pins it at INFO (SPEC-7-02).
@@ -40,6 +47,19 @@ class AuditEvent(models.Model):
         ORDER = "order", "Order"
         PAYMENT = "payment", "Payment"
         AUTH = "auth", "Authentication"
+        CATALOGUE = "catalogue", "Catalogue"
+        STAFF = "staff", "Staff"
+
+    # SPEC-20-4 [R-20.29]: which surface the mutation arrived through. A real
+    # field, not prose in a change message, so "did staff do this in the admin
+    # or through the API" is a filter rather than a text search. ``SYSTEM`` is
+    # the honest label for a business event whose writer does not attribute
+    # itself to a staff surface (checkout, payment verification, auth) — it
+    # says "not attributable", never "admin".
+    class Source(models.TextChoices):
+        ADMIN = "admin", "Admin"
+        API = "api", "API"
+        SYSTEM = "system", "System"
 
     class EventType(models.TextChoices):
         # Order lifecycle. Further per-transition events ride section 10
@@ -79,6 +99,15 @@ class AuditEvent(models.Model):
         AUTH_LOGIN_FAILED = "auth.login_failed", "Login failed"
         AUTH_EMAIL_VERIFIED = "auth.email_verified", "Email verified"
         AUTH_PASSWORD_RESET = "auth.password_reset", "Password reset"
+        # Catalogue mutations with their structured before -> after values
+        # (SPEC-20-4 [R-20.27]) — the API surface, which could previously
+        # only say "Updated via API.".
+        CATALOGUE_CREATED = "catalogue.created", "Catalogue item created"
+        CATALOGUE_UPDATED = "catalogue.updated", "Catalogue item updated"
+        CATALOGUE_DELETED = "catalogue.deleted", "Catalogue item deleted"
+        # A staff-role grant/revoke: the most consequential mutation the admin
+        # performs, and previously recorded only as per-direction prose.
+        STAFF_ROLES_UPDATED = "staff.roles_updated", "Staff roles updated"
 
     category = models.CharField(max_length=20, choices=Category.choices, db_index=True)
     event_type = models.CharField(
@@ -99,6 +128,24 @@ class AuditEvent(models.Model):
         related_name="audit_events",
     )
     detail = models.JSONField(default=dict, blank=True)
+    # SPEC-20-4 [R-20.29]: the surface the mutation arrived through — a field
+    # so an audit query can separate admin work from API work instead of
+    # pattern-matching change messages. Defaults to SYSTEM, meaning the writer
+    # makes no staff-surface claim (see ``Source``).
+    source = models.CharField(
+        max_length=10,
+        choices=Source.choices,
+        default=Source.SYSTEM,
+        db_index=True,
+    )
+    # SPEC-20-3 [R-20.26]: the correlation id of the request that produced
+    # the event, so an audit row can be joined to the request's log lines and
+    # to the id echoed on the response. Blank (never NULL) for events written
+    # outside a request — management commands, the test fixtures' direct
+    # calls — where there is no request to correlate with.
+    request_id = models.CharField(
+        max_length=REQUEST_ID_MAX_LENGTH, blank=True, db_index=True
+    )
     created_at = models.DateTimeField(auto_now_add=True)
 
     class Meta:
@@ -110,22 +157,34 @@ class AuditEvent(models.Model):
         return f"{self.created_at:%Y-%m-%d %H:%M:%S} {self.event_type}"
 
     @classmethod
-    def record(cls, event_type, actor=None, order=None, detail=None):
+    def record(cls, event_type, actor=None, order=None, detail=None, source=None):
         """Append one event; the single sanctioned write path.
 
         Call inside the same ``transaction.atomic()`` block as the side
         effect being recorded. ``category`` derives from the event-type's
-        dotted prefix (``order.``/``payment.``/``auth.``), so an unknown or
-        unprefixed identifier fails loudly instead of writing a row that no
-        category query will ever find. Anonymous/system actors store NULL,
-        mirroring ``StockMovement.created_by``.
+        dotted prefix (``order.``/``payment.``/``auth.``/``catalogue.``/
+        ``staff.``), so an unknown or unprefixed identifier fails loudly
+        instead of writing a row that no category query will ever find.
+        Anonymous/system actors store NULL, mirroring
+        ``StockMovement.created_by``.
+
+        ``source`` defaults to :attr:`Source.SYSTEM` — a writer that does not
+        name its surface makes no claim about one. The guarded staff
+        mutations state it explicitly (``Source.ADMIN`` / ``Source.API``).
+
+        The detail is passed through ``common.audit.clean_audit_payload``
+        here rather than at each call site: since SPEC-20-4 began storing
+        real before/after values, this is the one place that decides what may
+        be written, so no caller can bypass it.
         """
         event = cls.objects.create(
             category=cls.Category(event_type.split(".", 1)[0]),
             event_type=event_type,
             actor=actor if getattr(actor, "is_authenticated", False) else None,
             order=order,
-            detail=detail or {},
+            detail=clean_audit_payload(detail or {}),
+            source=source or cls.Source.SYSTEM,
+            request_id=current_request_id(),
         )
         # [SPEC-7-02] Observability baseline: the trail is DB-only
         # otherwise, so a log reader has no surface for it. Emitted after
@@ -140,11 +199,12 @@ class AuditEvent(models.Model):
         # association. Email/phone/address/full name are FORBIDDEN in
         # this output; the full rationale lives in docs/retention.md.
         audit_logger.info(
-            "audit %s id=%s actor=%s order=%s detail=%s",
+            "audit %s id=%s actor=%s order=%s request_id=%s detail=%s",
             event.event_type,
             event.pk,
             event.actor.username if event.actor else None,
             event.order_id,
+            event.request_id or NO_REQUEST_ID,
             event.detail,
         )
         return event
@@ -161,3 +221,62 @@ class AuditEvent(models.Model):
         raise ValueError(
             "AuditEvent rows are append-only: deleting an event is forbidden."
         )
+
+
+class SavedFilter(models.Model):
+    """One staff user's named changelist filter (SPEC-20-6 [R-20.11]).
+
+    Spec 20.1 lists "Saved filters/views where useful" among the data-table
+    capabilities and Django ships no equivalent, so the two highest-traffic
+    changelists get one. It is a *preference*, not business data: a small
+    set of changelist query parameters (``{"status__exact": "pending"}``)
+    the user named, scoped to one account and one model.
+
+    Three deliberate properties, all of which the test suite pins:
+
+    - scoped by ``(user, content_type)`` so a saved view is private and is
+      deleted with the account, never shared between staff;
+    - ``params`` holds a validated subset of what the changelist itself
+      accepts — the same gate the changelist applies on replay, so a stored
+      spec can only narrow a listing, never widen one;
+    - the table holds no domain data of its own. The parameters can name a
+      customer's phone or email as a search term, which is why the row
+      belongs to the staff user rather than to a shared "team view": it
+      lives and dies with the account that typed it.
+    """
+
+    NAME_MAX_LENGTH = 60
+
+    user = models.ForeignKey(
+        "auth.User",
+        on_delete=models.CASCADE,
+        related_name="saved_admin_filters",
+    )
+    # A ContentType rather than two char columns: the model identity is then
+    # a real reference (a row cannot outlive the model it points at, and the
+    # uniqueness scope is enforced by the database, not by convention).
+    content_type = models.ForeignKey(
+        "contenttypes.ContentType",
+        on_delete=models.CASCADE,
+        related_name="saved_admin_filters",
+    )
+    name = models.CharField(max_length=NAME_MAX_LENGTH)
+    params = models.JSONField(default=dict, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ("name",)
+        # One filter per name per user per model: re-saving a name replaces
+        # the selection (it is an update, not a duplicate), and the
+        # constraint is what says so.
+        constraints = [
+            models.UniqueConstraint(
+                fields=("user", "content_type", "name"),
+                name="unique_saved_filter_per_user_model",
+            )
+        ]
+        verbose_name = "Saved filter"
+        verbose_name_plural = "Saved filters"
+
+    def __str__(self):
+        return self.name

@@ -9,7 +9,12 @@ from rest_framework.decorators import api_view, permission_classes
 from rest_framework.response import Response
 from rest_framework import status
 
-from common.audit import log_api_action
+from common.audit import (
+    log_api_action,
+    log_mutation,
+    model_field_changes,
+)
+from common.models import AuditEvent
 from common.permissions import HasInventoryAdjust, HasProductsWriteOrReadOnly
 
 from .models import StockMovement, products
@@ -139,6 +144,18 @@ def product_list(request):
             with transaction.atomic():
                 product = serializer.save()
                 log_api_action(request, product, ADDITION, "Created via API.")
+                # SPEC-20-4 [R-20.27]: the LogEntry above says only that a
+                # catalogue item appeared. This records what it was created
+                # with, as real before (None) -> after values, and states the
+                # surface the write arrived through.
+                log_mutation(
+                    request,
+                    product,
+                    AuditEvent.EventType.CATALOGUE_CREATED,
+                    "created",
+                    AuditEvent.Source.API,
+                    changes=model_field_changes(product, serializer.validated_data),
+                )
 
             return Response(
                 serializer.data,
@@ -154,6 +171,34 @@ def product_list(request):
 # ==================================
 # Single Product Operations
 # ==================================
+
+def _save_product_update(request, serializer):
+    """Apply a validated PUT/PATCH and record what actually changed.
+
+    The pre-write snapshot is taken here, before ``save()``, because after
+    the save the old values are gone — that snapshot is what makes the
+    recorded before -> after pairs real rather than reconstructed. Both the
+    privileged-action LogEntry ([6.12.6]) and the structured mutation event
+    (SPEC-20-4 [R-20.27]) are written from this one place, so PUT and PATCH
+    cannot drift apart.
+    """
+    product = serializer.instance
+    before = {
+        name: getattr(product, name, None) for name in serializer.validated_data
+    }
+    product = serializer.save()
+    log_api_action(request, product, CHANGE, "Updated via API.")
+    log_mutation(
+        request,
+        product,
+        AuditEvent.EventType.CATALOGUE_UPDATED,
+        "updated",
+        AuditEvent.Source.API,
+        changes=model_field_changes(
+            product, serializer.validated_data, before=before
+        ),
+    )
+    return product
 
 @api_view(['GET', 'PUT', 'PATCH', 'DELETE'])
 @permission_classes([HasProductsWriteOrReadOnly])
@@ -195,8 +240,7 @@ def product_detail(request, slug):
         if serializer.is_valid():
             # [6.12.6] write + audit record commit together (see POST).
             with transaction.atomic():
-                product = serializer.save()
-                log_api_action(request, product, CHANGE, "Updated via API.")
+                product = _save_product_update(request, serializer)
 
             return Response(
                 serializer.data
@@ -222,8 +266,7 @@ def product_detail(request, slug):
         if serializer.is_valid():
             # [6.12.6] write + audit record commit together (see POST).
             with transaction.atomic():
-                product = serializer.save()
-                log_api_action(request, product, CHANGE, "Updated via API.")
+                product = _save_product_update(request, serializer)
 
             return Response(
                 serializer.data
@@ -247,6 +290,17 @@ def product_detail(request, slug):
             # The record stores the repr and pk (never a FK), so it
             # survives the row it describes.
             log_api_action(request, product, DELETION, "Deleted via API.")
+            # SPEC-20-4: a deletion has no "after" to record, but it still
+            # needs its surface stated and its target identified on a row
+            # that outlives the object. Written before the delete for the
+            # same pk-clearing reason as the LogEntry above.
+            log_mutation(
+                request,
+                product,
+                AuditEvent.EventType.CATALOGUE_DELETED,
+                "deleted",
+                AuditEvent.Source.API,
+            )
             product.delete()
 
         return Response(status=status.HTTP_204_NO_CONTENT)

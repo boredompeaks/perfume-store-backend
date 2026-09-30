@@ -1,0 +1,38 @@
+{# SPEC-20-6 [R-20.11]: the per-user saved-view bar on a changelist.
+   Rendered by SavedFilterMixin.changelist_view through the per-model
+   change_list.html overrides; every link/form here is scoped to the
+   signed-in user's own saved views (the endpoints enforce it too). #}
+<div class="module" id="saved-filters">
+  <h2>Saved views</h2>
+  {% if active_saved_filter %}
+    <p>
+      Listing the saved view <strong>{{ active_saved_filter.name }}</strong>.
+      <a href="{{ saved_filter_changelist_url }}">Clear it and show everything</a>
+    </p>
+  {% endif %}
+  <form method="post" action="{% url 'admin-saved-filter-save' app_label=saved_filter_meta.app_label model_name=saved_filter_meta.model_name %}">
+    {% csrf_token %}
+    {{ saved_filter_form.filter_spec }}
+    <p>
+      <label for="{{ saved_filter_form.name.id_for_label }}">{{ saved_filter_form.name.label }}</label>
+      {{ saved_filter_form.name }}
+      <input type="submit" class="default" value="Save this view" />
+    </p>
+    <p class="help">{{ saved_filter_form.name.help_text }}</p>
+  </form>
+  {% if saved_filters %}
+    <ul>
+      {% for saved in saved_filters %}
+        <li>
+          <a href="?{{ saved_filter_apply_param }}={{ saved.pk }}">{{ saved.name }}</a>
+          <form method="post" action="{% url 'admin-saved-filter-delete' saved.pk %}" style="display: inline">
+            {% csrf_token %}
+            <button type="submit" class="button" aria-label="Delete the saved view {{ saved.name }}">Delete</button>
+          </form>
+        </li>
+      {% endfor %}
+    </ul>
+  {% else %}
+    <p>No saved views yet — the current filter and search selection is what gets saved.</p>
+  {% endif %}
+</div>

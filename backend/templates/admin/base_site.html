@@ -1,0 +1,29 @@
+{% extends "admin/base.html" %}
+
+{# Django's own admin/base_site.html plus the SPEC-5-10 global search box.
+   The chrome block is the admin's documented place for site-wide header
+   extras and is rendered on EVERY admin page, which is what "one global
+   search entry point" needs; the model-specific search box Django puts on
+   a changelist (``change_list.html``'s own ``search`` block) is untouched
+   and still sits above the grid. Anonymous callers see no box, so the
+   login page is unchanged. #}
+{% block title %}{% if subtitle %}{{ subtitle }} | {% endif %}{{ title }} | {{ site_title|default:_('Django site admin') }}{% endblock %}
+
+{% block branding %}
+<div id="site-name"><a href="{% url 'admin:index' %}">{{ site_header|default:_('Django administration') }}</a></div>
+{% if user.is_anonymous %}
+  {% include "admin/color_theme_toggle.html" %}
+{% endif %}
+{% endblock %}
+
+{% block nav-global %}
+  {{ block.super }}
+  {% if user.is_staff and user.is_active %}
+    <form id="global-search" action="{% url 'admin-global-search' %}" method="get" role="search">
+      <label for="global-search-q" class="visually-hidden">Search orders, products and customers</label>
+      <input type="search" id="global-search-q" name="q" maxlength="200" autocomplete="off"
+             placeholder="Search orders, products, customers…" />
+      <input type="submit" value="Search" />
+    </form>
+  {% endif %}
+{% endblock %}
