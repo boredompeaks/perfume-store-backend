@@ -22,6 +22,11 @@ actions) declare themselves in ``confirmation_required_actions``; the base
 interposes a confirmation interstitial between the dropdown POST and the
 action body. Actions that already render their own deliberate input form
 (e.g. adjust-stock) are their own confirmation and stay off the list.
+
+SPEC-20-1 [R-20.20] enriches that one interstitial rather than adding a
+second mechanism: a financially significant action supplies a *structured*
+detail payload (``confirmation_details`` — amount, currency, affected items,
+resulting state) and the shared template renders it above the object list.
 """
 from dataclasses import replace
 from functools import wraps
@@ -29,8 +34,21 @@ from functools import wraps
 from django.contrib import admin
 from django.contrib.admin.options import ActionLocation
 from django.shortcuts import render
+from django.urls import reverse
 
 from common.permissions import user_has_capability
+
+# The POST contract of the interstitial. Module constants, not inline
+# literals, because the render path (which emits them) and the action gate
+# (which refuses to act without the confirm) have to agree on them.
+CONFIRM_FIELD = "confirm"
+CONFIRMATION_YES = "yes"
+
+# The prompt the delivered bulk-action interstitial has always shown, kept
+# verbatim as the default so rendering one stays byte-identical to before.
+DEFAULT_CONFIRM_WARNING = (
+    "is a sensitive action and cannot be undone. Confirm to continue."
+)
 
 
 class RoleAwareModelAdmin(admin.ModelAdmin):
@@ -126,22 +144,63 @@ class RoleAwareModelAdmin(admin.ModelAdmin):
         def confirmed_first(admin_self, request, queryset):
             # The superuser keeps the legacy direct execution: the bypass
             # is Django's own trust anchor and predates RBAC.
-            if request.user.is_superuser or request.POST.get("confirm") == "yes":
+            if (
+                request.user.is_superuser
+                or request.POST.get(CONFIRM_FIELD) == CONFIRMATION_YES
+            ):
                 return func(admin_self, request, queryset)
             return admin_self.render_action_confirmation(request, action, queryset)
 
         return confirmed_first
 
-    def render_action_confirmation(self, request, action, queryset):
+    # ——— the interstitial's structured detail payload (SPEC-20-1) ———
+
+    def confirmation_details(self, request, action_name, objects):
+        """The structured payload the interstitial renders above the objects.
+
+        Empty by default: an action with nothing consequential to spell out
+        keeps the delivered description/count/object-list render untouched.
+        A financially significant action overrides this and supplies the
+        amount and its currency, the affected items and the resulting state
+        per selected row (SPEC-20-1 [R-20.20]).
+        """
+        return {}
+
+    def render_confirmation(
+        self,
+        request,
+        *,
+        action_name,
+        description,
+        objects,
+        details=None,
+        warning=DEFAULT_CONFIRM_WARNING,
+    ):
+        """Render the interstitial — the single confirmation surface."""
         return render(
             request,
             "admin/action_confirmation.html",
             {
-                "title": action.description,
-                "description": action.description,
-                "action_name": action.name,
-                "objects": queryset,
+                "title": description,
+                "description": description,
+                "warning": warning,
+                "action_name": action_name,
+                "objects": objects,
                 "select_across": request.POST.get("select_across") == "1",
                 "opts": self.model._meta,
+                "details": (
+                    details
+                    if details is not None
+                    else self.confirmation_details(request, action_name, objects)
+                ),
+                "cancel_url": reverse("admin:index"),
             },
+        )
+
+    def render_action_confirmation(self, request, action, queryset):
+        return self.render_confirmation(
+            request,
+            action_name=action.name,
+            description=action.description,
+            objects=queryset,
         )

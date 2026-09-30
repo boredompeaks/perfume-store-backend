@@ -1,4 +1,5 @@
 import csv
+from decimal import Decimal
 
 from django.contrib import admin, messages
 from django.db import transaction
@@ -367,6 +368,53 @@ class OrderAdmin(RoleAwareModelAdmin):
     @admin.action(description="Mark selected as delivered")
     def mark_delivered(self, request, queryset):
         self._bulk_set_status(request, queryset, "delivered")
+
+    # ——— the confirmation detail payload (SPEC-20-1 [R-20.20]) ———
+
+    def confirmation_details(self, request, action_name, objects):
+        """What cancelling this selection actually costs, before it happens.
+
+        The amount and its currency, the lines affected and the state each
+        selected row ends in. Rows the action will *not* touch (paid orders
+        — cancelling those needs a refund, which does not exist here) are
+        spelled out too: skipping them is part of what the operator is
+        confirming, and "3 orders, only 1 cancelled" is exactly the surprise
+        this payload exists to prevent.
+        """
+        if action_name != "cancel_pending":
+            return {}
+        orders = list(objects)
+        cancelable = [order for order in orders if order.status == "pending"]
+        # Money stays Decimal end to end (conventions.md:15) and the
+        # roll-up is quantized before it is rendered. Currencies are listed
+        # rather than assumed: the denomination is a setting, not a constant.
+        total = sum(
+            (order.total_amount for order in cancelable), Decimal("0")
+        ).quantize(Decimal("0.01"))
+        return {
+            "summary": (
+                f"{len(cancelable)} of {len(orders)} selected order(s) will be "
+                f"cancelled, totalling {total} {'/'.join(sorted({o.currency for o in orders}))}"
+            ),
+            "rows": [self._cancel_confirmation_row(order) for order in orders],
+        }
+
+    def _cancel_confirmation_row(self, order):
+        pending = order.status == "pending"
+        return {
+            "label": str(order),
+            "fields": [
+                ("Amount", order.total_amount),
+                ("Currency", order.currency),
+                (
+                    "Resulting state",
+                    f"{order.status} → cancelled"
+                    if pending
+                    else f"{order.status} → unchanged (paid, never cancelled here)",
+                ),
+            ],
+            "items": [str(item) for item in order.items.all()],
+        }
 
     @admin.action(description="Cancel selected (unpaid only)")
     def cancel_pending(self, request, queryset):
