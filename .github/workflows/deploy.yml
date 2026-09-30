@@ -1,0 +1,167 @@
+# SPEC-22-07: release-time deploy of the SPEC-2-10b unit.
+#
+# This workflow runs no tests of its own. It runs the EXISTING gates and reads
+# their verdicts:
+#   * it is TRIGGERED by the completion of backend-tests.yml, so a red backend
+#     suite never reaches the deploy job at all, and
+#   * it additionally refuses unless secret-scan.yml has also succeeded on the
+#     very same commit (gitleaks blocking a release is the point of having it).
+# Inventing a second test run here would only add a gate that can disagree with
+# the first one.
+#
+# BRANCHES: master is deliberately absent from RELEASE_BRANCHES below. Master
+# stays deployable and is released by promotion (the release-engineer's merge),
+# never by a push-triggered deploy, so the list below is the only place a deploy
+# can originate. It also filters pushes that never ran backend-tests (a
+# frontend-only push does not touch the backend image).
+#
+# The deploy itself is one ssh call that runs scripts/release.sh on the deploy
+# host - the same script an operator runs by hand, so the rehearsed release and
+# the real one are the same commands. That host keeps a git clone of this
+# repository at DEPLOY_DIR (a repository variable) together with the untracked
+# .env holding the deploy secrets; nothing is synced from Actions, so no
+# credential crosses this job.
+#
+# Repository secrets required: DEPLOY_HOST, DEPLOY_USER, DEPLOY_SSH_KEY.
+# Optional: DEPLOY_KNOWN_HOSTS (pinned host key; without it the first contact
+# is trusted via accept-new, which still refuses a CHANGED key).
+# Repository variables optional: DEPLOY_BRANCHES, DEPLOY_DIR, DEPLOY_URL.
+
+name: deploy
+
+on:
+  workflow_run:
+    workflows: [backend-tests]
+    types: [completed]
+
+# One release at a time, per commit, and never cancel a release mid-flight.
+concurrency:
+  group: deploy-${{ github.event.workflow_run.head_sha }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  gate:
+    name: release gate
+    runs-on: ubuntu-latest
+    outputs:
+      sha: ${{ steps.allow.outputs.sha }}
+      ref: ${{ steps.allow.outputs.ref }}
+    steps:
+      # Fail here, before any credential is touched, with a sentence naming
+      # the reason. The branch list lives HERE and nowhere else.
+      - name: Allow a green push run on a release branch only
+        id: allow
+        env:
+          RELEASE_BRANCHES: ${{ vars.DEPLOY_BRANCHES || 'spec-comp,feat/add-frontend' }}
+          RUN_WORKFLOW: ${{ github.event.workflow_run.name }}
+          RUN_EVENT: ${{ github.event.workflow_run.event }}
+          RUN_CONCLUSION: ${{ github.event.workflow_run.conclusion }}
+          RUN_BRANCH: ${{ github.event.workflow_run.head_branch }}
+          RUN_SHA: ${{ github.event.workflow_run.head_sha }}
+        run: |
+          set -euo pipefail
+          if [ "$RUN_EVENT" != "push" ]; then
+            echo "refusing: $RUN_WORKFLOW ran on '$RUN_EVENT', not a push."
+            exit 1
+          fi
+          case ",$RELEASE_BRANCHES," in
+            *",$RUN_BRANCH,"*) ;;
+            *)
+              echo "refusing: '$RUN_BRANCH' is not a release branch ($RELEASE_BRANCHES)."
+              exit 1
+              ;;
+          esac
+          if [ "$RUN_CONCLUSION" != "success" ]; then
+            echo "refusing: $RUN_WORKFLOW concluded '$RUN_CONCLUSION' on $RUN_SHA."
+            exit 1
+          fi
+          echo "sha=$RUN_SHA" >> "$GITHUB_OUTPUT"
+          echo "ref=$RUN_BRANCH" >> "$GITHUB_OUTPUT"
+
+      # The secret scan runs in parallel with the backend suite, so it may
+      # still be running when this gate starts: poll it rather than racing it.
+      # Any terminal verdict other than success (or no run at all) refuses.
+      - name: Require the secret scan to have passed on this commit
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+          SCAN_WORKFLOW: secret-scan.yml
+          SCAN_WAIT_SECONDS: 300
+          RUN_SHA: ${{ github.event.workflow_run.head_sha }}
+        run: |
+          set -euo pipefail
+          deadline=$(( $(date +%s) + SCAN_WAIT_SECONDS ))
+          while :; do
+            conclusion=$(gh api "repos/$REPO/actions/workflows/$SCAN_WORKFLOW/runs?head_sha=$RUN_SHA&per_page=20" \
+              --jq '[.workflow_runs[] | select(.event == "push")] | first | .conclusion // "none"')
+            case "$conclusion" in
+              success)
+                echo "$SCAN_WORKFLOW passed on $RUN_SHA."
+                break
+                ;;
+              none)
+                ;;
+              *)
+                echo "refusing: $SCAN_WORKFLOW concluded '$conclusion' on $RUN_SHA."
+                exit 1
+                ;;
+            esac
+            if [ "$(date +%s)" -ge "$deadline" ]; then
+              echo "refusing: no $SCAN_WORKFLOW run on $RUN_SHA succeeded within ${SCAN_WAIT_SECONDS}s."
+              exit 1
+            fi
+            echo "waiting for $SCAN_WORKFLOW on $RUN_SHA (last verdict: $conclusion)"
+            sleep 15
+          done
+
+  deploy:
+    name: release
+    needs: gate
+    runs-on: ubuntu-latest
+    # Lets the repository require review/approval for releases and scope the
+    # secrets below to the production environment.
+    environment:
+      name: production
+      url: ${{ vars.DEPLOY_URL }}
+    permissions:
+      contents: read
+    steps:
+      # Secrets arrive through the step environment, are written to a 0600
+      # temp file and deleted by the trap; nothing here echoes them and no
+      # `set -x`, so the run log cannot leak a key or a host key. The remote
+      # command is an `&&` chain rather than a `;` list with a remote
+      # `set -e`: ssh reports the last status either way, the chain stops at
+      # the first failure on any POSIX shell (the login shell is not ours to
+      # assume), and release.sh carries its own `set -euo pipefail`.
+      - name: Run the release sequence on the deploy host
+        env:
+          RELEASED_SHA: ${{ needs.gate.outputs.sha }}
+          DEPLOY_DIR: ${{ vars.DEPLOY_DIR || '/srv/perfume-store' }}
+          DEPLOY_HOST: ${{ secrets.DEPLOY_HOST }}
+          DEPLOY_USER: ${{ secrets.DEPLOY_USER }}
+          DEPLOY_SSH_KEY: ${{ secrets.DEPLOY_SSH_KEY }}
+          DEPLOY_KNOWN_HOSTS: ${{ secrets.DEPLOY_KNOWN_HOSTS }}
+        run: |
+          set -euo pipefail
+          umask 077
+          key="$(mktemp)"
+          known_hosts="$(mktemp)"
+          trap 'rm -f "$key" "$known_hosts"' EXIT
+          printf '%s\n' "$DEPLOY_SSH_KEY" > "$key"
+          if [ -n "${DEPLOY_KNOWN_HOSTS:-}" ]; then
+            printf '%s\n' "$DEPLOY_KNOWN_HOSTS" > "$known_hosts"
+            host_key_check=yes
+          else
+            : > "$known_hosts"
+            host_key_check=accept-new
+          fi
+          ssh -i "$key" \
+            -o IdentitiesOnly=yes \
+            -o "StrictHostKeyChecking=$host_key_check" \
+            -o "UserKnownHostsFile=$known_hosts" \
+            -o BatchMode=yes \
+            "$DEPLOY_USER@$DEPLOY_HOST" \
+            "cd '$DEPLOY_DIR' && git fetch --quiet --prune origin && git -c advice.detachedHead=false checkout --quiet --detach '$RELEASED_SHA' && exec ./scripts/release.sh"
