@@ -44,5 +44,18 @@ Thumbs.db
 .opencode/
 .git-frontend-backup/
 
+# Ad-hoc probe / red-team / load-test scratch (never committed)
+*.log
+backend/tmp_*.py
+backend/tmp_*.log
+loadtest.py
+red_team_probe.py
+redteam_probe*.log
+collapse_hammer*.log
+collapse_hammer*.py
+ISSUES.md
+opencode.json
+probe.py
+
 # Spec run artifacts
 Saturday, Jul 25, 2026 at 5_23 AM.txt
