@@ -7,13 +7,15 @@ import {
   enrollmentConfirmRequest,
   enrollmentSetupRequest,
   isPlausibleCode,
+  qrImageSource,
   type MfaRequest,
+  type MfaSetup,
 } from "@/lib/mfa";
 import { inputClass } from "@/lib/ui";
 
 type Phase =
   | { kind: "credentials" }
-  | { kind: "scan"; secret: string; otpauthUri: string }
+  | { kind: "scan"; setup: MfaSetup }
   | { kind: "enabled" };
 
 /**
@@ -42,11 +44,11 @@ export default function MfaEnrollForm() {
       ? (err.fieldErrors?.code?.[0] ?? err.message)
       : fallback;
 
-  const send = async (request: MfaRequest) => {
+  const send = async <T,>(request: MfaRequest): Promise<T> => {
     setPending(true);
     setError(null);
     try {
-      return await apiFetch<Record<string, string>>(request.path, {
+      return await apiFetch<T>(request.path, {
         method: request.method,
         body: request.body,
       });
@@ -58,12 +60,10 @@ export default function MfaEnrollForm() {
   const onSetup = async (e: React.FormEvent) => {
     e.preventDefault();
     try {
-      const res = await send(enrollmentSetupRequest({ username, password }));
-      setPhase({
-        kind: "scan",
-        secret: res.secret,
-        otpauthUri: res.otpauth_uri,
-      });
+      const setup = await send<MfaSetup>(
+        enrollmentSetupRequest({ username, password }),
+      );
+      setPhase({ kind: "scan", setup });
     } catch (err) {
       setError(
         message(
@@ -77,7 +77,9 @@ export default function MfaEnrollForm() {
   const onConfirm = async (e: React.FormEvent) => {
     e.preventDefault();
     try {
-      await send(enrollmentConfirmRequest({ username, password }, code));
+      await send<{ enabled: boolean }>(
+        enrollmentConfirmRequest({ username, password }, code),
+      );
       setPhase({ kind: "enabled" });
       setCode("");
       setPassword("");
@@ -106,28 +108,44 @@ export default function MfaEnrollForm() {
   }
 
   if (phase.kind === "scan") {
+    const qr = qrImageSource(phase.setup);
     return (
       <form onSubmit={onConfirm} className="space-y-6" noValidate>
         <div>
           <h2 className="font-display text-xl">Scan, then confirm</h2>
           <ol className="mt-2 list-decimal space-y-1 pl-5 text-sm text-ink-muted">
             <li>Open your authenticator app and add a new account.</li>
-            <li>Add the account with the setup key below.</li>
+            <li>
+              {qr
+                ? "Scan the code, or type the setup key by hand."
+                : "Enter the setup key below by hand."}
+            </li>
             <li>Enter the 6-digit code it shows to finish.</li>
           </ol>
         </div>
 
-        {/* The provisioning URI and the bare secret both stay visible: the
-            URI is what the app's "enter a setup key" flow pastes, the
-            secret is what it asks for. */}
+        {qr && (
+          <img
+            src={qr}
+            alt="QR code for adding this account to an authenticator app"
+            width={192}
+            height={192}
+            className="border border-line-strong bg-surface p-2"
+          />
+        )}
+
+        {/* The manual fallback is always present: SPEC-20-9 renders the QR
+            from the provisioning URI the backend already returns, but plenty
+            of authenticator flows cannot scan (no camera, a desktop app that
+            wants the key), and the secret is the last resort. */}
         <div className="space-y-3 border border-line p-4 text-sm">
           <p>
             <span className="block text-ink-muted">Setup key</span>
-            <code className="block break-all">{phase.secret}</code>
+            <code className="block break-all">{phase.setup.secret}</code>
           </p>
           <p>
             <span className="block text-ink-muted">Setup link</span>
-            <code className="block break-all">{phase.otpauthUri}</code>
+            <code className="block break-all">{phase.setup.otpauth_uri}</code>
           </p>
         </div>
 

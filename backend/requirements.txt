@@ -4,6 +4,10 @@ Django==6.1.1
 djangorestframework==3.18.1
 djangorestframework-simplejwt==5.5.1
 django-cors-headers==4.9.0
+# SPEC-20-9: scannable MFA enrollment QR from the otpauth:// provisioning
+# URI (common/qr.py). Pure Python, no runtime dependencies, emits SVG
+# without an image library.
+segno==1.6.1
 razorpay==2.0.1
 python-dotenv==1.2.3
 Pillow==12.3.0

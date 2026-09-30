@@ -18,13 +18,17 @@ Pins the whole feature end to end:
   enrollment path named; customers and non-admin staff are untouched;
 - secret exposure: shown exactly once at setup, never returned again.
 """
+import base64
+from xml.etree import ElementTree
+
+import segno
 from django.conf import settings
 from django.contrib.auth.models import Group, User
 from django.test import SimpleTestCase, override_settings
 from django.utils import timezone
 
 from accounts.models import TOTPDevice
-from common import totp
+from common import qr, totp
 from common.models import AuditEvent
 from common.permissions import is_privileged
 from common.roles import ROLE_ADMIN, ROLE_SUPPORT
@@ -539,6 +543,122 @@ class MFAEnrollmentReachTests(ApiTestCase):
         )
         self.assertEqual(res.status_code, 200, res.data)
         self.assertIn("access", res.data)
+
+
+class MfaQrTests(SimpleTestCase):
+    """SPEC-20-9: the enrollment QR is a real, scannable QR of the URI.
+
+    What is pinned (no decoder is available, and inventing one here would
+    test segno, not this repo): the artifact is an inline SVG data URI, its
+    geometry is the QR matrix sized for THIS payload at the declared scale
+    and quiet zone, it is byte-identical to an independent render of the
+    provisioning URI the same response returns (so the view cannot have
+    encoded some other string), and it changes when the payload changes —
+    together that is a picture a scanner decodes to the provisioning URI.
+    """
+
+    def test_artifact_is_an_inline_svg_of_the_right_geometry(self):
+        uri = totp.otpauth_uri(TEST_TOTP_SECRET, "boss")
+        artifact = qr.qr_data_uri(uri)
+        self.assertTrue(
+            artifact.startswith(qr.SVG_DATA_URI_PREFIX)
+            and artifact.startswith("data:image/svg+xml;base64,")
+        )
+        svg = base64.b64decode(artifact[len("data:image/svg+xml;base64,"):])
+        root = ElementTree.fromstring(svg)
+        self.assertTrue(root.tag.endswith("svg"))
+        modules = len(segno.make(uri, error=qr.ERROR_CORRECTION).matrix) + (
+            2 * qr.SVG_BORDER
+        )
+        self.assertEqual(root.get("width"), f"{modules * qr.SVG_SCALE}")
+        self.assertEqual(root.get("height"), f"{modules * qr.SVG_SCALE}")
+
+    def test_artifact_is_bound_to_the_exact_payload(self):
+        uri = totp.otpauth_uri(TEST_TOTP_SECRET, "boss")
+        # One character of secret apart: a different enrollment must never
+        # render the same picture, or two users could scan each other's code.
+        other = totp.otpauth_uri(TEST_TOTP_SECRET[:-1] + "A", "boss")
+        self.assertNotEqual(qr.qr_data_uri(uri), qr.qr_data_uri(other))
+
+    def test_secret_is_encoded_not_written_into_the_markup(self):
+        # The payload travels as QR modules; the SVG itself carries no
+        # plaintext secret to leak into a DOM, a log or a screenshot.
+        artifact = qr.qr_data_uri(totp.otpauth_uri(TEST_TOTP_SECRET, "boss"))
+        self.assertNotIn(
+            TEST_TOTP_SECRET,
+            base64.b64decode(artifact[len("data:image/svg+xml;base64,"):]).decode(),
+        )
+
+
+class MFAEnrollmentQrTests(ApiTestCase):
+    """SPEC-20-9: setup hands the enrollment page a scannable code."""
+
+    def setUp(self):
+        self.boss = make_privileged("boss")
+
+    def bootstrap_setup(self):
+        return self.client.post(
+            "/api/accounts/mfa/setup/",
+            {"username": "boss", "password": PASSWORD},
+            format="json",
+        )
+
+    def test_setup_returns_the_qr_of_its_own_provisioning_uri(self):
+        res = self.bootstrap_setup()
+        self.assertEqual(res.status_code, 200, res.data)
+        self.assertEqual(
+            res.data["qr_data_uri"], qr.qr_data_uri(res.data["otpauth_uri"])
+        )
+
+    def test_bootstrap_rotation_returns_a_new_qr(self):
+        # Re-minting mints a new secret, so the picture must change with it:
+        # a stale QR would enroll the previous secret.
+        first = self.bootstrap_setup().data
+        self.client.post(
+            "/api/accounts/mfa/confirm/",
+            {
+                "username": "boss",
+                "password": PASSWORD,
+                "code": totp.hotp(first["secret"], totp.now() // totp.STEP),
+            },
+            format="json",
+        )
+        second = self.bootstrap_setup()
+        self.assertEqual(second.status_code, 403)  # the bootstrap window closed
+        _, token = self.api_login("boss")
+        self.auth(token)
+        device = TOTPDevice.objects.get(user=self.boss)
+        res = self.client.post(
+            "/api/accounts/mfa/setup/",
+            {"code": code_after(device)},
+            format="json",
+        )
+        self.assertEqual(res.status_code, 200, res.data)
+        self.assertNotEqual(res.data["secret"], first["secret"])
+        self.assertNotEqual(res.data["qr_data_uri"], first["qr_data_uri"])
+
+    def test_qr_is_shown_exactly_once_like_the_secret(self):
+        res = self.bootstrap_setup()
+        secret = res.data["secret"]
+        artifact = res.data["qr_data_uri"]
+        self.client.post(
+            "/api/accounts/mfa/confirm/",
+            {
+                "username": "boss",
+                "password": PASSWORD,
+                "code": totp.hotp(secret, totp.now() // totp.STEP),
+            },
+            format="json",
+        )
+        _, token = self.api_login("boss")
+        self.auth(token)
+        for later in (
+            self.client.get("/api/accounts/mfa/status/"),
+            self.client.post("/api/accounts/mfa/disable/", {}, format="json"),
+            self.client.get("/admin/login/"),
+        ):
+            self.assertNotIn(artifact, str(getattr(later, "data", "") or later))
+            self.assertNotIn(secret, str(getattr(later, "data", "") or later))
 
 
 class MFALoginEnforcementTests(ApiTestCase):

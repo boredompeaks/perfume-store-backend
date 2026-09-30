@@ -33,6 +33,31 @@ export type MfaRequest = {
   body: Record<string, string>;
 };
 
+/** What POST /api/accounts/mfa/setup/ answers with (SPEC-20-9 adds the QR). */
+export type MfaSetup = {
+  secret: string;
+  otpauth_uri: string;
+  qr_data_uri?: string | null;
+};
+
+/**
+ * The backend's inline QR prefix. An <img src> is the only thing allowed to
+ * consume the field, so anything else is dropped rather than rendered: an
+ * unexpected scheme must never reach the DOM as an image source.
+ */
+export const QR_DATA_URI_PREFIX = "data:image/svg+xml;base64,";
+
+/**
+ * The scannable code for the provisioning URI, or null when the response
+ * carries no usable artifact — the manual setup key beside it always works,
+ * so a missing or unexpected QR degrades to typing rather than to a dead
+ * step.
+ */
+export function qrImageSource(setup: Pick<MfaSetup, "qr_data_uri">): string | null {
+  const artifact = setup.qr_data_uri;
+  return artifact?.startsWith(QR_DATA_URI_PREFIX) ? artifact : null;
+}
+
 /**
  * Step 1: mint the secret. `code` is only needed when a device is ALREADY
  * active (the backend's re-enrollment guard re-proves the factor); during

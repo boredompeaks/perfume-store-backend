@@ -23,7 +23,7 @@ from django.utils import timezone
 from django.utils.encoding import force_bytes, force_str
 from django.utils.http import urlsafe_base64_encode, urlsafe_base64_decode
 
-from common import notifications, totp
+from common import notifications, qr, totp
 from common.models import AuditEvent
 from common.permissions import IsPrivilegedRole, is_privileged
 from ops import alerts
@@ -525,9 +525,13 @@ class MFAStatusView(APIView):
 class MFASetupView(APIView):
     """POST /api/accounts/mfa/setup/ — mint a fresh secret, shown once.
 
-    Returns the base32 secret and the otpauth:// URI for the user's
-    authenticator app (a URI string, not a QR image — R-17.9 demands the
-    factor, not an artefact). Two deliberate trust paths:
+    Returns the base32 secret, the otpauth:// URI for the user's
+    authenticator app, and (SPEC-20-9) a scannable QR of that same URI so
+    nobody has to transcribe a secret by hand. All three ride ONE response:
+    the secret leaves the server exactly once, so a separate QR endpoint
+    would have to re-disclose it. The QR is presentation only — every
+    decision about the factor still reads the secret and the URI, never the
+    picture. Two deliberate trust paths:
 
     - JWT session (privileged): steady-state path. Re-enrolling while a
       device is enabled must also re-prove the second factor with ``code``
@@ -577,10 +581,12 @@ class MFASetupView(APIView):
                     "last_used_counter",
                 ]
             )
+        uri = totp.otpauth_uri(device.secret, user.username)
         return Response(
             {
                 "secret": device.secret,
-                "otpauth_uri": totp.otpauth_uri(device.secret, user.username),
+                "otpauth_uri": uri,
+                "qr_data_uri": qr.qr_data_uri(uri),
             }
         )
 

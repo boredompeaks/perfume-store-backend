@@ -4,6 +4,8 @@ import {
   enrollmentSetupRequest,
   isPlausibleCode,
   normalizeCode,
+  qrImageSource,
+  QR_DATA_URI_PREFIX,
   MFA_CONFIRM_PATH,
   MFA_SETUP_PATH,
 } from "./mfa";
@@ -64,5 +66,41 @@ describe("code normalisation", () => {
     expect(isPlausibleCode("1234567")).toBe(false);
     expect(isPlausibleCode("12345a")).toBe(false);
     expect(isPlausibleCode("")).toBe(false);
+  });
+});
+
+describe("enrollment QR (SPEC-20-9)", () => {
+  const SETUP = {
+    secret: "GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ",
+    otpauth_uri: "otpauth://totp/Perfume%20Store:boss?secret=GEZ",
+    qr_data_uri: `${QR_DATA_URI_PREFIX}PHN2Zy8+`,
+  };
+
+  it("renders the backend's inline SVG artifact", () => {
+    expect(qrImageSource(SETUP)).toBe(SETUP.qr_data_uri);
+  });
+
+  it("falls back to the manual setup key for anything else", () => {
+    // The setup key beside the QR always works, so an absent or unexpected
+    // artifact degrades to typing a secret instead of a dead step — and a
+    // foreign scheme never reaches an <img src>.
+    expect(qrImageSource({ qr_data_uri: null })).toBeNull();
+    expect(qrImageSource({})).toBeNull();
+    expect(
+      qrImageSource({ qr_data_uri: "https://evil.example.com/qr.svg" }),
+    ).toBeNull();
+    expect(
+      qrImageSource({ qr_data_uri: "javascript:alert(1)" }),
+    ).toBeNull();
+    expect(
+      qrImageSource({ qr_data_uri: "data:image/svg+xml,<svg onload=1/>" }),
+    ).toBeNull();
+  });
+
+  it("the manual fallback is not the QR: both are needed", () => {
+    // Guard against a future refactor replacing the manual entry with the
+    // picture (or vice versa) — SPEC-20-9 requires both.
+    expect(SETUP.secret).not.toBe(SETUP.otpauth_uri);
+    expect(qrImageSource(SETUP)).not.toContain(SETUP.secret);
   });
 });
