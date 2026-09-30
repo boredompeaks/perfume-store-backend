@@ -6,6 +6,8 @@ from django.conf.urls.static import static
 
 from ops.views import api_settings, audit_log, dashboard, health
 
+from common.saved_filters import delete_saved_filter, save_saved_filter
+
 from orders.views import (
     admin_order_cancel,
     admin_order_detail,
@@ -74,6 +76,24 @@ urlpatterns = [
     # Audit log (spec 6.12 route /admin/audit-log) — same before-the-admin
     # include rule as the dashboard above.
     path("admin/audit-log/", audit_log, name="admin-audit-log"),
+
+    # SPEC-20-6 [R-20.11]: the saved-filter write endpoints — save the
+    # current filter selection under a name, and drop one of the caller's
+    # own. Applying a saved filter needs no route: it is the
+    # `?_saved_filter=<pk>` marker the changelist itself reads, so the
+    # saved view is reachable from the listing it filters. Both endpoints
+    # gate on the target ModelAdmin's own view capability, and
+    # must be registered BEFORE the admin include or it is swallowed.
+    path(
+        "admin/saved-filters/<slug:app_label>/<slug:model_name>/save/",
+        save_saved_filter,
+        name="admin-saved-filter-save",
+    ),
+    path(
+        "admin/saved-filters/delete/<int:pk>/",
+        delete_saved_filter,
+        name="admin-saved-filter-delete",
+    ),
 
     # §9.4 Orders module JSON seam (SPEC-9-07), legacy family: the alias of
     # the v1:admin orders mounts above (same view objects, no duplication).

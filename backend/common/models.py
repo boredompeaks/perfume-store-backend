@@ -221,3 +221,62 @@ class AuditEvent(models.Model):
         raise ValueError(
             "AuditEvent rows are append-only: deleting an event is forbidden."
         )
+
+
+class SavedFilter(models.Model):
+    """One staff user's named changelist filter (SPEC-20-6 [R-20.11]).
+
+    Spec 20.1 lists "Saved filters/views where useful" among the data-table
+    capabilities and Django ships no equivalent, so the two highest-traffic
+    changelists get one. It is a *preference*, not business data: a small
+    set of changelist query parameters (``{"status__exact": "pending"}``)
+    the user named, scoped to one account and one model.
+
+    Three deliberate properties, all of which the test suite pins:
+
+    - scoped by ``(user, content_type)`` so a saved view is private and is
+      deleted with the account, never shared between staff;
+    - ``params`` holds a validated subset of what the changelist itself
+      accepts — the same gate the changelist applies on replay, so a stored
+      spec can only narrow a listing, never widen one;
+    - the table holds no domain data of its own. The parameters can name a
+      customer's phone or email as a search term, which is why the row
+      belongs to the staff user rather than to a shared "team view": it
+      lives and dies with the account that typed it.
+    """
+
+    NAME_MAX_LENGTH = 60
+
+    user = models.ForeignKey(
+        "auth.User",
+        on_delete=models.CASCADE,
+        related_name="saved_admin_filters",
+    )
+    # A ContentType rather than two char columns: the model identity is then
+    # a real reference (a row cannot outlive the model it points at, and the
+    # uniqueness scope is enforced by the database, not by convention).
+    content_type = models.ForeignKey(
+        "contenttypes.ContentType",
+        on_delete=models.CASCADE,
+        related_name="saved_admin_filters",
+    )
+    name = models.CharField(max_length=NAME_MAX_LENGTH)
+    params = models.JSONField(default=dict, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ("name",)
+        # One filter per name per user per model: re-saving a name replaces
+        # the selection (it is an update, not a duplicate), and the
+        # constraint is what says so.
+        constraints = [
+            models.UniqueConstraint(
+                fields=("user", "content_type", "name"),
+                name="unique_saved_filter_per_user_model",
+            )
+        ]
+        verbose_name = "Saved filter"
+        verbose_name_plural = "Saved filters"
+
+    def __str__(self):
+        return self.name

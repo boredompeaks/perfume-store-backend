@@ -10,6 +10,7 @@ from django.utils.html import format_html, mark_safe
 from django import forms
 
 from common.admin import RoleAwareModelAdmin
+from common.saved_filters import SavedFilterMixin
 from .models import ProductVariant, StockMovement, products
 
 # SPEC-20-11 [R-20.35]: the ledger stamp carried by a changelist inline
@@ -69,7 +70,11 @@ class StockMovementInline(admin.TabularInline):
 
 
 @admin.register(products)
-class ProductAdmin(RoleAwareModelAdmin):
+class ProductAdmin(SavedFilterMixin, RoleAwareModelAdmin):
+    # SPEC-20-6 [R-20.11]: the saved-view bar rides first in the bases so
+    # the saved-filter merge happens before BOTH branches of the
+    # changelist_view below — including the view-only copy this admin hands
+    # to a role without inventory.adjust.
     # Role-aware least privilege (spec 6.12): the catalogue team owns the
     # product lifecycle; hard delete rides ``products.publish`` because it
     # is at least as sensitive as unpublishing (a later narrowing of

@@ -9,6 +9,7 @@ from django.utils import timezone
 from common.admin import RoleAwareModelAdmin
 from common.audit import log_mutation, model_field_changes
 from common.models import AuditEvent
+from common.saved_filters import SavedFilterMixin
 # [R-10.1] The order machine lives in orders.state (single source); this
 # module only consumes it.
 from .models import Coupon, Order, OrderItem, OrderStatusEvent
@@ -80,7 +81,11 @@ def _append_status_event(order, *, from_status, to_status, actor, trigger):
 
 
 @admin.register(Order)
-class OrderAdmin(RoleAwareModelAdmin):
+class OrderAdmin(SavedFilterMixin, RoleAwareModelAdmin):
+    # SPEC-20-6 [R-20.11]: the saved-view bar rides first in the bases so it
+    # wraps whichever changelist_view branch runs (this admin's transition
+    # guards are on save_model, not on the view, so the merge is the only
+    # thing in front of the grid).
     # Role-aware least privilege (spec 6.12): support fulfils and cancels,
     # finance reads. Add/delete stay capability-less on purpose — orders
     # originate from checkout (manual rows would bypass payment), and hard
