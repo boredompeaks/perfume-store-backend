@@ -2,7 +2,9 @@
 
 conventions.md: authorize via ``permission_classes`` — never inline
 ``request.user.is_staff`` checks. ``capability_required`` is the
-plain-Django twin for admin-chrome routes that are not DRF views.
+plain-Django twin for admin-chrome routes that are not DRF views, and it
+reuses that same staff flag as a second gate (SPEC-20-6b): its routes live
+inside ``/admin/``, which is staff-only everywhere else.
 """
 from functools import wraps
 
@@ -110,6 +112,17 @@ def capability_required(capability):
     admin-chrome contract: send them to the admin login, while an
     authenticated caller without the capability gets a visible 403 (never
     a login redirect they can already pass, never a silent empty page).
+
+    Staff membership is required in addition to the capability (SPEC-20-6b):
+    every view inside ``/admin/`` is ``staff_member_required``, and the
+    admin chrome itself only renders for staff, so a capability-gated chrome
+    route that admits a non-staff caller hands out page chrome — and, on the
+    global search, live change-form links — for a link the destination itself
+    would refuse. Matching ``staff_member_required`` keeps the whole area on
+    one gate instead of leaving each route to re-derive it. A non-staff
+    account cannot be given a role through the product UI, so this closes a
+    database-tamper reach rather than a live escalation — but the admin area
+    should not have to lean on that invariant holding.
     """
 
     def decorator(view):
@@ -120,7 +133,9 @@ def capability_required(capability):
                 return redirect_to_login(
                     request.get_full_path(), reverse("admin:login")
                 )
-            if user.is_superuser or user_has_capability(user, capability):
+            if user.is_superuser or (
+                user.is_staff and user_has_capability(user, capability)
+            ):
                 return view(request, *args, **kwargs)
             raise DjangoPermissionDenied(
                 "You do not have permission to perform this action."
@@ -143,8 +158,10 @@ def capability_required_any(capabilities):
     dashboard route, so this decorator keeps the contract of
     :func:`capability_required` in every respect: anonymous callers are sent
     to the admin login, an authenticated caller without any of the
-    capabilities gets a visible 403, and Django's own superuser bypass is
-    preserved.
+    capabilities gets a visible 403, Django's own superuser bypass is
+    preserved, and staff membership is required on top of the capabilities
+    (SPEC-20-6b) — the same staff gate its singular twin applies, so the
+    three chrome routes cannot drift apart again.
     """
 
     def decorator(view):
@@ -155,8 +172,11 @@ def capability_required_any(capabilities):
                 return redirect_to_login(
                     request.get_full_path(), reverse("admin:login")
                 )
-            if user.is_superuser or any(
-                user_has_capability(user, capability) for capability in capabilities
+            if user.is_superuser or (
+                user.is_staff
+                and any(
+                    user_has_capability(user, capability) for capability in capabilities
+                )
             ):
                 return view(request, *args, **kwargs)
             raise DjangoPermissionDenied(

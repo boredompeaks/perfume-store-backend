@@ -12,6 +12,9 @@ customers…". These tests pin the properties that make it safe and useful:
 - a caller who may view none of them is refused with a 403, not handed an
   empty page; anonymous callers go to the admin login; the superuser
   bypass the other admin surfaces keep still works;
+- SPEC-20-6b: the admin area requires staff membership as well as the
+  capability, so a non-staff account carrying a role group is refused here
+  exactly as it is by the changelists the result links point at;
 - no matches and no term are both clean 200 pages, not errors;
 - the search box is in the admin chrome on every staff page and absent from
   the login page, and the per-model search box is still there.
@@ -32,7 +35,8 @@ from common.admin_search import (
     SEARCH_TARGETS,
     registered_model_admin,
 )
-from common.roles import ROLE_ADMIN, ROLE_FINANCE, ROLE_MARKETING
+from common.permissions import user_has_capability
+from common.roles import ROLE_ADMIN, ROLE_FINANCE, ROLE_MARKETING, ROLE_SUPPORT
 from common.testing import ApiTestCase
 from orders.models import Order
 
@@ -203,6 +207,70 @@ class GlobalSearchCapabilityTests(ApiTestCase):
         self.assertIn(self.product.name, body)
         self.assertIn(str(self.order), body)
         self.assertIn(self.buyer.username, body)
+
+
+class GlobalSearchStaffGateTests(ApiTestCase):
+    """SPEC-20-6b: this route lives in the admin area, so it needs staff.
+
+    Holding a search capability was once enough to open it, which let a
+    non-staff account that carried a role group read ``Orders (n)`` here and
+    follow a live change-form link — while ``/admin/orders/order/`` bounced
+    the same account to the login, because every Django admin view is
+    ``staff_member_required``. The chrome box in ``base_site.html`` is gated
+    on ``is_staff``, so the route now agrees with the box above it.
+
+    Only database tampering can produce a non-staff role holder (the product
+    refuses roles for non-staff accounts), so these pins are deliberately
+    about the route being uniform with the rest of the admin area, not about
+    a reachable product flow.
+    """
+
+    def setUp(self):
+        self.buyer = self.make_user("vellum-buyer")
+        self.order = make_order(self.buyer, full_name="Vellum Buyer")
+        support = Group.objects.get_or_create(name=ROLE_SUPPORT)[0]
+        # The same role, the only difference being is_staff.
+        self.support_staff = User.objects.create_user(
+            username="support-staff",
+            email="support-staff@example.com",
+            password=TEST_PASSWORD,
+            is_staff=True,
+        )
+        self.support_staff.groups.add(support)
+        self.support_nonstaff = User.objects.create_user(
+            username="support-nonstaff",
+            email="support-nonstaff@example.com",
+            password=TEST_PASSWORD,
+        )
+        self.support_nonstaff.groups.add(support)
+
+    def test_a_staff_capability_holder_still_searches(self):
+        """No regression: the staff flag is an addition to the capability, not
+        a replacement for it."""
+        self.client.force_login(self.support_staff)
+        body = search(self.client, "Vellum")
+        self.assertIn(str(self.order), body)
+        self.assertIn("<h2>Orders (", body)
+
+    def test_a_non_staff_capability_holder_is_refused(self):
+        """Precondition: the capability is genuinely held (support maps
+        ``orders.read``), so the refusal is the staff gate and nothing else."""
+        self.assertTrue(user_has_capability(self.support_nonstaff, "orders.read"))
+        self.client.force_login(self.support_nonstaff)
+        res = self.client.get(SEARCH_URL, {"q": "Vellum"})
+        self.assertEqual(res.status_code, 403)
+        content = res.content.decode()
+        self.assertNotIn("<h2>Orders (", content)
+        self.assertNotIn(f"/admin/orders/order/{self.order.pk}/change/", content)
+
+    def test_the_route_agrees_with_the_changelists_it_links_to(self):
+        """Uniform gate: the non-staff caller is sent to the admin login by
+        the sibling changelist, and refused by this page."""
+        self.client.force_login(self.support_nonstaff)
+        changelist = self.client.get("/admin/orders/order/")
+        self.assertEqual(changelist.status_code, 302)
+        self.assertIn("/admin/login/", changelist["Location"])
+        self.assertEqual(self.client.get(SEARCH_URL, {"q": "Vellum"}).status_code, 403)
 
 
 class GlobalSearchSurfaceTests(ApiTestCase):

@@ -12,7 +12,9 @@ allow/deny per role, the full role->capability matrix against
 contract is untouched by the group-based layer.
 """
 from django.contrib.auth.models import AnonymousUser, Group, User
-from django.test import TestCase
+from django.core.exceptions import PermissionDenied as DjangoPermissionDenied
+from django.http import HttpResponse
+from django.test import RequestFactory, TestCase
 from rest_framework.exceptions import PermissionDenied
 from rest_framework.permissions import BasePermission
 from rest_framework.request import Request
@@ -27,6 +29,8 @@ from common.permissions import (
     IsAdminUserOrReadOnly,
     capability_or_read_only,
     capability_permission,
+    capability_required,
+    capability_required_any,
     get_user_roles,
     user_has_capability,
 )
@@ -264,6 +268,98 @@ class HasProductsWriteOrReadOnlyUnitTests(TestCase):
                 self.assertEqual(
                     str(ctx.exception), "Administrator access is required."
                 )
+
+
+class AdminChromeCapabilityDecoratorTests(TestCase):
+    """SPEC-20-6b: the admin-chrome decorators demand staff membership too.
+
+    ``capability_required`` / ``capability_required_any`` are the plain-Django
+    twins of the DRF capability classes, applied to the session views in the
+    admin area (``/admin/search/``, ``/admin/dashboard/``,
+    ``/admin/audit-log/``). Holding a capability used to be sufficient on its
+    own, so an authenticated non-staff account carrying a role group reached
+    those pages — including a 200 global search that listed orders and linked
+    to live change forms — while the very changelists those links pointed at
+    bounced it to the login (Django's admin views are ``staff_member_required``).
+    The admin area therefore requires ``is_staff`` in addition to the
+    capability, mirroring ``staff_member_required``; the capability layer and
+    the superuser bypass are unchanged."""
+
+    def setUp(self):
+        groups = sync_role_groups()
+        # Same role group, opposite staff flag: the only variable between the
+        # admitted and the refused caller is ``is_staff``.
+        self.staff_capable = User.objects.create_user(
+            username="chrome-staff", is_staff=True
+        )
+        self.staff_capable.groups.add(groups[ROLE_ADMIN])
+        self.nonstaff_capable = User.objects.create_user(username="chrome-nonstaff")
+        self.nonstaff_capable.groups.add(groups[ROLE_ADMIN])
+        self.staff_roleless = User.objects.create_user(
+            username="chrome-roleless", is_staff=True
+        )
+        # None leaves an unusable password: nothing here authenticates, and it
+        # keeps the fixture off the slow production hasher.
+        self.superuser = User.objects.create_superuser(
+            "chrome-root", "chrome-root@example.com", None
+        )
+        self.factory = RequestFactory()
+
+    def _call(self, decorator, *capabilities, user):
+        view = decorator(*capabilities)(lambda request: HttpResponse("chrome ok"))
+        request = self.factory.get("/admin/probe/")
+        request.user = user
+        return view(request)
+
+    # Both decorators, so neither can regress behind the other's pins.
+    def _both_decorators(self):
+        return (
+            ("capability_required", capability_required, ("orders.read",)),
+            (
+                "capability_required_any",
+                lambda *capabilities: capability_required_any(tuple(capabilities)),
+                ("products.read", "orders.read"),
+            ),
+        )
+
+    def test_staff_capability_holder_is_admitted_unchanged(self):
+        for name, decorator, capabilities in self._both_decorators():
+            with self.subTest(decorator=name):
+                res = self._call(decorator, *capabilities, user=self.staff_capable)
+                self.assertEqual(res.status_code, 200)
+                self.assertEqual(res.content, b"chrome ok")
+
+    def test_non_staff_capability_holder_is_denied(self):
+        # Precondition: the capability is genuinely held, so the refusal can
+        # only be the staff gate. (Unreachable through the product UI — a
+        # non-staff account cannot be given roles — but the admin area must not
+        # depend on that invariant holding at the database level.)
+        self.assertTrue(user_has_capability(self.nonstaff_capable, "orders.read"))
+        for name, decorator, capabilities in self._both_decorators():
+            with self.subTest(decorator=name):
+                with self.assertRaises(DjangoPermissionDenied):
+                    self._call(decorator, *capabilities, user=self.nonstaff_capable)
+
+    def test_staff_without_the_capability_is_still_denied(self):
+        """The capability layer is untouched: staff membership alone opens
+        nothing, which is what SPEC-17-10 closed on the dashboard."""
+        for name, decorator, capabilities in self._both_decorators():
+            with self.subTest(decorator=name):
+                with self.assertRaises(DjangoPermissionDenied):
+                    self._call(decorator, *capabilities, user=self.staff_roleless)
+
+    def test_anonymous_callers_are_still_sent_to_the_admin_login(self):
+        for name, decorator, capabilities in self._both_decorators():
+            with self.subTest(decorator=name):
+                res = self._call(decorator, *capabilities, user=AnonymousUser())
+                self.assertEqual(res.status_code, 302)
+                self.assertTrue(res["Location"].startswith("/admin/login/"))
+
+    def test_the_superuser_bypass_is_preserved(self):
+        for name, decorator, capabilities in self._both_decorators():
+            with self.subTest(decorator=name):
+                res = self._call(decorator, *capabilities, user=self.superuser)
+                self.assertEqual(res.status_code, 200)
 
 
 class PrivilegeEscalationGuardTests(TestCase):
