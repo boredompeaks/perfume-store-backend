@@ -647,22 +647,21 @@ class ProductAdminTests(ApiTestCase):
         self.assertContains(res, "low (3)")        # stock 3 -> amber branch
         self.assertContains(res, "rose_")          # thumbnail from the ImageField
 
-    def test_changelist_stock_column_is_display_only(self):
-        """SPEC-6-02 [6.5.17]: a changelist inline stock edit writes no
-        movement row, so stock left list_editable — the adjust-stock action
-        is the only sanctioned mutation path. The column stays visible and
-        price stays inline-editable."""
-        self.assertNotIn("stock", ProductAdmin.list_editable)
+    def test_changelist_renders_inline_stock_next_to_price(self):
+        """SPEC-20-11 [R-20.35]: `stock` is inline-editable beside `price`.
+        The affordance is cheap; the ledger write behind it is the contract
+        (see the inline-edit pins in tests/test_admin_inline_stock.py)."""
+        self.assertIn("stock", ProductAdmin.list_editable)
         res = self.client.get("/admin/products/products/")
         self.assertEqual(res.status_code, 200)
         self.assertContains(res, 'name="form-0-price"')     # price still editable
-        self.assertNotContains(res, 'name="form-0-stock"')  # no inline stock input
-        self.assertContains(res, 'class="field-stock"')  # stock column still displayed
+        self.assertContains(res, 'name="form-0-stock"')     # ... and stock with it
+        self.assertContains(res, 'class="field-stock"')     # column still labelled
 
-    def test_changelist_bulk_save_ignores_tampered_stock(self):
-        """A hand-crafted changelist POST must not move stock: the formset
-        only accepts list_editable fields, so stock can never be changed —
-        and certainly never without a movement row — from the changelist."""
+    def test_changelist_bulk_save_of_price_leaves_stock_ledger_free(self):
+        """A price-only inline save never touches inventory: the stock cell is
+        posted back unchanged (that is what the real grid submits), so the
+        delta is 0 — no mutation, no movement row."""
         res = self.client.get("/admin/products/products/")
         management = dict(
             re.findall(r'name="(form-[A-Z_]+)" value="([^"]*)"', res.content.decode())
@@ -676,7 +675,7 @@ class ProductAdminTests(ApiTestCase):
                 "form-INITIAL_FORMS": "1",
                 "form-0-id": str(self.plain.id),
                 "form-0-price": "77.00",
-                "form-0-stock": "999",  # the silent edit the old UI allowed
+                "form-0-stock": "3",  # untouched cell, echoed back unchanged
                 "_save": "Save",
             },
             follow=True,
