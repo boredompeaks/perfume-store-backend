@@ -49,6 +49,16 @@ jobs:
     outputs:
       sha: ${{ steps.allow.outputs.sha }}
       ref: ${{ steps.allow.outputs.ref }}
+    # Job-level permissions REPLACE the top-level block, so contents: read is
+    # restated here. actions: read is what the secret-scan step below needs: it
+    # lists that workflow's runs via `gh api repos/.../actions/...`, and every
+    # unlisted scope is `none`, so without it that call 403s, `set -euo pipefail`
+    # aborts the step, and the gate fails on every push — the gated deploy would
+    # never run at all. The release job below keeps contents: read alone; it only
+    # ssh's out to the deploy host.
+    permissions:
+      contents: read
+      actions: read
     steps:
       # Fail here, before any credential is touched, with a sentence naming
       # the reason. The branch list lives HERE and nowhere else.
