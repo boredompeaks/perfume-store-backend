@@ -16,6 +16,7 @@ from datetime import timedelta
 from pathlib import Path
 from urllib.parse import unquote, urlparse
 import os
+from django.core.exceptions import ImproperlyConfigured
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -308,7 +309,57 @@ FRONTEND_URL = os.getenv('FRONTEND_URL', 'http://localhost:3000').rstrip('/')
 # needs no extra configuration; override it only when the two live apart.
 MFA_ENROLL_URL = os.getenv('MFA_ENROLL_URL', f"{FRONTEND_URL}/staff/mfa/enroll")
 MEDIA_URL = '/media/'
-MEDIA_ROOT = BASE_DIR / 'media'
+# SPEC-2-04 [V-13]: uploads (product images, user files) are MEDIA, not
+# STATIC. MEDIA_ROOT is env-driven for the same reason STATIC_ROOT is
+# (SPEC-22-01): the container image mounts a persistent volume at
+# /app/media and a host deployment puts it wherever its disk is, while
+# local development keeps the conventional in-backend directory so the
+# dev loop changes nothing.
+MEDIA_ROOT = Path(os.getenv('DJANGO_MEDIA_ROOT') or (BASE_DIR / 'media'))
+
+# An importable dotted path, nothing else: a filesystem path, a URL or a
+# stray trailing dot can never be imported.
+_DOTTED_PATH = re.compile(r'^[A-Za-z_]\w*(\.[A-Za-z_]\w*)+$')
+
+
+def _env_dotted_path(name, default):
+    """Resolve an importable dotted path (a storage backend) from the env.
+
+    A malformed value is refused at boot rather than left to fail on the
+    FIRST upload in production - the worst possible moment to discover the
+    storage backend was never importable. Only the shape is checked here:
+    a syntactically valid path to a backend that is not installed can only
+    be caught by importing it, and importing an operator-supplied module at
+    settings-import time is not something this project does.
+    """
+    raw = (os.getenv(name) or '').strip() or default
+    if not _DOTTED_PATH.fullmatch(raw):
+        raise ImproperlyConfigured(
+            f'{name} must be an importable dotted Python path (the default is '
+            f'{default}); got {raw!r}.'
+        )
+    return raw
+
+
+# SPEC-2-04 [V-13]: STORAGES makes the media backend env-switchable, so a
+# deployment can move uploads off the app filesystem with configuration
+# alone - a mounted volume today (DJANGO_MEDIA_ROOT above), an object store
+# later (DJANGO_MEDIA_BACKEND), with no code change and no storage-bucket
+# model. Defaults are Django's own backends, so an unconfigured deployment
+# behaves exactly as it did before.
+#
+# The staticfiles backend is deliberately left as StaticFilesStorage:
+# whitenoise serves what collectstatic gathered from STATIC_ROOT, and a
+# manifest-hashing storage would rewrite every collected asset URL.
+MEDIA_BACKEND = _env_dotted_path(
+    'DJANGO_MEDIA_BACKEND', 'django.core.files.storage.FileSystemStorage'
+)
+STORAGES = {
+    'default': {'BACKEND': MEDIA_BACKEND},
+    'staticfiles': {
+        'BACKEND': 'django.contrib.staticfiles.storage.StaticFilesStorage'
+    },
+}
 
 
 def _env_int(name, default):

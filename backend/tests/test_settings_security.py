@@ -17,9 +17,18 @@ from urllib.parse import unquote
 
 import config.settings as config_settings
 from django.conf import settings
-from django.test import SimpleTestCase
+from django.core.exceptions import ImproperlyConfigured
+from django.test import SimpleTestCase, override_settings
+from django.urls import resolve
+from django.views.static import serve as serve_media
 
 BACKEND_DIR = Path(__file__).resolve().parent.parent
+
+# A non-debug boot — the production shape. config.settings refuses to import
+# one that is incompletely configured, so every subprocess test that boots
+# that shape starts from here and each missing key stays visible instead of
+# hiding behind a harness default.
+_NON_DEBUG_ENV = {"DJANGO_SECRET_KEY": "x" * 50}
 
 # Env names the settings module reads outside the DJANGO_/RAZORPAY_/EMAIL_
 # families. config.settings calls load_dotenv() at import, so an untracked,
@@ -570,6 +579,135 @@ class StaticFilesProductionTests(SimpleTestCase):
         self.assertEqual(res.returncode, 0, res.stderr)
         self.assertIn("MIDDLEWARE_HAS_WN True", res.stdout)
         self.assertIn("STATIC_ROOT True", res.stdout)
+
+
+class MediaServingProductionTests(SimpleTestCase):
+    """SPEC-2-04 [V-13]: an uploaded product image must not 404 in production.
+
+    Two independent halves, pinned here. The storage half: where media is
+    written (DJANGO_MEDIA_ROOT) and which backend writes it
+    (DJANGO_MEDIA_BACKEND, settings.STORAGES) are configuration, so a
+    deployment persists uploads on a mounted volume instead of the app
+    container's filesystem. The serving half: the media URL is a real route
+    (config/urls.py -> django.views.static.serve), NOT Django's static()
+    helper, which returns nothing at all when DEBUG=False — that silent
+    no-op is what made every product image 404 in production.
+    """
+
+    _BOOT_ENV = _NON_DEBUG_ENV
+
+    def test_media_storage_defaults_to_the_documented_django_backends(self):
+        res = run_settings_import(
+            dict(self._BOOT_ENV),
+            snippet=(
+                "import config.settings as s; "
+                "print('MEDIA_ROOT', s.MEDIA_ROOT); "
+                "print('MEDIA_URL', s.MEDIA_URL); "
+                "print('DEFAULT', s.STORAGES['default']['BACKEND']); "
+                "print('STATICFILES', s.STORAGES['staticfiles']['BACKEND'])"
+            ),
+        )
+        self.assertEqual(res.returncode, 0, res.stderr)
+        self.assertIn(
+            "MEDIA_ROOT " + str(config_settings.BASE_DIR / "media"), res.stdout
+        )
+        self.assertIn("MEDIA_URL /media/", res.stdout)
+        self.assertIn(
+            "DEFAULT django.core.files.storage.FileSystemStorage", res.stdout
+        )
+        # whitenoise serves what collectstatic gathered, so the staticfiles
+        # backend stays the plain one: a manifest-hashing storage would
+        # rewrite every collected asset URL.
+        self.assertIn(
+            "STATICFILES django.contrib.staticfiles.storage.StaticFilesStorage",
+            res.stdout,
+        )
+
+    def test_media_root_and_backend_are_env_switchable(self):
+        res = run_settings_import(
+            {
+                **self._BOOT_ENV,
+                "DJANGO_MEDIA_ROOT": "/srv/uploads",
+                "DJANGO_MEDIA_BACKEND": "example.bucket.MediaBucket",
+            },
+            snippet=(
+                "import config.settings as s; "
+                # as_posix() so the printed path is platform-independent
+                # (a Windows subprocess would render backslashes).
+                "print('MEDIA_ROOT', s.MEDIA_ROOT.as_posix()); "
+                "print('DEFAULT', s.STORAGES['default']['BACKEND'])"
+            ),
+        )
+        self.assertEqual(res.returncode, 0, res.stderr)
+        self.assertIn("MEDIA_ROOT /srv/uploads", res.stdout)
+        self.assertIn("DEFAULT example.bucket.MediaBucket", res.stdout)
+
+    def test_malformed_media_backend_refuses_to_boot(self):
+        # A filesystem path is not importable. Left unvalidated it would
+        # surface as an ImportError on the first staff upload in production,
+        # long after the deploy that caused it.
+        res = run_settings_import(
+            {**self._BOOT_ENV, "DJANGO_MEDIA_BACKEND": "/srv/uploads"},
+            snippet="import config.settings",
+        )
+        self.assertNotEqual(res.returncode, 0, res.stdout)
+        self.assertIn("DJANGO_MEDIA_BACKEND", res.stderr)
+        # The resolver itself, in-process: a non-dotted value is refused and
+        # the message names the offending key.
+        os.environ["DJANGO_MEDIA_BACKEND_TEST"] = "/srv/uploads"
+        try:
+            with self.assertRaises(ImproperlyConfigured) as caught:
+                config_settings._env_dotted_path(
+                    "DJANGO_MEDIA_BACKEND_TEST", "django.core.files.storage"
+                )
+            self.assertIn("DJANGO_MEDIA_BACKEND_TEST", str(caught.exception))
+        finally:
+            del os.environ["DJANGO_MEDIA_BACKEND_TEST"]
+
+    def test_media_url_is_served_with_debug_false(self):
+        # The end-to-end proof of V-13: a DEBUG=false boot against a
+        # configured media root returns the uploaded bytes for a product
+        # image URL. Under the previous static() route this was a 404.
+        with tempfile.TemporaryDirectory() as media_root:
+            product_image = Path(media_root) / "products"
+            product_image.mkdir()
+            (product_image / "rose.png").write_bytes(b"PNGDATA")
+            res = run_settings_import(
+                {
+                    **self._BOOT_ENV,
+                    "DJANGO_DEBUG": "false",
+                    "DJANGO_MEDIA_ROOT": media_root,
+                    # django.setup() needs the settings module named, and the
+                    # test client's host is 'testserver' — a non-debug boot
+                    # rejects anything outside ALLOWED_HOSTS.
+                    "DJANGO_SETTINGS_MODULE": "config.settings",
+                    "DJANGO_ALLOWED_HOSTS": "testserver",
+                },
+                snippet=(
+                    "import django; django.setup(); "
+                    "from django.test import Client; "
+                    "resp = Client().get('/media/products/rose.png'); "
+                    "print('STATUS', resp.status_code); "
+                    "print('BYTES', b''.join(resp.streaming_content).decode())"
+                ),
+            )
+        self.assertEqual(res.returncode, 0, res.stderr)
+        self.assertIn("STATUS 200", res.stdout)
+        self.assertIn("BYTES PNGDATA", res.stdout)
+
+    def test_media_url_resolves_to_the_serve_route_either_way(self):
+        # Not DEBUG-conditional. settings.DEBUG is False under the test
+        # runner, so re-resolving under an explicit DEBUG=True shows the
+        # same route: a regression back to static() would leave no match at
+        # all here (its helper emits nothing when DEBUG is false).
+        for debug in (False, True):
+            with self.subTest(debug=debug), override_settings(DEBUG=debug):
+                match = resolve("/media/products/rose.png")
+                self.assertIs(match.func, serve_media)
+                self.assertEqual(match.kwargs["path"], "products/rose.png")
+                self.assertEqual(
+                    match.kwargs["document_root"], str(settings.MEDIA_ROOT)
+                )
 
 
 class TransportHardeningTests(SimpleTestCase):

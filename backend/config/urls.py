@@ -1,8 +1,10 @@
+import re
+
 from django.contrib import admin
-from django.urls import include, path
+from django.urls import include, path, re_path
+from django.views.static import serve as serve_media
 
 from django.conf import settings
-from django.conf.urls.static import static
 
 from ops.views import api_settings, audit_log, dashboard, health
 
@@ -141,7 +143,26 @@ urlpatterns = [
 ]
 
 
-urlpatterns += static(
-    settings.MEDIA_URL,
-    document_root=settings.MEDIA_ROOT
-)
+# SPEC-2-04 [V-13]: media is served here, unconditionally. Django's
+# static() helper returns an empty list when DEBUG=False, so every uploaded
+# product image used to 404 in production with nothing logged anywhere - the
+# helper is gone from this file and MEDIA is routed explicitly against
+# MEDIA_ROOT, which is env-driven (DJANGO_MEDIA_ROOT) to the mounted volume a
+# deployment actually persists. STATIC needs no route here: whitenoise
+# middleware serves STATIC_ROOT from the app process (SPEC-22-01).
+#
+# Production front door: nginx (or whatever terminates in front of gunicorn)
+# should serve /media/ straight off that same mounted volume rather than
+# proxying bytes through Python - see docs/deploy-runbook.md ("Serving
+# media"). This route is the Django-side guarantee behind that arrangement:
+# a missing or misconfigured front-door rule then degrades to a file served
+# by the app instead of a 404, which is why the pattern is NOT gated on
+# DEBUG. It is deliberately last in urlpatterns so an application route can
+# never be shadowed by a media path.
+urlpatterns += [
+    re_path(
+        r'^' + re.escape(settings.MEDIA_URL.lstrip('/')) + r'(?P<path>.*)$',
+        serve_media,
+        {'document_root': str(settings.MEDIA_ROOT)},
+    )
+]
