@@ -23,6 +23,9 @@ Pins the whole feature end to end:
   to the browser that asked for it, lapses on the env-driven TTL, is dropped
   by disable/re-enrollment, and never touches the challenge path, the replay
   guard or the customer door;
+- SPEC-20-8b the same opt-in at the Django admin door, decided by the SAME
+  shared function, with every fail-safe (other browser, lapsed grant, forged
+  or other-user marker, the TTL kill switch) still challenged there;
 - secret exposure: shown exactly once at setup, never returned again.
 """
 import base64
@@ -34,7 +37,7 @@ import segno
 from django.conf import settings
 from django.contrib.auth.models import Group, User
 from django.core import signing
-from django.test import SimpleTestCase, override_settings
+from django.test import RequestFactory, SimpleTestCase, override_settings
 from django.utils import timezone
 
 from accounts import mfa_trust
@@ -1312,6 +1315,225 @@ class AdminMFAEnforcementTests(ApiTestCase):
         self.assertFalse(self.is_logged_in())
         res = self.admin_login("root", totp=self.valid_code())
         self.assertTrue(self.is_logged_in())
+
+
+class AdminMfaTrustDeviceTests(ApiTestCase):
+    """SPEC-20-8b: "trust this device" reaches the Django admin door too.
+
+    SPEC-20-8 shipped the opt-in on the staff API serializer; ``/admin/`` is
+    the OTHER privileged door and its form is a second enforcement surface.
+    These pins hold the line that there is ONE rule, not two that drift:
+
+    - a trusted, unexpired device with a valid marker logs into the admin
+      with no fresh code (the user's directive, on the primary staff door);
+    - every fail-safe still bites AT THE ADMIN: another browser, a lapsed
+      grant, a forged or someone else's marker, and the ``MFA_TRUST_DAYS=0``
+      kill switch all land back on the challenge;
+    - the challenge itself is untouched — a wrong code is still
+      MFA_CODE_INVALID, the replay watermark is never moved by a skipped or
+      untrusted login, and nothing is downgraded to make a skip possible;
+    - non-privileged staff (and customers) are exactly as they were.
+    """
+
+    TRUST_PATH = "/api/accounts/mfa/trust/"
+
+    def setUp(self):
+        self.boss = make_privileged("boss")
+        self.device = enroll_via_model(self.boss)
+
+    def grant(self):
+        """Drive the real opt-in from a real privileged session, so the
+        marker on the client is one ``bind_trust_cookie`` actually signed.
+        """
+        self.api_login("boss")
+        device = TOTPDevice.objects.get(user=self.boss)
+        counter = totp.now() // totp.STEP
+        # Same accommodation MfaTrustDeviceTests.grant documents: the login
+        # above spent this step's code, so the watermark is rewound for the
+        # trust call rather than sleeping or patching the clock.
+        device.last_used_counter = counter - 1
+        device.save(update_fields=["last_used_counter"])
+        res = self.client.post(
+            self.TRUST_PATH,
+            {"code": totp.hotp(device.secret, counter)},
+            format="json",
+        )
+        self.assertEqual(res.status_code, 200, res.data)
+        self.assertIn(settings.MFA_TRUST_COOKIE_NAME, res.cookies)
+        return res
+
+    def admin_login(self, username="boss", client=None, **extra):
+        payload = {"username": username, "password": PASSWORD, "next": "/admin/"}
+        payload.update(extra)
+        return (client or self.client).post("/admin/login/", payload, follow=True)
+
+    def is_logged_in(self, client=None):
+        return "_auth_user_id" in (client or self.client).session
+
+    def challenged(self, res, client=None):
+        """Assert the admin refused the login and re-asked for the code."""
+        self.assertFalse(self.is_logged_in(client))
+        self.assertContains(res, "Enter your authentication code.")
+        return res
+
+    # -- 1. the promise, on the admin door ---------------------------------
+
+    def test_trusted_device_reaches_the_admin_without_a_fresh_code(self):
+        self.grant()
+        res = self.admin_login()
+        self.assertTrue(self.is_logged_in())
+        # Past the login page (the admin chrome is rendering) and never
+        # once asked for a code.
+        self.assertContains(res, "/admin/logout/")
+        self.assertNotContains(res, "Enter your authentication code.")
+
+    def test_a_trusted_admin_login_spends_no_code_and_ignores_a_posted_one(self):
+        # Nobody asked this browser for a code, so a posted value is not a
+        # factor: never verified, never consumed, watermark unmoved.
+        self.grant()
+        watermark = TOTPDevice.objects.get(user=self.boss).last_used_counter
+        self.admin_login(totp="000000")
+        self.assertTrue(self.is_logged_in())
+        device = TOTPDevice.objects.get(user=self.boss)
+        self.assertEqual(device.last_used_counter, watermark)
+
+    # -- 2. the fail-safes, at the admin door ------------------------------
+
+    def test_another_browser_is_still_challenged_at_the_admin(self):
+        self.grant()
+        other = self.fresh_client()
+        self.challenged(self.admin_login(client=other), other)
+
+    def test_an_expired_grant_challenges_the_admin(self):
+        self.grant()
+        self.device.trusted_until = timezone.now() - timedelta(seconds=1)
+        self.device.save(update_fields=["trusted_until"])
+        self.challenged(self.admin_login())
+
+    def test_a_forged_marker_cannot_open_the_admin(self):
+        self.grant()
+        real = self.client.cookies[settings.MFA_TRUST_COOKIE_NAME].value
+        self.client.cookies[settings.MFA_TRUST_COOKIE_NAME] = real[:-1] + (
+            "A" if real[-1] != "A" else "B"
+        )
+        self.challenged(self.admin_login())
+
+    def test_another_users_marker_does_not_open_the_admin(self):
+        # Shared/kiosk browser. Both grants are genuinely live, so the
+        # (user, device) pair is the only thing left that can refuse.
+        chief = make_privileged("chief")
+        chief_device = enroll_via_model(chief)
+        chief_device.trusted_until = mfa_trust.trust_deadline()
+        chief_device.save(update_fields=["trusted_until"])
+        self.grant()
+        self.client.cookies[settings.MFA_TRUST_COOKIE_NAME] = signing.dumps(
+            {"user": chief.pk, "device": chief_device.pk}, salt=mfa_trust.TRUST_SALT
+        )
+        self.challenged(self.admin_login())
+
+    def test_zero_days_is_the_kill_switch_at_the_admin(self):
+        # The deployment-wide off-switch reaches this door too: the grant and
+        # the marker are both still here, and the challenge is straight back.
+        self.grant()
+        with override_settings(MFA_TRUST_DAYS=0):
+            self.challenged(self.admin_login())
+
+    # -- 3. the challenge is not weakened ----------------------------------
+
+    def test_an_invalid_code_is_still_refused_while_a_marker_is_present(self):
+        # Holding a marker does not make a wrong code acceptable: once the
+        # grant is gone, the same invalid code is refused exactly as before.
+        self.grant()
+        self.device.trusted_until = timezone.now() - timedelta(seconds=1)
+        self.device.save(update_fields=["trusted_until"])
+        res = self.admin_login(totp="000000")
+        self.assertFalse(self.is_logged_in())
+        self.assertContains(res, "Invalid or expired authentication code.")
+
+    def test_trust_cannot_resurrect_a_spent_code_at_the_admin(self):
+        # The replay guard across the trust boundary: the code the opt-in
+        # spent stays spent, and the next unused one is what works.
+        self.grant()
+        device = TOTPDevice.objects.get(user=self.boss)
+        spent = totp.hotp(device.secret, device.last_used_counter)
+        # The skipped login spends nothing...
+        self.admin_login()
+        self.assertTrue(self.is_logged_in())
+        self.client.logout()
+        # ...and the code the opt-in spent is still spent once the challenge
+        # is back: the next unused one is what works.
+        self.device.trusted_until = timezone.now() - timedelta(seconds=1)
+        self.device.save(update_fields=["trusted_until"])
+        res = self.admin_login(totp=spent)
+        self.assertContains(res, "Invalid or expired authentication code.")
+        self.assertFalse(self.is_logged_in())
+        self.admin_login(totp=code_after(device))
+        self.assertTrue(self.is_logged_in())
+
+    def test_disabling_mfa_still_demands_enrollment_at_the_admin(self):
+        # The enrollment check outranks the skip, so a leftover marker can
+        # never answer a login whose factor was turned off.
+        self.grant()
+        device = TOTPDevice.objects.get(user=self.boss)
+        res = self.client.post(
+            "/api/accounts/mfa/disable/",
+            {"code": code_after(device)},
+            format="json",
+        )
+        self.assertEqual(res.status_code, 200, res.data)
+        res = self.admin_login()
+        self.assertFalse(self.is_logged_in())
+        self.assertContains(res, "Multi-factor authentication is mandatory")
+
+    # -- 4. the plumbing, and the untouched third parties ------------------
+
+    def test_the_form_reads_the_marker_off_the_request_it_is_given(self):
+        # White box on the plumbing itself: the form is handed a request
+        # (as AdminSite -> LoginView does) and finds the marker there.
+        from accounts.admin import MFAAdminAuthenticationForm
+
+        self.grant()
+        request = RequestFactory().post("/admin/login/")
+        request.COOKIES = {
+            settings.MFA_TRUST_COOKIE_NAME: self.client.cookies[
+                settings.MFA_TRUST_COOKIE_NAME
+            ].value
+        }
+        form = MFAAdminAuthenticationForm(
+            request=request, data={"username": "boss", "password": PASSWORD}
+        )
+        self.assertTrue(form.is_valid(), form.errors)
+        self.assertEqual(form.cleaned_data["username"], "boss")
+
+    def test_a_form_without_a_request_is_challenged_not_crashed(self):
+        # No request means no browser to vouch for: challenge, never 500.
+        from accounts.admin import MFAAdminAuthenticationForm
+
+        self.grant()
+        form = MFAAdminAuthenticationForm(
+            data={"username": "boss", "password": PASSWORD}
+        )
+        self.assertFalse(form.is_valid())
+        self.assertIn("Enter your authentication code.", str(form.errors))
+
+    def test_non_privileged_staff_never_meet_the_challenge_at_the_admin(self):
+        helper = self.make_user("helper")
+        helper.is_staff = True
+        helper.save()
+        self.admin_login("helper")
+        self.assertTrue(self.is_logged_in())
+
+    def test_a_customer_is_still_refused_the_admin_door(self):
+        # The admin door answers a non-staff account with the stock admin
+        # message and no MFA wording at all, so neither the challenge nor
+        # the enrollment block leaks to a caller who failed the first factor
+        # (and the trust machinery changes nothing for them either).
+        self.make_user("shopper")
+        res = self.admin_login("shopper")
+        self.assertFalse(self.is_logged_in())
+        self.assertContains(res, "correct username and password for a staff account")
+        self.assertNotContains(res, "Enter your authentication code.")
+        self.assertNotContains(res, "Multi-factor authentication is mandatory")
 
 
 class AdminSiteWiringTests(SimpleTestCase):

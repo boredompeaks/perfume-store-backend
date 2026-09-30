@@ -13,6 +13,7 @@ from common.permissions import is_privileged
 from common.roles import STAFF_ROLES
 from orders.models import Order
 
+from . import mfa_trust
 from .models import (
     MFA_CODE_INVALID,
     MFA_CODE_REQUIRED,
@@ -35,6 +36,15 @@ class MFAAdminAuthenticationForm(AdminAuthenticationForm):
     a caller who failed the first factor). Non-privileged staff and
     customers log in exactly as before — the field is optional and unused
     for them.
+
+    SPEC-20-8b: a device this browser was trusted on skips the fresh code
+    here too, through :func:`accounts.mfa_trust.is_trusted_device` — the
+    SAME decision the staff API serializer makes, so the directive "don't
+    challenge me every login" holds on the primary staff door and there is
+    exactly one implementation of the rule to keep honest. ``AdminSite.login``
+    hands the request to ``LoginView``, which passes it to the form, so
+    ``self.request.COOKIES`` is where the signed marker lives. Everything
+    below the skip is the unchanged pre-SPEC-20-8 challenge.
     """
 
     totp = forms.CharField(
@@ -56,6 +66,11 @@ class MFAAdminAuthenticationForm(AdminAuthenticationForm):
         device = TOTPDevice.active_for(user)
         if device is None:
             raise forms.ValidationError(MFA_ENROLLMENT_REQUIRED)
+        # The shared skip decision — see the class docstring. Read before
+        # the code is demanded, and never instead of the enrollment check
+        # above: a disabled factor must not be answered by a stale grant.
+        if mfa_trust.is_trusted_device(getattr(self, "request", None), user, device):
+            return cleaned_data
         code = cleaned_data.get("totp")
         if not code:
             raise forms.ValidationError(MFA_CODE_REQUIRED)

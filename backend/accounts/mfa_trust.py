@@ -23,6 +23,10 @@ the narrowest thing the system can do:
   last_used_counter) is unchanged, and trust only decides whether that path
   runs at all.
 
+Both enforcement surfaces consult :func:`is_trusted_device` and nothing else,
+so "don't challenge me every login" means the same thing at the staff API door
+and at ``/admin/`` (SPEC-20-8b).
+
 The TTL is env-driven (``MFA_TRUST_DAYS``, default 30); 0 is a safe
 deployment-wide kill switch that puts every privileged login straight back
 behind the challenge.
@@ -84,10 +88,19 @@ def is_trusted_device(request, user, device):
     caller presents an unexpired, untampered marker naming this user and
     this very device row (a shared browser therefore never carries one
     user's trust into another's login).
+
+    This is the ONLY skip decision in the system, shared by both privileged
+    doors: the staff login serializer (DRF) and the Django admin login form
+    (SPEC-20-8b). All it needs of the caller is a cookie jar, so the plain
+    ``HttpRequest`` the admin form carries works exactly like the DRF
+    request — a second implementation would only be a second thing to drift.
     """
     if device.trusted_until is None or device.trusted_until <= timezone.now():
         return False
-    raw = request.COOKIES.get(settings.MFA_TRUST_COOKIE_NAME)
+    # A caller with no request to read (a form built without one) has no
+    # browser to vouch for, so it earns the challenge rather than a 500.
+    cookies = getattr(request, "COOKIES", None) or {}
+    raw = cookies.get(settings.MFA_TRUST_COOKIE_NAME)
     if not raw:
         return False
     try:
