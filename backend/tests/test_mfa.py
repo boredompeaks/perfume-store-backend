@@ -8,14 +8,19 @@ Pins the whole feature end to end:
 - the enrollment API (setup/confirm/status/disable) for privileged roles,
   both trust paths (JWT steady-state and the credential bootstrap that
   keeps blocked-at-login enforcement reachable);
+- SPEC-20-13 enrollment REACH: the admin login page offers the enrollment
+  surface (and says so loudly when MFA is what blocked the attempt), and the
+  bootstrap flow the enrollment page drives mints a usable device without a
+  JWT;
 - enforcement at BOTH surfaces: the staff API login (totp required for
   privileged users, replay-guarded) and the Django admin login form;
 - rollout semantics: unenrolled privileged accounts are blocked with the
   enrollment path named; customers and non-admin staff are untouched;
 - secret exposure: shown exactly once at setup, never returned again.
 """
+from django.conf import settings
 from django.contrib.auth.models import Group, User
-from django.test import SimpleTestCase
+from django.test import SimpleTestCase, override_settings
 from django.utils import timezone
 
 from accounts.models import TOTPDevice
@@ -428,6 +433,112 @@ class MFAEnrollmentTests(ApiTestCase):
             "/api/accounts/mfa/disable/", {"code": "000000"}, format="json"
         )
         self.assertEqual(res.status_code, 400)
+
+
+class MFAEnrollmentReachTests(ApiTestCase):
+    """SPEC-20-13: a blocked privileged account can actually reach enrollment.
+
+    Mandatory MFA (R-17.9) refuses an unenrolled privileged login, so the
+    enrollment API was reachable only by hand-typed POSTs — an account with
+    no device was locked out of /admin/ and the API with no path back in.
+    These pins cover both halves of the reach: the admin login page offers
+    the enrollment surface (always, and loudly when MFA is the reason the
+    attempt failed), and the credential-bootstrap flow the enrollment page
+    drives mints a working device without ever holding a JWT.
+    """
+
+    def setUp(self):
+        self.boss = make_privileged("boss")
+
+    def admin_login_page(self):
+        return self.client.get("/admin/login/")
+
+    def test_admin_login_page_always_offers_enrollment(self):
+        res = self.admin_login_page()
+        self.assertContains(res, settings.MFA_ENROLL_URL)
+        self.assertContains(res, "Enroll your device")
+
+    def test_enrollment_url_is_configuration_not_a_constant(self):
+        with override_settings(
+            MFA_ENROLL_URL="https://elsewhere.example.com/enroll"
+        ):
+            self.assertContains(
+                self.admin_login_page(), "https://elsewhere.example.com/enroll"
+            )
+
+    def test_blocked_privileged_login_offers_the_enrollment_notice(self):
+        res = self.client.post(
+            "/admin/login/",
+            {"username": "boss", "password": PASSWORD, "next": "/admin/"},
+            follow=True,
+        )
+        self.assertNotIn("_auth_user_id", self.client.session)
+        self.assertContains(res, "Multi-factor authentication is mandatory")
+        self.assertContains(res, "Set up multi-factor authentication")
+        self.assertContains(res, settings.MFA_ENROLL_URL)
+
+    def test_password_failure_shows_the_link_but_not_the_mfa_notice(self):
+        # The notice is keyed off the MFA block specifically: telling a
+        # caller who simply mistyped their password to go and enroll would
+        # be a confusing (and leaky) answer to an ordinary failure.
+        res = self.client.post(
+            "/admin/login/",
+            {"username": "boss", "password": "Wr0ng-Passphrase!"},
+            follow=True,
+        )
+        self.assertContains(res, "Please enter the correct username and password")
+        self.assertNotContains(res, "Set up multi-factor authentication")
+        self.assertContains(res, settings.MFA_ENROLL_URL)
+
+    def test_signed_in_admin_visit_is_redirected_not_rendered(self):
+        # config.admin.MFAAdminSite.login flags the enrollment block on the
+        # unrendered login page; an already-authenticated visit is a redirect
+        # that has no form at all.
+        self.client.force_login(User.objects.create_superuser(
+            username="root", email="root@example.com", password=PASSWORD
+        ))
+        res = self.admin_login_page()
+        self.assertEqual(res.status_code, 302)
+
+    def test_login_page_never_renders_a_secret(self):
+        enroll_via_model(self.boss)
+        res = self.admin_login_page()
+        self.assertNotContains(res, TEST_TOTP_SECRET)
+
+    def test_enrollment_reach_needs_no_jwt_then_login_works(self):
+        """The whole reach, exactly as the enrollment page drives it:
+        password-proven setup -> secret + provisioning URI -> confirm ->
+        the factor now gates (and admits) login."""
+        res = self.client.post(
+            "/api/accounts/mfa/setup/",
+            {"username": "boss", "password": PASSWORD},
+            format="json",
+        )
+        self.assertEqual(res.status_code, 200, res.data)
+        secret = res.data["secret"]
+        self.assertTrue(res.data["otpauth_uri"].startswith("otpauth://totp/"))
+        self.assertIn(secret, res.data["otpauth_uri"])
+
+        device = TOTPDevice.objects.get(user=self.boss)
+        self.assertFalse(device.enabled)
+        res = self.client.post(
+            "/api/accounts/mfa/confirm/",
+            {
+                "username": "boss",
+                "password": PASSWORD,
+                "code": totp.hotp(secret, totp.now() // totp.STEP),
+            },
+            format="json",
+        )
+        self.assertEqual(res.status_code, 200, res.data)
+
+        res = self.client.post(
+            "/api/accounts/login/",
+            login_payload("boss", totp=code_after(device)),
+            format="json",
+        )
+        self.assertEqual(res.status_code, 200, res.data)
+        self.assertIn("access", res.data)
 
 
 class MFALoginEnforcementTests(ApiTestCase):

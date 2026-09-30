@@ -7,7 +7,20 @@ import { ApiError } from "@/lib/api";
 import { useAuth } from "@/lib/auth";
 import { inputClass } from "@/lib/ui";
 
-export default function LoginForm({ next }: { next?: string }) {
+export default function LoginForm({
+  next,
+  variant = "customer",
+}: {
+  next?: string;
+  /**
+   * Which sign-in door this is. SPEC-20-13 added the staff door so the
+   * authentication-code field can be shown where it is actually required
+   * (and named without the "staff with MFA only" hedge, which a customer
+   * cannot evaluate before signing in). SPEC-20-10 makes "customer" the
+   * storefront default and removes the field from it.
+   */
+  variant?: "customer" | "staff";
+}) {
   const router = useRouter();
   const { login } = useAuth();
   const [username, setUsername] = useState("");
@@ -74,11 +87,15 @@ export default function LoginForm({ next }: { next?: string }) {
           />
         </div>
         <div>
-          {/* SPEC-17-05 (R-17.9): staff MFA. Only privileged roles are
-              required to fill this in; everyone else submits without it. */}
+          {/* SPEC-17-05 (R-17.9): staff MFA. On the staff door this is the
+              second factor the backend demands, so it is named plainly; on
+              the storefront door it stays a hint (SPEC-20-10 removes it
+              there — customers never authenticate with it). */}
           <label htmlFor="login-totp" className="mb-1 block text-sm">
             Authentication code{" "}
-            <span className="text-ink-muted">(staff with MFA only)</span>
+            {variant === "staff" ? null : (
+              <span className="text-ink-muted">(staff with MFA only)</span>
+            )}
           </label>
           <input
             id="login-totp"
@@ -105,6 +122,18 @@ export default function LoginForm({ next }: { next?: string }) {
           {pending ? "Signing in…" : "Sign in"}
         </button>
       </form>
+
+      {variant === "staff" && (
+        <p className="mt-6 border-t border-line pt-6 text-sm text-ink-muted">
+          Setting up for the first time?{" "}
+          <Link
+            href="/staff/mfa/enroll"
+            className="underline underline-offset-4 transition-colors hover:text-bronze"
+          >
+            Enroll your device
+          </Link>
+        </p>
+      )}
 
       {/*
         These links are ALWAYS rendered, never conditioned on the error.
