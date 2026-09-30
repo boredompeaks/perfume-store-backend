@@ -26,4 +26,5 @@ useDefault = true
     '''An0ther-Pass-77\b''',
     '''\bGEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ\b''', # 2026-09-23 RFC 6238 App-B SHA-1 test vector; SPEC-17-05 TOTP fixtures (common/testing.py, tests/test_mfa.py) - not a credential
     '''\bGEZDGNBV234567\b''', # 2026-09-23 synthetic base32 fragment in tests/test_mfa.py otpauth-URI shape assertion - not a credential
+    '''\brzp_live_x\b''', # 2026-09-30 SPEC-20-4 audit-source fixture in tests/test_audit_structured.py - a deliberately truncated, non-functional Razorpay key id used only to prove the secret-filter strips key-shaped values. NOT a credential (no real key ever matches "rzp_live_x").
   ]
