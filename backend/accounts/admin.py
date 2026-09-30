@@ -6,9 +6,14 @@ from django.contrib.auth.admin import UserAdmin as DjangoUserAdmin
 from django.contrib.auth.forms import UserChangeForm
 from django.contrib.auth.models import Group, User
 from django.core.exceptions import PermissionDenied
+from django.urls import reverse
 
 from common import totp
-from common.admin import RoleAwareModelAdmin
+from common.admin import (
+    CONFIRMATION_YES,
+    CONFIRM_FIELD,
+    RoleAwareModelAdmin,
+)
 from common.permissions import is_privileged
 from common.roles import STAFF_ROLES
 from orders.models import Order
@@ -22,6 +27,16 @@ from .models import (
 )
 # Replace auth's default User admin with the store-aware one below.
 admin.site.unregister(User)
+
+# SPEC-20-2 [R-20.18]: a staff-role add/remove is a privilege grant and gets
+# the same interstitial the destructive bulk actions use — same template, same
+# confirm contract, one mechanism. The prompt is deliberately not the bulk
+# action's: unlike a cancel, a role change CAN be undone, so telling the
+# operator otherwise would be a lie on the screen.
+ROLE_CHANGE_ACTION = "staff_role_change"
+ROLE_CHANGE_WARNING = (
+    "adds or removes staff authority on this account. Confirm to continue."
+)
 
 
 class MFAAdminAuthenticationForm(AdminAuthenticationForm):
@@ -288,6 +303,104 @@ class StoreUserAdmin(RoleAwareModelAdmin, DjangoUserAdmin):
         for group in sorted(desired - held, key=lambda g: g.name):
             obj.groups.add(group)
             self.log_change(request, obj, f'Added role "{group.name}".')
+
+    # ——— SPEC-20-2 [R-20.18]: the explicit confirm step ———
+
+    def changeform_view(self, request, object_id=None, form_url="", extra_context=None):
+        # The seam of the shipped view flow (the same method ModelAdmin's
+        # get_urls wraps), entered before the form is even validated: a
+        # staff-role change must be confirmed, and this is the only place
+        # that can stop the save before save_model/_apply_staff_roles run.
+        pending = self._pending_role_change(request, object_id)
+        if pending is not None:
+            return self.render_confirmation(
+                request,
+                action_name=ROLE_CHANGE_ACTION,
+                description=f"Change staff roles for {pending['username']}",
+                objects=[pending["user"]],
+                details=pending,
+                warning=ROLE_CHANGE_WARNING,
+                re_post=True,
+                cancel_url=self._change_url(pending["user"]),
+            )
+        return super().changeform_view(request, object_id, form_url, extra_context)
+
+    def _change_url(self, obj):
+        """The change page the interstitial's Cancel link returns to."""
+        meta = self.model._meta
+        return reverse(
+            f"admin:{meta.app_label}_{meta.model_name}_change", args=[obj.pk]
+        )
+
+    def _pending_role_change(self, request, object_id):
+        """The role add/remove this POST would commit, as a detail payload,
+        or ``None`` when there is nothing to confirm.
+
+        ``None`` means the ordinary view flow runs. The check is a DIFF, never
+        a presence test: an emptied multi-select legitimately submits no
+        ``staff_roles`` key at all, which is exactly a removal — so a
+        presence test would be the bypass.
+
+        Three guards come before the diff, each for a reason:
+
+        - the commit leg returns ``None``: ``confirm=yes`` means the user
+          already confirmed this exact submission and the normal, fully
+          validated save must now run;
+        - a caller without ``staff.manage`` returns ``None``: it must be
+          refused by the view's own change gate, never shown a confirmation
+          page for a privilege change they may not make;
+        - a non-staff target returns ``None``: roles are not part of a
+          customer's change surface at all (``get_fieldsets``), so that
+          form keeps its own guards and its own pins.
+
+        The confirmation covers the whole submission, not just the role rows,
+        because re-driving the same payload through the ordinary save is what
+        keeps every existing form guard in force on the commit leg.
+        """
+        if request.method != "POST" or object_id is None:
+            return None
+        if request.POST.get(CONFIRM_FIELD) == CONFIRMATION_YES:
+            return None
+        if not self._map_grants(request, "change"):
+            return None
+        target = self.get_object(request, object_id)
+        if target is None or not target.is_staff:
+            return None
+        held = set(target.groups.filter(name__in=STAFF_ROLES))
+        # The interstitial REPORTS the diff; it does not validate it. Only
+        # the six role groups are resolved (the rendered choices), and a
+        # non-numeric or foreign pk is simply not part of the diff — the
+        # form's own queryset validation stays the authority on the commit
+        # leg, so a crafted value can never 500 the confirmation or, worse,
+        # be reported as if it were a role.
+        submitted = {pk for pk in request.POST.getlist("staff_roles") if pk.isdigit()}
+        desired = set(Group.objects.filter(pk__in=submitted, name__in=STAFF_ROLES))
+        added = sorted(desired - held, key=lambda group: group.name)
+        removed = sorted(held - desired, key=lambda group: group.name)
+        if not (added or removed):
+            return None
+        return {
+            "user": target,
+            "username": target.username,
+            "summary": (
+                f"{len(added)} role(s) to add, {len(removed)} to remove — each is "
+                "audited separately under your name once confirmed"
+            ),
+            "rows": [
+                {
+                    "label": target.username,
+                    "fields": [
+                        ("Roles to add", self._role_names(added)),
+                        ("Roles to remove", self._role_names(removed)),
+                    ],
+                    "items": [],
+                }
+            ],
+        }
+
+    @staticmethod
+    def _role_names(groups):
+        return ", ".join(group.name for group in groups) or "none"
 
     @admin.display(description="Orders")
     def order_count(self, obj):

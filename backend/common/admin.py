@@ -27,6 +27,10 @@ SPEC-20-1 [R-20.20] enriches that one interstitial rather than adding a
 second mechanism: a financially significant action supplies a *structured*
 detail payload (``confirmation_details`` — amount, currency, affected items,
 resulting state) and the shared template renders it above the object list.
+SPEC-20-2 [R-20.18] then reuses the very same page as the confirm step for a
+mutation that is not a bulk action (a staff-role change on the user change
+form): the interstitial re-drives the submission it interrupted, so there is
+one confirmation contract, one template and one commit gate.
 """
 from dataclasses import replace
 from functools import wraps
@@ -39,8 +43,9 @@ from django.urls import reverse
 from common.permissions import user_has_capability
 
 # The POST contract of the interstitial. Module constants, not inline
-# literals, because the render path (which emits them) and the action gate
-# (which refuses to act without the confirm) have to agree on them.
+# literals, because three places have to agree on them: the render path
+# (emits them), the commit gate (refuses to act without the confirm) and the
+# re-submission path for a non-bulk confirmation.
 CONFIRM_FIELD = "confirm"
 CONFIRMATION_YES = "yes"
 
@@ -49,6 +54,28 @@ CONFIRMATION_YES = "yes"
 DEFAULT_CONFIRM_WARNING = (
     "is a sensitive action and cannot be undone. Confirm to continue."
 )
+
+
+def _repost_fields(post):
+    """Flatten the interrupted POST into ``(name, value)`` hidden pairs.
+
+    A non-bulk confirmation must re-drive the *same* submission, so every
+    field the user already filled travels through the interstitial and the
+    confirmed POST re-runs the ordinary, fully validated save — the
+    interstitial adds a step, never a second, looser write path. Multi-valued
+    fields contribute one pair per value. The CSRF token (the template
+    renders a fresh one) and the confirm marker (the template owns it) are
+    dropped, so an interrupted POST can neither forge a token nor pin its own
+    outcome. ``request.FILES`` is deliberately not flattened: no file field
+    rides this seam, and re-sending bytes through hidden inputs is not a thing
+    to invent for it.
+    """
+    return tuple(
+        (name, value)
+        for name, values in post.lists()
+        if name != CONFIRM_FIELD and not name.startswith("csrf")
+        for value in values
+    )
 
 
 class RoleAwareModelAdmin(admin.ModelAdmin):
@@ -175,8 +202,15 @@ class RoleAwareModelAdmin(admin.ModelAdmin):
         objects,
         details=None,
         warning=DEFAULT_CONFIRM_WARNING,
+        re_post=False,
+        cancel_url=None,
     ):
-        """Render the interstitial — the single confirmation surface."""
+        """Render the interstitial — the single confirmation surface.
+
+        Bulk actions and non-bulk mutations (the staff-role change step)
+        both come through here, so there is one template, one confirm
+        contract and one place the structured detail payload is assembled.
+        """
         return render(
             request,
             "admin/action_confirmation.html",
@@ -193,7 +227,8 @@ class RoleAwareModelAdmin(admin.ModelAdmin):
                     if details is not None
                     else self.confirmation_details(request, action_name, objects)
                 ),
-                "cancel_url": reverse("admin:index"),
+                "pending_fields": _repost_fields(request.POST) if re_post else (),
+                "cancel_url": cancel_url or reverse("admin:index"),
             },
         )
 
