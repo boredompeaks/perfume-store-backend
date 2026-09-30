@@ -106,3 +106,40 @@ export function normalizeCode(code: string | undefined): string {
 export function isPlausibleCode(code: string): boolean {
   return new RegExp(`^\\d{${TOTP_DIGITS}}$`).test(normalizeCode(code));
 }
+
+/**
+ * SPEC-20-10: the two sign-in doors. `staff` is the privileged surface that
+ * enforces R-17.9 (`/api/accounts/login/`); `customer` is the storefront
+ * one, which declares no `totp` field at all and refuses privileged
+ * accounts server-side.
+ */
+export type LoginSurface = "customer" | "staff";
+
+export const LOGIN_PATHS: Record<LoginSurface, string> = {
+  customer: "/api/accounts/storefront/login/",
+  staff: "/api/accounts/login/",
+};
+
+export function loginEndpoint(surface: LoginSurface): string {
+  return LOGIN_PATHS[surface];
+}
+
+/**
+ * The body for a login POST. `totp` is carried on the staff door only —
+ * even if a caller passes one, the customer body can never grow the field,
+ * so the storefront form cannot offer an authentication code it has no way
+ * to honour (and the server ignores one if a crafted request sends it).
+ */
+export function buildLoginBody(
+  surface: LoginSurface,
+  creds: Credentials,
+  code?: string,
+): Record<string, string> {
+  const body: Record<string, string> = {
+    username: creds.username.trim(),
+    password: creds.password,
+  };
+  const normalized = normalizeCode(code);
+  if (surface === "staff" && normalized) body.totp = normalized;
+  return body;
+}

@@ -549,6 +549,9 @@ class AuthThrottleTests(ApiTestCase):
             "username-available": "auth",
             "register": "auth",
             "login": "auth",
+            # SPEC-20-10: the customer door rides the same credential
+            # budget as the staff door it was split off from.
+            "storefront-login": "auth",
             "token-refresh": "auth",
             "logout": "auth",
             # SPEC-17-05: the MFA enrollment surface rides the same 'auth'

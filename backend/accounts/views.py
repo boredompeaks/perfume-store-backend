@@ -1,5 +1,6 @@
 from rest_framework.decorators import api_view, throttle_scope
 from rest_framework.exceptions import AuthenticationFailed
+from rest_framework.exceptions import PermissionDenied
 from rest_framework.exceptions import ValidationError as DRFValidationError
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
@@ -31,11 +32,20 @@ from .models import (
     MFA_CODE_INVALID,
     TOTPDevice,
 )
-from .serializers import MFATokenObtainPairSerializer, RegisterSerializer
+from .serializers import (
+    MFATokenObtainPairSerializer,
+    RegisterSerializer,
+    StorefrontTokenObtainPairSerializer,
+)
 
 
 class LoginView(TokenObtainPairView):
-    """JWT login behind the 'auth' throttle scope.
+    """JWT login behind the 'auth' throttle scope — the STAFF door.
+
+    SPEC-20-10: this is the privileged surface. It keeps the MFA-aware
+    serializer, so a privileged account must present its TOTP code (or
+    enroll first) exactly as before; the customer door is
+    StorefrontLoginView below.
 
     Throttling here bounds credential stuffing (V-04). The response contract
     is TokenObtainPairView's, except that the refresh token never enters the
@@ -57,9 +67,11 @@ class LoginView(TokenObtainPairView):
     def post(self, request, *args, **kwargs):
         try:
             response = super().post(request, *args, **kwargs)
-        except (AuthenticationFailed, DRFValidationError):
+        except (AuthenticationFailed, DRFValidationError, PermissionDenied):
             # super().post signals every rejection by raising; record the
             # failed attempt, then re-raise so the response is unchanged.
+            # PermissionDenied is the storefront door refusing a privileged
+            # account (SPEC-20-10) — a refused login like any other.
             self._record_login(request, succeeded=False)
             raise
         self._record_login(request, succeeded=True)
@@ -80,6 +92,20 @@ class LoginView(TokenObtainPairView):
             actor=User.objects.filter(username=username).first(),
             detail={"username": username},
         )
+
+
+class StorefrontLoginView(LoginView):
+    """POST /api/accounts/storefront/login/ — the CUSTOMER door (SPEC-20-10).
+
+    Inherited wholesale from LoginView, so the throttle, the audit trail
+    and the HttpOnly refresh cookie [R-17.12] are literally the same code.
+    The only difference is the serializer: this door has no ``totp`` field
+    and refuses privileged accounts outright (see
+    StorefrontTokenObtainPairSerializer) — which is what keeps it from
+    becoming a way around [R-17.9].
+    """
+
+    serializer_class = StorefrontTokenObtainPairSerializer
 
 
 def _set_refresh_cookie(response):

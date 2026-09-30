@@ -2,6 +2,7 @@ from django.contrib.auth.models import User
 from django.contrib.auth.password_validation import validate_password
 from django.core.exceptions import ValidationError
 from rest_framework import serializers
+from rest_framework.exceptions import PermissionDenied
 from rest_framework_simplejwt.serializers import TokenObtainPairSerializer
 
 from common import totp
@@ -12,6 +13,14 @@ from .models import (
     MFA_CODE_REQUIRED,
     MFA_ENROLLMENT_REQUIRED,
     TOTPDevice,
+)
+
+# SPEC-20-10: raised by the storefront serializer only, so it lives beside
+# its single raiser rather than in accounts.models with the login/admin
+# messages (that module is the shared R-17.9 wording and stays untouched).
+MFA_STAFF_LOGIN_REQUIRED = (
+    "This is a staff account. Staff sign in on the staff sign-in page, "
+    "where multi-factor authentication is part of the login."
 )
 
 
@@ -112,4 +121,29 @@ class MFATokenObtainPairSerializer(TokenObtainPairSerializer):
             # RFC 6238 §5.2: the consumed counter is the replay watermark.
             device.last_used_counter = counter
             device.save(update_fields=["last_used_counter"])
+        return data
+
+
+class StorefrontTokenObtainPairSerializer(TokenObtainPairSerializer):
+    """Customer storefront login — no ``totp`` field at all (SPEC-20-10).
+
+    The storefront has no TOTP: R-17.9 binds privileged roles only, so a
+    customer was being shown, and could post, an authentication-code field
+    that no server check ever read. This door declares the parent's explicit
+    ``username``/``password`` and nothing more, which makes ``totp`` a
+    non-field in both directions: the storefront form cannot render it, and
+    a body that includes it is ignored rather than half-honoured.
+
+    A privileged account is REFUSED here instead of being authenticated.
+    This serializer has no factor to demand, so letting one through would
+    turn the customer door into a way around the very rule that made it
+    necessary — the caller is pointed at the door that does enforce R-17.9.
+    The answer reveals nothing the caller has not already proven with a
+    correct password.
+    """
+
+    def validate(self, attrs):
+        data = super().validate(attrs)
+        if is_privileged(self.user):
+            raise PermissionDenied(MFA_STAFF_LOGIN_REQUIRED)
         return data

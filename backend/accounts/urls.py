@@ -3,7 +3,7 @@ from django.urls import path
 from .views import (
     register, username_available, verify_email, resend_verification,
     forgot_username, request_password_reset, reset_password, LoginView,
-    LogoutView, RefreshView,
+    LogoutView, RefreshView, StorefrontLoginView,
     MFAStatusView, MFASetupView, MFAConfirmView, MFADisableView,
 )
 
@@ -32,6 +32,16 @@ urlpatterns = [
         'login/',
         LoginView.as_view(),
         name='login'
+    ),
+
+    # SPEC-20-10: the customer door. `login/` above is the STAFF door (it
+    # carries the R-17.9 TOTP requirement), so customers get a surface with
+    # no totp field at all; a privileged account is refused here and sent to
+    # the staff door rather than authenticated without the factor.
+    path(
+        'storefront/login/',
+        StorefrontLoginView.as_view(),
+        name='storefront-login'
     ),
 
     path(

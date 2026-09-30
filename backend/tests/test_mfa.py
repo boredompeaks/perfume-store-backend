@@ -14,6 +14,9 @@ Pins the whole feature end to end:
   JWT;
 - enforcement at BOTH surfaces: the staff API login (totp required for
   privileged users, replay-guarded) and the Django admin login form;
+- SPEC-20-10 door split: the storefront login declares no totp field at all
+  and refuses privileged accounts, while the staff door keeps demanding and
+  spending the factor;
 - rollout semantics: unenrolled privileged accounts are blocked with the
   enrollment path named; customers and non-admin staff are untouched;
 - secret exposure: shown exactly once at setup, never returned again.
@@ -28,6 +31,7 @@ from django.test import SimpleTestCase, override_settings
 from django.utils import timezone
 
 from accounts.models import TOTPDevice
+from accounts.serializers import StorefrontTokenObtainPairSerializer
 from common import qr, totp
 from common.models import AuditEvent
 from common.permissions import is_privileged
@@ -754,12 +758,19 @@ class MFALoginEnforcementTests(ApiTestCase):
         )
         self.assertEqual(res.status_code, 200)
 
-    def test_customer_totp_field_ignored(self):
-        self.make_user("buyer")
-        res = self.client.post(
-            "/api/accounts/login/", login_payload("buyer", totp="000000"), format="json"
+    def test_customer_door_has_no_totp_field(self):
+        # SPEC-20-10 rewrite of the old `test_customer_totp_field_ignored`
+        # pin. That pin asserted the superseded contract — "the storefront
+        # login SERVES a totp field and ignores its value" — which is the
+        # bug: a customer was shown, and could post, an authentication code
+        # no server check ever read. The customer door now declares the
+        # parent's username/password and nothing else, so `totp` is not a
+        # field in either direction (it cannot be rendered, and a body that
+        # includes it is ignored instead of half-honoured).
+        self.assertEqual(
+            sorted(StorefrontTokenObtainPairSerializer().fields),
+            ["password", "username"],
         )
-        self.assertEqual(res.status_code, 200)
 
     def test_non_admin_staff_login_unaffected(self):
         support = self.make_user("helper")
@@ -784,6 +795,129 @@ class MFALoginEnforcementTests(ApiTestCase):
             format="json",
         )
         self.assertEqual(res.status_code, 200, res.data)
+
+
+class StorefrontLoginSplitTests(ApiTestCase):
+    """SPEC-20-10: the customer door never speaks TOTP; the staff door does.
+
+    One `LoginView` used to serve both populations, which forced the TOTP
+    field into every customer's validation surface. The split gives
+    customers their own door and keeps the privileged enforcement on
+    `login/` — and, critically, makes the customer door REFUSE a
+    privileged account, so it cannot become a way around [R-17.9].
+    """
+
+    CUSTOMER_DOOR = "/api/accounts/storefront/login/"
+    STAFF_DOOR = "/api/accounts/login/"
+
+    def setUp(self):
+        self.make_user("buyer")
+
+    def test_customer_door_authenticates_with_credentials_alone(self):
+        res = self.client.post(
+            self.CUSTOMER_DOOR, login_payload("buyer"), format="json"
+        )
+        self.assertEqual(res.status_code, 200, res.data)
+        self.assertIn("access", res.data)
+
+    def test_customer_door_treats_a_posted_totp_as_nothing(self):
+        # Not an auth factor and not a device: the code is a non-field, so
+        # it reaches no verification and mints no credential of its own.
+        res = self.client.post(
+            self.CUSTOMER_DOOR,
+            login_payload("buyer", totp="000000"),
+            format="json",
+        )
+        self.assertEqual(res.status_code, 200, res.data)
+        self.assertFalse(TOTPDevice.objects.exists())
+
+    def test_customer_door_keeps_the_refresh_cookie_contract(self):
+        # [R-17.12] unchanged on the new door: the refresh token rides the
+        # HttpOnly cookie, never the response body.
+        res = self.client.post(
+            self.CUSTOMER_DOOR, login_payload("buyer"), format="json"
+        )
+        self.assertNotIn("refresh", res.data)
+        self.assertIn(settings.JWT_REFRESH_COOKIE_NAME, res.cookies)
+
+    def test_customer_door_wrong_password_is_still_uniform(self):
+        res = self.client.post(
+            self.CUSTOMER_DOOR,
+            login_payload("buyer", password="Wr0ng-Passphrase!"),
+            format="json",
+        )
+        self.assertEqual(res.status_code, 401)
+
+    def test_customer_door_refuses_a_privileged_account_and_audits_it(self):
+        boss = make_privileged("boss")
+        enroll_via_model(boss)
+        res = self.client.post(
+            self.CUSTOMER_DOOR, login_payload("boss"), format="json"
+        )
+        self.assertEqual(res.status_code, 403)
+        self.assertNotIn("access", res.data)
+        self.assertIn("staff sign-in page", res.data["error"])
+        self.assertTrue(
+            AuditEvent.objects.filter(
+                event_type=AuditEvent.EventType.AUTH_LOGIN_FAILED, actor=boss
+            ).exists()
+        )
+
+    def test_customer_door_refuses_an_unenrolled_privileged_account(self):
+        # Mandatory means mandatory: with no device to satisfy, the door
+        # without a code field still must not authenticate the account.
+        make_privileged("newbie")
+        res = self.client.post(
+            self.CUSTOMER_DOOR, login_payload("newbie"), format="json"
+        )
+        self.assertEqual(res.status_code, 403)
+        self.assertNotIn("access", res.data)
+
+    def test_customer_door_serves_non_privileged_staff_unchanged(self):
+        # R-17.9 binds privileged roles only, and the customer door refuses
+        # exactly those: a support-role staffer (staff, no staff.manage) is
+        # an ordinary caller here, as it always was on the shared door.
+        helper = self.make_user("helper")
+        helper.is_staff = True
+        helper.save()
+        helper.groups.add(Group.objects.get_or_create(name=ROLE_SUPPORT)[0])
+        res = self.client.post(
+            self.CUSTOMER_DOOR, login_payload("helper"), format="json"
+        )
+        self.assertEqual(res.status_code, 200, res.data)
+
+    def test_staff_door_still_ignores_a_customers_totp(self):
+        # The staff door keeps its own contract for non-privileged callers:
+        # the field exists for privileged logins and is inert for everyone
+        # else (the pre-split pin, preserved on the door it described).
+        res = self.client.post(
+            self.STAFF_DOOR, login_payload("buyer", totp="000000"), format="json"
+        )
+        self.assertEqual(res.status_code, 200)
+        self.assertFalse(TOTPDevice.objects.exists())
+
+    def test_staff_door_still_demands_and_spends_the_factor(self):
+        boss = make_privileged("boss")
+        device = enroll_via_model(boss)
+        res = self.client.post(self.STAFF_DOOR, login_payload("boss"), format="json")
+        self.assertEqual(res.status_code, 400)  # no code
+        self.assertNotIn("access", res.data)
+        res = self.client.post(
+            self.STAFF_DOOR, login_payload("boss", totp="000000"), format="json"
+        )
+        self.assertEqual(res.status_code, 400)  # wrong code
+        code = totp.hotp(device.secret, totp.now() // totp.STEP)
+        res = self.client.post(
+            self.STAFF_DOOR, login_payload("boss", totp=code), format="json"
+        )
+        self.assertEqual(res.status_code, 200, res.data)
+        # The replay guard rides on the door that consumed the code: the same
+        # one cannot be spent twice (RFC 6238 §5.2).
+        replay = self.fresh_client()
+        res = replay.post(
+            self.STAFF_DOOR, login_payload("boss", totp=code), format="json"
+        )
+        self.assertEqual(res.status_code, 400)
 
 
 class AdminMFAEnforcementTests(ApiTestCase):

@@ -22,7 +22,7 @@ export default async function LoginPage({
   return (
     <AuthShell title="Sign in">
       <GuestOnly next={next}>
-        <LoginForm next={next} />
+        <LoginForm next={next} variant="customer" />
       </GuestOnly>
     </AuthShell>
   );

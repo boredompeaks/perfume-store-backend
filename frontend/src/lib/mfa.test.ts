@@ -1,8 +1,10 @@
 import { describe, expect, it } from "vitest";
 import {
+  buildLoginBody,
   enrollmentConfirmRequest,
   enrollmentSetupRequest,
   isPlausibleCode,
+  loginEndpoint,
   normalizeCode,
   qrImageSource,
   QR_DATA_URI_PREFIX,
@@ -66,6 +68,33 @@ describe("code normalisation", () => {
     expect(isPlausibleCode("1234567")).toBe(false);
     expect(isPlausibleCode("12345a")).toBe(false);
     expect(isPlausibleCode("")).toBe(false);
+  });
+});
+
+describe("sign-in doors (SPEC-20-10)", () => {
+  it("each surface posts to its own endpoint", () => {
+    // The staff door is the one that enforces the TOTP factor; the customer
+    // door is the one whose serializer has no totp field at all.
+    expect(loginEndpoint("staff")).toBe("/api/accounts/login/");
+    expect(loginEndpoint("customer")).toBe("/api/accounts/storefront/login/");
+    expect(loginEndpoint("customer")).not.toBe(loginEndpoint("staff"));
+  });
+
+  it("a customer login never carries a totp key", () => {
+    expect(buildLoginBody("customer", CREDS)).toEqual({
+      username: "boss",
+      password: "S3cure-Passphrase!",
+    });
+    // Even if a caller hands one over, the storefront body cannot grow the
+    // field: the form has no input for it and the server ignores it.
+    expect(buildLoginBody("customer", CREDS, "123456")).not.toHaveProperty(
+      "totp",
+    );
+  });
+
+  it("a staff login carries the code only when one was typed", () => {
+    expect(buildLoginBody("staff", CREDS)).not.toHaveProperty("totp");
+    expect(buildLoginBody("staff", CREDS, " 123456 ").totp).toBe("123456");
   });
 });
 
