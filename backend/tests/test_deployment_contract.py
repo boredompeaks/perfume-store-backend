@@ -11,14 +11,27 @@ Deliberately no YAML library: PyYAML is not a declared dependency (it is not in
 requirements.txt, and adding it would put a parser in the production image for
 the sake of a test), so the assertions read the files as text. The compose file
 is schema-validated where it matters - `docker compose config` - not here.
+
+Gate fix cycle 1 (SPEC-2-04/SPEC-22-03) added the two classes at the bottom:
+the image's build-time collectstatic layer and the compose runtime env contract
+now have to SATISFY the non-debug guards, and both are proved the only way that
+means anything - by booting the app with exactly the env those files commit,
+and by watching a guard key being dropped and the boot still being refused.
 """
 
+import os
 import re
+import subprocess
+import sys
+import tempfile
 from pathlib import Path
 
 from django.test import SimpleTestCase
 
+from tests.test_settings_security import run_settings_import
+
 REPO_ROOT = Path(__file__).resolve().parents[2]
+BACKEND_DIR = REPO_ROOT / "backend"
 COMPOSE = "docker-compose.yml"
 PROCFILE = "Procfile"
 RELEASE = "scripts/release.sh"
@@ -65,6 +78,112 @@ def read(relative_path):
 def code_lines(text):
     """Drop comment-only lines so prose can never satisfy a contract check."""
     return [line for line in text.splitlines() if not line.strip().startswith("#")]
+
+
+# Every key a DJANGO_DEBUG=false boot must declare before config.settings will
+# import (SPEC-22-03 [R-22.3]). Listed here because the two deployment files
+# below have to carry it: a build layer and a runtime container are both
+# non-debug boots, and the guard is deliberately blind to which one it is.
+NON_DEBUG_REQUIRED_KEYS = (
+    "DJANGO_SECRET_KEY",
+    "DJANGO_ENV",
+    "DATABASE_URL",
+    "DJANGO_ALLOWED_HOSTS",
+    "CSRF_TRUSTED_ORIGINS",
+)
+
+# Run inside the container's own interpreter and settings, so this is the
+# gunicorn load path (the image CMD hands it exactly this module) followed by
+# the probe the compose healthcheck performs against /health/.
+RUNTIME_BOOT_SNIPPET = (
+    "import config.wsgi as wsgi;"
+    "print('WSGI', type(wsgi.application).__name__);"
+    "from django.test import Client;"
+    "print('HEALTH', Client(headers={'host': 'shop.example.test'})"
+    ".get('/health/').status_code)"
+)
+
+
+def dockerfile_build_env():
+    """Return the env the image's collectstatic layer runs under, as committed.
+
+    Parsed out of the Dockerfile instead of restated here, so a pin can never
+    quietly agree with a stale copy of the RUN line: whatever the image
+    actually sets is exactly what the tests below boot the app with. Backslash
+    continuations are joined first, because the command of an env-setting RUN
+    sits on the last of them.
+    """
+    logical, buffer = [], ""
+    for raw in read("backend/Dockerfile").splitlines():
+        line = raw.rstrip()
+        if line.endswith("\\"):
+            buffer += line[:-1] + " "
+            continue
+        logical.append((buffer + line).strip())
+        buffer = ""
+    layers = [
+        line
+        for line in logical
+        if line.startswith("RUN ") and "collectstatic" in line
+    ]
+    assert len(layers) == 1, f"expected one collectstatic layer, got {layers}"
+    env = {}
+    for token in layers[0].split()[1:]:
+        if not re.match(r"^[A-Za-z_][A-Za-z0-9_]*=", token):
+            break  # the command itself, not an environment assignment
+        key, _, value = token.partition("=")
+        env[key] = value
+    return env
+
+
+def compose_backend_environment():
+    """Return the backend service's compose `environment:` mapping, as text."""
+    text = read(COMPOSE)
+    service = re.search(r"^  backend:\s*$", text, re.M)
+    assert service, "docker-compose.yml has no backend service"
+    block = text[service.end() :]
+    end = re.search(r"^(?:  \S|\S)", block, re.M)
+    block = block[: end.start()] if end else block
+    environment = re.search(r"^    environment:\s*$", block, re.M)
+    assert environment, "the backend service has no environment: block"
+    values = block[environment.end() :]
+    sibling = re.search(r"^    \S", values, re.M)
+    values = values[: sibling.start()] if sibling else values
+    return {
+        match.group(1): match.group(2)
+        for match in re.finditer(
+            r"^      ([A-Za-z_][A-Za-z0-9_]*):\s*(.*)$", values, re.M
+        )
+    }
+
+
+def run_backend(argv, env):
+    """Run a command in the backend checkout against a hermetic environment.
+
+    Only `env` decides what config.settings sees: the inherited DJANGO_*,
+    RAZORPAY_* and EMAIL_* names (plus the ones load_dotenv() may already have
+    pushed into this process) are stripped, so a developer's local .env can
+    neither satisfy a guard nor mask one.
+    """
+    scrubbed = {
+        key: value
+        for key, value in os.environ.items()
+        if not key.startswith(("DJANGO_", "RAZORPAY_", "EMAIL_"))
+    }
+    return subprocess.run(
+        argv,
+        capture_output=True,
+        text=True,
+        cwd=str(BACKEND_DIR),
+        env={**scrubbed, **env},
+        timeout=300,
+    )
+
+
+def manage(*argv, env):
+    """Run `manage.py <argv>` in the hermetic environment above."""
+    return run_backend([sys.executable, "manage.py", *argv], env)
+
 
 
 class DeploymentFilesExistTests(SimpleTestCase):
@@ -376,3 +495,162 @@ class NoHardcodedSecretsTests(SimpleTestCase):
             [],
             "credentials must come from the environment: " + "; ".join(offenders),
         )
+
+
+class BuildLayerSatisfiesTheNonDebugGuardsTests(SimpleTestCase):
+    """Gate fix cycle 1 (SPEC-2-04/22-03): `docker build` was dead, not
+    merely unguarded.
+
+    The image collects its assets in a build layer that runs with
+    DJANGO_DEBUG=false, so SPEC-22-03's fail-closed guards apply to it exactly
+    as they do to a container: a build that cannot declare an environment, a
+    usable DATABASE_URL, explicit hosts/origins and a secret key does not build
+    at all, and the promoted image stopped building. Every boot below uses
+    EXACTLY the env the committed RUN line sets - no helper keys - so nothing
+    here can be satisfied by something the Dockerfile does not actually do.
+    """
+
+    def setUp(self):
+        self.build_env = dockerfile_build_env()
+
+    def test_build_layer_declares_every_key_a_non_debug_boot_requires(self):
+        self.assertEqual(self.build_env.get("DJANGO_DEBUG"), "false")
+        for key in NON_DEBUG_REQUIRED_KEYS:
+            with self.subTest(key=key):
+                self.assertTrue(
+                    self.build_env.get(key),
+                    f"the collectstatic layer does not declare {key}",
+                )
+
+    def test_build_layer_env_names_a_declared_environment(self):
+        # A misspelling would refuse the build, so the layer's environment
+        # name has to be one the settings module actually accepts.
+        self.assertIn(
+            self.build_env["DJANGO_ENV"],
+            ("local", "ci", "staging", "production"),
+        )
+
+    def test_build_layer_bakes_no_secret_and_names_no_real_database(self):
+        # A secret in an image is readable by anyone who can pull it, so the
+        # placeholder has to announce itself as one.
+        self.assertIn("not-a-real-secret", self.build_env["DJANGO_SECRET_KEY"])
+        database_url = self.build_env["DATABASE_URL"]
+        # collectstatic opens no connection, but the guard cannot know that, so
+        # the URL only has to be parseable. It must be a throwaway file under a
+        # temp directory: never a Postgres host, never credentials, never the
+        # application's own development database.
+        self.assertTrue(database_url.startswith("sqlite:///"), database_url)
+        self.assertNotIn("@", database_url)
+        self.assertTrue(
+            database_url.removeprefix("sqlite:///").startswith("/tmp/"),
+            f"the build-layer database is not a throwaway temp path: {database_url}",
+        )
+
+    def test_build_layer_env_passes_djangos_system_checks(self):
+        # The layer's env verbatim - nothing overridden, because the container
+        # path it names (/app/staticfiles) is only ever read by collectstatic,
+        # so a test host never has to create it to run the checks.
+        res = manage("check", env=dict(self.build_env))
+        self.assertEqual(res.returncode, 0, res.stdout + res.stderr)
+        self.assertIn("no issues", res.stdout)
+
+    def test_collectstatic_succeeds_under_the_build_layer_env(self):
+        # The end-to-end proof that the image builds again. Only the OUTPUT
+        # directory is redirected, to a temp dir this test owns and removes:
+        # /app/staticfiles exists inside the image, not on a test host.
+        with tempfile.TemporaryDirectory() as static_root:
+            res = manage(
+                "collectstatic",
+                "--noinput",
+                env={**self.build_env, "DJANGO_STATIC_ROOT": static_root},
+            )
+            gathered = list(Path(static_root).rglob("*.css"))
+        self.assertEqual(res.returncode, 0, res.stdout + res.stderr)
+        self.assertTrue(gathered, "collectstatic gathered no CSS")
+
+    def test_the_build_layer_env_still_refuses_when_a_guard_key_is_dropped(self):
+        # Why the layer needs the keys at all: drop any one of them and the
+        # same boot is still refused by name. This is also the proof that the
+        # layer's env SATISFIES the guard rather than routing around it, and
+        # that nothing here weakened the production refusal.
+        for key in NON_DEBUG_REQUIRED_KEYS:
+            with self.subTest(key=key):
+                res = run_settings_import(
+                    {k: v for k, v in self.build_env.items() if k != key}
+                )
+                self.assertNotEqual(res.returncode, 0, res.stdout)
+                self.assertIn(key, res.stderr)
+
+
+class ComposeRuntimeEnvContractTests(SimpleTestCase):
+    """Gate fix cycle 1 (SPEC-2-04/22-03): the runtime service has to boot.
+
+    The compose env contract listed the secret key, hosts, DEBUG and
+    DATABASE_URL but never DJANGO_ENV or CSRF_TRUSTED_ORIGINS, so with exactly
+    the env this file assembles the gunicorn CMD, release.sh's migration
+    checkpoint and /health/ all refused at import - a crash-loop no release
+    could get past, and the strongest gate in the project.
+    """
+
+    def setUp(self):
+        self.environment = compose_backend_environment()
+
+    def test_backend_service_declares_the_non_debug_guard_keys(self):
+        # DJANGO_SECRET_KEY is deliberately absent (it flows in through
+        # env_file, and an earlier test pins that it is never set here): these
+        # are the keys whose absence made the container refuse to start.
+        for key in ("DJANGO_ENV", "CSRF_TRUSTED_ORIGINS", "DATABASE_URL"):
+            with self.subTest(key=key):
+                self.assertIn(key, self.environment)
+
+    def test_environment_name_and_origins_come_from_the_deployment_env(self):
+        # Pass-throughs, not literals: the .env the deploy host holds is the
+        # only place that knows which environment it is and which origin it
+        # serves. The default names a real environment (compose IS the
+        # production orchestrator); the origins are REQUIRED, because a
+        # localhost default here is precisely the unconfigured deployment the
+        # settings guard exists to refuse - compose says which key is missing
+        # instead of letting the container crash-loop on the import.
+        for key in ("DJANGO_ENV", "CSRF_TRUSTED_ORIGINS"):
+            with self.subTest(key=key):
+                self.assertIn("${" + key, self.environment[key])
+        self.assertRegex(
+            self.environment["DJANGO_ENV"],
+            r"\$\{DJANGO_ENV:-(staging|production)\}",
+        )
+        origins = self.environment["CSRF_TRUSTED_ORIGINS"]
+        self.assertIn(":?set CSRF_TRUSTED_ORIGINS", origins)
+
+    def test_the_compose_env_contract_boots_the_app_and_serves_health(self):
+        # The proof BUG-2 needed, with the env the compose contract assembles
+        # from a repo-root .env: the WSGI application the image CMD hands
+        # gunicorn imports, Django's checks, and /health/ answering 200 - all
+        # through the settings import, with no server and no network.
+        #
+        # DATABASE_URL is the one substitution: the contract's Postgres runs in
+        # the `db` service and cannot be reached from a test process, so the
+        # contract's own documented alternative - an explicit sqlite:// URL,
+        # honoured in every environment - stands in for it. MEDIA_ROOT is
+        # redirected to a temp dir so /health/'s write probe never touches the
+        # checkout.
+        with tempfile.TemporaryDirectory() as workdir:
+            env = {
+                "DJANGO_SECRET_KEY": "x" * 50,
+                "DJANGO_DEBUG": "false",
+                "DJANGO_ENV": "production",
+                "DJANGO_ALLOWED_HOSTS": "shop.example.test",
+                "CSRF_TRUSTED_ORIGINS": "https://shop.example.test",
+                "DATABASE_URL": "sqlite:///"
+                + (Path(workdir) / "runtime.sqlite3").as_posix(),
+                "DJANGO_MEDIA_ROOT": workdir,
+                "DJANGO_STATIC_ROOT": workdir,
+            }
+            migrated = manage("migrate", "--noinput", env=env)
+            self.assertEqual(migrated.returncode, 0, migrated.stdout + migrated.stderr)
+            res = run_backend([sys.executable, "-c", RUNTIME_BOOT_SNIPPET], env)
+        self.assertEqual(res.returncode, 0, res.stdout + res.stderr)
+        # What the container CMD loads, and what the compose healthcheck probes.
+        self.assertIn("WSGI WSGIHandler", res.stdout)
+        self.assertIn("HEALTH 200", res.stdout)
+
+

@@ -83,10 +83,34 @@ with staging's key (session, signed cookie) is not honoured in production.
 The staging database is disposable: it is restored from a sanitised dump or
 seeded fresh, never pointed at production for convenience.
 
-**Known gap (follow-up for the Dockerfile owner, SPEC-2-10a).** The image's
-build-time `collectstatic` runs with `DJANGO_DEBUG=false` and no
-`DATABASE_URL`, so the SPEC-22-03 guard makes `docker build` refuse until
-that `RUN` gains an explicit build-time `DATABASE_URL` (e.g.
-`sqlite:////tmp/build.sqlite3`). The guard is the correct behaviour and the
-build line is what has to change; `backend/Dockerfile` was out of scope for
-this task.
+**Where each key is set.** The table above is the whole contract, and every one
+of those keys has to be present in *both* places a non-debug boot happens -
+the guards are conjunctive, so the one key you are missing is the one that
+refuses the boot, whatever the others say:
+
+- **The image's build layer** (`backend/Dockerfile`, the `collectstatic`
+  `RUN`). A build layer is a `DJANGO_DEBUG=false` boot too, so it declares the
+  same keys, as build-time-only values: `DJANGO_ENV=ci` (a build is not a
+  deployment), the non-secret placeholder secret key, a throwaway
+  `DATABASE_URL=sqlite:////tmp/build.sqlite3`, and the localhost hosts and
+  origins. Nothing there is a credential or a real database - `collectstatic`
+  opens no connection, but the guard cannot know that, and the URL only has to
+  be parseable. `backend/.dockerignore` keeps `.env` and `db.sqlite3` out of
+  the build context, so this temp path is the only database the image names.
+- **The running container** (`docker-compose.yml` + the repo-root `.env`).
+  `DJANGO_ENV` and `CSRF_TRUSTED_ORIGINS` are pass-throughs, because only the
+  deployment knows which environment it is and which origin it serves.
+  `DJANGO_ENV` defaults to `production` - this file is the production
+  orchestrator - and set it to `local` for local work. `CSRF_TRUSTED_ORIGINS`
+  is **required**: compose refuses to start and names the missing key, instead
+  of booting a container that dies on the settings import. The secret key,
+  hosts, `DJANGO_DEBUG` and the app-side keys flow in through `env_file`.
+
+Both halves are pinned by the suite rather than only documented:
+`backend/tests/test_deployment_contract.py` boots the app with exactly the
+build env the committed `RUN` line declares, and with the shape the compose
+contract assembles (gunicorn's `config.wsgi:application` loads and `/health/`
+answers 200 in-process), and it asserts that dropping **any one** of the five
+keys is still refused by name. So neither file can drift back into an
+unbuildable image or a crash-looping container without a red test, and the
+production guard cannot be quietly weakened from the deployment side.

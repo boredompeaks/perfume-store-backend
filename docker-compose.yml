@@ -19,6 +19,14 @@
 #   DJANGO_SECRET_KEY=<long random string>
 #   DJANGO_ALLOWED_HOSTS=localhost,127.0.0.1
 #   DJANGO_DEBUG=false
+#   # SPEC-22-03: a non-debug boot refuses to start unless it can declare
+#   # which environment it is, so the backend service passes this through
+#   # (default production; set local for local work).
+#   DJANGO_ENV=production
+#   # ...and unless it states the origin it serves, which only the deployment
+#   # knows: compose REFUSES TO START without it rather than letting the
+#   # container crash-loop on the settings import.
+#   CSRF_TRUSTED_ORIGINS=http://localhost:3000
 #   POSTGRES_USER=perfume
 #   POSTGRES_PASSWORD=<long random string>
 #   POSTGRES_DB=perfume_store
@@ -81,6 +89,21 @@ services:
       # Static files live inside the image (SPEC-22-01): whitenoise serves
       # them from the app process, so the release only has to re-collect.
       DJANGO_STATIC_ROOT: /app/staticfiles
+      # SPEC-22-03 [R-22.3]: the guards apply to this container exactly as they
+      # apply to any non-debug boot, so the runtime env has to carry their keys
+      # - without DJANGO_ENV and CSRF_TRUSTED_ORIGINS the image refuses to
+      # import, the gunicorn CMD crash-loops, release.sh's migration
+      # checkpoint fails and /health/ never answers.
+      # Both are pass-throughs from the repo-root .env, because only the
+      # deployment knows which environment it is and which origin it serves.
+      # DJANGO_ENV defaults to a real declared name (this file IS the
+      # production orchestrator; set DJANGO_ENV=local for local work). The
+      # origins are REQUIRED rather than defaulted: a localhost default here
+      # is precisely the unconfigured deployment the settings guard exists to
+      # refuse, so compose names the missing key up front instead of letting
+      # the container die on the settings import. Neither is a secret.
+      DJANGO_ENV: "${DJANGO_ENV:-production}"
+      CSRF_TRUSTED_ORIGINS: "${CSRF_TRUSTED_ORIGINS:?set CSRF_TRUSTED_ORIGINS in the repo-root .env}"
     ports:
       - "8000:8000"
     volumes:
