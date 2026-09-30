@@ -2,16 +2,26 @@ from django.contrib.auth.models import User
 from django.contrib.auth.password_validation import validate_password
 from django.core.exceptions import ValidationError
 from rest_framework import serializers
+from rest_framework.exceptions import PermissionDenied
 from rest_framework_simplejwt.serializers import TokenObtainPairSerializer
 
 from common import totp
 from common.permissions import is_privileged
 
+from . import mfa_trust
 from .models import (
     MFA_CODE_INVALID,
     MFA_CODE_REQUIRED,
     MFA_ENROLLMENT_REQUIRED,
     TOTPDevice,
+)
+
+# SPEC-20-10: raised by the storefront serializer only, so it lives beside
+# its single raiser rather than in accounts.models with the login/admin
+# messages (that module is the shared R-17.9 wording and stays untouched).
+MFA_STAFF_LOGIN_REQUIRED = (
+    "This is a staff account. Staff sign in on the staff sign-in page, "
+    "where multi-factor authentication is part of the login."
 )
 
 
@@ -86,6 +96,13 @@ class MFATokenObtainPairSerializer(TokenObtainPairSerializer):
     are ever minted without the second factor. Rollout: a privileged user
     with no confirmed device is blocked at login (mandatory means
     mandatory) with the enrollment path named in the message.
+
+    SPEC-20-8: the ONLY change to the rule above is the guard around it —
+    a device the user explicitly trusted, whose TTL has not lapsed, and that
+    this very request is coming from, skips the challenge. Everything inside
+    that guard (require a code, verify, consume the replay counter) is
+    byte-for-byte the pre-SPEC-20-8 code path, so an untrusted device cannot
+    be made to skip a code, and trust can never make a code replayable.
     """
 
     # Optional at the field level so non-privileged logins stay
@@ -98,18 +115,46 @@ class MFATokenObtainPairSerializer(TokenObtainPairSerializer):
             device = TOTPDevice.active_for(self.user)
             if device is None:
                 raise serializers.ValidationError({"totp": [MFA_ENROLLMENT_REQUIRED]})
-            code = attrs.get("totp")
-            if not code:
-                raise serializers.ValidationError({"totp": [MFA_CODE_REQUIRED]})
-            counter = totp.verify_code(
-                device.secret,
-                code,
-                at_time=totp.now(),
-                last_used_counter=device.last_used_counter,
-            )
-            if counter is None:
-                raise serializers.ValidationError({"totp": [MFA_CODE_INVALID]})
-            # RFC 6238 §5.2: the consumed counter is the replay watermark.
-            device.last_used_counter = counter
-            device.save(update_fields=["last_used_counter"])
+            if not mfa_trust.is_trusted_device(
+                self.context["request"], self.user, device
+            ):
+                code = attrs.get("totp")
+                if not code:
+                    raise serializers.ValidationError({"totp": [MFA_CODE_REQUIRED]})
+                counter = totp.verify_code(
+                    device.secret,
+                    code,
+                    at_time=totp.now(),
+                    last_used_counter=device.last_used_counter,
+                )
+                if counter is None:
+                    raise serializers.ValidationError({"totp": [MFA_CODE_INVALID]})
+                # RFC 6238 §5.2: the consumed counter is the replay watermark.
+                device.last_used_counter = counter
+                device.save(update_fields=["last_used_counter"])
+        return data
+
+
+class StorefrontTokenObtainPairSerializer(TokenObtainPairSerializer):
+    """Customer storefront login — no ``totp`` field at all (SPEC-20-10).
+
+    The storefront has no TOTP: R-17.9 binds privileged roles only, so a
+    customer was being shown, and could post, an authentication-code field
+    that no server check ever read. This door declares the parent's explicit
+    ``username``/``password`` and nothing more, which makes ``totp`` a
+    non-field in both directions: the storefront form cannot render it, and
+    a body that includes it is ignored rather than half-honoured.
+
+    A privileged account is REFUSED here instead of being authenticated.
+    This serializer has no factor to demand, so letting one through would
+    turn the customer door into a way around the very rule that made it
+    necessary — the caller is pointed at the door that does enforce R-17.9.
+    The answer reveals nothing the caller has not already proven with a
+    correct password.
+    """
+
+    def validate(self, attrs):
+        data = super().validate(attrs)
+        if is_privileged(self.user):
+            raise PermissionDenied(MFA_STAFF_LOGIN_REQUIRED)
         return data

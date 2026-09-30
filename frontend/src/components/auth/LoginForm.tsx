@@ -7,7 +7,20 @@ import { ApiError } from "@/lib/api";
 import { useAuth } from "@/lib/auth";
 import { inputClass } from "@/lib/ui";
 
-export default function LoginForm({ next }: { next?: string }) {
+export default function LoginForm({
+  next,
+  variant = "customer",
+}: {
+  next?: string;
+  /**
+   * Which sign-in door this is. SPEC-20-10: the storefront ("customer") door
+   * renders NO authentication-code field at all — customers never
+   * authenticate with one, and offering it there was unknowable noise for
+   * the overwhelming majority of sign-ins. The "staff" door renders it,
+   * plainly, because that is where [R-17.9] demands it.
+   */
+  variant?: "customer" | "staff";
+}) {
   const router = useRouter();
   const { login } = useAuth();
   const [username, setUsername] = useState("");
@@ -21,10 +34,9 @@ export default function LoginForm({ next }: { next?: string }) {
     setPending(true);
     setError(null);
     try {
-      // The code is sent only when entered, so customer logins keep the
-      // exact payload they always had (SPEC-17-05: the field is mandatory
-      // server-side for privileged roles, ignored for everyone else).
-      await login(username.trim(), password, totp.trim() || undefined);
+      // The surface picks both the endpoint and whether a code may ride
+      // along (lib/mfa.ts): the customer body can never grow a totp key.
+      await login(variant, username.trim(), password, totp.trim() || undefined);
       // Cart is session-based and survives login; go where the user was
       // headed. Awaiting keeps "Signing in…" visible until the destination
       // is rendering (the backend's PBKDF2 check costs ~0.7s — honest
@@ -33,8 +45,13 @@ export default function LoginForm({ next }: { next?: string }) {
     } catch (err) {
       setError(
         err instanceof ApiError
-          ? err.fieldErrors?.totp?.[0] ??
-              "We couldn't sign you in with those details."
+          ? // The staff door reports MFA problems under `totp`; the customer
+            // door has no such field, so its answers (a uniform 401, or the
+            // "this is a staff account" refusal) arrive as the envelope's
+            // own text.
+            variant === "staff"
+            ? (err.fieldErrors?.totp?.[0] ?? err.message)
+            : err.message
           : "Sign-in failed. Check your connection and try again.",
       );
     } finally {
@@ -73,23 +90,26 @@ export default function LoginForm({ next }: { next?: string }) {
             required
           />
         </div>
-        <div>
-          {/* SPEC-17-05 (R-17.9): staff MFA. Only privileged roles are
-              required to fill this in; everyone else submits without it. */}
-          <label htmlFor="login-totp" className="mb-1 block text-sm">
-            Authentication code{" "}
-            <span className="text-ink-muted">(staff with MFA only)</span>
-          </label>
-          <input
-            id="login-totp"
-            type="text"
-            inputMode="numeric"
-            autoComplete="one-time-code"
-            value={totp}
-            onChange={(e) => setTotp(e.target.value)}
-            className={`${inputClass} w-full`}
-          />
-        </div>
+        {variant === "staff" && (
+          <div>
+            {/* SPEC-17-05 (R-17.9): the second factor the backend demands
+                for privileged accounts on this door. It does not exist on
+                the storefront door — see SPEC-20-10. */}
+            <label htmlFor="login-totp" className="mb-1 block text-sm">
+              Authentication code
+            </label>
+            <input
+              id="login-totp"
+              type="text"
+              inputMode="numeric"
+              autoComplete="one-time-code"
+              value={totp}
+              onChange={(e) => setTotp(e.target.value)}
+              className={`${inputClass} w-full`}
+              required
+            />
+          </div>
+        )}
 
         {error && (
           <p role="alert" className="text-sm text-bronze" aria-live="polite">
@@ -106,34 +126,56 @@ export default function LoginForm({ next }: { next?: string }) {
         </button>
       </form>
 
+      {variant === "staff" && (
+        <p className="mt-6 border-t border-line pt-6 text-sm text-ink-muted">
+          Setting up for the first time?{" "}
+          <Link
+            href="/staff/mfa/enroll"
+            className="underline underline-offset-4 transition-colors hover:text-bronze"
+          >
+            Enroll your device
+          </Link>
+        </p>
+      )}
+
       {/*
         These links are ALWAYS rendered, never conditioned on the error.
         The backend's 401 is deliberately ambiguous (wrong credentials vs
         unverified email — enumeration-safe by design); branching the UI on
-        the failure reason would leak that signal back.
+        the failure reason would leak that signal back. They are also
+        customer-only now that the form has two surfaces: registration and
+        email recovery are storefront concerns (SPEC-20-10).
       */}
-      <div className="mt-6 space-y-2 border-t border-line pt-6 text-sm text-ink-muted">
-        <p>
-          New here?{" "}
-          <Link href="/register" className="underline underline-offset-4 transition-colors hover:text-bronze">
-            Create an account
-          </Link>
-        </p>
-        <p>
-          Waiting for a verification email?{" "}
-          <Link href="/resend-verification" className="underline underline-offset-4 transition-colors hover:text-bronze">
-            Resend it
-          </Link>
-        </p>
-        <p className="flex gap-4">
-          <Link href="/forgot-username" className="underline underline-offset-4 transition-colors hover:text-bronze">
-            Forgot username?
-          </Link>
-          <Link href="/forgot-password" className="underline underline-offset-4 transition-colors hover:text-bronze">
-            Forgot password?
-          </Link>
-        </p>
-      </div>
+      {variant === "customer" && (
+        <div className="mt-6 space-y-2 border-t border-line pt-6 text-sm text-ink-muted">
+          <p>
+            Staff member?{" "}
+            <Link href="/staff/login" className="underline underline-offset-4 transition-colors hover:text-bronze">
+              Staff sign in
+            </Link>
+          </p>
+          <p>
+            New here?{" "}
+            <Link href="/register" className="underline underline-offset-4 transition-colors hover:text-bronze">
+              Create an account
+            </Link>
+          </p>
+          <p>
+            Waiting for a verification email?{" "}
+            <Link href="/resend-verification" className="underline underline-offset-4 transition-colors hover:text-bronze">
+              Resend it
+            </Link>
+          </p>
+          <p className="flex gap-4">
+            <Link href="/forgot-username" className="underline underline-offset-4 transition-colors hover:text-bronze">
+              Forgot username?
+            </Link>
+            <Link href="/forgot-password" className="underline underline-offset-4 transition-colors hover:text-bronze">
+              Forgot password?
+            </Link>
+          </p>
+        </div>
+      )}
     </div>
   );
 }

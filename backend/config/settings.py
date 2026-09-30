@@ -246,6 +246,13 @@ EMAIL_HOST_PASSWORD = os.getenv('EMAIL_HOST_PASSWORD', '')
 EMAIL_USE_TLS = os.getenv('EMAIL_USE_TLS', 'true').lower() == 'true'
 DEFAULT_FROM_EMAIL = os.getenv('DEFAULT_FROM_EMAIL', EMAIL_HOST_USER)
 FRONTEND_URL = os.getenv('FRONTEND_URL', 'http://localhost:3000').rstrip('/')
+# SPEC-20-13: where the admin login page sends an account that MFA has
+# blocked. Mandatory MFA (R-17.9) refuses an unenrolled privileged login,
+# so without a reachable enrollment surface such an account is locked out
+# of both /admin/ and the API with no way back in. The default is the
+# storefront host's staff enrollment page, so a single-host deployment
+# needs no extra configuration; override it only when the two live apart.
+MFA_ENROLL_URL = os.getenv('MFA_ENROLL_URL', f"{FRONTEND_URL}/staff/mfa/enroll")
 MEDIA_URL = '/media/'
 MEDIA_ROOT = BASE_DIR / 'media'
 
@@ -266,6 +273,19 @@ LOW_STOCK_THRESHOLD = _env_int('LOW_STOCK_THRESHOLD', 5)
 # Ops dashboard: the "Sales over time" chart covers this many calendar days
 # ending today. Tunable per deployment without a code change.
 DASHBOARD_SALES_WINDOW_DAYS = _env_int('DASHBOARD_SALES_WINDOW_DAYS', 30)
+
+# SPEC-20-8: "trust this device for N days" on the privileged MFA door. The
+# TTL is the only knob: 30 days is the window the user directive asks for,
+# and 0 is a safe kill switch that puts every privileged login straight back
+# behind a fresh code, no code change needed. Trust is opt-in per device (no
+# login can grant it), so this can only lengthen or shorten a grant the user
+# already made — it cannot grant one.
+MFA_TRUST_DAYS = _env_int('MFA_TRUST_DAYS', 30)
+# The signed marker binding a trusted device to the browser that asked for
+# it (HttpOnly, SameSite=Strict): a stolen password from any other browser
+# still earns the challenge.
+MFA_TRUST_COOKIE_NAME = os.getenv('MFA_TRUST_COOKIE_NAME', 'mfa_trusted_device')
+MFA_TRUST_COOKIE_SAMESITE = os.getenv('MFA_TRUST_COOKIE_SAMESITE', 'Strict')
 
 # SPEC-19-2 [R-19.20/R-19.21] admin alerts. Comma-separated staff/admin
 # mailboxes; empty disables admin alerts entirely (no guessed recipient).

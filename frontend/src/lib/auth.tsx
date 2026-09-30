@@ -8,6 +8,7 @@ import {
   useState,
 } from "react";
 import { apiFetch } from "./api";
+import { buildLoginBody, loginEndpoint, type LoginSurface } from "./mfa";
 import { forgetShipping } from "./shipping-store";
 import {
   clearTokens,
@@ -22,7 +23,17 @@ type AuthStatus = "loading" | "authenticated" | "anonymous";
 type AuthContextValue = {
   status: AuthStatus;
   userId: number | null;
-  login: (username: string, password: string, totp?: string) => Promise<void>;
+  /**
+   * `surface` picks the door: "customer" posts to the storefront login,
+   * which has no MFA field, "staff" to the one that enforces the TOTP
+   * factor (SPEC-20-10).
+   */
+  login: (
+    surface: LoginSurface,
+    username: string,
+    password: string,
+    totp?: string,
+  ) => Promise<void>;
   logout: () => void;
 };
 
@@ -53,18 +64,21 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   }, []);
 
   const login = useCallback(
-    async (username: string, password: string, totp?: string) => {
+    async (
+      surface: LoginSurface,
+      username: string,
+      password: string,
+      totp?: string,
+    ) => {
       // The login response carries only the access token: the refresh token
       // is set as an HttpOnly cookie by the backend (R-17.12) and never
-      // enters JS-readable storage. totp rides along only when provided —
-      // the backend demands it for privileged roles (SPEC-17-05, R-17.9).
-      const data = await apiFetch<{ access: string }>(
-        "/api/accounts/login/",
-        {
-          method: "POST",
-          body: totp ? { username, password, totp } : { username, password },
-        },
-      );
+      // enters JS-readable storage. `totp` rides along only on the staff
+      // door, which the backend demands for privileged roles (SPEC-17-05,
+      // R-17.9); the customer door has no such field (SPEC-20-10).
+      const data = await apiFetch<{ access: string }>(loginEndpoint(surface), {
+        method: "POST",
+        body: buildLoginBody(surface, { username, password }, totp),
+      });
       setTokens(data.access);
       setUserId(decodeJwtUserId(data.access));
       setStatus("authenticated");

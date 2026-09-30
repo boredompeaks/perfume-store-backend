@@ -3,8 +3,8 @@ from django.urls import path
 from .views import (
     register, username_available, verify_email, resend_verification,
     forgot_username, request_password_reset, reset_password, LoginView,
-    LogoutView, RefreshView,
-    MFAStatusView, MFASetupView, MFAConfirmView, MFADisableView,
+    LogoutView, RefreshView, StorefrontLoginView,
+    MFAStatusView, MFASetupView, MFAConfirmView, MFADisableView, MFATrustDeviceView,
 )
 
 
@@ -32,6 +32,16 @@ urlpatterns = [
         'login/',
         LoginView.as_view(),
         name='login'
+    ),
+
+    # SPEC-20-10: the customer door. `login/` above is the STAFF door (it
+    # carries the R-17.9 TOTP requirement), so customers get a surface with
+    # no totp field at all; a privileged account is refused here and sent to
+    # the staff door rather than authenticated without the factor.
+    path(
+        'storefront/login/',
+        StorefrontLoginView.as_view(),
+        name='storefront-login'
     ),
 
     path(
@@ -72,6 +82,14 @@ urlpatterns = [
         'mfa/disable/',
         MFADisableView.as_view(),
         name='mfa-disable'
+    ),
+
+    # SPEC-20-8: the opt-in "trust this device for MFA_TRUST_DAYS days",
+    # beside the enrollment surface it belongs to.
+    path(
+        'mfa/trust/',
+        MFATrustDeviceView.as_view(),
+        name='mfa-trust'
     ),
 
 ]

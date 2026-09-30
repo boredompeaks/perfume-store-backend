@@ -549,6 +549,9 @@ class AuthThrottleTests(ApiTestCase):
             "username-available": "auth",
             "register": "auth",
             "login": "auth",
+            # SPEC-20-10: the customer door rides the same credential
+            # budget as the staff door it was split off from.
+            "storefront-login": "auth",
             "token-refresh": "auth",
             "logout": "auth",
             # SPEC-17-05: the MFA enrollment surface rides the same 'auth'
@@ -558,6 +561,9 @@ class AuthThrottleTests(ApiTestCase):
             "mfa-setup": "auth",
             "mfa-confirm": "auth",
             "mfa-disable": "auth",
+            # SPEC-20-8: the "trust this device" opt-in spends a TOTP code
+            # like its siblings, so it rides the same 'auth' budget.
+            "mfa-trust": "auth",
         }
         found = {}
         for pattern in account_urlpatterns:

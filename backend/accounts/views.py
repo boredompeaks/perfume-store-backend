@@ -1,5 +1,6 @@
 from rest_framework.decorators import api_view, throttle_scope
 from rest_framework.exceptions import AuthenticationFailed
+from rest_framework.exceptions import PermissionDenied
 from rest_framework.exceptions import ValidationError as DRFValidationError
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
@@ -23,19 +24,29 @@ from django.utils import timezone
 from django.utils.encoding import force_bytes, force_str
 from django.utils.http import urlsafe_base64_encode, urlsafe_base64_decode
 
-from common import notifications, totp
+from common import notifications, qr, totp
 from common.models import AuditEvent
 from common.permissions import IsPrivilegedRole, is_privileged
 from ops import alerts
+from . import mfa_trust
 from .models import (
     MFA_CODE_INVALID,
     TOTPDevice,
 )
-from .serializers import MFATokenObtainPairSerializer, RegisterSerializer
+from .serializers import (
+    MFATokenObtainPairSerializer,
+    RegisterSerializer,
+    StorefrontTokenObtainPairSerializer,
+)
 
 
 class LoginView(TokenObtainPairView):
-    """JWT login behind the 'auth' throttle scope.
+    """JWT login behind the 'auth' throttle scope — the STAFF door.
+
+    SPEC-20-10: this is the privileged surface. It keeps the MFA-aware
+    serializer, so a privileged account must present its TOTP code (or
+    enroll first) exactly as before; the customer door is
+    StorefrontLoginView below.
 
     Throttling here bounds credential stuffing (V-04). The response contract
     is TokenObtainPairView's, except that the refresh token never enters the
@@ -57,9 +68,11 @@ class LoginView(TokenObtainPairView):
     def post(self, request, *args, **kwargs):
         try:
             response = super().post(request, *args, **kwargs)
-        except (AuthenticationFailed, DRFValidationError):
+        except (AuthenticationFailed, DRFValidationError, PermissionDenied):
             # super().post signals every rejection by raising; record the
             # failed attempt, then re-raise so the response is unchanged.
+            # PermissionDenied is the storefront door refusing a privileged
+            # account (SPEC-20-10) — a refused login like any other.
             self._record_login(request, succeeded=False)
             raise
         self._record_login(request, succeeded=True)
@@ -80,6 +93,20 @@ class LoginView(TokenObtainPairView):
             actor=User.objects.filter(username=username).first(),
             detail={"username": username},
         )
+
+
+class StorefrontLoginView(LoginView):
+    """POST /api/accounts/storefront/login/ — the CUSTOMER door (SPEC-20-10).
+
+    Inherited wholesale from LoginView, so the throttle, the audit trail
+    and the HttpOnly refresh cookie [R-17.12] are literally the same code.
+    The only difference is the serializer: this door has no ``totp`` field
+    and refuses privileged accounts outright (see
+    StorefrontTokenObtainPairSerializer) — which is what keeps it from
+    becoming a way around [R-17.9].
+    """
+
+    serializer_class = StorefrontTokenObtainPairSerializer
 
 
 def _set_refresh_cookie(response):
@@ -440,11 +467,12 @@ def reset_password(request):
 
 
 # --- SPEC-17-05 [R-17.9]: TOTP enrollment for privileged roles ------------
-# All four endpoints are IsPrivilegedRole-gated: exactly the population
-# enforcement blocks at login may enroll/status/disable. The 'auth' scope
-# bounds brute-forcing the 6-digit code space like every other identity
-# flow. Secrets leave the server exactly once (setup response) and never
-# again; nothing below returns or logs one.
+# Every endpoint here serves exactly the population enforcement blocks at
+# login: status/disable/trust are IsPrivilegedRole-gated, and setup/confirm
+# carry their own gate (a JWT session, or the credential bootstrap while no
+# device is active). The 'auth' scope bounds brute-forcing the 6-digit code
+# space like every other identity flow. Secrets leave the server exactly once
+# (setup response) and never again; nothing below returns or logs one.
 
 
 def _body_value(request, key):
@@ -525,9 +553,13 @@ class MFAStatusView(APIView):
 class MFASetupView(APIView):
     """POST /api/accounts/mfa/setup/ — mint a fresh secret, shown once.
 
-    Returns the base32 secret and the otpauth:// URI for the user's
-    authenticator app (a URI string, not a QR image — R-17.9 demands the
-    factor, not an artefact). Two deliberate trust paths:
+    Returns the base32 secret, the otpauth:// URI for the user's
+    authenticator app, and (SPEC-20-9) a scannable QR of that same URI so
+    nobody has to transcribe a secret by hand. All three ride ONE response:
+    the secret leaves the server exactly once, so a separate QR endpoint
+    would have to re-disclose it. The QR is presentation only — every
+    decision about the factor still reads the secret and the URI, never the
+    picture. Two deliberate trust paths:
 
     - JWT session (privileged): steady-state path. Re-enrolling while a
       device is enabled must also re-prove the second factor with ``code``
@@ -569,18 +601,25 @@ class MFASetupView(APIView):
             device.enabled = False
             device.confirmed_at = None
             device.last_used_counter = None
+            # SPEC-20-8: a rotation (the lost-device path) is a NEW factor,
+            # so any trust the previous secret collected lapses here rather
+            # than silently carrying over to the secret nobody has vetted.
+            device.trusted_until = None
             device.save(
                 update_fields=[
                     "secret",
                     "enabled",
                     "confirmed_at",
                     "last_used_counter",
+                    "trusted_until",
                 ]
             )
+        uri = totp.otpauth_uri(device.secret, user.username)
         return Response(
             {
                 "secret": device.secret,
-                "otpauth_uri": totp.otpauth_uri(device.secret, user.username),
+                "otpauth_uri": uri,
+                "qr_data_uri": qr.qr_data_uri(uri),
             }
         )
 
@@ -660,5 +699,53 @@ class MFADisableView(APIView):
             )
         with transaction.atomic():
             device.enabled = False
-            device.save(update_fields=["enabled"])
+            # SPEC-20-8: a factor that is off has nothing to trust. Clearing
+            # the TTL means a later re-enrollment starts from the challenge,
+            # so a stale grant can never ride back in with the new secret.
+            device.trusted_until = None
+            device.save(update_fields=["enabled", "trusted_until"])
         return Response({"enabled": False})
+
+
+class MFATrustDeviceView(APIView):
+    """POST /api/accounts/mfa/trust/ {code} — trust THIS device for N days.
+
+    SPEC-20-8: the opt-in half of "trust this device for 30 days". It is
+    never reached implicitly — the privileged user asks for it, from a
+    session that already holds a JWT (which itself required the factor), and
+    this call re-proves the factor with a FRESH code. That second proof is
+    deliberate: a stolen session must not be able to convert itself into
+    thirty days of challenge-free logins, and the fresh code goes through
+    the same replay-guarded ``_consume_code`` as every other code, so
+    granting trust spends a one-time code exactly once.
+
+    Gated and throttled exactly like its siblings (IsPrivilegedRole, 'auth'),
+    and it can only ever write to the caller's own device row.
+    """
+
+    permission_classes = [IsPrivilegedRole]
+    throttle_scope = 'auth'
+
+    def post(self, request):
+        device = TOTPDevice.active_for(request.user)
+        if device is None:
+            # No factor to make trustworthy; the enrollment message belongs
+            # to the login path, and this one names the missing precondition.
+            return Response(
+                {"code": ["Multi-factor authentication is not enabled."]},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        if _consume_code(device, _body_value(request, "code")) is None:
+            return Response(
+                {"code": [MFA_CODE_INVALID]}, status=status.HTTP_400_BAD_REQUEST
+            )
+        with transaction.atomic():
+            deadline = mfa_trust.grant_trust(device)
+        response = Response(
+            {
+                "trusted": True,
+                "trusted_until": deadline,
+                "trust_days": settings.MFA_TRUST_DAYS,
+            }
+        )
+        return mfa_trust.bind_trust_cookie(response, request.user, device)
