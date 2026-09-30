@@ -9,6 +9,17 @@ django-cors-headers==4.9.0
 # without an image library.
 segno==1.6.1
 razorpay==2.0.1
+# SPEC-22-01: production Postgres. Django's postgresql backend loads psycopg3
+# at first connection, so without this the documented postgres DATABASE_URL
+# crashes the moment prod takes its first query. [binary] ships prebuilt
+# libpq wheels (no compiler needed in the image).
+psycopg[binary]==3.3.6
+# WSGI server for config.wsgi (the Dockerfile CMD); Django's dev server is
+# not a production server.
+gunicorn==26.2.0
+# Serves STATIC_ROOT from the app process, so DEBUG=false deployments still
+# ship admin CSS/JS without a separate web server or object store.
+whitenoise==6.11.0
 python-dotenv==1.2.3
 Pillow==12.3.0
 coverage==7.16.1

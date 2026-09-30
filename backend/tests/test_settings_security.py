@@ -288,6 +288,57 @@ class DatabaseUrlParsingTests(SimpleTestCase):
         self.assertNotIn('PASSWORD', db)
         self.assertNotIn('PORT', db)
 
+    def test_postgres_url_forwards_sslmode_into_options(self):
+        # SPEC-22-01: sslmode travels in the URL query and reaches psycopg
+        # through OPTIONS. Dropping it (the previous behaviour) left a remote
+        # production database connecting unencrypted.
+        db = config_settings._database_from_url(
+            'postgres://u:p@db.example.com:5432/perfume_store?sslmode=require'
+        )
+        self.assertEqual(db['OPTIONS'], {'sslmode': 'require'})
+
+    def test_postgres_url_forwards_multiple_options_with_last_value_winning(self):
+        # Repeated keys: libpq takes the last occurrence, so the parser does
+        # too instead of letting dict-construction order decide.
+        db = config_settings._database_from_url(
+            'postgres://u:p@h/db?sslmode=disable&connect_timeout=10'
+            '&sslmode=require'
+        )
+        self.assertEqual(
+            db['OPTIONS'],
+            {'sslmode': 'require', 'connect_timeout': '10'},
+        )
+
+    def test_postgres_url_options_are_url_decoded(self):
+        db = config_settings._database_from_url(
+            'postgres://u:p@h/db?options=-c%20statement_timeout%3D5000'
+        )
+        self.assertEqual(
+            db['OPTIONS'], {'options': '-c statement_timeout=5000'}
+        )
+
+    def test_postgres_url_without_query_omits_options_entirely(self):
+        # No empty OPTIONS dict: a backend with an empty OPTIONS is a
+        # different connection-setup path than one with none at all, so the
+        # key stays absent when the URL carries no params.
+        db = config_settings._database_from_url('postgres://u:p@h:5432/db')
+        self.assertNotIn('OPTIONS', db)
+
+    def test_malformed_query_params_are_ignored_not_guessed_at(self):
+        # A bare flag (no '='), an empty pair and an empty key carry no
+        # value to forward; they are dropped rather than turned into a
+        # parameter the operator never wrote.
+        db = config_settings._database_from_url(
+            'postgres://u:p@h/db?sslmode=&novalue&&=orphan&sslmode=require'
+        )
+        self.assertEqual(db['OPTIONS'], {'sslmode': 'require'})
+
+    def test_sqlite_url_query_params_are_not_turned_into_options(self):
+        # Only the Postgres branch takes connection params: a sqlite URL
+        # with a stray query must stay a plain file configuration.
+        db = config_settings._database_from_url('sqlite:///db.sqlite3?timeout=5')
+        self.assertNotIn('OPTIONS', db)
+
     def test_postgres_url_without_host_keeps_name_only(self):
         # Socket-style URL: no credentials or host to map onto the config.
         db = config_settings._database_from_url('postgres:///appdb')
@@ -377,6 +428,24 @@ class DatabaseUrlImportTests(SimpleTestCase):
         self.assertIn("ENGINE django.db.backends.postgresql", res.stdout)
         self.assertIn("FIELDS db u h 5432", res.stdout)
 
+    def test_postgres_sslmode_reaches_the_imported_database_options(self):
+        # The import-time wiring, not just the pure parser: a production
+        # DATABASE_URL with sslmode must end up in DATABASES['default'].
+        res = run_settings_import(
+            {
+                **self._BOOT_ENV,
+                "DATABASE_URL": (
+                    "postgres://u:p@h:5432/db?sslmode=require"
+                ),
+            },
+            snippet=(
+                "import config.settings as s; "
+                "print('OPTIONS', s.DATABASES['default'].get('OPTIONS'))"
+            ),
+        )
+        self.assertEqual(res.returncode, 0, res.stderr)
+        self.assertIn("OPTIONS {'sslmode': 'require'}", res.stdout)
+
     def test_malformed_database_url_imports_without_crashing(self):
         res = run_settings_import(
             {**self._BOOT_ENV, "DATABASE_URL": "postgres://u@h:notaport/db"},
@@ -398,6 +467,109 @@ class DatabaseUrlImportTests(SimpleTestCase):
         )
         self.assertEqual(res.returncode, 0, res.stderr)
         self.assertIn("ENGINE django.db.backends.sqlite3", res.stdout)
+
+
+class StaticFilesProductionTests(SimpleTestCase):
+    """SPEC-22-01: the documented production path is real — STATIC_ROOT exists
+    so `collectstatic` has somewhere to write, and whitenoise serves the
+    result from the app process so DEBUG=false does not strip every asset
+    from the admin. Import-time settings, pinned like every other knob above
+    (the subprocess pattern keeps a developer's local .env out of it).
+    """
+
+    _BOOT_ENV = {"DJANGO_SECRET_KEY": "x" * 50}
+
+    def test_static_root_defaults_to_the_conventional_directory(self):
+        res = run_settings_import(
+            dict(self._BOOT_ENV),
+            snippet=(
+                "import config.settings as s; "
+                "print('STATIC_ROOT', s.STATIC_ROOT); "
+                "print('STATIC_URL', s.STATIC_URL)"
+            ),
+        )
+        self.assertEqual(res.returncode, 0, res.stderr)
+        self.assertIn(
+            "STATIC_ROOT " + str(config_settings.BASE_DIR / "staticfiles"),
+            res.stdout,
+        )
+        self.assertIn("STATIC_URL static/", res.stdout)
+
+    def test_static_root_is_env_driven_for_an_alternate_volume_layout(self):
+        res = run_settings_import(
+            {**self._BOOT_ENV, "DJANGO_STATIC_ROOT": "/srv/assets/static"},
+            snippet="import config.settings as s; print('STATIC_ROOT', s.STATIC_ROOT)",
+        )
+        self.assertEqual(res.returncode, 0, res.stderr)
+        self.assertIn("STATIC_ROOT /srv/assets/static", res.stdout)
+
+    def test_collectstatic_succeeds_into_the_configured_static_root(self):
+        # The end-to-end proof: a DEBUG=false settings import plus a real
+        # `collectstatic` run writes files into the configured directory.
+        # Nothing here touches the repo's own staticfiles/ — the root is a
+        # temp dir the test owns and removes.
+        with tempfile.TemporaryDirectory() as static_root:
+            env = {
+                **self._BOOT_ENV,
+                "DJANGO_STATIC_ROOT": static_root,
+                "PYTHONPATH": str(BACKEND_DIR),
+            }
+            res = subprocess.run(
+                [sys.executable, "manage.py", "collectstatic", "--noinput"],
+                capture_output=True,
+                text=True,
+                cwd=str(BACKEND_DIR),
+                env={
+                    **{
+                        k: v
+                        for k, v in os.environ.items()
+                        if not k.startswith(("DJANGO_", "RAZORPAY_", "EMAIL_"))
+                        and k not in _LEAKED_ENV_NAMES
+                    },
+                    **env,
+                },
+                timeout=300,
+            )
+            self.assertEqual(res.returncode, 0, res.stdout + res.stderr)
+            gathered = list(Path(static_root).rglob("*.css"))
+            self.assertTrue(gathered, f"no CSS gathered into {static_root}")
+
+    def test_whitenoise_is_wired_behind_security_and_before_session(self):
+        middleware = settings.MIDDLEWARE
+        self.assertIn(
+            "whitenoise.middleware.WhiteNoiseMiddleware", middleware
+        )
+        # Documented slot: SecurityMiddleware may rewrite the response first,
+        # so whitenoise must not run above it; and nothing that touches the
+        # session or the request body should sit between them.
+        self.assertLess(
+            middleware.index("django.middleware.security.SecurityMiddleware"),
+            middleware.index("whitenoise.middleware.WhiteNoiseMiddleware"),
+        )
+        self.assertLess(
+            middleware.index("whitenoise.middleware.WhiteNoiseMiddleware"),
+            middleware.index(
+                "django.contrib.sessions.middleware.SessionMiddleware"
+            ),
+        )
+
+    def test_static_serving_is_not_gated_on_debug(self):
+        # whitenoise sits in MIDDLEWARE unconditionally and STATIC_ROOT is
+        # set unconditionally, so a DEBUG=false boot (the production shape)
+        # still serves assets. USE_FINDERS may follow DEBUG — it only widens
+        # local development, it cannot remove the production path.
+        res = run_settings_import(
+            {"DJANGO_DEBUG": "false", **self._BOOT_ENV},
+            snippet=(
+                "import config.settings as s; "
+                "print('MIDDLEWARE_HAS_WN', "
+                "'whitenoise.middleware.WhiteNoiseMiddleware' in s.MIDDLEWARE); "
+                "print('STATIC_ROOT', bool(s.STATIC_ROOT))"
+            ),
+        )
+        self.assertEqual(res.returncode, 0, res.stderr)
+        self.assertIn("MIDDLEWARE_HAS_WN True", res.stdout)
+        self.assertIn("STATIC_ROOT True", res.stdout)
 
 
 class TransportHardeningTests(SimpleTestCase):

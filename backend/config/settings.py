@@ -96,6 +96,13 @@ MIDDLEWARE = [
     # login bounce) and on the unhandled-exception 500.
     'common.middleware.RequestIDMiddleware',
     'django.middleware.security.SecurityMiddleware',
+    # SPEC-22-01: whitenoise serves STATIC_ROOT from the app process, so a
+    # deployment with DEBUG=false still returns the admin CSS/JS. Placed
+    # directly below SecurityMiddleware (its documented slot: after the
+    # security headers, before anything that touches the request body or
+    # the session) and unconditionally, so a misconfigured DEBUG cannot
+    # silently drop assets.
+    'whitenoise.middleware.WhiteNoiseMiddleware',
     'django.contrib.sessions.middleware.SessionMiddleware',
     'corsheaders.middleware.CorsMiddleware',
     'django.middleware.common.CommonMiddleware',
@@ -133,6 +140,30 @@ WSGI_APPLICATION = 'config.wsgi.application'
 
 # Database
 # https://docs.djangoproject.com/en/6.1/ref/settings/#databases
+
+
+def _query_options(query):
+    """Return the DATABASES OPTIONS for a DATABASE_URL query string.
+
+    libpq connection parameters travel in the URL query (a Heroku-style
+    `postgres://...?sslmode=require`), and psycopg reads them from the
+    connection OPTIONS dict. Dropping them (the pre-SPEC-22-01 behaviour)
+    left a remote production database connecting unencrypted over whatever
+    the network offered. Only bare `key=value` pairs are forwarded: a
+    repeated key takes its last value (matching libpq, which takes the last
+    occurrence) and a param with no `=` is ignored rather than guessed at.
+    """
+    if not query:
+        return {}
+    options = {}
+    for pair in query.split('&'):
+        if not pair or '=' not in pair:
+            continue
+        key, _, value = pair.partition('=')
+        key = unquote(key).strip()
+        if key:
+            options[key] = unquote(value)
+    return options
 
 
 def _database_from_url(url):
@@ -176,8 +207,12 @@ def _database_from_url(url):
             config['HOST'] = parsed.hostname
         if port is not None:
             config['PORT'] = str(port)
-        # Extra query params (sslmode, ...) are deliberately ignored until
-        # the S22 deployment work wires SSL options through.
+        # SPEC-22-01: libpq connection params (sslmode above all) are part
+        # of the URL, not noise — a remote production Postgres reached
+        # without sslmode would carry its traffic in the clear.
+        options = _query_options(parsed.query)
+        if options:
+            config['OPTIONS'] = options
         return config
     if scheme == 'sqlite':
         # Exactly one leading slash is stripped so that sqlite:///db.sqlite3
@@ -238,6 +273,20 @@ USE_TZ = True
 # https://docs.djangoproject.com/en/6.1/howto/static-files/
 
 STATIC_URL = 'static/'
+
+# SPEC-22-01: collectstatic needs a destination. Env-driven because the
+# container image (Dockerfile) and a conventional VM/hosted deployment put
+# it in different places; the default is the conventional in-backend
+# directory so a deployment with no configuration at all still builds.
+STATIC_ROOT = os.getenv('DJANGO_STATIC_ROOT') or str(BASE_DIR / 'staticfiles')
+
+# whitenoise serves what collectstatic gathered, straight from the app
+# process: no separate web server, no S3 bucket, no missing-asset 404s in
+# production. USE_FINDERS follows DEBUG because without it a local dev
+# server would 404 every asset until collectstatic was run by hand; in
+# production (DEBUG=false) it is off and only STATIC_ROOT is consulted.
+WHITENOISE_USE_FINDERS = DEBUG
+WHITENOISE_AUTOREFRESH = DEBUG
 
 
 # Email
