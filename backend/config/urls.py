@@ -6,6 +6,7 @@ from django.conf.urls.static import static
 
 from ops.views import api_settings, audit_log, dashboard, health
 
+from common.admin_search import global_search
 from common.saved_filters import delete_saved_filter, save_saved_filter
 
 from orders.views import (
@@ -76,6 +77,13 @@ urlpatterns = [
     # Audit log (spec 6.12 route /admin/audit-log) — same before-the-admin
     # include rule as the dashboard above.
     path("admin/audit-log/", audit_log, name="admin-audit-log"),
+
+    # SPEC-5-10 (spec 5.1, "Search orders, products, customers…"): the ONE
+    # global admin search. Gated by the disjunction of the three models' own
+    # view capabilities, with each model's results gated individually by
+    # its ModelAdmin — same before-the-admin include rule as the chrome
+    # routes above.
+    path("admin/search/", global_search, name="admin-global-search"),
 
     # SPEC-20-6 [R-20.11]: the saved-filter write endpoints — save the
     # current filter selection under a name, and drop one of the caller's

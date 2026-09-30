@@ -1,0 +1,43 @@
+{% extends "admin/base_site.html" %}
+
+{# SPEC-5-10, spec 5.1: the ONE global search entry point — "Search orders,
+   products, customers…". Groups appear only for the models this caller may
+   view (common/admin_search.py gates each one on its ModelAdmin's own
+   view permission), so this page can never name a model they cannot list. #}
+{% block content %}
+  <h1>Search</h1>
+  <form id="global-search-form" method="get" action="{% url 'admin-global-search' %}" role="search">
+    <label for="global-search-q" class="visually-hidden">Search orders, products and customers</label>
+    <input type="search" id="global-search-q" name="q" value="{{ term }}"
+           maxlength="200" autocomplete="off"
+           placeholder="Search orders, products, customers…" />
+    <input type="submit" class="default" value="Search" />
+  </form>
+
+  {% if not term %}
+    <p>Type at least one character to search the models you can see.</p>
+  {% elif not groups %}
+    <p>You cannot view any searchable model, so there is nothing to search.</p>
+  {% elif not total %}
+    <p>No matches for <strong>{{ term }}</strong> in the models you can view.</p>
+  {% else %}
+    <p>{{ total }} match{{ total|pluralize:"es" }} for <strong>{{ term }}</strong>.</p>
+  {% endif %}
+
+  {% for group in groups %}
+    {% if group.total %}
+      <h2>{{ group.title }} ({{ group.total }})</h2>
+      <ul id="global-search-results-{{ forloop.counter }}">
+        {% for row in group.rows %}
+          <li><a href="{{ row.url }}">{{ row.label }}</a></li>
+        {% endfor %}
+      </ul>
+      {% if group.total > group.rows|length %}
+        <p>
+          Showing the first {{ group.rows|length }} —
+          <a href="{{ group.changelist_url }}">all {{ group.total }} in {{ group.title }}</a>.
+        </p>
+      {% endif %}
+    {% endif %}
+  {% endfor %}
+{% endblock %}

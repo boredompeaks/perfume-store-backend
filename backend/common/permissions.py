@@ -131,6 +131,43 @@ def capability_required(capability):
     return decorator
 
 
+def capability_required_any(capabilities):
+    """Decorator: the disjunction twin of :func:`capability_required`.
+
+    Some admin-chrome routes have no single capability behind them: SPEC-5-10's
+    unified global search spans three models with three different view
+    capabilities, so the honest gate is "may open the page if you may view
+    at least one of the models it searches" — the per-model results are
+    then gated individually by each ModelAdmin. A blanket ``is_staff`` would
+    be the alternative and is exactly what SPEC-17-10 closed on the
+    dashboard route, so this decorator keeps the contract of
+    :func:`capability_required` in every respect: anonymous callers are sent
+    to the admin login, an authenticated caller without any of the
+    capabilities gets a visible 403, and Django's own superuser bypass is
+    preserved.
+    """
+
+    def decorator(view):
+        @wraps(view)
+        def gated(request, *args, **kwargs):
+            user = request.user
+            if not user.is_authenticated:
+                return redirect_to_login(
+                    request.get_full_path(), reverse("admin:login")
+                )
+            if user.is_superuser or any(
+                user_has_capability(user, capability) for capability in capabilities
+            ):
+                return view(request, *args, **kwargs)
+            raise DjangoPermissionDenied(
+                "You do not have permission to perform this action."
+            )
+
+        return gated
+
+    return decorator
+
+
 def _permission_class_name(capability):
     """``orders.fulfill`` -> ``HasOrdersFulfill`` (stable, importable name)."""
     return "Has" + "".join(part.capitalize() for part in capability.split("."))
