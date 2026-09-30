@@ -65,9 +65,9 @@ Statuses: `PENDING -> IN-COMPLIANCE -> BUILDING -> IN-AUDIT -> BUGS-FOUND -> SHI
 
 ## Baseline
 
-**MEASURED 2026-09-30 (auditor FULL @ 847054b) — GREEN. Section 21 build complete.** Measured: **1021 tests, 1017 pass + 4 expectedFailure, cov 100.00%** (3909 stmts, 0 miss), test exit 0, `makemigrations --check` clean, coverage gate 100.00% >= 90, xfail ceiling EXACTLY 4. Frontend: 8 files / 55 vitest tests pass, `npm run build` exit 0. Progression: 992 (SPEC-20-6b) → **1021 (SPEC-21-5 +10, SPEC-21-3 +19)** = +29 tests, zero regressions (xfail held at exactly 4, coverage held at 100.00%). Route metrics now measured 70 /api/ routes = 34 legacy + 36 /api/v1/ (resolver walk).
+**MEASURED 2026-09-30 (auditor FULL @ d64afa5) — GREEN. Section 22 batch 1 complete.** Measured: **1033 tests, 1029 pass + 4 expectedFailure, cov 100.00%** (3927 stmts, 0 miss), test exit 0, `makemigrations --check` "No changes detected", collectstatic 157 files under DEBUG=false, psycopg 3.3.6 / gunicorn 26.2.0 / whitenoise 6.11.0 importable. Progression: 1021 (S21) → **1033 (SPEC-22-01 +12)** = +12, zero regressions (xfail exactly 4, coverage 100.00%). Non-blocking: `black -S` would join 3 wrapped lines; pre-existing repo Black drift, no black in CI.
 
-Previous floor: **992 tests, 988 pass + 4 expectedFailure, cov 100.00%** (3816 stmts, 0 miss) — tree 031ba97, Section 20 rebuild complete. Zero-regression held across every S20 batch: xfail exactly 4 and coverage 100.00% throughout.
+Previous floor: **1021 tests, 1017 pass + 4 expectedFailure, cov 100.00%** (3909 stmts) — Section 21 promoted @ 05399b9.
 
 last-promoted SHA: **68bed0b** (PR #11 "Promotion (SECTION, S17 queue COMPLETE)..." — merged by the USER 2026-09-23T01:02:50Z at head 58b0eb6; covers S17 remainder + S19 (19-2 cycle 2 @ 58b0eb6, 19-4 @ ae3ef7c); orchestrator fetch-verified 2026-09-23: mergeCommit 68bed0b9a86c, head 58b0eb6 confirmed ancestor of origin/feat/add-frontend tip. No open PRs; the next promotion PR is delta-only from 68bed0b.)
 
