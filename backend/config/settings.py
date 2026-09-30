@@ -90,6 +90,11 @@ INSTALLED_APPS = [
 ]
 
 MIDDLEWARE = [
+    # SPEC-20-3 [R-20.26]: per-request correlation id. First in the chain on
+    # purpose, so the X-Request-ID header is on every response including the
+    # ones produced above the view (security redirect, CORS preflight, admin
+    # login bounce) and on the unhandled-exception 500.
+    'common.middleware.RequestIDMiddleware',
     'django.middleware.security.SecurityMiddleware',
     'django.contrib.sessions.middleware.SessionMiddleware',
     'corsheaders.middleware.CorsMiddleware',
@@ -453,6 +458,14 @@ CSRF_TRUSTED_ORIGINS = [origin for origin in os.getenv(
 
 CORS_ALLOW_CREDENTIALS = True
 
+# SPEC-20-3 [R-20.26]: a browser may not read a cross-origin response header
+# unless the server names it here, so without this the correlation id would
+# be invisible to exactly the client that reports a failed request. The value
+# is the literal header name (django-cors-headers joins these strings
+# verbatim) and a test pins it to the middleware's constant, so the two
+# cannot drift.
+CORS_EXPOSE_HEADERS = ['X-Request-ID']
+
 
 # Logging (SPEC-7-02): an env-driven dictConfig baseline. No external
 # services are wired here — sentry/metrics/alerts stay deferred to the S22
@@ -517,8 +530,16 @@ def _build_logging(app_level, file_path=None):
         "formatters": {
             # Brace-style: audit detail payloads render dicts with braces,
             # which a %-style template would collide with on %% escaping.
+            #
+            # SPEC-20-3 [R-20.26]: the correlation id is stamped by the
+            # formatter itself (one place, so a new call site cannot forget
+            # it) rather than being added to each call site's format string.
             "plain": {
-                "format": "{levelname} {asctime} {name} {message}",
+                "()": "common.middleware.RequestIDFormatter",
+                "format": (
+                    "{levelname} {asctime} {name} request_id={request_id} "
+                    "{message}"
+                ),
                 "style": "{",
             },
         },

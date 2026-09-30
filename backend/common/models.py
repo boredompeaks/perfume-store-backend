@@ -20,6 +20,12 @@ import logging
 
 from django.db import models
 
+from common.middleware import (
+    NO_REQUEST_ID,
+    REQUEST_ID_MAX_LENGTH,
+    current_request_id,
+)
+
 # A dedicated channel name (not this module's __name__) so deployments can
 # route or filter the business trail in log tooling independently of model
 # noise; settings.LOGGING pins it at INFO (SPEC-7-02).
@@ -99,6 +105,14 @@ class AuditEvent(models.Model):
         related_name="audit_events",
     )
     detail = models.JSONField(default=dict, blank=True)
+    # SPEC-20-3 [R-20.26]: the correlation id of the request that produced
+    # the event, so an audit row can be joined to the request's log lines and
+    # to the id echoed on the response. Blank (never NULL) for events written
+    # outside a request — management commands, the test fixtures' direct
+    # calls — where there is no request to correlate with.
+    request_id = models.CharField(
+        max_length=REQUEST_ID_MAX_LENGTH, blank=True, db_index=True
+    )
     created_at = models.DateTimeField(auto_now_add=True)
 
     class Meta:
@@ -126,6 +140,7 @@ class AuditEvent(models.Model):
             actor=actor if getattr(actor, "is_authenticated", False) else None,
             order=order,
             detail=detail or {},
+            request_id=current_request_id(),
         )
         # [SPEC-7-02] Observability baseline: the trail is DB-only
         # otherwise, so a log reader has no surface for it. Emitted after
@@ -140,11 +155,12 @@ class AuditEvent(models.Model):
         # association. Email/phone/address/full name are FORBIDDEN in
         # this output; the full rationale lives in docs/retention.md.
         audit_logger.info(
-            "audit %s id=%s actor=%s order=%s detail=%s",
+            "audit %s id=%s actor=%s order=%s request_id=%s detail=%s",
             event.event_type,
             event.pk,
             event.actor.username if event.actor else None,
             event.order_id,
+            event.request_id or NO_REQUEST_ID,
             event.detail,
         )
         return event
