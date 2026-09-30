@@ -19,6 +19,7 @@ import tempfile
 from contextlib import contextmanager
 from pathlib import Path
 from tempfile import mkdtemp
+from unittest.mock import patch
 
 from django.conf import settings
 from django.contrib.auth.models import User
@@ -30,6 +31,7 @@ from django.test import SimpleTestCase, override_settings, tag
 from common.testing import ApiTestCase
 from ops.management.commands.restore_drill import (
     RESTORE_ALIAS,
+    Command,
     _within,
     is_rehearsal_safe,
 )
@@ -327,14 +329,43 @@ class RestoreDrillRunTests(DrillHygieneAssertionsMixin, ApiTestCase):
 
     def test_drill_removes_its_own_workdir_even_when_it_fails(self):
         """Cleanup runs in a finally, so the restored sqlite file and the
-        dump are removed on the failure path too."""
-        workdir_before = self.workdirs_before
+        dump are removed on the failure path too.
 
-        with self.assertRaises(CommandError):
-            self.run_drill(simulate_failure=True)
+        The directory under test is the one THIS run created, captured
+        through ``_remove_workdir`` -- the seam the teardown itself uses --
+        and not through a glob of the system temp directory. Asserting
+        against an ambient glob asserts on whatever the last run happened to
+        leave lying around, which is why the previous form also demanded
+        that some earlier run had already leaked a workdir: it passed or
+        failed according to the machine's history, and a clean CI runner had
+        nothing to find.
+        """
+        seen = {}
+        original = Command._remove_workdir
 
-        self.assertEqual(self.drill_workdirs(), workdir_before)
-        self.assertNotEqual(workdir_before, set())
+        def spy(command, workdir):
+            # Recorded before the real teardown runs, so this sees the failed
+            # run's directory exactly as the failure left it.
+            path = Path(workdir)
+            seen["path"] = path
+            seen["existed"] = path.is_dir()
+            seen["contents"] = sorted(entry.name for entry in path.glob("*"))
+            return original(command, workdir)
+
+        with patch.object(Command, "_remove_workdir", spy):
+            with self.assertRaises(CommandError):
+                self.run_drill(simulate_failure=True)
+
+        self.assertIn("path", seen, "the failed run never tore its workdir down")
+        self.assertTrue(seen["existed"], "the workdir was already gone at teardown")
+        # the drill really did build the rehearsal before failing, so this is
+        # not an empty directory that happened to match the prefix
+        self.assertIn("snapshot.json", seen["contents"])
+        self.assertIn("restored.sqlite3", seen["contents"])
+        self.assertFalse(
+            seen["path"].exists(),
+            f"a failed drill left its workdir behind: {seen['path']}",
+        )
 
 
 @tag("ops")
@@ -343,8 +374,6 @@ class RestoreDrillWorkdirHygieneTests(SimpleTestCase):
     what makes that true for sqlite's journal siblings too."""
 
     def test_remove_workdir_deletes_every_file_it_contains(self):
-        from ops.management.commands.restore_drill import Command
-
         workdir = Path(mkdtemp(prefix="restore-drill-cleanup-"))
         self.addCleanup(shutil.rmtree, workdir, True)
         for name in ("snapshot.json", "restored.sqlite3", "restored.sqlite3-journal"):
