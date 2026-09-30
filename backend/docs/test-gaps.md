@@ -22,7 +22,7 @@ venv\Scripts\python -m coverage report
 |---|---|
 | Tests | **1021 — 1017 pass + 4 expectedFailure (documented flip tests), 0 failures, 0 errors** |
 | Code under automated test | **100.00%** (3909 statements, 0 missed; gate `fail_under = 90`) |
-| API routes | **35** in the legacy `/api/` family, mirrored 1:1 by 35 `/api/v1/` aliases (**70 mounted routes**) |
+| API routes | **70** mounted under `/api/`: **34** in the legacy `/api/` family + **36** under `/api/v1/`. The v1 family re-mounts the same view objects rather than mirroring the legacy paths 1:1 — `products`/`cart`/`orders` move under `/api/v1/store/`, `accounts` under `/api/v1/account/`, the orders JSON seam under `/api/v1/admin/`, legacy `/api/settings/` reappears as `/api/v1/store/config/`, and v1 adds two admin seams (`dashboard`, `audit-log`) that the legacy family mounts outside `/api/` |
 | Unit tests (app `tests.py` + `test_*.py`) | **500** (accounts 68, products 124, cart 50, orders 213, ops 45) |
 | E2E / integration tests (`tests/` package) | **516** (cross-app, admin-surface, CSRF/audit/ops, checkout-refresh and restore-drill specs) |
 | Settings / security specs (`config/tests.py`) | **5** (V-02 fail-closed DEBUG + secret-key subprocess checks) |
