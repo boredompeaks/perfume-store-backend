@@ -9,7 +9,7 @@ work instead of advertising an open list.
 **Measured this run** (`manage.py test`, `--verbosity 0`):
 
 ```text
-Ran 1002 tests
+Ran 1021 tests
 OK (expected failures=4)
 ```
 
@@ -20,11 +20,11 @@ venv\Scripts\python -m coverage report
 
 | Metric | Count |
 |---|---|
-| Tests | **1002 — 998 pass + 4 expectedFailure (documented flip tests), 0 failures, 0 errors** |
-| Code under automated test | **100.00%** (3816 statements, 0 missed; gate `fail_under = 90`) |
+| Tests | **1021 — 1017 pass + 4 expectedFailure (documented flip tests), 0 failures, 0 errors** |
+| Code under automated test | **100.00%** (3909 statements, 0 missed; gate `fail_under = 90`) |
 | API routes | **35** in the legacy `/api/` family, mirrored 1:1 by 35 `/api/v1/` aliases (**70 mounted routes**) |
 | Unit tests (app `tests.py` + `test_*.py`) | **500** (accounts 68, products 124, cart 50, orders 213, ops 45) |
-| E2E / integration tests (`tests/` package) | **497** (cross-app, admin-surface, CSRF/audit/ops specs) |
+| E2E / integration tests (`tests/` package) | **516** (cross-app, admin-surface, CSRF/audit/ops, checkout-refresh and restore-drill specs) |
 | Settings / security specs (`config/tests.py`) | **5** (V-02 fail-closed DEBUG + secret-key subprocess checks) |
 
 Unit tests live in each app's `tests.py`/`test_*.py`; e2e/integration tests in
@@ -120,7 +120,7 @@ added after this list was written; its pins are in `CartCouponStateTests`.
 Added after this list: order-number race retries, checkout dedup (SPEC-21-1),
 Idempotency-Key replay (SPEC-9-01) and checkout-refresh safety (SPEC-21-5).
 
-### E2E / integration (12 enumerated) — DELIVERED in `tests/` (497 tests)
+### E2E / integration (12 enumerated) — DELIVERED in `tests/` (516 tests)
 
 1. Full happy path (register → verify → login → product → cart → checkout →
    mocked payment → verify → stock/coupon/cart) — DELIVERED
