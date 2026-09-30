@@ -65,9 +65,9 @@ Statuses: `PENDING -> IN-COMPLIANCE -> BUILDING -> IN-AUDIT -> BUGS-FOUND -> SHI
 
 ## Baseline
 
-**MEASURED 2026-09-30 (auditor FULL @ d64afa5) — GREEN. Section 22 batch 1 complete.** Measured: **1033 tests, 1029 pass + 4 expectedFailure, cov 100.00%** (3927 stmts, 0 miss), test exit 0, `makemigrations --check` "No changes detected", collectstatic 157 files under DEBUG=false, psycopg 3.3.6 / gunicorn 26.2.0 / whitenoise 6.11.0 importable. Progression: 1021 (S21) → **1033 (SPEC-22-01 +12)** = +12, zero regressions (xfail exactly 4, coverage 100.00%). Non-blocking: `black -S` would join 3 wrapped lines; pre-existing repo Black drift, no black in CI.
+**MEASURED 2026-09-30 (auditor RE-AUDIT @ ea1a2b7) — GREEN. Section 22 batch 2 complete.** Measured: **1060 tests, 1056 pass + 4 expectedFailure, cov 100.00%** (3927 stmts, 0 miss), exit 0, `makemigrations --check` "No changes detected", `test_deployment_contract` 27 tests OK. Progression: 1033 (batch 1) → **1060 (SPEC-22-07 +27)** = +27, zero regressions (xfail exactly 4, coverage 100.00%). Batches 1+2 together turned the deployment gap-sink P1s green: prod postgres path loadable (psycopg/gunicorn/whitenoise, sslmode→OPTIONS, STATIC_ROOT+whitenoise collectstatic-ready), a real backend image, compose+Procfile+release.sh, and a release-time migrate with a fail-closed migration-review checkpoint. Gate regression fixed: deploy gate job needed `actions: read` (job-level permissions REPLACE workflow-level). **Non-blocking P3 carry-forward: the gate-job-permission class is unpinned in test_deployment_contract.py — add a permission pin.**
 
-Previous floor: **1021 tests, 1017 pass + 4 expectedFailure, cov 100.00%** (3909 stmts) — Section 21 promoted @ 05399b9.
+Previous floor: **1033 tests, 1029 pass + 4 expectedFailure, cov 100.00%** (3927 stmts) — Section 22 batch 1 (SPEC-22-01 + SPEC-2-10a) audited SHIP.
 
 last-promoted SHA: **68bed0b** (PR #11 "Promotion (SECTION, S17 queue COMPLETE)..." — merged by the USER 2026-09-23T01:02:50Z at head 58b0eb6; covers S17 remainder + S19 (19-2 cycle 2 @ 58b0eb6, 19-4 @ ae3ef7c); orchestrator fetch-verified 2026-09-23: mergeCommit 68bed0b9a86c, head 58b0eb6 confirmed ancestor of origin/feat/add-frontend tip. No open PRs; the next promotion PR is delta-only from 68bed0b.)
 
