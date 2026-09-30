@@ -52,6 +52,14 @@ jobs:
           python -m coverage run manage.py test
           python -m coverage report
 
+      # `coverage report` is the gate (fail_under=90 in .coveragerc); the HTML
+      # report is a separate step so the upload below always has an artifact to
+      # publish -- including on a red gate, where it is the diagnostic.
+      # Directory comes from [html] directory in .coveragerc.
+      - name: Generate coverage HTML report
+        if: always()
+        run: python -m coverage html
+
       - name: Upload coverage HTML report
         if: always()
         uses: actions/upload-artifact@v4
