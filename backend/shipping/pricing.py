@@ -15,7 +15,13 @@ Three rules, in this order, and they are deliberately NOT collapsed into one:
    answering it with a free shipment is how a store loses money quietly.
 3. Only "the store has configured no shipping at all" answers with no
    charge. That is a different fact from (2) - shipping was never switched
-   on - and it is the only silent zero in this module.
+   on - and it is the only silent zero in this module. It stays a zero
+   because refusing the order is a different decision than pricing one, but
+   it is no longer SILENT: the checkout caller logs a WARNING when it
+   records one, `ops.services.get_health` reports `shipping_configured`
+   for a merchant to read, and `manage.py seed_shipping_methods` is the
+   documented way to end the state. None of those three change what this
+   function returns.
 
 Two orders of precedence, for two different questions: INSIDE one method the
 narrowest matching rate wins over the cheapest (a regional rate is written to
@@ -250,7 +256,9 @@ def quote_shipping(
     Raises :class:`ShippingUnavailable` for a method that does not resolve
     and for a destination no active rate serves. Returns None ONLY for the
     unconfigured store, which the caller records as an explicit
-    no-shipping-charge order rather than as a rate of zero.
+    no-shipping-charge order rather than as a rate of zero - and which the
+    caller is expected to make visible, because a store that never notices
+    is a store that never charges for delivery.
     """
     if method_code is not None and not _method_resolves(method_code):
         raise ShippingUnavailable(UNKNOWN_METHOD_MESSAGE)

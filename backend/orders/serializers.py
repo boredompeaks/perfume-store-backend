@@ -117,6 +117,13 @@ class OrderSerializer(serializers.ModelSerializer):
             # configured - which is a real zero charge, never a missing one.
             'shipping_method',
             'shipping_amount',
+            # [R-8.13] The frozen delivery-option label. It rides every order
+            # read so a hard-deleted ShippingMethod does not make a historical
+            # order unreadable: `shipping_method` goes null, this keeps naming
+            # the option the customer bought, and it is empty on an order
+            # priced while no shipping was configured - so the two stay
+            # tellable apart. Read-only like the amount it was priced with.
+            "shipping_method_code",
             # [R-8.11] The denomination of total_amount/discount_amount is
             # exposed beside them (checkout, dedup replay, and order reads
             # all serialize through here). Read-only like the money itself.
@@ -150,6 +157,7 @@ class OrderSerializer(serializers.ModelSerializer):
             'total_amount',
             'shipping_method',
             'shipping_amount',
+            "shipping_method_code",
             'currency',
             'items',
             'created_at',

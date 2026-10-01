@@ -99,6 +99,20 @@ def _razorpay_mode() -> str:
     return "unset"
 
 
+def _shipping_configured() -> bool:
+    """Whether the store has at least one ACTIVE shipping method.
+
+    Imported lazily inside the function for the same reason the health probe
+    imports its models there: a module-level import would make this ops
+    module depend on the shipping app's models at import time, and the
+    resolver is one cheap ``EXISTS`` on an indexed boolean column - cheap
+    enough for a probe that is safe to poll.
+    """
+    from shipping.pricing import shipping_configured
+
+    return shipping_configured()
+
+
 def get_health() -> dict:
     """Cheap checks only — no network calls, safe to poll."""
     from cart.models import Cart
@@ -120,6 +134,19 @@ def get_health() -> dict:
         settings.EMAIL_HOST_USER and settings.EMAIL_HOST_PASSWORD
     )
     checks["razorpay_mode"] = _razorpay_mode()
+    # SPEC-1-B05 [R-1.07]: the merchant-facing "shipping is switched on"
+    # marker. An unconfigured store prices every order at shipping_amount
+    # 0.00 and that zero is otherwise invisible from outside the order row,
+    # so it is reported here beside the other deployment-configuration
+    # checks a merchant already reads on /health/ and the ops dashboard.
+    #
+    # Deliberately NOT part of the `status` computation below: a store that
+    # has not configured shipping yet is a pre-launch state, not an outage,
+    # and gating `status` on it would turn a fresh deployment into a 503 and
+    # mail the staff mailbox every poll. The information is the point, not
+    # the alarm - the WARNING on the checkout path is the half that must
+    # page a human.
+    checks["shipping_configured"] = _shipping_configured()
 
     low_stock = 0
     out_of_stock = 0

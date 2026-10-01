@@ -8,7 +8,9 @@ applied inside the checkout's atomic block.
 """
 
 from decimal import Decimal
+from io import StringIO
 
+from django.core.management.base import CommandError
 from django.db import connection
 from django.test import override_settings
 
@@ -1170,6 +1172,381 @@ class ShippingThresholdSettingTests(ApiTestCase):
     def test_an_empty_threshold_leaves_the_rule_off(self):
         with _env({"SHIPPING_FREE_THRESHOLD": "   "}):
             self.assertIsNone(_env_money("SHIPPING_FREE_THRESHOLD"))
+
+    # The non-finite family. ``Decimal("NaN").quantize()`` returns a QUIET NaN
+    # WITHOUT raising, so these values used to sail through the parse and then
+    # raise InvalidOperation on the comparison - i.e. SHIPPING_FREE_THRESHOLD=NaN
+    # crashed the process at settings import, which is the exact failure this
+    # function exists to prevent. Every one must resolve to the SAME safe
+    # answer as any other unusable input: the rule stays off, so every
+    # shipment is still charged.
+    def test_a_nan_threshold_leaves_the_rule_off(self):
+        with _env({"SHIPPING_FREE_THRESHOLD": "NaN"}):
+            self.assertIsNone(_env_money("SHIPPING_FREE_THRESHOLD"))
+
+    def test_a_lowercase_nan_threshold_leaves_the_rule_off(self):
+        with _env({"SHIPPING_FREE_THRESHOLD": "nan"}):
+            self.assertIsNone(_env_money("SHIPPING_FREE_THRESHOLD"))
+
+    def test_an_infinite_threshold_leaves_the_rule_off(self):
+        with _env({"SHIPPING_FREE_THRESHOLD": "Infinity"}):
+            self.assertIsNone(_env_money("SHIPPING_FREE_THRESHOLD"))
+
+    def test_a_negative_infinite_threshold_leaves_the_rule_off(self):
+        with _env({"SHIPPING_FREE_THRESHOLD": "-Infinity"}):
+            self.assertIsNone(_env_money("SHIPPING_FREE_THRESHOLD"))
+
+    def test_a_signalling_nan_threshold_leaves_the_rule_off(self):
+        with _env({"SHIPPING_FREE_THRESHOLD": "sNaN"}):
+            self.assertIsNone(_env_money("SHIPPING_FREE_THRESHOLD"))
+
+    # A threshold no order could ever reach, and one this store could not even
+    # store: both are typos, and the safe reading of a typo is the one that
+    # keeps charging.
+    def test_a_threshold_past_the_largest_storable_amount_leaves_the_rule_off(
+        self,
+    ):
+        with _env({"SHIPPING_FREE_THRESHOLD": "100000000.00"}):
+            self.assertIsNone(_env_money("SHIPPING_FREE_THRESHOLD"))
+
+    def test_a_forty_digit_threshold_leaves_the_rule_off(self):
+        with _env({"SHIPPING_FREE_THRESHOLD": "9" * 40}):
+            self.assertIsNone(_env_money("SHIPPING_FREE_THRESHOLD"))
+
+    def test_the_largest_storable_threshold_is_still_honoured(self):
+        # The boundary the guard above draws: 99999999.99 is the biggest
+        # amount any money column here holds, so it is a legal threshold.
+        with _env({"SHIPPING_FREE_THRESHOLD": "99999999.99"}):
+            self.assertEqual(
+                _env_money("SHIPPING_FREE_THRESHOLD"),
+                Decimal("99999999.99"),
+            )
+
+    def test_no_unusable_value_is_ever_answered_with_an_unorderable_amount(self):
+        # The property, not the spelling: whatever goes in, what comes out is
+        # either None or a value that can be compared and stored.
+        for raw in (
+            "NaN",
+            "nan",
+            "-NaN",
+            "sNaN",
+            "Infinity",
+            "-Infinity",
+            "inf",
+            "1E+40",
+            "9" * 40,
+            "-1",
+            "free-ish",
+            "100000000",
+        ):
+            with self.subTest(raw=raw), _env({"SHIPPING_FREE_THRESHOLD": raw}):
+                value = _env_money("SHIPPING_FREE_THRESHOLD")
+                if value is not None:
+                    self.assertTrue(value.is_finite())
+                    self.assertGreaterEqual(value, Decimal("0.00"))
+                    self.assertLessEqual(value, Decimal("99999999.99"))
+
+
+# ==================================
+# The delivery option a historical order names
+# ==================================
+
+
+class ShippingMethodDeletionTests(ApiTestCase):
+    """Deleting a delivery option must not erase it from the orders that
+    used it (spec 8.3 line 2497: "Orders must retain what was actually
+    purchased"; line 2485: "Use explicit deletion/archival policies")."""
+
+    def setUp(self):
+        self.product = self.make_product(price="999.99")
+        self.standard = method()
+        rate(self.standard, "49.00")
+        self.make_user("buyer")
+        _, token = self.api_login("buyer")
+        self.auth(token)
+
+    def test_the_order_snapshots_the_delivery_option_it_was_priced_with(self):
+        self.seed_session_cart([(self.product, 1)])
+        res = self.checkout()
+        self.assertEqual(res.status_code, 201, res.data)
+        order = Order.objects.get()
+        self.assertEqual(order.shipping_method_code, "standard")
+        # While the row lives, the live link and the snapshot agree - the
+        # snapshot is redundant until it is not.
+        self.assertEqual(order.shipping_method, self.standard)
+        self.assertEqual(res.data["shipping_method_code"], "standard")
+
+    def test_hard_deleting_the_method_keeps_the_label_on_a_historical_order(self):
+        self.seed_session_cart([(self.product, 1)])
+        self.assertEqual(self.checkout().status_code, 201)
+        self.standard.delete()
+        order = Order.objects.get()
+        # The shipped SET_NULL semantics are untouched: the live link is gone.
+        self.assertIsNone(order.shipping_method)
+        # ... and the money is untouched.
+        self.assertEqual(order.shipping_amount, Decimal("49.00"))
+        # ... but the order still names the option it was actually charged
+        # for, so the record of what was purchased survives the row.
+        self.assertEqual(order.shipping_method_code, "standard")
+
+    def test_the_order_body_still_names_the_option_after_the_row_is_deleted(self):
+        self.seed_session_cart([(self.product, 1)])
+        self.assertEqual(self.checkout().status_code, 201)
+        self.standard.delete()
+        res = self.client.get("/api/orders/")
+        self.assertEqual(res.status_code, 200, res.data)
+        body = res.data["results"][0]
+        self.assertIsNone(body["shipping_method"])
+        self.assertEqual(body["shipping_method_code"], "standard")
+        self.assertEqual(body["shipping_amount"], "49.00")
+
+    @override_settings(SHIPPING_FREE_THRESHOLD=Decimal("999.00"))
+    def test_a_deleted_option_is_tellable_apart_from_never_configured(self):
+        # The exact confusion the snapshot ends. The free-shipping rule makes
+        # this the SHARPEST version of it: both orders then read
+        # `shipping_method: null` AND a 0.00 delivery charge, so the live link
+        # and the money say nothing at all about which delivery option was
+        # bought. The snapshot is the only thing left that can.
+        self.seed_session_cart([(self.product, 1)])
+        self.assertEqual(self.checkout().status_code, 201)
+        priced = Order.objects.get()
+        self.standard.delete()
+
+        self.seed_session_cart([(self.product, 1)])
+        self.assertEqual(self.checkout().status_code, 201)
+        unconfigured = Order.objects.exclude(pk=priced.pk).get()
+        priced.refresh_from_db()
+
+        # Indistinguishable on the shipped fields...
+        self.assertIsNone(priced.shipping_method)
+        self.assertIsNone(unconfigured.shipping_method)
+        self.assertEqual(priced.shipping_amount, unconfigured.shipping_amount)
+        # ... and told apart by the label, which is the point.
+        self.assertEqual(priced.shipping_method_code, "standard")
+        self.assertEqual(unconfigured.shipping_method_code, "")
+
+    def test_deactivation_keeps_the_order_and_the_label_intact(self):
+        # The documented retirement path, which must remain the cheap one:
+        # no deletion, so nothing is ever at risk of being lost.
+        self.seed_session_cart([(self.product, 1)])
+        self.assertEqual(self.checkout().status_code, 201)
+        self.standard.is_active = False
+        self.standard.save()
+        order = Order.objects.get()
+        self.assertEqual(order.shipping_method, self.standard)
+        self.assertEqual(order.shipping_method_code, "standard")
+        self.assertEqual(order.shipping_amount, Decimal("49.00"))
+
+    def test_an_order_priced_with_no_shipping_configured_snapshots_no_label(self):
+        ShippingMethod.objects.all().delete()
+        self.seed_session_cart([(self.product, 1)])
+        res = self.checkout()
+        self.assertEqual(res.status_code, 201, res.data)
+        self.assertEqual(Order.objects.get().shipping_method_code, "")
+        self.assertEqual(res.data["shipping_method_code"], "")
+
+
+# ==================================
+# The unconfigured-store signal
+# ==================================
+
+
+class UnconfiguredShippingSignalTests(ApiTestCase):
+    """A real zero charge is correct; a store that never learns about it is
+    not. Three signals, none of which changes what is charged."""
+
+    def setUp(self):
+        self.product = self.make_product(price="999.99")
+        self.make_user("buyer")
+        _, token = self.api_login("buyer")
+        self.auth(token)
+
+    def test_a_free_shipment_because_nothing_is_configured_is_logged_a_warning(
+        self,
+    ):
+        # No method at all, so this order is priced at shipping_amount 0.00.
+        self.seed_session_cart([(self.product, 1)])
+        with self.assertLogs("orders.views", level="WARNING") as captured:
+            res = self.checkout()
+        self.assertEqual(res.status_code, 201, res.data)
+        warnings = [r for r in captured.records if r.levelname == "WARNING"]
+        self.assertEqual(len(warnings), 1, captured.output)
+        self.assertIn("NO shipping charge", warnings[0].getMessage())
+
+    def test_the_warning_names_the_command_that_fixes_the_state(self):
+        self.seed_session_cart([(self.product, 1)])
+        with self.assertLogs("orders.views", level="WARNING") as captured:
+            self.assertEqual(self.checkout().status_code, 201)
+        self.assertIn("seed_shipping_methods", captured.output[0])
+
+    def test_a_charged_shipment_logs_no_such_warning(self):
+        # The signal must be about the silent zero only, or it is noise the
+        # merchant learns to ignore.
+        standard = method()
+        rate(standard, "49.00")
+        self.seed_session_cart([(self.product, 1)])
+        with self.assertNoLogs("orders.views", level="WARNING"):
+            res = self.checkout()
+        self.assertEqual(res.status_code, 201, res.data)
+        self.assertEqual(Order.objects.get().shipping_amount, Decimal("49.00"))
+
+    def test_a_refused_destination_logs_no_such_warning(self):
+        # The refusal path returns no quote but is NOT the silent zero: it
+        # rejects the order, so there is no revenue to warn anyone about.
+        standard = method()
+        rate(standard, "49.00", region="Karnataka")
+        self.seed_session_cart([(self.product, 1)])
+        with self.assertNoLogs("orders.views", level="WARNING"):
+            res = self.checkout(state="Maharashtra")
+        self.assertEqual(res.status_code, 400, res.data)
+
+    def test_the_health_probe_reports_that_shipping_is_not_configured(self):
+        from ops.services import get_health
+
+        health = get_health()
+        self.assertIn("shipping_configured", health["checks"])
+        self.assertFalse(health["checks"]["shipping_configured"])
+
+    def test_the_health_probe_reports_shipping_once_a_method_exists(self):
+        from ops.services import get_health
+
+        method()
+        self.assertTrue(get_health()["checks"]["shipping_configured"])
+
+    def test_unconfigured_shipping_does_not_make_the_probe_degraded(self):
+        # A store that has not configured shipping yet is a pre-launch state,
+        # not an outage: gating the probe's status would turn a fresh
+        # deployment into a 503 and mail the staff mailbox on every poll.
+        from ops.services import get_health
+
+        health = get_health()
+        self.assertFalse(health["checks"]["shipping_configured"])
+        self.assertEqual(health["status"], "ok")
+        self.assertEqual(self.client.get("/health/").status_code, 200)
+
+
+# ==================================
+# Seeding a store that has no shipping
+# ==================================
+
+
+class SeedShippingMethodsCommandTests(ApiTestCase):
+    """`manage.py seed_shipping_methods` - the documented end of the silent
+    zero. Deliberate operator action: no import-time or migration-time
+    side effect can put a made-up price in a database."""
+
+    def setUp(self):
+        self.product = self.make_product(price="999.99")
+
+    def seed(self, *args, **options):
+        from django.core.management import call_command
+
+        out = StringIO()
+        options.setdefault("stdout", out)
+        call_command("seed_shipping_methods", *args, **options)
+        return out.getvalue()
+
+    def test_importing_the_command_writes_nothing(self):
+        import ops.management.commands.seed_shipping_methods  # noqa: F401
+
+        self.assertEqual(ShippingMethod.objects.count(), 0)
+        self.assertEqual(ShippingRate.objects.count(), 0)
+
+    def test_it_creates_both_methods_with_a_national_rate(self):
+        self.seed()
+        self.assertEqual(
+            sorted(ShippingMethod.objects.values_list("code", flat=True)),
+            ["express", "standard"],
+        )
+        self.assertEqual(ShippingRate.objects.count(), 2)
+        for shipping_rate in ShippingRate.objects.all():
+            # A geography wildcard, which is how a national rate is expressed
+            # in this schema: empty region and empty prefix match everywhere.
+            self.assertEqual(shipping_rate.region, "")
+            self.assertEqual(shipping_rate.postal_code_prefix, "")
+            self.assertEqual(shipping_rate.is_active, True)
+
+    def test_the_seeded_rates_are_money_a_store_can_actually_charge(self):
+        self.seed()
+        self.assertTrue(shipping_configured())
+        self.assertEqual(
+            quote_amount(),
+            Decimal("49.00"),
+        )
+        self.assertEqual(
+            quote_amount(method_code="express"),
+            Decimal("149.00"),
+        )
+
+    def test_the_amounts_are_options_not_constants(self):
+        self.seed("--standard-amount", "60.50", "--express-amount", "200")
+        standard = ShippingMethod.objects.get(code="standard")
+        express = ShippingMethod.objects.get(code="express")
+        self.assertEqual(standard.rates.get().amount, Decimal("60.50"))
+        self.assertEqual(express.rates.get().amount, Decimal("200.00"))
+
+    def test_rerunning_it_creates_nothing_and_changes_no_price(self):
+        self.seed()
+        first = ShippingRate.objects.get(method__code="standard").amount
+        output = self.seed()
+        self.assertEqual(ShippingRate.objects.count(), 2)
+        self.assertEqual(ShippingMethod.objects.count(), 2)
+        self.assertEqual(
+            ShippingRate.objects.get(method__code="standard").amount, first
+        )
+        self.assertIn("0 method(s) and 0 rate(s) created", output)
+
+    def test_it_never_reprices_or_reactivates_what_a_merchant_owns(self):
+        standard = method()
+        rate(standard, "77.00")
+        standard.name = "Ground"
+        standard.is_active = False
+        standard.save()
+        self.seed()
+        standard.refresh_from_db()
+        self.assertEqual(standard.name, "Ground")
+        self.assertFalse(standard.is_active)
+        self.assertEqual(standard.rates.get().amount, Decimal("77.00"))
+        # The express method was still created: a partially configured store
+        # is completed, not skipped.
+        self.assertTrue(ShippingMethod.objects.filter(code="express").exists())
+
+    def test_a_dry_run_writes_nothing_and_says_what_it_would_do(self):
+        output = self.seed("--dry-run")
+        self.assertEqual(ShippingMethod.objects.count(), 0)
+        self.assertEqual(ShippingRate.objects.count(), 0)
+        self.assertIn("2 method(s) and 2 rate(s)", output)
+
+    def test_a_dry_run_over_a_seeded_store_reports_nothing_left_to_do(self):
+        self.seed()
+        output = self.seed("--dry-run")
+        self.assertIn("0 method(s) and 0 rate(s)", output)
+        self.assertEqual(ShippingRate.objects.count(), 2)
+
+    def test_an_unusable_amount_is_refused_and_writes_nothing(self):
+        # Unlike an env default, a bad flag here would store a bad PRICE, so
+        # it must stop the operator rather than be quietly defaulted.
+        for value in ("NaN", "Infinity", "-1", "abc"):
+            with self.subTest(value=value):
+                with self.assertRaises(CommandError):
+                    self.seed("--standard-amount", value)
+                self.assertEqual(ShippingMethod.objects.count(), 0)
+                self.assertEqual(ShippingRate.objects.count(), 0)
+
+    def test_a_seeded_store_charges_for_delivery_end_to_end(self):
+        # The whole point of the command: the silent zero is gone, and the
+        # order now records a real charge with a real method.
+        self.seed()
+        self.make_user("buyer")
+        _, token = self.api_login("buyer")
+        self.auth(token)
+        self.seed_session_cart([(self.product, 1)])
+        with self.assertNoLogs("orders.views", level="WARNING"):
+            res = self.checkout()
+        self.assertEqual(res.status_code, 201, res.data)
+        order = Order.objects.get()
+        self.assertEqual(order.shipping_method_code, "standard")
+        self.assertEqual(order.shipping_amount, Decimal("49.00"))
 
 
 def _env(values):

@@ -919,7 +919,7 @@ def create_order(request):
                     duplicate.customer_name,
                 )
 
-            # [R-1.13] The collapse returns the order but NOT the credential
+                # [R-1.13] The collapse returns the order but NOT the credential
                 # (`_checkout_response` discloses the token on a mint only):
                 # returning it here would make a permanent read credential
                 # replayable by anyone who can reach a collapse. Scoped by
@@ -1023,6 +1023,32 @@ def create_order(request):
             shipping_method_id = (
                 shipping_quote.method_id if shipping_quote is not None else None
             )
+            # [R-8.13] The delivery-option label is snapshotted beside the FK
+            # (spec 8.3: an order retains what was actually purchased), so the
+            # order still names the option it was charged for after the method
+            # row is deleted. Empty exactly when the FK is null for the other
+            # reason - the store had no shipping configured - which is what
+            # keeps those two cases tellable apart.
+            shipping_method_code = (
+                shipping_quote.method_code if shipping_quote is not None else ""
+            )
+            if shipping_quote is None:
+                # The silent zero, made audible (SPEC-1-B05): this order is
+                # being accepted with no delivery charge because the store has
+                # no active shipping method, and nothing else in the request
+                # or the response says so. WARNING rather than INFO because
+                # the cost is silent revenue, and one line per order placed is
+                # a rate an operator can act on - a merchant who sees it can
+                # run `manage.py seed_shipping_methods`. The 201 is unchanged:
+                # refusing the order is a different decision than this task
+                # makes, and a store that has not configured shipping yet is
+                # not broken. `shipping_amount` stays the honest 0.00.
+                logger.warning(
+                    "Checkout priced with NO shipping charge for %s: the store "
+                    "has no active shipping method configured (seed one with "
+                    "`manage.py seed_shipping_methods` to start charging)",
+                    guest_email or user,
+                )
             total_amount = quantize_money(merchandise_total + shipping_amount)
 
             # [R-8.4] The order number is minted inside this same atomic block,
@@ -1054,6 +1080,7 @@ def create_order(request):
                             coupon=coupon,
                             discount_amount=discount_amount,
                             shipping_method_id=shipping_method_id,
+                            shipping_method_code=shipping_method_code,
                             shipping_amount=shipping_amount,
                             total_amount=total_amount,
                             order_number=candidate,

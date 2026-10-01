@@ -283,6 +283,33 @@ class Order(models.Model):
         related_name='orders',
     )
 
+    # [R-8.13] The frozen delivery-option label (spec 8.3 "Historical
+    # snapshots", line 2497: "Orders must retain what was actually
+    # purchased"). Exactly the shape and the reason of OrderItem.product_name
+    # beside its own SET_NULL product FK: the FK is the LIVE link to a
+    # staff-managed row, and this is the record of what the customer actually
+    # bought. Hard-deleting a ShippingMethod cascades its rates and SET_NULLs
+    # the FK, so without this column the order body reads
+    # `shipping_method: null` - indistinguishable from an order priced while
+    # the store had no shipping configured at all, which is how a historical
+    # delivery option gets silently erased. That is why the column exists
+    # even while the row it names is alive and the two always agree.
+    #
+    # The deletion policy spec 8.3 line 2485 asks for, stated explicitly:
+    # DEACTIVATION is how a delivery option is retired (it stops being
+    # offered and leaves every order that used it intact), and this snapshot
+    # is what outlives the row if it is ever hard-deleted. The FK keeps
+    # SET_NULL rather than PROTECT on purpose - the shipped semantics stand,
+    # and blocking the delete would make a legitimate admin action a 500
+    # without adding anything this snapshot does not already preserve.
+    # Set once at checkout from the quoted method's code; no save path
+    # mutates it. Empty on an order priced with no shipping configured.
+    shipping_method_code = models.CharField(
+        max_length=40,  # ShippingMethod.code width, so the label always fits
+        blank=True,
+        default='',
+    )
+
     # Zero on an order priced before shipping was configured, and zero on a
     # free-shipping order: both are real zero charges, distinguished by
     # whether shipping_method is set, never by a sentinel amount.

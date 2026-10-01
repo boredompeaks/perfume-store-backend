@@ -62,7 +62,7 @@ CAPABILITY_ROLES = {
     # the roles spec 1.1 names them for.
     "orders.fulfill": frozenset({ROLE_SUPPORT, ROLE_INVENTORY, ROLE_ADMIN}),
     "orders.cancel": frozenset({ROLE_SUPPORT, ROLE_ADMIN}),
-# [R-1.07] SPEC-1-B05: shipping methods and their rates. A rate is money
+    # [R-1.07] SPEC-1-B05: shipping methods and their rates. A rate is money
     # every future order will be charged, so it follows the money capability
     # `refunds.create` already sets rather than the fulfilment one: finance
     # and admin, not the packing operator. Spec 1.1 line 110's "shipping"
