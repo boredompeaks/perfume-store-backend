@@ -93,6 +93,16 @@ class GuestCheckoutTestBase(ApiTestCase):
     def guest_token_header(self, token):
         return {TOKEN_HEADER: token}
 
+    @staticmethod
+    def user_with_role(username, role):
+        """A staff account holding exactly one role, as the capability map
+        reads it (group membership intersected with STAFF_ROLES)."""
+        user = User.objects.create_user(
+            username, f"{username}@example.com", "S3cure-Passphrase!", is_staff=True
+        )
+        user.groups.add(Group.objects.get_or_create(name=role)[0])
+        return user
+
 
 @tag("orders")
 class GuestCheckoutCreationTests(GuestCheckoutTestBase):
@@ -524,14 +534,6 @@ class GuestOrderStaffSurfaceTests(GuestCheckoutTestBase):
     or the fulfilment queue silently drops the store's sales.
     """
 
-    @staticmethod
-    def user_with_role(username, role):
-        user = User.objects.create_user(
-            username, f"{username}@example.com", "S3cure-Passphrase!", is_staff=True
-        )
-        user.groups.add(Group.objects.get_or_create(name=role)[0])
-        return user
-
     def test_the_admin_json_seam_serves_guest_orders(self):
         order, _ = self.place_guest_order()
         self.client.force_authenticate(self.user_with_role("finmgr", ROLE_FINANCE))
@@ -741,14 +743,6 @@ class GuestOrderNullUserPathTests(GuestCheckoutTestBase):
             User.objects.get(username="finmgr").id,
         )
         self.assertEqual(Refund.objects.get(order=order).kind, Refund.Kind.FULL)
-
-    @staticmethod
-    def user_with_role(username, role):
-        user = User.objects.create_user(
-            username, f"{username}@example.com", "S3cure-Passphrase!", is_staff=True
-        )
-        user.groups.add(Group.objects.get_or_create(name=role)[0])
-        return user
 
     def test_cancelling_a_guest_order_releases_its_hold(self):
         """The stock-release path a cancelled checkout takes, on a guest row."""
