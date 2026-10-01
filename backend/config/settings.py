@@ -812,10 +812,20 @@ def _init_error_tracking(dsn, environment, sample_rate, traces_sample_rate):
     Returns True when the tracker is live. The SDK is imported INSIDE the
     DSN gate rather than at module scope, so an unconfigured process never
     loads it, never imports its transports and never opens a socket at
-    import time. An SDK that is configured but not installed degrades to a
-    warning instead of refusing the boot: losing error reporting must not be
-    able to take the storefront down, and the boot-time network is off either
-    way (the SDK sends on the first event, in a background worker).
+    import time. Losing error reporting must not be able to take the
+    storefront down, and the boot-time network is off either way (the SDK
+    sends on the first event, in a background worker). So BOTH ways of
+    failing to report are degraded, not fatal:
+
+    - an SDK that is configured but not installed (ImportError);
+    - a DSN the SDK itself refuses - a typo or a truncated value in `.env`,
+      which the SDK rejects by raising `BadDsn` from `init()`. `init()` is
+      therefore INSIDE the try, not merely the imports: this is a settings
+      module, so an uncaught raise here happens at import time and takes
+      down every worker in the deployment (and the release script's migrate
+      checkpoint) rather than merely the reporting. `except Exception` is
+      deliberate - whatever the SDK raises from a bad configuration is, by
+      that fact, not worth a boot.
 
     The two integrations are what make the EXISTING logging config the
     reporting path: `django.request` is pinned at ERROR by _build_logging
@@ -829,25 +839,34 @@ def _init_error_tracking(dsn, environment, sample_rate, traces_sample_rate):
         import sentry_sdk
         from sentry_sdk.integrations.django import DjangoIntegration
         from sentry_sdk.integrations.logging import LoggingIntegration
+
+        sentry_sdk.init(
+            dsn=dsn,
+            environment=environment,
+            sample_rate=sample_rate,
+            traces_sample_rate=traces_sample_rate,
+            # Request bodies, cookies, headers and user identifiers stay inside
+            # the process unless an operator deliberately turns this on.
+            send_default_pii=False,
+            integrations=[
+                DjangoIntegration(),
+                LoggingIntegration(level=logging.INFO, event_level=logging.ERROR),
+            ],
+        )
     except ImportError:
         logging.getLogger(__name__).warning(
             "SENTRY_DSN is set but the sentry-sdk package is not installed; "
             "error tracking stays off for this process."
         )
         return False
-    sentry_sdk.init(
-        dsn=dsn,
-        environment=environment,
-        sample_rate=sample_rate,
-        traces_sample_rate=traces_sample_rate,
-        # Request bodies, cookies, headers and user identifiers stay inside
-        # the process unless an operator deliberately turns this on.
-        send_default_pii=False,
-        integrations=[
-            DjangoIntegration(),
-            LoggingIntegration(level=logging.INFO, event_level=logging.ERROR),
-        ],
-    )
+    except Exception as error:
+        logging.getLogger(__name__).warning(
+            "SENTRY_DSN was rejected by the sentry-sdk (%s: %s); error "
+            "tracking stays off for this process. Check the value in .env.",
+            type(error).__name__,
+            error,
+        )
+        return False
     return True
 
 

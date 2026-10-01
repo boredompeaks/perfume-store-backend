@@ -615,9 +615,14 @@ with no DSN the app is simply unmonitored, never broken.
 
 **5. SSH deploy key.** Add the new public key to the host's `authorized_keys`
 **before** removing the old one, then re-run a deploy to prove it works, then
-remove the old key. GitHub Actions' deploy job uses
-`core.ssh_command`/`ssh-key` from repository secrets - update the secret, run
-one deploy, then revoke the old key in the provider.
+remove the old key. The deploy job runs **no** ssh-agent and sets no
+`core.ssh_command`: it writes the `DEPLOY_SSH_KEY` repository secret to a
+`mktemp` file under `umask 077` - with `DEPLOY_KNOWN_HOSTS` beside it (empty
+means `StrictHostKeyChecking=accept-new`), both removed by an `EXIT` trap,
+nothing echoed and no `set -x` - and calls `ssh -i "$key" -o
+IdentitiesOnly=yes`. Rotation is therefore: replace the `DEPLOY_SSH_KEY`
+secret, run one deploy to prove the new key authenticates, then delete the old
+public key from the host.
 
 ### The `SECRET_KEY` caveat (read before rotating it)
 

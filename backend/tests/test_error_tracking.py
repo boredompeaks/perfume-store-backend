@@ -19,6 +19,10 @@ crosses the gate:
    handed to `init()` must be DjangoIntegration plus a LoggingIntegration whose
    `event_level` is ERROR, which is what turns the ERROR-level `django.request`
    records `_build_logging` already pins into events.
+3. **A DSN the SDK refuses must not refuse the boot.** `MalformedDsnBootTests`
+   pins this against the REAL SDK, because only the real one raises
+   `BadDsn`: a settings module executes `init()` at import, so an un-guarded
+   raise there is a dead deployment rather than one broken worker.
 
 The container probe is pinned by EXECUTION: the `HEALTHCHECK` command is
 parsed out of the committed Dockerfile and run against a stubbed
@@ -52,6 +56,36 @@ FAKE_DSN = "https://not-a-real-key@o0.ingest.us.example.invalid/0"
 # The stub the "with a DSN" path is given instead of the real SDK. `init` is
 # recorded, never called through to a transport.
 STUB_INIT_CALLS = []
+
+# The minimum a production boot must be given to get past the SPEC-22-03
+# guards, so a test can vary SENTRY_* and nothing else. Spelled out here (as
+# the settings module would read it) rather than imported from the settings
+# tests, because a scrubbed environment plus these keys IS the deployment
+# being simulated.
+PROD_BOOT_ENV = {
+    "DJANGO_SECRET_KEY": "x" * 50,
+    "DJANGO_ENV": "production",
+    "DJANGO_ALLOWED_HOSTS": "shop.example.test",
+    "CSRF_TRUSTED_ORIGINS": "https://shop.example.test",
+    "DATABASE_URL": "postgres://u:p@db.example.com:5432/perfume_store",
+}
+
+# Run in the child before importing settings, so a socket call made during
+# the boot fails the pin instead of reaching the network (conventions.md:
+# tests must not hit the network). Each entry raises with a fixed message.
+BLOCK_NETWORK_PREAMBLE = """
+import socket
+
+
+def _no_network(*args, **kwargs):
+    raise AssertionError("the boot opened a socket")
+
+
+socket.socket.connect = _no_network
+socket.socket.connect_ex = _no_network
+socket.create_connection = _no_network
+socket.getaddrinfo = _no_network
+"""
 
 
 def install_stub_sdk(modules=None):
@@ -247,6 +281,104 @@ class ErrorTrackingInertWithoutADsnTests(SimpleTestCase):
         self.assertIn("SAMPLE 0.25", res.stdout)
         # No user data leaves the process unless an operator opts in.
         self.assertIn("PII False", res.stdout)
+
+
+class MalformedDsnBootTests(SimpleTestCase):
+    """A DSN the SDK refuses degrades to a warning; it never refuses the boot.
+
+    Everything here runs against the REAL SDK, not the recorder stub above,
+    because the failure being pinned is one only the real SDK produces:
+    `sentry_sdk.init()` raises `sentry_sdk.parsers.BadDsn` out of its own DSN
+    parser. Left un-guarded that raise happens while `config.settings` is
+    being EXECUTED, so it is not one broken process but a dead deployment -
+    every gunicorn worker, and the release script's migrate checkpoint that
+    imports settings to find the database. The stub cannot catch it, which is
+    exactly why the bug shipped.
+
+    requirements.txt pins the package, so the real one is importable in CI and
+    in a venv built from it; `test_the_pinned_sdk_is_really_installed` keeps
+    that honest here rather than letting the pins below pass vacuously.
+    """
+
+    # Two operator-reachable shapes: a project name pasted into the DSN slot,
+    # and a value truncated by a bad edit of the .env file.
+    MALFORMED_DSNS = ("not-a-dsn", "https://")
+
+    def test_a_malformed_dsn_warns_and_stays_off(self):
+        for dsn in self.MALFORMED_DSNS:
+            with self.subTest(dsn=dsn):
+                with self.assertLogs("config.settings", level="WARNING") as logs:
+                    live = config_settings._init_error_tracking(
+                        dsn, "production", 1.0, 0.0
+                    )
+                self.assertFalse(live)
+                self.assertIn("rejected by the sentry-sdk", logs.output[0])
+                # The warning names the remedy, because this fires once at
+                # boot into a log nobody is watching. It deliberately does NOT
+                # echo the DSN: that value carries the project's public key.
+                self.assertIn("the value in .env", logs.output[0])
+
+    def test_the_settings_import_survives_a_malformed_dsn(self):
+        # The P1 shape, at the level where it bites: the whole settings
+        # import, in a clean subprocess with the real SDK. If init() ever
+        # moves back outside the guard, this goes red with a BadDsn traceback
+        # and a non-zero exit rather than passing quietly.
+        for dsn in self.MALFORMED_DSNS:
+            with self.subTest(dsn=dsn):
+                res = run_settings_import(
+                    {
+                        **PROD_BOOT_ENV,
+                        "SENTRY_DSN": dsn,
+                        # Spelled out, not inherited: this helper scrubs the
+                        # DJANGO_/RAZORPAY_/EMAIL_ families only, so a DSN or
+                        # label in the developer's shell could otherwise decide
+                        # what this boot does.
+                        "SENTRY_ENVIRONMENT": "",
+                    },
+                    snippet=(
+                        "import config.settings as s;"
+                        "print('ENABLED', s.ERROR_TRACKING_ENABLED);"
+                        "print('DSN', s.SENTRY_DSN)"
+                    ),
+                )
+                self.assertEqual(res.returncode, 0, res.stdout + res.stderr)
+                self.assertIn("ENABLED False", res.stdout)
+                # The gate still reads what was configured; only the SDK's
+                # opinion of it changed.
+                self.assertIn(f"DSN {dsn}", res.stdout)
+                self.assertIn("rejected by the sentry-sdk", res.stderr)
+
+    def test_a_valid_dsn_still_boots_without_touching_the_network(self):
+        # The counterpart, so the fix cannot be "catch everything and do
+        # nothing": a well-formed DSN really does initialise the SDK - and
+        # still dials nothing at boot, because its transport is lazy and
+        # sends on the first event from a worker. `socket` is blocked at the
+        # call sites rather than by replacing `socket.socket`, which `ssl`
+        # subclasses and which would break the import instead of the pin.
+        res = run_settings_import(
+            {**PROD_BOOT_ENV, "SENTRY_DSN": FAKE_DSN, "SENTRY_ENVIRONMENT": ""},
+            snippet=(
+                BLOCK_NETWORK_PREAMBLE + "import config.settings as s;"
+                "print('ENABLED', s.ERROR_TRACKING_ENABLED);"
+                "print('CLIENT', bool(__import__('sentry_sdk').get_client()))"
+            ),
+        )
+        self.assertEqual(res.returncode, 0, res.stdout + res.stderr)
+        self.assertIn("ENABLED True", res.stdout)
+        self.assertIn("CLIENT True", res.stdout)
+
+    def test_the_pinned_sdk_is_really_installed(self):
+        # The pin in requirements.txt is a promise until the package is
+        # importable: an environment that never installed it would make every
+        # "against the real SDK" pin above pass vacuously, down the
+        # ImportError branch. The expected version is READ OUT of the pin
+        # rather than restated, so bumping it cannot turn this into a lie.
+        import sentry_sdk
+
+        requirements = (BACKEND_DIR / "requirements.txt").read_text(encoding="utf-8")
+        pinned = re.search(r"^sentry-sdk==(\S+)", requirements, re.M)
+        self.assertIsNotNone(pinned, "requirements.txt must pin sentry-sdk")
+        self.assertEqual(sentry_sdk.VERSION, pinned.group(1))
 
 
 class ErrorTrackingWithADsnTests(SimpleTestCase):
