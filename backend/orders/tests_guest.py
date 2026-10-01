@@ -225,10 +225,26 @@ class GuestCheckoutCreationTests(GuestCheckoutTestBase):
     def test_an_over_length_shipping_field_is_refused_before_the_row_exists(self):
         """[R-1.13] The same trap on the rest of the payload: `full_name`'s 150
         and `phone`'s 15 are varchar widths SQLite does not enforce and
-        Postgres rejects. Refused before the atomic block opens."""
+        Postgres rejects. Refused before the atomic block opens.
+
+        BOTH paths are pinned by the gate's MESSAGE, not by the status alone.
+        The status is not evidence: an ANONYMOUS submission of this payload
+        answers 400 too, on the `guest_email is required` gate, so a half of
+        this test that never authenticated would stay green with the width
+        loop scoped back to the guest branch and the DataError 500 back on a
+        public endpoint. So the account request below is authenticated (and
+        holds a cart of its own, or the cart gate would answer 404 instead),
+        and each half names the error it expects -- only the width gate can
+        produce that string.
+        """
+        self.make_user("buyer")
+        _, token = self.api_login("buyer")
+        self.auth(token)
+        self.seed_session_cart([(self.product, 1)])
         for field, limit in (("full_name", 150), ("phone", 15)):
             with self.subTest(field=field):
-                res = self.guest_checkout(**{field: "x" * (limit + 1)})
+                too_long = "x" * (limit + 1)
+                res = self.guest_checkout(**{field: too_long})
 
                 self.assertEqual(res.status_code, 400, res.data)
                 self.assertEqual(
@@ -238,11 +254,15 @@ class GuestCheckoutCreationTests(GuestCheckoutTestBase):
                 self.assertEqual(Order.objects.count(), 0)
                 # The account path shares the gate: this is the shipping
                 # payload, not a guest-only field.
-                self.auth(self.api_login("buyer")[1])
-                account = self.checkout(**{field: "x" * (limit + 1)})
+                account = self.checkout(**{field: too_long})
+
                 self.assertEqual(account.status_code, 400, account.data)
+                self.assertEqual(
+                    account.data["error"],
+                    f"{field} must be at most {limit} characters",
+                )
                 self.assertEqual(Order.objects.count(), 0)
-                self.auth(None)
+        self.auth(None)
 
     def test_the_guest_email_is_stored_in_one_canonical_form(self):
         """[R-1.13] BUG-3: RFC 5321 local-parts are case-insensitive in
