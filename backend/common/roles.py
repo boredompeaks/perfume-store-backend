@@ -77,6 +77,22 @@ CAPABILITY_ROLES = {
     # who can see a rate can work out what an order will be charged), and no
     # shipping row holds customer data.
     "shipping.manage": frozenset({ROLE_FINANCE, ROLE_ADMIN}),
+    # [R-1.08] SPEC-1-B06: working a shipment and its tracking trail, split
+    # from every other order power on purpose. Spec 6.9 line 1749/1757/1759
+    # files "View shipment and tracking history", "Create shipment" and "Add
+    # tracking number" under the ADMIN ORDER ACTIONS -- ordinary order work,
+    # which is the support role's job ("Handle customer enquiries and
+    # permitted order issues", line 92) and admin's. The inventory/fulfilment
+    # operator is deliberately NOT granted it: spec 1.1 line 110's "shipping"
+    # is already delivered to that role as `orders.fulfill` (SPEC-1-B03), and
+    # widening it here would break that task's exact-set pin on the role.
+    # Read and write are separate capabilities so a future read-only support
+    # role can take the trail without taking the pen, and a shipment row is
+    # the one shipping row that carries a CUSTOMER's address by association
+    # (through its order), which is the reason `shipping.manage` did not get
+    # them for free.
+    "shipments.read": frozenset({ROLE_SUPPORT, ROLE_ADMIN}),
+    "shipments.write": frozenset({ROLE_SUPPORT, ROLE_ADMIN}),
     "refunds.create": frozenset({ROLE_FINANCE, ROLE_ADMIN}),
     "customers.read": frozenset({ROLE_SUPPORT, ROLE_FINANCE, ROLE_ADMIN}),
     "discounts.write": frozenset({ROLE_MARKETING, ROLE_ADMIN}),

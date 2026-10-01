@@ -270,6 +270,15 @@ HasRefundsCreate = capability_permission("refunds.create")
 # exists: a capability in CAPABILITY_ROLES always has its named gate, so a
 # future shipping write endpoint cannot be bolted on without one.
 HasShippingManage = capability_permission("shipping.manage")
+# [R-1.08] SPEC-1-B06: the shipment tracking surface's gates. No
+# customer-facing endpoint uses them -- a customer reads their own tracking
+# trail by account or by the guest credential B04 minted, never by staff
+# capability -- but the one-named-class-per-capability invariant this module
+# documents is what makes the pair mandatory the moment the capabilities
+# exist: without them `tests/test_rbac_foundation.py` goes red, and a future
+# staff shipment endpoint could not be wired at all.
+HasShipmentsRead = capability_permission("shipments.read")
+HasShipmentsWrite = capability_permission("shipments.write")
 HasCustomersRead = capability_permission("customers.read")
 HasDiscountsWrite = capability_permission("discounts.write")
 HasReportsRead = capability_permission("reports.read")
