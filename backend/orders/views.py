@@ -23,6 +23,7 @@ from .serializers import OrderSerializer
 from .state import (
     ADMIN_FULFILMENT_NEXT,
     ALLOWED_TRANSITIONS,
+    FULFILMENT_QUEUE_STATUSES,
     precondition_failures,
     transition_allowed,
 )
@@ -57,6 +58,7 @@ from common.permissions import (
     HasOrdersFulfill,
     HasOrdersRead,
     HasRefundsCreate,
+    user_has_capability,
 )
 # [SPEC-12-02] StockReservation rides the existing products.models import
 # line (insertion-only style): the checkout lifecycle mints them in
@@ -1499,6 +1501,32 @@ def admin_order_detail(request, order_id):
     return Response(OrderSerializer(order).data)
 
 
+def _may_fulfil(user, order):
+    """Whether ``user`` may advance ``order`` one fulfilment step.
+
+    Two questions, not one. A caller holding ``orders.read`` sees the whole
+    order book, so the fulfilment walk is unscoped for it (support and admin,
+    the two roles that hold both capabilities; finance holds ``orders.read``
+    but not ``orders.fulfill``, so it never reaches this seam at all). A
+    caller holding ONLY ``orders.fulfill`` is the packing operator, whose
+    authority is the queue — the statuses the walk can still advance, the
+    same constant ``OrderAdmin``'s scoped grid lists — and nothing else.
+
+    Django's ``is_superuser`` flag is preserved as the bypass every other
+    surface keeps (mirroring ``capability_required``): the trust anchor must
+    not be narrowed by a least-privilege rule meant for staff roles.
+
+    Deny-by-default in both directions: an unknown capability grants nothing,
+    and a caller with no role at all has already been refused by
+    ``HasOrdersFulfill`` before this runs.
+    """
+    if user.is_superuser or user_has_capability(user, "orders.read"):
+        return True
+    return user_has_capability(user, "orders.fulfill") and (
+        order.status in FULFILMENT_QUEUE_STATUSES
+    )
+
+
 @api_view(['POST'])
 @permission_classes([HasOrdersFulfill])
 def admin_order_fulfill(request, order_id):
@@ -1512,7 +1540,18 @@ def admin_order_fulfill(request, order_id):
     stamp is written here: the admin surface's mark_shipped/mark_delivered
     do not write shipped_at/delivered_at either, and the named-stamp
     writers are their own later task — the JSON seam never invents a richer
-    record than the admin surface for the same transition."""
+    record than the admin surface for the same transition.
+
+    [R-1-B03] The fulfilment capability is not order visibility (spec 1.1
+    line 110 splits them), so a caller holding ``orders.fulfill`` WITHOUT
+    ``orders.read`` — the inventory/fulfilment operator — is scoped to the
+    queue its own admin surface lists (``FULFILMENT_QUEUE_STATUSES``) and
+    cannot advance an order outside it by guessing a pk. An out-of-queue
+    order is answered with the SAME uniform 404 an unknown id gets: it must
+    not confirm that the order exists, nor name its status, to a role that
+    was deliberately not given order visibility. A caller that does hold
+    ``orders.read`` (support, finance, admin) and Django's superuser flag
+    keep the unrestricted contract above."""
     with transaction.atomic():
         try:
             order = Order.objects.select_for_update().get(id=order_id)
@@ -1520,6 +1559,11 @@ def admin_order_fulfill(request, order_id):
             return Response(
                 {"error": "Order not found"},
                 status=status.HTTP_404_NOT_FOUND
+            )
+
+        if not _may_fulfil(request.user, order):
+            return Response(
+                {"error": "Order not found"}, status=status.HTTP_404_NOT_FOUND
             )
 
         target = ADMIN_FULFILMENT_NEXT.get(order.status)

@@ -57,6 +57,14 @@ ADMIN_FULFILMENT_NEXT = {
     "shipped": "delivered",
 }
 
+# The fulfilment queue: the statuses a packing/shipping step can still be
+# taken FROM, i.e. exactly the orders that await a packer. Derived from
+# ADMIN_FULFILMENT_NEXT rather than spelled out, so the queue can never list a
+# status the machine will not advance (or miss one it will) — the admin
+# listing that shows it and the API seam that advances it read the same
+# constant.
+FULFILMENT_QUEUE_STATUSES = tuple(ADMIN_FULFILMENT_NEXT)
+
 # ——— [R-10.19]/[R-10.14] SPEC-10-03: transition preconditions ———————————
 # ALLOWED_TRANSITIONS says WHICH moves are legal; preconditions say what
 # must be TRUE about the row before the move (spec 10.3 lists

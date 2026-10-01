@@ -125,12 +125,22 @@ class RoleAwareModelAdmin(admin.ModelAdmin):
       execute until the user explicitly confirms on the interstitial page.
     - ``confirmation_reason_actions``: names (from the set above) whose
       interstitial also asks for an optional reason/note.
+    - ``scoped_view_capability``: an OPTIONAL second door onto the same
+      surface for a role the map denies full visibility to (spec 1.1 line
+      110's packing/shipping operator holds ``orders.fulfill`` but not
+      ``orders.read``). Such a caller still reaches the changelist — it
+      already holds the model's ``change`` capability, which is what gates
+      the grid — but the ModelAdmin is expected to narrow what that grid
+      shows (queryset, columns, searchable fields, change-form fieldsets).
+      ``None`` (the default, and every admin but the one that declares it)
+      means there is no second door at all.
     """
 
     capability_map = {}
     action_capabilities = {}
     confirmation_required_actions = frozenset()
     confirmation_reason_actions = frozenset()
+    scoped_view_capability = None
 
     # ——— capability plumbing ———
 
@@ -162,11 +172,30 @@ class RoleAwareModelAdmin(admin.ModelAdmin):
     def has_delete_permission(self, request, obj=None):
         return self._map_grants(request, "delete")
 
+    def is_scoped_viewer(self, request):
+        """Whether this caller reaches the surface through
+        ``scoped_view_capability`` rather than through ``capability_map``.
+
+        True only for a caller that holds the scoped capability and NOT the
+        model's own view capability — a superuser, and any role holding both,
+        answer ``False`` and therefore keep the ordinary full surface. The
+        check is deny-by-default: no ``scoped_view_capability`` declared means
+        no second door, whatever the caller holds.
+        """
+        capability = self.scoped_view_capability
+        if capability is None or not self._holds_capability(request, capability):
+            return False
+        return not self._map_grants(request, "view")
+
     def has_module_permission(self, request):
         # The default checks Django model permissions (which no role
         # carries), which would hide every model from the admin index;
         # module visibility must follow the same map as the model itself.
-        return self.has_view_permission(request)
+        # A scoped viewer is the one addition: the packing operator holds the
+        # model's change capability, so its grid already answers 200, and
+        # leaving the module off the index would make that reachable-but-
+        # undiscoverable surface (the operator would have to guess the URL).
+        return self.has_view_permission(request) or self.is_scoped_viewer(request)
 
     # ——— privileged-action audit trail ([6.12.5]) ———
 

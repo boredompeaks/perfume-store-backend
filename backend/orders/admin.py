@@ -23,6 +23,7 @@ from products.models import StockReservation
 # [R-10.12] SPEC-10-02: the trigger vocabulary for the audit writers.
 from .state import (
     ALLOWED_TRANSITIONS,
+    FULFILMENT_QUEUE_STATUSES,
     TRIGGER_ADMIN_BULK_ACTION,
     TRIGGER_ADMIN_CHANGE_FORM,
     fulfilment_for_status,
@@ -61,6 +62,29 @@ class OrderItemInline(admin.TabularInline):
         return False
 
 
+class OrderItemPackingInline(OrderItemInline):
+    """The item lines as the PACKING operator needs them.
+
+    Spec 1.1 line 110 gives packing and shipping to the inventory/fulfilment
+    operator, which does not hold ``orders.read`` (order visibility) — so the
+    per-line ``price``/``subtotal`` are the store's money, not its packing
+    list, and this inline shows what to pick and how many of it.
+
+    ``has_view_permission`` is the one thing it adds: Django skips an inline
+    whose view, change, add and delete are all false (which is why the
+    money-bearing parent never renders), and "what is in this parcel" is the
+    whole point of the fulfilment surface. It stays a READ — the parent's
+    add/change/delete denials are inherited unchanged.
+    """
+
+    fields = ("product_name", "sku", "variant_name", "quantity")
+    verbose_name = "Item to pack"
+    verbose_name_plural = "Items to pack"
+
+    def has_view_permission(self, request, obj=None):
+        return True
+
+
 # The legal status flow (ALLOWED_TRANSITIONS) and its gate
 # (transition_allowed) live in orders.state — [R-10.1] single source. The
 # cancelling-a-paid-order rationale is documented beside the table there.
@@ -97,6 +121,49 @@ class OrderAdmin(SavedFilterMixin, RoleAwareModelAdmin):
         "change": "orders.fulfill",
         "delete": None,
     }
+    # [R-1-B03] Spec 1.1 line 110 puts packing and shipping on the
+    # inventory/fulfilment operator, which holds ``orders.fulfill`` and
+    # deliberately NOT ``orders.read`` (least privilege: it is not "see every
+    # order"). Without this second door the operator's grid answers 200 on a
+    # URL it can only guess, because its change capability is what Django
+    # gates the changelist on, while the admin index hid the module and no
+    # page listed the orders awaiting packing. The scoped viewer is therefore
+    # admitted to the FULFILMENT queue below — a narrowed listing, not a wider
+    # capability: ``orders.read`` itself stays where spec 1.1 puts it, so
+    # ``export_csv`` (gated on it) is still refused.
+    scoped_view_capability = "orders.fulfill"
+    # The queue: statuses the fulfilment walk can still advance (spec line
+    # 110's "packing, shipping"), read from orders.state so the listing can
+    # never drift from the transitions it offers. Anything else (delivered,
+    # cancelled) is not this operator's work and is not listed.
+    scoped_queryset = FULFILMENT_QUEUE_STATUSES
+    # Columns packing needs and nothing else. No total, discount, currency,
+    # coupon or payment reference: those are the money columns orders.read
+    # withholds, and a packer has no use for them.
+    scoped_list_display = (
+        "id",
+        # [R-8.5] the customer-facing reference beside the internal pk
+        "order_number",
+        # Destination only: enough to sort a courier run, not a customer
+        # record. Name, phone and email are not on this grid.
+        "city",
+        "status",
+        "created_at",
+    )
+    # No phone / email / customer-name search: the operator may find an order
+    # to pack by its reference, not by probing customer records
+    # (``customers.read`` is a capability it does not hold).
+    scoped_search_fields = ("id", "order_number")
+    # The change form, narrowed the same way: what is going where, and what
+    # state it is in. The user, phone, money and gateway columns stay out.
+    scoped_fieldsets = (
+        (
+            "Shipping",
+            {"fields": ("order_number", "address", "city", "state", "pincode")},
+        ),
+        ("Fulfilment", {"fields": ("status",)}),
+        ("Timestamps", {"fields": ("created_at", "shipped_at", "delivered_at")}),
+    )
     action_capabilities = {
         "mark_confirmed": "orders.fulfill",
         "mark_shipped": "orders.fulfill",
@@ -198,6 +265,67 @@ class OrderAdmin(SavedFilterMixin, RoleAwareModelAdmin):
     @admin.display(description="Payment ref")
     def payment_ref(self, obj):
         return obj.razorpay_payment_id or "—"
+
+    # ——— the scoped fulfilment surface (a scoped viewer, see above) ———
+
+    # Each hook narrows ONE thing for a scoped viewer and defers to Django's
+    # own accessor otherwise, so the full-surface behaviour of every other
+    # role (and the superuser bypass) is byte-identical to before: the same
+    # method, not a second code path. Declared state, never derived from the
+    # request's role mid-flight.
+
+    def get_queryset(self, request):
+        queryset = super().get_queryset(request)
+        if not self.is_scoped_viewer(request):
+            return queryset
+        return queryset.filter(status__in=self.scoped_queryset)
+
+    def get_list_display(self, request):
+        if not self.is_scoped_viewer(request):
+            return super().get_list_display(request)
+        return self.scoped_list_display
+
+    def get_search_fields(self, request):
+        if not self.is_scoped_viewer(request):
+            return super().get_search_fields(request)
+        return self.scoped_search_fields
+
+    def get_fieldsets(self, request, obj=None):
+        if not self.is_scoped_viewer(request):
+            return super().get_fieldsets(request, obj)
+        return self.scoped_fieldsets
+
+    def get_inlines(self, request, obj=None):
+        if self.is_scoped_viewer(request):
+            # The money half of the item snapshot is withheld with the rest of
+            # it. get_inlines yields CLASSES (Django instantiates them), so
+            # the swap is a class substitution, not an instance.
+            return [OrderItemPackingInline]
+        return super().get_inlines(request, obj)
+
+    def get_readonly_fields(self, request, obj=None):
+        # The customer-facing reference is minted by the checkout (frozen, like
+        # the item snapshots); a scoped viewer's change form may not rewrite it.
+        readonly = super().get_readonly_fields(request, obj)
+        if not self.is_scoped_viewer(request) or "order_number" in readonly:
+            return readonly
+        return readonly + ("order_number",)
+
+    def changelist_view(self, request, extra_context=None):
+        """The grid a scoped viewer lands on IS the fulfilment queue.
+
+        ``get_queryset`` above already restricts the rows to the statuses the
+        packing walk can advance, and every surface that reads rows through
+        this admin (``get_actions``' querysets, the saved-filter merge, the
+        change view's ``get_object``) inherits that narrowing — so the actions
+        cannot be pointed at an order outside the queue either. This override
+        exists only to skip ``SavedFilterMixin`` for a scoped viewer: its write
+        endpoints gate on ``has_view_permission``, which this role deliberately
+        does not hold, so the bar would offer a form that can only ever 404.
+        """
+        if not self.is_scoped_viewer(request):
+            return super().changelist_view(request, extra_context)
+        return RoleAwareModelAdmin.changelist_view(self, request, extra_context)
 
     # ——— single-object guard (covers the inline status editor) ———
 

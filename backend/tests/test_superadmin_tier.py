@@ -64,6 +64,8 @@ from common.roles import (
 )
 from common.testing import ApiTestCase
 from orders.models import Order, OrderItem
+from orders.state import ADMIN_FULFILMENT_NEXT
+from orders.views import _may_fulfil
 
 from .test_staff_roles_admin import user_change_post
 
@@ -566,6 +568,289 @@ class InventoryFulfilmentAuthorityTests(ApiTestCase):
 
         self.assertEqual(res.status_code, 200, res.data)
         self.assertEqual(res.data["status"], "confirmed")
+
+    def test_the_json_seam_is_scoped_to_the_queue_for_a_fulfil_only_role(self):
+        # [R-1-B03] orders.fulfill is not order visibility (spec 1.1 line
+        # 110), so the operator may advance the orders its queue lists and no
+        # others. The out-of-queue answer is the SAME uniform 404 an unknown
+        # id gets: it must not confirm the order exists, nor name its status,
+        # to a role that was deliberately denied order visibility.
+        order = self._walk_ready_order("Scoped Rose")
+        settled = self._order(status="delivered", total_amount="250.00")
+        self.client.force_authenticate(self.operator)
+
+        settled_before = settled.status
+        res = self.client.post(f"/api/admin/orders/{settled.id}/fulfill/")
+
+        self.assertEqual(res.status_code, 404, res.data)
+        settled.refresh_from_db()
+        self.assertEqual(settled.status, settled_before)
+        # ...and the queued order is still advanceable, so the scope narrows
+        # rather than closing the seam.
+        queued = self.client.post(f"/api/admin/orders/{order.id}/fulfill/")
+        self.assertEqual(queued.status_code, 200, queued.data)
+        order.refresh_from_db()
+        self.assertEqual(order.status, "confirmed")
+
+    def test_an_orders_read_holder_keeps_the_unscoped_json_seam(self):
+        # Support holds orders.read (order visibility) AND orders.fulfill, so
+        # the queue scope does not apply to it: a settled order still answers
+        # the machine's own 409 with its allowed set, exactly as before.
+        settled = self._order(status="delivered", total_amount="250.00")
+        self.client.force_authenticate(self.support)
+
+        res = self.client.post(f"/api/admin/orders/{settled.id}/fulfill/")
+
+        self.assertEqual(res.status_code, 409, res.data)
+        self.assertEqual(res.data["details"]["allowed"], "")
+        self.assertEqual(res.data["code"], "conflict")
+
+    def test_the_superuser_flag_is_not_narrowed_by_the_queue_scope(self):
+        # Django's own bypass is preserved on the scoped seam for the same
+        # reason it is preserved on every other surface: the trust anchor must
+        # not be narrowed by a least-privilege rule meant for staff roles.
+        root = User.objects.create_superuser("queue-root", "root@example.com", None)
+        self.assertTrue(_may_fulfil(root, self._order(status="delivered")))
+        # ...and it grants nothing on its own to an anonymous caller: no
+        # capability, no bypass.
+        self.assertFalse(_may_fulfil(AnonymousUser(), self._order()))
+
+
+@tag("e2e")
+class FulfilmentQueueSurfaceTests(ApiTestCase):
+    """[R-1-B03] The operator-reachable listing the packing capability needs.
+
+    Holding ``orders.fulfill`` gives the changelist a 200 (Django gates it on
+    the model's change permission) while the admin index hid the module, so
+    the operator could advance an order only by guessing its pk and had no way
+    to discover which orders awaited packing. ``OrderAdmin``'s scoped viewer
+    is the fix: a queue listing, discoverable from the index, narrowed to
+    packing — and ``orders.read`` itself stays where spec 1.1 puts it.
+    """
+
+    CHANGELIST = "/admin/orders/order/"
+
+    def setUp(self):
+        self.operator = make_role_user(ROLE_INVENTORY, "queue-packer")
+        self.support = make_role_user(ROLE_SUPPORT, "queue-support")
+        self.buyer = self.make_user("queue-buyer")
+        self.product = self.make_product(name="Queue Rose", price="750.00", stock=9)
+        self.queued = self._order("PACK-0001", status="pending", total="750.00")
+        OrderItem.objects.create(
+            order=self.queued,
+            product=self.product,
+            product_name=self.product.name,
+            price=self.product.price,
+            quantity=2,
+            subtotal=Decimal("1500.00"),
+        )
+        Order.objects.filter(pk=self.queued.pk).update(payment_status="captured")
+        # Not this operator's work: delivered (no fulfilment edge) and
+        # cancelled (same), both out of the queue.
+        self.settled = self._order("PACK-0002", status="delivered", total="250.00")
+        self.cancelled = self._order("PACK-0003", status="cancelled", total="80.00")
+
+    def _order(self, order_number, status, total):
+        return Order.objects.create(
+            user=self.buyer,
+            order_number=order_number,
+            full_name="Queue Buyer",
+            phone="9876500011",
+            address="1 Queue Lane",
+            city="Indore",
+            state="MP",
+            pincode="452001",
+            status=status,
+            total_amount=Decimal(total),
+        )
+
+    def order_admin(self):
+        return admin.site._registry[Order]
+
+    def test_the_index_offers_the_operator_its_queue(self):
+        # Discoverability is the whole defect: the module was hidden, so the
+        # surface existed but nothing pointed at it.
+        self.client.force_login(self.operator)
+        res = self.client.get("/admin/")
+        self.assertEqual(res.status_code, 200)
+        self.assertContains(res, self.CHANGELIST)
+        self.assertTrue(
+            self.order_admin().has_module_permission(request_for(self.operator))
+        )
+
+    def test_the_index_hides_the_queue_from_a_role_that_may_neither_read_nor_pack(self):
+        # Deny-by-default in the other direction: marketing holds neither
+        # capability, so the module stays off their index.
+        self.client.force_login(make_role_user(ROLE_MARKETING, "queue-marketing"))
+        res = self.client.get("/admin/")
+        self.assertEqual(res.status_code, 200)
+        self.assertNotContains(res, self.CHANGELIST)
+
+    def test_the_queue_lists_the_orders_awaiting_a_pack_and_only_those(self):
+        self.client.force_login(self.operator)
+        res = self.client.get(self.CHANGELIST)
+        self.assertEqual(res.status_code, 200)
+        self.assertContains(res, self.queued.order_number)
+        self.assertNotContains(res, self.settled.order_number)
+        self.assertNotContains(res, self.cancelled.order_number)
+
+    def test_the_queue_offers_the_three_fulfilment_actions_and_no_money_ones(self):
+        self.client.force_login(self.operator)
+        res = self.client.get(self.CHANGELIST)
+        self.assertEqual(res.status_code, 200)
+        for action in ("mark_confirmed", "mark_shipped", "mark_delivered"):
+            self.assertContains(res, action)
+        # export_csv rides orders.read, which this role deliberately lacks.
+        self.assertNotContains(res, "export_csv")
+
+    def test_the_queue_withholds_the_money_and_the_customer_record(self):
+        self.client.force_login(self.operator)
+        res = self.client.get(self.CHANGELIST)
+        self.assertEqual(res.status_code, 200)
+        # The money columns and the customer's own details are orders.read's
+        # (and customers.read's), not a packer's.
+        self.assertNotContains(res, str(self.queued.total_amount))
+        self.assertNotContains(res, self.queued.full_name)
+        self.assertNotContains(res, self.queued.phone)
+        self.assertNotContains(res, self.buyer.email)
+
+    def test_the_queue_is_searched_by_reference_not_by_customer(self):
+        self.client.force_login(self.operator)
+        by_reference = self.client.get(self.CHANGELIST, {"q": self.queued.order_number})
+        self.assertEqual(by_reference.status_code, 200)
+        self.assertContains(by_reference, self.queued.order_number)
+        # A customer record is not a lookup key for this role: searching by
+        # name or phone finds nothing, because get_search_fields is narrowed.
+        for term in (self.queued.full_name, self.queued.phone, self.buyer.email):
+            with self.subTest(term=term):
+                res = self.client.get(self.CHANGELIST, {"q": term})
+                self.assertEqual(res.status_code, 200)
+                self.assertNotContains(res, self.queued.order_number)
+
+    def test_the_operator_advances_a_queued_order_from_the_queue(self):
+        self.client.force_login(self.operator)
+        res = self.client.post(
+            self.CHANGELIST,
+            {"action": "mark_confirmed", "_selected_action": [str(self.queued.pk)]},
+        )
+        self.assertEqual(res.status_code, 302)
+        self.queued.refresh_from_db()
+        self.assertEqual(self.queued.status, "confirmed")
+        entry = LogEntry.objects.get(object_id=str(self.queued.pk))
+        self.assertEqual(entry.user.username, "queue-packer")
+
+    def test_a_forged_selection_outside_the_queue_is_inert(self):
+        # The actions read their queryset from this admin's get_queryset, so
+        # a hand-posted pk cannot reach an order the queue does not list.
+        self.client.force_login(self.operator)
+        res = self.client.post(
+            self.CHANGELIST,
+            {"action": "mark_confirmed", "_selected_action": [str(self.settled.pk)]},
+        )
+        self.assertEqual(res.status_code, 302)
+        self.settled.refresh_from_db()
+        self.assertEqual(self.settled.status, "delivered")
+        self.assertFalse(
+            LogEntry.objects.filter(
+                object_id=str(self.settled.pk), user=self.operator
+            ).exists()
+        )
+
+    def test_the_change_form_shows_the_packing_list_and_no_money(self):
+        self.client.force_login(self.operator)
+        res = self.client.get(f"{self.CHANGELIST}{self.queued.pk}/change/")
+        self.assertEqual(res.status_code, 200)
+        # What to pack: the item snapshot, without its prices.
+        self.assertContains(res, self.product.name)
+        self.assertNotContains(res, "1500.00")
+        self.assertNotContains(res, "750.00")
+        # The customer record and the money block stay out.
+        self.assertNotContains(res, self.queued.full_name)
+        self.assertNotContains(res, self.queued.phone)
+        self.assertNotContains(res, self.buyer.email)
+
+    def test_an_order_outside_the_queue_has_no_change_page_for_this_role(self):
+        self.client.force_login(self.operator)
+        for order in (self.settled, self.cancelled):
+            with self.subTest(status=order.status):
+                res = self.client.get(f"{self.CHANGELIST}{order.pk}/change/")
+                self.assertEqual(res.status_code, 302)
+
+    def test_the_queue_offers_no_saved_view_bar_it_could_never_save(self):
+        # The bar's own endpoints gate on has_view_permission, which this role
+        # does not hold, so rendering it would offer a form that only 404s.
+        self.client.force_login(self.operator)
+        res = self.client.get(self.CHANGELIST)
+        self.assertEqual(res.status_code, 200)
+        self.assertNotContains(res, 'id="saved-filters"')
+
+    def test_the_scoped_viewer_is_exactly_fulfil_without_orders_read(self):
+        model_admin = self.order_admin()
+        for user, expected in (
+            (self.operator, True),
+            (self.support, False),  # holds orders.read as well
+            (
+                make_role_user(ROLE_ADMIN, "queue-chief"),
+                False,
+            ),
+        ):
+            with self.subTest(username=user.username):
+                request = RequestFactory().get(self.CHANGELIST)
+                request.user = user
+                self.assertIs(model_admin.is_scoped_viewer(request), expected)
+
+    def test_the_queue_declaration_reads_from_the_machine_and_the_map(self):
+        # The queue can only ever be the statuses the fulfilment walk can
+        # advance (single source: orders.state), and the second door is
+        # declared as a capability that exists in the roles map — an unknown
+        # identifier would deny, which is why the drift pin below matters.
+        model_admin = self.order_admin()
+        self.assertEqual(
+            tuple(model_admin.scoped_queryset), tuple(ADMIN_FULFILMENT_NEXT)
+        )
+        self.assertIn(model_admin.scoped_view_capability, set(CAPABILITY_ROLES))
+        # The withheld columns really are the ones orders.read holds.
+        full = set(model_admin.list_display)
+        withheld = {
+            "user",
+            "full_name",
+            "total_amount",
+            "discount_amount",
+            "currency",
+            "coupon",
+            "payment_ref",
+        }
+        self.assertLessEqual(withheld, full)
+        self.assertFalse(withheld & set(model_admin.scoped_list_display))
+        # The customer record is withheld from search as well as from the grid.
+        self.assertFalse(
+            {"full_name", "phone", "user__email", "user__username"}
+            & set(model_admin.scoped_search_fields)
+        )
+        self.assertTrue(
+            {"full_name", "phone", "user__email"} <= set(model_admin.search_fields)
+        )
+
+    def test_orders_read_holders_keep_the_full_grid_and_the_saved_bar(self):
+        self.client.force_login(self.support)
+        res = self.client.get(self.CHANGELIST)
+        self.assertEqual(res.status_code, 200)
+        self.assertContains(res, str(self.queued.total_amount))
+        self.assertContains(res, self.queued.full_name)
+        self.assertContains(res, "export_csv")
+        # The saved-view bar is untouched for a role that may save one.
+        self.assertContains(res, 'id="saved-filters"')
+        self.assertContains(res, self.settled.order_number)
+
+    def test_the_superuser_keeps_the_full_grid_on_the_orders_module(self):
+        User.objects.create_superuser("queue-root", "root@example.com", TEST_PASSWORD)
+        root = User.objects.get(username="queue-root")
+        self.client.force_login(root)
+        res = self.client.get(self.CHANGELIST)
+        self.assertEqual(res.status_code, 200)
+        self.assertContains(res, str(self.queued.total_amount))
+        self.assertContains(res, self.settled.order_number)
+        self.assertTrue(self.order_admin().has_module_permission(request_for(root)))
 
 
 class SuperuserBypassTests(TestCase):
