@@ -19,6 +19,12 @@ from orders.views import (
     admin_order_refund,
 )
 
+# [R-1.15] SPEC-1-06: the payment webhook endpoint, mounted under the webhooks
+# family §9 (line 2587) reserves. It is not one of the direct admin mounts
+# above because it authenticates no user at all: its only credential is the
+# provider's signature over the raw request body.
+from orders.webhooks import razorpay_webhook
+
 
 # --- /api/v1/ namespace (spec §9, R-9.0) ---------------------------------
 # Spec §9 prescribes versioned routes under /api/v1/ with four
@@ -35,9 +41,10 @@ from orders.views import (
 # names keep producing legacy paths (e.g. links inside password-reset
 # emails) until that cutover.
 #
-# The webhooks family stays unrouted for now: no webhook endpoint exists
-# yet and SPEC-1-06 owns that endpoint and its mount (§11/§17 cross-refs
-# already require it to live under this namespace).
+# The webhooks family holds one endpoint (SPEC-1-06): the payment gateway
+# calling the server about a payment. It is a server-to-server call, so it
+# gets no legacy alias and no dual mount — there is no frontend base URL to
+# cut over here, only a provider URL to configure.
 
 v1_store_patterns = [
     path("products/", include("products.urls")),
@@ -69,10 +76,21 @@ v1_admin_patterns = [
     path("orders/<int:order_id>/refund/", admin_order_refund, name="orders-refund"),
 ]
 
+# [R-1.15] SPEC-1-06: the gateway's own callback, mounted under the family §9
+# reserves for it. Named by provider so the family can hold the next one (a
+# payments provider that is not Razorpay) without re-deciding the mount.
+v1_webhook_patterns = [
+    path("razorpay/", razorpay_webhook, name="razorpay-webhook"),
+]
+
 v1_urlpatterns = [
     path("store/", include((v1_store_patterns, "store"), namespace="store")),
     path("account/", include((v1_account_patterns, "account"), namespace="account")),
     path("admin/", include((v1_admin_patterns, "admin"), namespace="admin")),
+    path(
+        "webhooks/",
+        include((v1_webhook_patterns, "webhooks"), namespace="webhooks"),
+    ),
 ]
 
 

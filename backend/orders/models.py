@@ -638,3 +638,113 @@ class Refund(models.Model):
     def __str__(self):
         return f"Refund #{self.pk} {self.amount} ({self.kind})"
 
+
+class PaymentEvent(models.Model):
+    """[R-1.15] SPEC-1-06: one delivery of one payment-provider webhook event.
+
+    Spec section 1 puts "Payment gateway, refunds, webhooks" in the payments
+    row of the system overview and spec 11.2 makes webhook signature
+    verification and duplicate-delivery handling payment requirements in their
+    own right. Until this table existed, the only statement this store had
+    about a payment was what the customer's browser said after checkout - so a
+    dropped callback left a paid order pending forever, and a forged callback
+    could claim one. Razorpay's own record is the authority; this table is the
+    store's side of hearing it.
+
+    Every delivery is recorded, whatever it turns out to be worth:
+
+    * ``event_id`` (the provider's per-delivery id) is UNIQUE, and that
+      constraint - not a check-then-write - is the replay authority. A second
+      delivery of the same event collides, the handler rolls back, and the
+      store returns success without a second effect. The unique index is the
+      guarantee; the IntegrityError-retry loop in ``orders.webhooks`` is how
+      it is honored, exactly as ``create_payment`` honors the payment-intent
+      uniqueness (conventions.md:17).
+    * ``outcome`` is what the handler decided. APPLIED means money moved onto
+      the order; REFUSED means a validly-signed event that must not move it
+      (unknown order, mismatched payment reference, wrong amount, an edge the
+      machine does not declare); RECORDED means the delivery was genuine but
+      this store has no writer for it (a refund notification, an event type
+      the vocabulary does not name). Refusals and records are kept, not
+      dropped: "the provider says this happened and we did nothing about it"
+      is the row reconciliation reads.
+    * ``order`` is SET_NULL and nullable because a refusal must outlive the
+      lookup that produced it - an event naming an order this store has never
+      seen is exactly the row an operator needs, and a financial trail must
+      not cascade away with a deleted order row.
+    * ``payload`` keeps the decoded event exactly as delivered. The
+      event-type-specific columns beside it are the reconcilable answers, but
+      they are chosen by this store's writers: when a provider adds a field or
+      a future handler needs one this batch did not anticipate, the delivered
+      event is the only record that still holds it.
+
+    ``amount`` is the store's Decimal money (never provider minor units,
+    never a float), quantized through ``common.money`` by the writer. It is
+    NULL for an event that carries no amount.
+    """
+
+    class Outcome(models.TextChoices):
+        APPLIED = "applied", "Applied"
+        REFUSED = "refused", "Refused"
+        RECORDED = "recorded", "Recorded"
+
+    # The provider's own event name (see WEBHOOK_* in orders.state). No
+    # `choices`: the provider may add event types at any time, and a delivery
+    # it considers real must be recordable even when this store has no writer
+    # for it. The behaviour vocabulary is `outcome`, not this column.
+    event_id = models.CharField(
+        max_length=100,
+        unique=True,
+    )
+
+    event_type = models.CharField(
+        max_length=50,
+    )
+
+    order = models.ForeignKey(
+        Order,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='payment_events',
+    )
+
+    # The gateway payment the event is about (a refund event carries the
+    # payment it returned money against). Blank rather than NULL: every
+    # delivery has a text answer here, and "" says "the event named no
+    # payment" without claiming one.
+    gateway_payment_id = models.CharField(
+        max_length=100,
+        blank=True,
+        default='',
+    )
+
+    amount = models.DecimalField(
+        max_digits=10,
+        decimal_places=2,
+        null=True,
+        blank=True,
+    )
+
+    payload = models.JSONField()
+
+    outcome = models.CharField(
+        max_length=10,
+        choices=Outcome.choices,
+        default=Outcome.RECORDED,
+    )
+
+    created_at = models.DateTimeField(
+        auto_now_add=True
+    )
+
+    class Meta:
+        # Newest first for the same reason OrderStatusEvent is: the trail is
+        # read most-recent-first.
+        ordering = ("-created_at", "-id")
+        verbose_name = "payment event"
+        verbose_name_plural = "payment events"
+
+    def __str__(self):
+        return f"{self.event_type} {self.event_id} ({self.outcome})"
+

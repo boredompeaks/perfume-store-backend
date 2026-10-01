@@ -182,6 +182,35 @@ def fulfilment_for_status(status: str) -> str:
     return LEGACY_STATUS_DIMENSIONS[status][1]
 
 
+# [R-10.4] The payment value a capture writes. Named here because the machine
+# is the single source for what a capture MEANS: verify_payment (the customer
+# callback) and the SPEC-1-06 webhook reconciler both write this value and both
+# ask this module whether the row may reach it, so neither restates it.
+PAYMENT_CAPTURED = "captured"
+
+# The lifecycle order the dimension mapping above is read in. status_for_payment
+# needs a progression, not a set: one payment value spans several statuses
+# (captured covers confirmed/shipped/delivered) and the answer to "which status
+# does a capture put the order in?" is the EARLIEST one it implies.
+LIFECYCLE_SEQUENCE = ("pending", "confirmed", "shipped", "delivered", "cancelled")
+
+
+def status_for_payment(payment_status: str) -> str:
+    """The earliest lifecycle status whose payment dimension is ``payment_status``.
+
+    The inverse of :func:`payment_for_status`, and the reason a writer never
+    has to name a status literal beside a payment value. ``None`` when no
+    status implies that payment — which is the honest answer for the
+    refund-dimension values, states the legacy single status cannot express
+    (the documented [R-10.1] divergence), so a caller must handle it rather
+    than assume a mapping exists.
+    """
+    for status in LIFECYCLE_SEQUENCE:
+        if LEGACY_STATUS_DIMENSIONS.get(status, ("", ""))[0] == payment_status:
+            return status
+    return None
+
+
 # ——— [R-10.12]/[R-10.17] SPEC-10-02: transition-audit triggers ——————————
 # Every legal status transition appends an OrderStatusEvent row naming the
 # surface that performed it. The trigger vocabulary lives here beside the
@@ -201,6 +230,13 @@ TRIGGER_ADMIN_API_CANCEL = "admin_api_cancel"
 # trigger is what names the failure — spec 10.3's "Failure/retry
 # behaviour" answer for this edge.
 TRIGGER_PAYMENT_FAILED = "payment_failed"
+# [R-1.15] SPEC-1-06: the gateway told us the money arrived, so the same
+# capture edge the customer callback drives has a second, server-to-server
+# source. It is its own trigger (not TRIGGER_PAYMENT_VERIFY) because spec
+# 10.3 asks the trail to name WHICH surface performed the transition: a
+# reconciliation from the provider's own record and a customer-initiated
+# verify are different facts about the same edge.
+TRIGGER_PAYMENT_WEBHOOK = "payment_webhook"
 
 STATUS_EVENT_TRIGGERS = [
     (TRIGGER_ORDER_CREATE, "Order created"),
@@ -210,4 +246,25 @@ STATUS_EVENT_TRIGGERS = [
     (TRIGGER_ADMIN_API_FULFIL, "Admin fulfilment API"),
     (TRIGGER_ADMIN_API_CANCEL, "Admin cancel API"),
     (TRIGGER_PAYMENT_FAILED, "Payment verification failed"),
+    (TRIGGER_PAYMENT_WEBHOOK, "Payment webhook"),
 ]
+
+# ——— [R-1.15] SPEC-1-06: the provider's webhook event vocabulary ————————
+# The names the payment gateway sends in its event header. They live here,
+# beside the machine they feed, for the same reason STATUS_EVENT_TRIGGERS
+# does: the handler dispatches on constants, so no string literal can drift
+# away from the vocabulary the rest of the file declares. An event outside
+# this vocabulary is still RECORDED (the reconciliation trail must never
+# discard a delivery the provider says happened) — it simply moves nothing.
+WEBHOOK_EVENT_CAPTURED = "payment.captured"
+WEBHOOK_EVENT_AUTHORIZED = "payment.authorized"
+WEBHOOK_EVENT_FAILED = "payment.failed"
+WEBHOOK_EVENT_REFUNDED = "payment.refunded"
+
+# A completed refund. Both spellings are the same fact: Razorpay's own event
+# name for a settled refund is ``refund.processed``, while ``payment.refunded``
+# is the payment-scoped name the same provider documents for it. Accepting
+# either means a rename on the provider's side cannot silently stop the trail.
+WEBHOOK_REFUND_EVENTS = frozenset(
+    {WEBHOOK_EVENT_REFUNDED, "refund.processed"}
+)

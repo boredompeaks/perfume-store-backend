@@ -22,6 +22,14 @@ from dotenv import load_dotenv
 load_dotenv()
 RAZORPAY_KEY_ID = os.getenv('RAZORPAY_KEY_ID')
 RAZORPAY_KEY_SECRET = os.getenv('RAZORPAY_KEY_SECRET')
+# SPEC-1-06 [R-1.15]: the secret Razorpay signs every webhook delivery with
+# (Dashboard -> Settings -> Webhooks -> the secret beside the endpoint URL).
+# It is a DIFFERENT credential from the key pair above - rotating one does not
+# rotate the other - and it is the ONLY credential the webhook endpoint
+# accepts, which is why the endpoint fails closed (503) while it is unset
+# rather than accepting an unsigned delivery. No default: an unconfigured
+# value is empty, never a guessable literal.
+RAZORPAY_WEBHOOK_SECRET = (os.getenv('RAZORPAY_WEBHOOK_SECRET') or '').strip()
 
 # Build paths inside the project like this: BASE_DIR / 'subdir'.
 BASE_DIR = Path(__file__).resolve().parent.parent
@@ -611,6 +619,13 @@ REST_FRAMEWORK = {
         # receive an outbound email, so the budget is the same shape as
         # the recovery bound (tighter than the generic auth budget).
         'restock': os.getenv('THROTTLE_RESTOCK_RATE', '5/min'),
+        # SPEC-1-06: webhook deliveries are server-to-server and arrive in
+        # bursts (a retry storm, a payout sweep, a provider-side loop), so the
+        # budget is a floor on honest traffic rather than an anti-brute-force
+        # bound - unlike 'payment', which also throttles order-id guessing.
+        # Signature verification is what defends this endpoint; the rate
+        # only bounds the parsing work an unsigned caller can ask for.
+        'webhook': os.getenv('THROTTLE_WEBHOOK_RATE', '120/min'),
     },
 }
 
