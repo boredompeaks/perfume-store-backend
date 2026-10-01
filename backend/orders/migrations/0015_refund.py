@@ -25,7 +25,10 @@ class Migration(migrations.Migration):
                         verbose_name="ID",
                     ),
                 ),
-                ("amount", models.DecimalField(decimal_places=2, max_digits=12)),
+                (
+                    "amount",
+                    models.DecimalField(decimal_places=2, max_digits=10),
+                ),
                 ("reason", models.TextField()),
                 (
                     "kind",

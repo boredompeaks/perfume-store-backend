@@ -28,7 +28,10 @@ STATUS_CHOICES = [
 ]
 
 # Legal status flow. Cancelling a *paid* order is deliberately impossible —
-# there is no refund flow yet (V-03); reconciliation is manual by design.
+# the machine declares no edge into "cancelled" from confirmed/shipped/
+# delivered. Its money comes back through the SPEC-1-05 refund seam instead,
+# which records a Refund and moves the payment dimension without moving the
+# order's status.
 ALLOWED_TRANSITIONS = {
     "pending": {"confirmed", "cancelled"},
     "confirmed": {"shipped"},
@@ -91,9 +94,9 @@ def precondition_failures(order, new_status):
 # The legacy single status conflates "did they pay" with "did we ship"; the
 # two dimensions below separate those questions. The spec's example states
 # are the canonical sets: ambiguous values like "success" or "done" are
-# deliberately absent (spec 10.2's own warning). Refund/failure/COD writers
-# are SPEC-10-04's scope — the values exist here so the machine is complete,
-# but nothing writes them yet.
+# deliberately absent (spec 10.2's own warning). The failure writer is
+# SPEC-10-04's; partially_refunded / refunded are written by the SPEC-1-05
+# refund seam; authorized has no writer yet.
 PAYMENT_STATUS_CHOICES = [
     ("pending", "Pending"),
     ("authorized", "Authorized"),
@@ -131,11 +134,12 @@ PAYMENT_METHOD_CHOICES = [
 # failure writer moves pending -> failed, and failed -> captured is the
 # RETRY edge — a failed verification leaves the order status untouched
 # (retryable by design), so the next successful verify captures normally.
-# No writer exists yet for authorized / partially_refunded / refunded
-# (gateway two-step and the refund section's writers, SPEC-1-05/6-12);
-# their edges are declared so the machine is complete and those sections
-# pin against a table that already answers them. Mirrors
-# transition_allowed (self-transitions stay legal: idempotent replays).
+# No writer exists yet for authorized (the gateway two-step capture,
+# SPEC-10-04's remaining payment work); its edge is declared so the machine
+# is complete and that work pins against a table that already answers it.
+# partially_refunded / refunded are written by the SPEC-1-05 refund seam.
+# Mirrors transition_allowed (self-transitions stay legal: idempotent
+# replays).
 PAYMENT_ALLOWED_TRANSITIONS = {
     "pending": {"captured", "failed"},
     "authorized": {"captured"},

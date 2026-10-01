@@ -249,12 +249,13 @@ class Order(models.Model):
     # or-check; serializers and the admin expose them read-only). UTC
     # storage comes from USE_TZ=True, not from the columns. paid_at and
     # cancelled_at have live writers (verify_payment / admin cancel);
-    # fulfilled_at, shipped_at, delivered_at and refunded_at are the named
-    # pattern the later fulfilment and refund sections write -- no writer
-    # touches them yet. Historical rows stay NULL on purpose: the events
-    # predate the columns, their times are unknowable, so no backfill is
-    # possible. No index yet: spec 8.3 says add indexes from measured query
-    # patterns, and none of these dates is queried with status today.
+    # refunded_at has one too (the SPEC-1-05 refund seam); fulfilled_at,
+    # shipped_at and delivered_at are the named pattern the fulfilment
+    # section writes -- no writer touches them yet. Historical rows stay
+    # NULL on purpose: the events predate the columns, their times are
+    # unknowable, so no backfill is possible. No index yet: spec 8.3 says
+    # add indexes from measured query patterns, and none of these dates is
+    # queried with status today.
     paid_at = models.DateTimeField(null=True, blank=True)
     fulfilled_at = models.DateTimeField(null=True, blank=True)
     shipped_at = models.DateTimeField(null=True, blank=True)
@@ -394,8 +395,16 @@ class OrderItem(models.Model):
 
 def _require_captured_payment(order):
     """Ship only after the money is real: a shipped order whose payment
-    later fails is un-reconcilable (no refund flow yet, V-03), and the
-    payment dimension (spec 10.2) is exactly where that truth lives.
+    later fails is un-reconcilable, and the payment dimension (spec 10.2) is
+    exactly where that truth lives.
+
+    [R-1.14] SPEC-1-05: ``partially_refunded`` is real money too - a capture
+    minus a recorded refund, and the Refund row is precisely what
+    reconciliation reads - so the remainder may ship. Refusing it would strand
+    paid-for inventory permanently: cancel is illegal from ``confirmed`` and
+    ``mark_shipped`` is the only path to ``fulfilled``, so there is no
+    operator route out. ``pending`` / ``authorized`` / ``failed`` are still
+    refused; none of them is captured money.
 
     [R-10.2] SPEC-10-04 COD variant: a cash-on-delivery order is paid at/
     after delivery, so demanding a capture before shipping would make COD
@@ -405,7 +414,7 @@ def _require_captured_payment(order):
     timing; the reading is documented in changes.md)."""
     if order.payment_method == PAYMENT_METHOD_COD:
         return []
-    if order.payment_status != "captured":
+    if order.payment_status not in ("captured", "partially_refunded"):
         return [f"payment must be captured (is '{order.payment_status}')"]
     return []
 
@@ -540,11 +549,8 @@ class Refund(models.Model):
         related_name='refunds'
     )
 
-    # The task's pinned width: two digits wider than Order.total_amount's
-    # money column. The writer refuses anything above the order's captured
-    # amount, so the extra width is headroom, never reachable money.
     amount = models.DecimalField(
-        max_digits=12,
+        max_digits=10,
         decimal_places=2
     )
 

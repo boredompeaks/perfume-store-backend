@@ -128,9 +128,10 @@ class OrderAdmin(SavedFilterMixin, RoleAwareModelAdmin):
         "coupon",
         "payment_ref",
         "created_at",
-        # [R-8.16] the two live business-event stamps beside the row; the
-        # still-unwritten events (fulfilled/shipped/delivered/refunded) stay
-        # off the changelist until their writers land.
+        # [R-8.16] the two live business-event stamps beside the row;
+        # refunded_at (written by the SPEC-1-05 refund seam) and the
+        # still-unwritten fulfilled/shipped/delivered events stay off the
+        # changelist until their writers land.
         "paid_at",
         "cancelled_at",
     )
@@ -211,7 +212,8 @@ class OrderAdmin(SavedFilterMixin, RoleAwareModelAdmin):
                     f"Order #{obj.pk}: cannot move from '{old}' to '{obj.status}'. "
                     f"Allowed from '{old}': {allowed}. "
                     + (
-                        "Cancelling a paid order needs a refund — reconcile manually."
+                        "Cancelling a paid order needs a refund — issue "
+                        "one via POST /api/admin/orders/<id>/refund/."
                         if old in ("confirmed", "shipped", "delivered")
                         else ""
                     ),
@@ -389,10 +391,10 @@ class OrderAdmin(SavedFilterMixin, RoleAwareModelAdmin):
 
         The amount and its currency, the lines affected and the state each
         selected row ends in. Rows the action will *not* touch (paid orders
-        — cancelling those needs a refund, which does not exist here) are
-        spelled out too: skipping them is part of what the operator is
-        confirming, and "3 orders, only 1 cancelled" is exactly the surprise
-        this payload exists to prevent.
+        — cancelling those is a separate, refund-backed decision, see the
+        refund seam) are spelled out too: skipping them is part of what the
+        operator is confirming, and "3 orders, only 1 cancelled" is exactly
+        the surprise this payload exists to prevent.
         """
         if action_name != "cancel_pending":
             return {}
@@ -531,8 +533,9 @@ class OrderAdmin(SavedFilterMixin, RoleAwareModelAdmin):
         if skipped:
             self.message_user(
                 request,
-                f"{skipped} order(s) skipped — paid orders cannot be cancelled "
-                f"(no refund flow; reconcile manually).",
+                f"{skipped} order(s) skipped — paid orders cannot be "
+                f"cancelled (refund them via "
+                f"POST /api/admin/orders/<id>/refund/).",
                 messages.WARNING,
             )
 

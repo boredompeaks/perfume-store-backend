@@ -29,7 +29,7 @@ import razorpay
 
 from common.roles import ROLE_FINANCE, ROLE_SUPPORT
 from common.testing import TEST_RAZORPAY_KEY_ID, TEST_RAZORPAY_KEY_SECRET, ApiTestCase
-from orders.models import Order, Refund
+from orders.models import Order, OrderItem, Refund
 from orders.refunds import RefundGatewayError, refund_payment
 
 
@@ -168,6 +168,20 @@ class RefundTestBase(ApiTestCase):
             razorpay_order_id=f"order_{payment_id or 'NONE'}",
             razorpay_payment_id=payment_id,
         )
+
+    def with_items(self, order, product=None, quantity=1):
+        """Give an ORM-created order the checkout lines the shipped edge
+        requires (SPEC-10-03 makes items a shipped precondition)."""
+        product = product or self.make_product(name="Rose Aurum", price="900.00")
+        OrderItem.objects.create(
+            order=order,
+            product=product,
+            product_name=product.name,
+            price=product.price,
+            quantity=quantity,
+            subtotal=product.price * quantity,
+        )
+        return order
 
     def gateway(self, prefix="rfnd_TEST"):
         """The mocked Razorpay client, whose refunds succeed.
@@ -424,11 +438,13 @@ class RefundEligibilityTests(RefundTestBase):
 
     def test_a_failed_payment_cannot_be_refunded(self):
         order = self.captured_order(payment_status="failed")
+        client = self.gateway()
 
         res = self.refund(order)
 
         self.assertEqual(res.status_code, 409, res.data)
         self.assertEqual(Refund.objects.count(), 0)
+        client.refund.create.assert_not_called()
 
     def test_a_captured_order_with_no_gateway_payment_is_refused(self):
         # A cash-on-delivery order has no provider payment to reverse: the
@@ -721,3 +737,95 @@ class RefundAdminSurfaceTests(RefundTestBase):
         refund.refresh_from_db()
         self.assertEqual(refund.amount, Decimal("900.00"))
         self.assertEqual(refund.reason, "Damaged in transit")
+
+
+@tag("orders")
+class PartiallyRefundedShipmentTests(RefundTestBase):
+    """[R-1.14] A partially-refunded order is still shippable.
+
+    Regression pin for the interaction the first cut missed: the shipped
+    precondition accepted ``captured`` only, so the moment a refund moved the
+    payment dimension to ``partially_refunded`` the order could never ship
+    again - and because cancel is illegal from ``confirmed`` there was no
+    operator route out, so paid-for inventory was stranded permanently.
+    ``partially_refunded`` is captured money minus a recorded refund, and the
+    Refund row is what reconciliation reads, so the remainder ships.
+    """
+
+    FULFIL_PATH = "/api/admin/orders/{order_id}/fulfill/"
+
+    def partially_refunded_order(self):
+        """A confirmed, itemised order with one partial refund against it."""
+        order = self.captured_order()
+        self.with_items(order)
+        self.gateway()
+        self.refund(order, amount="100.00")
+        order.refresh_from_db()
+        self.assertEqual(order.payment_status, "partially_refunded")
+        return order
+
+    def _support_client(self, username="supp"):
+        client = self.fresh_client()
+        client.force_authenticate(self.user_with_role(username, ROLE_SUPPORT))
+        return client
+
+    def _run_admin_action(self, action, orders):
+        """A bulk action through the real admin UI (the house pattern)."""
+        User.objects.create_superuser(
+            "refundboss", "refundboss@example.com", "S3cure-Passphrase!"
+        )
+        admin_client = self.fresh_client()
+        self.assertTrue(
+            admin_client.login(username="refundboss", password="S3cure-Passphrase!")
+        )
+        return admin_client.post(
+            "/admin/orders/order/",
+            {
+                "action": action,
+                "_selected_action": [str(order.id) for order in orders],
+                "select_across": "0",
+            },
+            follow=True,
+        )
+
+    def test_a_partially_refunded_order_ships_through_the_fulfil_seam(self):
+        order = self.partially_refunded_order()
+
+        res = self._support_client().post(
+            self.FULFIL_PATH.format(order_id=order.id), {}, format="json"
+        )
+
+        self.assertEqual(res.status_code, 200, res.data)
+        order.refresh_from_db()
+        self.assertEqual(order.status, "shipped")
+        self.assertEqual(order.fulfilment_status, "fulfilled")
+        # Shipping reconciles against the refund row rather than erasing it:
+        # the money returned and the money shipped are both still on record.
+        self.assertEqual(Refund.refunded_total(order), Decimal("100.00"))
+        self.assertEqual(order.refundable_remaining, Decimal("800.00"))
+
+    def test_a_partially_refunded_order_ships_through_the_admin_bulk_action(self):
+        order = self.partially_refunded_order()
+
+        res = self._run_admin_action("mark_shipped", [order])
+
+        self.assertEqual(res.status_code, 200)
+        order.refresh_from_db()
+        self.assertEqual(order.status, "shipped")
+
+    def test_payment_states_that_are_not_captured_money_still_cannot_ship(self):
+        for payment_status in ("pending", "authorized", "failed"):
+            with self.subTest(payment_status=payment_status):
+                order = self.captured_order(
+                    payment_id=f"pay_{payment_status}",
+                    payment_status=payment_status,
+                )
+                self.with_items(order)
+
+                res = self._support_client(f"supp-{payment_status}").post(
+                    self.FULFIL_PATH.format(order_id=order.id), {}, format="json"
+                )
+
+                self.assertEqual(res.status_code, 409, res.data)
+                order.refresh_from_db()
+                self.assertEqual(order.status, "confirmed")

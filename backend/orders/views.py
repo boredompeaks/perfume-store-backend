@@ -1595,8 +1595,10 @@ def admin_order_cancel(request, order_id):
     """[R-9.4.11] POST /api/admin/orders/:id/cancel — cancel an unpaid order.
 
     The same machine gate the admin uses decides: only ``pending`` carries
-    a cancel edge (cancelling a paid order is deliberately impossible until
-    refunds exist — the 409 says so, mirroring the admin wording).
+    a cancel edge, so a paid order cannot be cancelled at all - its money
+    comes back through the refund seam below instead, which records a
+    Refund and moves the payment dimension without moving the status. The
+    409 names that path.
     Idempotent: the machine's self-transition makes a re-cancel a no-op
     200 (no second stamp, no duplicate audit row). cancelled_at rides the
     transition exactly like admin ``cancel_pending`` — the is-none guard
@@ -1622,8 +1624,9 @@ def admin_order_cancel(request, order_id):
             return Response(
                 {
                     "error": f"Order cannot be cancelled from status "
-                             f"'{order.status}'. Cancelling a paid order "
-                             f"needs a refund — reconcile manually.",
+                             f"'{order.status}'. A paid order cannot be "
+                             f"cancelled — issue a refund instead "
+                             f"(POST /api/admin/orders/<id>/refund/).",
                 },
                 status=status.HTTP_409_CONFLICT
             )
@@ -1756,10 +1759,14 @@ def admin_order_refund(request, order_id):
                     status=status.HTTP_404_NOT_FOUND
                 )
 
-            # This order's refund rows, locked beside the order row. The
-            # queryset is materialized because that is what makes the lock
-            # take effect; the same list answers the replay probe below, so
-            # the balance is read from rows nothing else can be appending to.
+            # This order's refund rows, locked beside the order row, and
+            # materialized because that is what makes the lock take effect.
+            # What makes the ATTEMPT safe is the Order row lock above: every
+            # refund writer for this order takes it first, so no other writer
+            # can append a refund between this transaction's balance read and
+            # its commit. This list serves the replay probe below; the balance itself
+            # comes from refundable_remaining's aggregate, and the Order lock
+            # is what keeps that read consistent.
             order_refunds = list(
                 Refund.objects.select_for_update().filter(order=order)
             )
@@ -1802,7 +1809,17 @@ def admin_order_refund(request, order_id):
                     status=status.HTTP_409_CONFLICT
                 )
 
-            if order.payment_status not in ("captured", "partially_refunded"):
+            # [R-10.1] Eligibility is asked of the machine, not restated
+            # here: a refund moves the payment dimension onto one of the two
+            # refund values, so the row's current payment must be one the
+            # machine declares an edge FROM (payment_transition_allowed over
+            # PAYMENT_ALLOWED_TRANSITIONS - captured or partially_refunded
+            # today). pending / authorized / failed declare no refund edge,
+            # so they are refused before anything is written.
+            if not any(
+                payment_transition_allowed(order.payment_status, target)
+                for target in ("refunded", "partially_refunded")
+            ):
                 return Response(
                     {
                         "error": f"Order payment is '{order.payment_status}'; "
@@ -1887,10 +1904,13 @@ def admin_order_refund(request, order_id):
             ])
 
             refunded_total = Refund.refunded_total(order)
-            # [R-10.1] The payment dimension moves only along declared edges
-            # (PAYMENT_ALLOWED_TRANSITIONS): captured/partially_refunded ->
-            # partially_refunded, and -> refunded once nothing is left. The
-            # balance gate above is what guarantees this can never overshoot.
+            # [R-10.1] The balance gate is what chooses between the two refund
+            # values the eligibility gate above proved reachable: nothing left
+            # to refund -> refunded, some money still refundable ->
+            # partially_refunded. Both are declared edges in
+            # PAYMENT_ALLOWED_TRANSITIONS from every state this writer admits,
+            # and the gate above is what guarantees the order can never
+            # overshoot the captured amount.
             order.payment_status = (
                 "refunded"
                 if refunded_total >= quantize_money(order.total_amount)
