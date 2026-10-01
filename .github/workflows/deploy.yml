@@ -15,6 +15,25 @@
 # can originate. It also filters pushes that never ran backend-tests (a
 # frontend-only push does not touch the backend image).
 #
+# NOT A RELEASE IS NOT A FAILURE. `workflow_run` fires for EVERY completion of
+# backend-tests, including the `pull_request` run that each promotion PR
+# produces, and including pushes to branches that are not release branches
+# (master, most obviously). None of those is a release that this workflow was
+# asked to perform, so the gate reports NEUTRAL (exit 0, allow=false) and the
+# release job is skipped. Reporting a designed refusal as a red check would
+# leave a red check on every promotion PR head, and a gate that can never be
+# all-green is a gate nobody reads. What still HARD FAILS is everything about
+# an actual release attempt on a release branch: a red backend suite, a red or
+# missing secret scan, a timed-out scan.
+#
+# DORMANT BY DEFAULT. The release job additionally requires the repository
+# variable DEPLOY_ENABLED == 'true'. This repository has no production deploy
+# host and no DEPLOY_* secrets, so an unguarded release job would ssh at an
+# empty host on every green push to spec-comp and fail forever - a guaranteed
+# red check on the release branch, which is the same defect wearing a
+# different hat. An operator configures DEPLOY_ENABLED (and the production
+# environment's secrets and reviewers) when there is a real host to release to.
+#
 # The deploy itself is one ssh call that runs scripts/release.sh on the deploy
 # host - the same script an operator runs by hand, so the rehearsed release and
 # the real one are the same commands. That host keeps a git clone of this
@@ -49,6 +68,7 @@ jobs:
     outputs:
       sha: ${{ steps.allow.outputs.sha }}
       ref: ${{ steps.allow.outputs.ref }}
+      allow: ${{ steps.allow.outputs.allow }}
     # Job-level permissions REPLACE the top-level block, so contents: read is
     # restated here. actions: read is what the secret-scan step below needs: it
     # lists that workflow's runs via `gh api repos/.../actions/...`, and every
@@ -73,28 +93,39 @@ jobs:
           RUN_SHA: ${{ github.event.workflow_run.head_sha }}
         run: |
           set -euo pipefail
+          # Neutral, not red: this trigger is not a release request. See the
+          # NOT A RELEASE IS NOT A FAILURE note at the top of this file.
           if [ "$RUN_EVENT" != "push" ]; then
-            echo "refusing: $RUN_WORKFLOW ran on '$RUN_EVENT', not a push."
-            exit 1
+            echo "no release: $RUN_WORKFLOW ran on '$RUN_EVENT', not a push."
+            echo "allow=false" >> "$GITHUB_OUTPUT"
+            exit 0
           fi
           case ",$RELEASE_BRANCHES," in
             *",$RUN_BRANCH,"*) ;;
             *)
-              echo "refusing: '$RUN_BRANCH' is not a release branch ($RELEASE_BRANCHES)."
-              exit 1
+              echo "no release: '$RUN_BRANCH' is not a release branch ($RELEASE_BRANCHES)."
+              echo "allow=false" >> "$GITHUB_OUTPUT"
+              exit 0
               ;;
           esac
+          # Past this point a release IS being requested, so every remaining
+          # condition is a real gate and fails hard.
           if [ "$RUN_CONCLUSION" != "success" ]; then
             echo "refusing: $RUN_WORKFLOW concluded '$RUN_CONCLUSION' on $RUN_SHA."
             exit 1
           fi
           echo "sha=$RUN_SHA" >> "$GITHUB_OUTPUT"
           echo "ref=$RUN_BRANCH" >> "$GITHUB_OUTPUT"
+          echo "allow=true" >> "$GITHUB_OUTPUT"
 
       # The secret scan runs in parallel with the backend suite, so it may
       # still be running when this gate starts: poll it rather than racing it.
       # Any terminal verdict other than success (or no run at all) refuses.
+      # Skipped entirely when no release was requested - otherwise this step
+      # would spend its 300s budget waiting for a push-event scan that will
+      # never exist on a pull_request run and then fail the step.
       - name: Require the secret scan to have passed on this commit
+        if: steps.allow.outputs.allow == 'true'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           REPO: ${{ github.repository }}
@@ -130,6 +161,14 @@ jobs:
   deploy:
     name: release
     needs: gate
+    # Two conditions, both required. The first is the gate's own verdict: no
+    # release requested (a pull_request run, or a push to a non-release branch
+    # such as master) means no release attempt. The second is the operator's
+    # opt-in: this repo has no production host and no DEPLOY_* secrets, so
+    # until DEPLOY_ENABLED is set the job never starts instead of failing an
+    # ssh at an empty host on every green push. Every real security gate is
+    # unchanged and still runs in `gate`.
+    if: needs.gate.outputs.allow == 'true' && vars.DEPLOY_ENABLED == 'true'
     runs-on: ubuntu-latest
     # Lets the repository require review/approval for releases and scope the
     # secrets below to the production environment.
