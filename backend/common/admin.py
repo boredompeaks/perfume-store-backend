@@ -17,6 +17,17 @@ Two conventions guardrails are honoured deliberately:
   Django uses for ``allowed_permissions``), so a gated action disappears
   from the dropdown *and* is rejected if POSTed directly.
 
+A surface with a second door (``scoped_view_capability`` — spec 1.1 line
+110's packing operator reaches the orders grid without ``orders.read``)
+narrows READING and WRITING from two deny-by-default declarations:
+``scoped_writable_fields`` decides which fields such a caller may edit at
+all (every other field its fieldsets expose renders read-only), and
+``scoped_value_capabilities`` decides which *values* of those fields need a
+further capability. The second one is enforced at the input, in
+``formfield_for_dbfield``, which both admin write paths (the change form
+and the ``list_editable`` formset) are built through — so a value the
+caller may not write is neither offered nor accepted.
+
 Destructive bulk actions ([6.12.4] — explicit confirmation for sensitive
 actions) declare themselves in ``confirmation_required_actions``; the base
 interposes a confirmation interstitial between the dropdown POST and the
@@ -131,9 +142,10 @@ class RoleAwareModelAdmin(admin.ModelAdmin):
       ``orders.read``). Such a caller still reaches the changelist — it
       already holds the model's ``change`` capability, which is what gates
       the grid — but the ModelAdmin is expected to narrow what that grid
-      shows (queryset, columns, searchable fields, change-form fieldsets).
-      ``None`` (the default, and every admin but the one that declares it)
-      means there is no second door at all.
+      shows (queryset, columns, searchable fields, change-form fieldsets)
+      AND what it may write (``scoped_writable_fields`` /
+      ``scoped_value_capabilities``). ``None`` (the default, and every admin
+      but the one that declares it) means there is no second door at all.
     """
 
     capability_map = {}
@@ -196,6 +208,92 @@ class RoleAwareModelAdmin(admin.ModelAdmin):
         # leaving the module off the index would make that reachable-but-
         # undiscoverable surface (the operator would have to guess the URL).
         return self.has_view_permission(request) or self.is_scoped_viewer(request)
+
+    # ——— the scoped WRITE seam (what a scoped viewer may commit) ———
+    #
+    # Reading is half the second door; writing is the half that needs its own
+    # declarations, because a scoped viewer's change capability is real (it is
+    # what Django gates the grid on) while its mandate is one function. Both
+    # attributes are deny-by-default: the base declares NOTHING writable and
+    # NO gated value, so an admin that opens the door without declaring its
+    # writes offers a read, not an editor, and a future capability is never
+    # writable until someone maps it.
+
+    # Field names this surface lets a scoped viewer edit. Every other field its
+    # fieldsets expose renders read-only (see ``get_readonly_fields``).
+    scoped_writable_fields = frozenset()
+    # ``field name -> {value: capability required to write that value}``. A
+    # value named here belongs to another capability's authority, so it is
+    # offered and accepted only for a caller holding that capability; an
+    # unmapped value carries no extra requirement beyond the field's own.
+    scoped_value_capabilities = {}
+
+    def scoped_value_permitted(self, request, field_name, value):
+        """Whether ``value`` may be written into ``field_name`` by this caller.
+
+        The single point the answer is computed at, read from both ends of the
+        seam: ``formfield_for_dbfield`` withholds a refused value from the
+        widget, and it is the same predicate a ModelAdmin would ask before
+        writing a value itself. ``str()`` because a ModelForm hands back a
+        string for a char/choice field while a dict key is written literally.
+        """
+        required = self.scoped_value_capabilities.get(field_name, {}).get(str(value))
+        return required is None or self._holds_capability(request, required)
+
+    def get_readonly_fields(self, request, obj=None):
+        """A scoped viewer edits only what its ModelAdmin declared writable.
+
+        Deny-by-default over the model: every editable field it carries except
+        the declared writes renders read-only, and Django's ``get_form``
+        EXCLUDES readonly fields from the ModelForm — so a hand-posted value
+        for one is never a form field and is ignored outright rather than
+        validated away. That is why widening a scoped fieldset cannot silently
+        hand out a write: the declaration, not the fieldset, decides what is
+        editable.
+
+        The field list is read from the MODEL, never from ``get_fieldsets()``:
+        the default ``get_fieldsets`` reaches back into ``get_form`` and
+        ``get_readonly_fields``, so consulting it here would recurse on any
+        surface that does not declare its own fieldsets.
+        """
+        readonly = super().get_readonly_fields(request, obj)
+        if not self.is_scoped_viewer(request):
+            return readonly
+        withheld = (
+            field.name
+            for field in self.model._meta.get_fields()
+            if getattr(field, "editable", False)
+            and field.name not in self.scoped_writable_fields
+            and field.name not in readonly
+        )
+        return readonly + tuple(withheld)
+
+    def formfield_for_dbfield(self, db_field, request, **kwargs):
+        """A value this caller may not write is never OFFERED to it.
+
+        Both admin write paths are built through this callback — ``get_form``
+        for the change form and ``get_changelist_form`` for the ``list_editable``
+        formset both pass it as ``formfield_callback`` — so narrowing the
+        choices here closes them at once, at the layer that owns the input: the
+        option is gone from the widget, and a value posted by hand fails the
+        field's own validation before ``save_model`` is ever reached. Only a
+        field with choices may be named in ``scoped_value_capabilities``; any
+        other formfield is returned untouched.
+        """
+        formfield = super().formfield_for_dbfield(db_field, request, **kwargs)
+        gated = (
+            self.scoped_value_capabilities.get(db_field.name)
+            if self.is_scoped_viewer(request)
+            else None
+        )
+        if not gated:
+            return formfield
+        formfield.choices = [
+            choice
+            for choice in formfield.choices
+            if self.scoped_value_permitted(request, db_field.name, choice[0])
+        ]
+        return formfield
 
     # ——— privileged-action audit trail ([6.12.5]) ———
 

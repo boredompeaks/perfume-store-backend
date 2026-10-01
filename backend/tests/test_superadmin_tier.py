@@ -63,8 +63,8 @@ from common.roles import (
     sync_role_groups,
 )
 from common.testing import ApiTestCase
-from orders.models import Order, OrderItem
-from orders.state import ADMIN_FULFILMENT_NEXT
+from orders.models import Order, OrderItem, OrderStatusEvent
+from orders.state import ADMIN_FULFILMENT_NEXT, ALLOWED_TRANSITIONS
 from orders.views import _may_fulfil
 
 from .test_staff_roles_admin import user_change_post
@@ -851,6 +851,367 @@ class FulfilmentQueueSurfaceTests(ApiTestCase):
         self.assertContains(res, str(self.queued.total_amount))
         self.assertContains(res, self.settled.order_number)
         self.assertTrue(self.order_admin().has_module_permission(request_for(root)))
+
+
+@tag("e2e")
+class ScopedFulfilWritePathTests(ApiTestCase):
+    """[R-1-B03] cycle 3: what the packing door may WRITE, on both admin paths.
+
+    Cycle 2 narrowed this surface for reading and left the write path wide: a
+    role holding exactly ``{products.read, inventory.read, inventory.adjust,
+    orders.fulfill}`` could cancel a pending order through the change form AND
+    through the ``list_editable`` cell (``pending -> cancelled`` is a legal
+    machine edge), and could rewrite the delivery address — the one surface
+    where the machine gate says nothing, because the value is not the status.
+
+    The two admin write paths are the change form and the changelist formset.
+    Django builds both through ``formfield_for_dbfield`` and
+    ``get_readonly_fields``, so one declaration in the base closes both; these
+    tests drive the real POSTs and then assert on the PERSISTED row, not on the
+    status code, because a refusal that still moved the row would be no
+    refusal at all.
+    """
+
+    CHANGELIST = "/admin/orders/order/"
+
+    def setUp(self):
+        self.operator = make_role_user(ROLE_INVENTORY, "write-packer")
+        # Support holds orders.cancel (and orders.read, so it is NOT a scoped
+        # viewer): the control that proves the seam refuses only the packer.
+        self.support = make_role_user(ROLE_SUPPORT, "write-support")
+        self.chief = make_role_user(ROLE_ADMIN, "write-chief")
+        self.root = User.objects.create_superuser(
+            "write-root", "root@example.com", TEST_PASSWORD
+        )
+        self.buyer = self.make_user("write-buyer")
+        self.product = self.make_product(name="Write Rose", price="750.00", stock=9)
+        self.queued = self._order("WRITE-0001")
+
+    def _order(self, order_number):
+        order = Order.objects.create(
+            user=self.buyer,
+            order_number=order_number,
+            full_name="Write Buyer",
+            phone="9876500044",
+            address="1 Queue Lane",
+            city="Indore",
+            state="MP",
+            pincode="452001",
+            total_amount=Decimal("750.00"),
+        )
+        OrderItem.objects.create(
+            order=order,
+            product=self.product,
+            product_name=self.product.name,
+            price=self.product.price,
+            quantity=1,
+            subtotal=Decimal("750.00"),
+        )
+        # Paid, so the fulfilment preconditions are met for the queue advance.
+        Order.objects.filter(pk=order.pk).update(payment_status="captured")
+        return order
+
+    # helpers -----------------------------------------------------------------
+    def order_admin(self):
+        return admin.site._registry[Order]
+
+    def change_url(self):
+        return f"{self.CHANGELIST}{self.queued.pk}/change/"
+
+    def change_post(self, **fields):
+        """A complete change-form POST, exactly as the grid's form renders it.
+
+        It states the full surface's editable fields (so the same payload is an
+        honest submission for a cancel holder and for the superuser) plus the
+        item inline's management form, whose fields are read-only on every
+        surface. A scoped viewer's extra fields are not form fields there, so
+        they are ignored — which is exactly what the address test relies on.
+        """
+        order = self.queued
+        payload = {
+            "user": order.user_id,
+            "full_name": order.full_name,
+            "phone": order.phone,
+            "address": order.address,
+            "city": order.city,
+            "state": order.state,
+            "pincode": order.pincode,
+            "status": order.status,
+            "_save": "Save",
+            "items-TOTAL_FORMS": "1",
+            "items-INITIAL_FORMS": "1",
+            "items-MIN_NUM_FORMS": "0",
+            "items-MAX_NUM_FORMS": "1000",
+            "items-0-id": str(order.items.get().pk),
+        }
+        payload.update(fields)
+        return self.client.post(self.change_url(), payload)
+
+    def changelist_post(self, status="confirmed"):
+        """The ``list_editable`` formset POST, exactly as the grid renders it."""
+        order = self.queued
+        payload = {
+            "_save": "Save",
+            "form-TOTAL_FORMS": "1",
+            "form-INITIAL_FORMS": "1",
+            "form-MIN_NUM_FORMS": "0",
+            "form-MAX_NUM_FORMS": "1000",
+            "form-0-id": str(order.pk),
+            "form-0-order_number": order.order_number,
+            "form-0-status": status,
+        }
+        return self.client.post(self.CHANGELIST, payload)
+
+    def assert_row_unchanged(self):
+        """The persisted row is the contract: status AND every stamp the
+        refused write would have set."""
+        order = self.queued
+        order.refresh_from_db()
+        self.assertEqual(order.status, "pending")
+        self.assertIsNone(order.cancelled_at)
+        self.assertFalse(
+            OrderStatusEvent.objects.filter(order=order).exists(),
+            "a refused status write must leave no transition audit row",
+        )
+
+    # the packing work that must survive the fix ------------------------------
+    def test_a_fulfil_only_role_advances_a_packing_status_on_the_change_form(self):
+        self.client.force_login(self.operator)
+
+        res = self.change_post(status="confirmed")
+
+        self.assertEqual(res.status_code, 302)
+        self.queued.refresh_from_db()
+        self.assertEqual(self.queued.status, "confirmed")
+        event = OrderStatusEvent.objects.get(order=self.queued)
+        self.assertEqual(event.to_status, "confirmed")
+        self.assertEqual(event.actor, self.operator)
+
+    def test_a_fulfil_only_role_advances_a_packing_status_on_the_list_edit_cell(self):
+        # The other surviving write path: the grid cell is how a packer walks a
+        # queue, so narrowing the cancel target must not close it.
+        self.client.force_login(self.operator)
+
+        res = self.changelist_post(status="confirmed")
+
+        self.assertEqual(res.status_code, 302)
+        self.queued.refresh_from_db()
+        self.assertEqual(self.queued.status, "confirmed")
+
+    # the destructive target, both paths ---------------------------------------
+    def test_a_fulfil_only_role_cannot_cancel_through_the_change_form(self):
+        self.client.force_login(self.operator)
+
+        res = self.change_post(status="cancelled")
+
+        # Django's own field validation refuses the hand-posted value and
+        # re-renders; nothing reaches save_model.
+        self.assertEqual(res.status_code, 200)
+        self.assertIn("status", res.context["adminform"].form.errors)
+        self.assert_row_unchanged()
+        self.assertFalse(
+            LogEntry.objects.filter(
+                object_id=str(self.queued.pk), user=self.operator
+            ).exists(),
+            "a refused write must leave no change-log entry",
+        )
+
+    def test_a_fulfil_only_role_cannot_cancel_through_the_list_edit_cell(self):
+        self.client.force_login(self.operator)
+
+        res = self.changelist_post(status="cancelled")
+
+        self.assertIn(res.status_code, (200, 302))
+        self.assert_row_unchanged()
+
+    def test_the_change_form_offers_the_packer_no_cancel_option(self):
+        self.client.force_login(self.operator)
+
+        res = self.client.get(self.change_url())
+
+        self.assertEqual(res.status_code, 200)
+        offered = [
+            value
+            for value, _label in res.context["adminform"].form.fields["status"].choices
+        ]
+        self.assertNotIn("cancelled", offered)
+        # ...and the queue walk is still offered in full.
+        self.assertLessEqual({"confirmed", "shipped", "delivered"}, set(offered))
+        self.assertNotContains(res, '<option value="cancelled">')
+
+    def test_the_list_edit_cell_offers_the_packer_no_cancel_option(self):
+        self.client.force_login(self.operator)
+
+        res = self.client.get(self.CHANGELIST)
+
+        self.assertEqual(res.status_code, 200)
+        # The cell exists (the packing advance still lives there) but its
+        # widget carries no cancel target.
+        self.assertContains(res, 'name="form-0-status"')
+        self.assertNotContains(res, '<option value="cancelled"')
+
+    # the delivery address (BUG-5) --------------------------------------------
+    def test_a_fulfil_only_role_cannot_rewrite_the_delivery_address(self):
+        self.client.force_login(self.operator)
+
+        res = self.change_post(
+            address="1 Attacker Lane",
+            city="Mars",
+            state="ZZ",
+            pincode="000000",
+        )
+
+        self.assertEqual(res.status_code, 302)
+        self.queued.refresh_from_db()
+        self.assertEqual(self.queued.address, "1 Queue Lane")
+        self.assertEqual(self.queued.city, "Indore")
+        self.assertEqual(self.queued.state, "MP")
+        self.assertEqual(self.queued.pincode, "452001")
+
+    def test_the_scoped_change_form_renders_no_input_for_a_withheld_field(self):
+        self.client.force_login(self.operator)
+
+        res = self.client.get(self.change_url())
+
+        self.assertEqual(res.status_code, 200)
+        for field in ("address", "city", "state", "pincode", "order_number"):
+            with self.subTest(field=field):
+                self.assertNotContains(res, f'name="{field}"')
+        # ...while the one writable field is still an input.
+        self.assertContains(res, 'name="status"')
+
+    # no over-blocking ---------------------------------------------------------
+    def test_a_cancel_holder_keeps_its_change_form_authority(self):
+        # Support holds orders.cancel and orders.read, so it is not a scoped
+        # viewer: the pending -> cancelled edge it may commit on the sanctioned
+        # API path must stay committable here too.
+        self.client.force_login(self.support)
+
+        res = self.change_post(status="cancelled")
+
+        self.assertEqual(res.status_code, 302)
+        self.queued.refresh_from_db()
+        self.assertEqual(self.queued.status, "cancelled")
+        self.assertIsNotNone(self.queued.cancelled_at)
+
+    def test_the_cancel_holder_is_still_offered_the_cancel_option(self):
+        self.client.force_login(self.support)
+
+        res = self.client.get(self.change_url())
+
+        offered = [
+            value
+            for value, _label in res.context["adminform"].form.fields["status"].choices
+        ]
+        self.assertIn("cancelled", offered)
+
+    def test_the_admin_role_keeps_its_full_change_form_and_cell(self):
+        self.client.force_login(self.chief)
+
+        form = self.client.get(self.change_url())
+        offered = [
+            value
+            for value, _label in form.context["adminform"].form.fields["status"].choices
+        ]
+        self.assertIn("cancelled", offered)
+        self.assertContains(form, 'name="address"')
+        grid = self.client.get(self.CHANGELIST)
+        self.assertContains(grid, 'name="form-0-status"')
+        self.assertContains(grid, '<option value="cancelled"')
+        committed = self.changelist_post(status="cancelled")
+        self.assertEqual(committed.status_code, 302)
+        self.queued.refresh_from_db()
+        self.assertEqual(self.queued.status, "cancelled")
+
+    def test_the_superuser_bypass_is_untouched_by_the_scoped_seam(self):
+        self.client.force_login(self.root)
+
+        form = self.client.get(self.change_url())
+        offered = [
+            value
+            for value, _label in form.context["adminform"].form.fields["status"].choices
+        ]
+        self.assertIn("cancelled", offered)
+        self.assertContains(form, 'name="address"')
+        committed = self.change_post(status="cancelled")
+        self.assertEqual(committed.status_code, 302)
+        self.queued.refresh_from_db()
+        self.assertEqual(self.queued.status, "cancelled")
+        self.assertIsNotNone(self.queued.cancelled_at)
+
+    # the declaration itself ---------------------------------------------------
+    def test_the_write_declaration_names_the_packing_field_and_the_cancel_capability(
+        self,
+    ):
+        model_admin = self.order_admin()
+        self.assertEqual(model_admin.scoped_writable_fields, frozenset({"status"}))
+        self.assertEqual(
+            model_admin.scoped_value_capabilities,
+            {"status": {"cancelled": "orders.cancel"}},
+        )
+        # One authority, not three that can drift: the change form, the cell and
+        # the bulk action all answer on orders.cancel.
+        self.assertEqual(
+            model_admin.scoped_value_capabilities["status"]["cancelled"],
+            model_admin.action_capabilities["cancel_pending"],
+        )
+        # Least privilege: the refusal costs the operator nothing else, and the
+        # operator still holds no orders.read (so no export_csv).
+        self.assertFalse(user_has_capability(self.operator, "orders.cancel"))
+        self.assertFalse(user_has_capability(self.operator, "orders.read"))
+        self.assertEqual(held_capabilities(self.operator), INVENTORY_CAPABILITIES)
+
+    def test_every_machine_target_outside_the_fulfilment_walk_is_capability_mapped(
+        self,
+    ):
+        # Deny-by-default drift pin. The machine is the source of every target
+        # a scoped viewer could ever reach; any edge that is not a fulfilment
+        # step must be mapped to the capability that owns it, or the next edge
+        # someone adds would be writable by a packer by omission.
+        model_admin = self.order_admin()
+        machine_targets = set().union(*ALLOWED_TRANSITIONS.values())
+        fulfilment_targets = set(ADMIN_FULFILMENT_NEXT.values())
+        mapped = set(model_admin.scoped_value_capabilities["status"])
+        self.assertEqual(machine_targets - fulfilment_targets, mapped)
+        self.assertEqual(mapped, {"cancelled"})
+
+    def test_the_seam_is_deny_by_default_for_an_admin_that_declares_no_writes(self):
+        # The base's own defaults, probed directly: a ModelAdmin that opens the
+        # door without declaring its writes must offer a read, not an editor.
+        bare = RoleAwareModelAdmin(Order, admin.site)
+        bare.scoped_view_capability = "orders.fulfill"
+        request = RequestFactory().get(self.change_url())
+        request.user = self.operator
+        self.assertTrue(bare.is_scoped_viewer(request))
+        self.assertEqual(bare.scoped_writable_fields, frozenset())
+        self.assertEqual(bare.scoped_value_capabilities, {})
+        exposed = {
+            field
+            for _title, options in bare.get_fieldsets(request, self.queued)
+            for field in options["fields"]
+        }
+        self.assertTrue(exposed <= set(bare.get_readonly_fields(request, self.queued)))
+        # ...and with nothing mapped, no value is withheld (the field set is
+        # what refuses the write) — which is why the orders admin must map the
+        # destructive one explicitly.
+        self.assertTrue(bare.scoped_value_permitted(request, "status", "cancelled"))
+
+    def test_the_value_predicate_answers_on_the_capability_not_on_the_role(self):
+        # The predicate is the seam's single decision point, so it is pinned on
+        # both answers: the packer is refused the cancel target, a cancel holder
+        # is allowed it, and an unmapped value needs nothing extra.
+        model_admin = self.order_admin()
+        for user, cancelled_allowed in ((self.operator, False), (self.support, True)):
+            with self.subTest(username=user.username):
+                request = RequestFactory().get(self.change_url())
+                request.user = user
+                self.assertEqual(
+                    model_admin.scoped_value_permitted(request, "status", "cancelled"),
+                    cancelled_allowed,
+                )
+                self.assertTrue(
+                    model_admin.scoped_value_permitted(request, "status", "confirmed")
+                )
 
 
 class SuperuserBypassTests(TestCase):

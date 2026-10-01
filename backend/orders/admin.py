@@ -164,6 +164,27 @@ class OrderAdmin(SavedFilterMixin, RoleAwareModelAdmin):
         ("Fulfilment", {"fields": ("status",)}),
         ("Timestamps", {"fields": ("created_at", "shipped_at", "delivered_at")}),
     )
+    # [R-1-B03] cycle 3: what this door may WRITE. Declared, not derived, and
+    # deny-by-default in the base — the grid above decides what a packer can
+    # read, these two decide what it can commit, so a scoped fieldset can
+    # never hand out a write by growing a field.
+    #
+    # Fulfilment state is the one editable field: advancing a packed order is
+    # the whole point of this surface. Everything else it renders — the
+    # checkout-minted reference and the delivery address included — is
+    # read-only, so a packer cannot redirect a parcel: re-pointing where a
+    # parcel goes is not packing or shipping authority (spec line 110), and it
+    # is the destructive kind of edit nobody on this surface is here to make.
+    scoped_writable_fields = frozenset({"status"})
+    # And of the statuses, the one that belongs to somebody else. Cancelling
+    # is [6.12.4]'s destructive authority on a financial record — confirmation
+    # interstitial plus a captured reason on the sanctioned path — and it is
+    # gated on ``orders.cancel``, which this role deliberately does not hold.
+    # It is named here with the same capability the bulk ``cancel_pending``
+    # action answers on (pinned equal by the test suite), so the change form,
+    # the list-edit cell and the bulk action are one authority rather than
+    # three that can drift.
+    scoped_value_capabilities = {"status": {"cancelled": "orders.cancel"}}
     action_capabilities = {
         "mark_confirmed": "orders.fulfill",
         "mark_shipped": "orders.fulfill",
@@ -272,7 +293,10 @@ class OrderAdmin(SavedFilterMixin, RoleAwareModelAdmin):
     # own accessor otherwise, so the full-surface behaviour of every other
     # role (and the superuser bypass) is byte-identical to before: the same
     # method, not a second code path. Declared state, never derived from the
-    # request's role mid-flight.
+    # request's role mid-flight. What the door may WRITE is not narrowed here
+    # at all — it is declared once, above (``scoped_writable_fields`` /
+    # ``scoped_value_capabilities``) and enforced by the base, which is where
+    # the change form and the list-edit cell are both built from.
 
     def get_queryset(self, request):
         queryset = super().get_queryset(request)
@@ -302,14 +326,6 @@ class OrderAdmin(SavedFilterMixin, RoleAwareModelAdmin):
             # the swap is a class substitution, not an instance.
             return [OrderItemPackingInline]
         return super().get_inlines(request, obj)
-
-    def get_readonly_fields(self, request, obj=None):
-        # The customer-facing reference is minted by the checkout (frozen, like
-        # the item snapshots); a scoped viewer's change form may not rewrite it.
-        readonly = super().get_readonly_fields(request, obj)
-        if not self.is_scoped_viewer(request) or "order_number" in readonly:
-            return readonly
-        return readonly + ("order_number",)
 
     def changelist_view(self, request, extra_context=None):
         """The grid a scoped viewer lands on IS the fulfilment queue.
