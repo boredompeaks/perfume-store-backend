@@ -34,7 +34,7 @@ SHIPPED rows re-verified built: SPEC-1-01 @ 5b88c43, SPEC-1-02/03 @ 002d8e3, SPE
 
 | Task ID | Req | Pri | Scope (files) | Status |
 |---|---|---|---|---|
-| SPEC-1-B01 | Refund model + gateway refund call + admin refund endpoint (atomic + select_for_update) | P1 | 5 / 1 model | PENDING |
+| SPEC-1-B01 | Refund model + gateway refund call + admin refund endpoint (atomic + select_for_update) | P1 | 5/1 model (+urls.py, accepted) | SHIPPED @ 7b1ab40 -> 45a2f89 (audit cycle 1: 8 bugs incl P1 partial-refund-blocks-ship; RE-AUDIT SHIP, mutation-proven, floor 1243) | 2 |
 | SPEC-1-B02 | Razorpay webhook ingest, signature-verified, idempotent PaymentEvent, capture→confirm reconciler | P1 | 5 / 1 model | PENDING (dep B01) |
 | SPEC-1-B03 | Superadmin tier + platform capabilities; grant inventory/fulfilment the packing capability | P2 | 5 / 0 | PENDING |
 | SPEC-1-B04 | Guest checkout: nullable Order.user + guest_email/guest_token, order lookup, drop auth wall | P2 | 5 / 0 | PENDING (dep B01,B02) |
