@@ -609,9 +609,7 @@ class RetentionTests(BackupTestCase):
         self.write_dump("20260101T000000Z")
         self.write_dump("20260102T000000Z")
 
-        self.assertEqual(
-            prune(self.backup_dir, 1), [f"{PREFIX}-20260101T000000Z.dump"]
-        )
+        self.assertEqual(prune(self.backup_dir, 1), [f"{PREFIX}-20260101T000000Z.dump"])
         self.assertTrue(impostor.is_dir())
 
     def test_ownership_is_decided_by_the_engine_signature_not_the_name(self):
@@ -901,7 +899,7 @@ class BackupScriptExecutionTests(SimpleTestCase):
     # Records the argv the script handed the container and succeeds: the dump
     # itself is what the management command does, not this script's business.
     DOCKER_STUB = (
-        "#!/usr/bin/env bash\nprintf '%s\\n' \"$*\" >> \"$DOCKER_LOG\"\nexit 0\n"
+        '#!/usr/bin/env bash\nprintf \'%s\\n\' "$*" >> "$DOCKER_LOG"\nexit 0\n'
     )
 
     @classmethod
