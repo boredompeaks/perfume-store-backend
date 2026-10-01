@@ -416,6 +416,112 @@ set the forwarded-scheme header for every request, and the container's own
 `8000` port must not be exposed to the internet - a direct connection would
 bypass the front door and the HSTS redirect entirely.
 
+## Email delivery verification (SPEC-22-10, closes R-22.18)
+
+### What `/health/` proves, and what it cannot
+
+`/health/`'s `smtp_configured` check is a **configuration** check: it is true
+when `EMAIL_HOST_USER` and `EMAIL_HOST_PASSWORD` are non-empty
+(`ops/services.py`, `get_health`). It cannot tell you the difference between
+
+- the app can *attempt* a send,
+- the server *accepted* the message, and
+- the message *arrived* in an inbox,
+
+and it is blind to the two failures that hurt customers: a **wrong password
+(accepted at boot, `535` at send time)** and **spam-folder delivery** (the send
+succeeds and the mail is silently filed). Delivery is the provider's and the
+receiver's business, so it is verified from the **receiving** end - by a human
+confirming that one message actually arrived. That is what this section is
+for.
+
+### The probe: `manage.py email_send_probe`
+
+```bash
+# 1. the plan, and the default: NOTHING is sent
+docker compose run --rm -T backend python manage.py email_send_probe
+
+# 2. deliver one probe to every allowlisted operator mailbox
+docker compose run --rm -T backend python manage.py email_send_probe --send
+
+# 3. or to one of them (must already be allowlisted)
+docker compose run --rm -T backend python manage.py email_send_probe --send \
+    --recipient ops@your-domain.example
+```
+
+Run it with the deployment's own environment (inside the compose project, or
+over the same `ssh` the release script uses), because the probe reports and
+uses exactly the `EMAIL_*` configuration the deployed container runs with. It
+goes through `common.notifications.send_email` (SPEC-19-1's single send path),
+so the sender address and the backend are the app's real ones - a probe on a
+private code path could pass while the app's own mail failed.
+
+Gates, all of which refuse by name rather than guess:
+
+| Gate | Behaviour | Why it is structural |
+|---|---|---|
+| **Allowlisted recipients only** | the recipient must be in `settings.ALERT_RECIPIENTS` - your own staff mailboxes, which already receive every admin alert. Empty allowlist = refused. `--recipient` naming anything else = refused, naming nothing = every allowlisted entry | the probe cannot be aimed at a customer, and it never reads a `User.email`, so it cannot leak another person's address because it never looks at one |
+| **Dry run by default** | nothing is sent without `--send` | the safe answer to "what would this do?" is the answer you get |
+| **A backend that never speaks SMTP is refused** | `console`, `locmem` and `dummy` backends accept the message and report success | probing one would report a delivery that never happened - and it is why the test suite, which runs on `locmem`, can never send real mail through this command |
+| **Deployment facts only** | the body carries environment, server, sender and timestamp; no order, no username, no product data | the probe is filed in mailboxes that may be forwarded |
+| **A refused delivery is loud** | an SMTP rejection exits non-zero with the server's own status text (`535` auth, `550` relay denied, connection refused) and never echoes the credential | an accepted-looking probe that quietly failed is the failure this replaces |
+
+### The operator procedure
+
+1. **Dry run.** Read the plan: the environment name, the backend, the server,
+   the sender address and the recipients. Two things are worth catching here
+   before any mail leaves: a sender address on the *wrong* domain (see
+   alignment below) and a recipient list that is empty or stale.
+2. **Send**, then **confirm on the receiving end**: inbox *and* spam folder. A
+   probe that is "sent" and never seen is a failure, not a slow mail server.
+3. **Keep the receipt.** In the recipient's mail client, "show original" /
+   "view source" and keep the `Authentication-Results` header (below) with the
+   deploy log entry. That header is the evidence; the command's own output is
+   only the claim that the server accepted the message.
+4. **When to run it:** after any SMTP credential change (the SMTP step in
+   "Secret rotation" above), after a DNS or mail-provider change, after a
+   restore to a new host (the new host's outbound IP is not in SPF until it
+   is), and whenever a customer reports an email that never arrived
+   (`docs/runbook-incident-recovery.md` §1, "Order exists but customer says
+   they never got it" is the order-side twin of this).
+
+### Reading the receipt: the three headers that matter
+
+| Header | Good | What a failure means |
+|---|---|---|
+| `Authentication-Results` - `spf=pass` | the sending host is authorized for the envelope sender's domain | the provider's SPF record is missing, or the sending host is not in it, or the record exceeds 10 DNS lookups (which makes SPF fail with `permerror`) |
+| `Authentication-Results` - `dkim=pass` | the message was cryptographically signed and the public key is published | signing is off at the provider, or the selector's `_domainkey` TXT record is unpublished/rotated away. Note a *forwarded* copy legitimately fails this - it is not evidence about the original send |
+| `Authentication-Results` - `dmarc=pass` | an authenticated (SPF or DKIM) identifier **aligned** with the visible `From` domain | neither SPF nor DKIM aligned with the `From:` domain, so the provider applies its DMARC policy (usually quarantine or reject) |
+| `Return-Path` vs `From` | same domain, or the provider's aligned bounce domain | **the single most common cause of spam-folder delivery**: `DEFAULT_FROM_EMAIL` on a domain the SPF/DKIM records do not authorize. `DEFAULT_FROM_EMAIL` defaults to `EMAIL_HOST_USER` (`config/settings.py`), so the mailbox you send from must live on the sending domain |
+
+### SPF, DKIM and DMARC for the sending domain
+
+This application does **not** sign its mail itself: there is no DKIM library in
+`backend/requirements.txt`, and signing is the provider's job. What this
+repository owes is the configuration contract, and `DEFAULT_FROM_EMAIL` /
+`EMAIL_HOST_USER` landing on the sending domain.
+
+| Record | What to publish | Rules that matter |
+|---|---|---|
+| **SPF** (TXT on the sending domain, or its mail subdomain) | `v=spf1 include:<your provider's selector> -all` | the selector is a **provider fact** - copy it from the provider's dashboard, never invent it. `-all` (hard fail), never `+all`: `+all` authorizes the whole internet to mail as your domain. Keep the record under the **10-DNS-lookup limit** (`include:` costs lookups; flatten when you approach it). One SPF record per domain - a second one is a permanent error |
+| **DKIM** | enable signing at the provider; publish its `_domainkey.<selector>` TXT record (2048-bit RSA) in DNS | the selector must be in the SPF record too if the provider relies on SPF alignment. Rotate the key when you decommission a provider, and delete the old `_domainkey` TXT record with it, or a leaked signing key stays usable |
+| **DMARC** | `_dmarc.<domain>` TXT, published in **three stages**: `v=DMARC1; p=none; rua=mailto:<dmarc-reports-address>` -> read the aggregate reports for a full reporting cycle -> `p=quarantine; pct=...` -> `p=reject` | start at `p=none`: jumping straight to `p=reject` with misaligned `From` silently breaks every transactional mail this store sends. Review the aggregate reports monthly; they are the only source that says who is failing alignment and why. Keep the DMARC domain aligned with whatever `DEFAULT_FROM_EMAIL` is |
+| **Sending host hygiene** | PTR/reverse DNS matching the hostname, submission on 587 with STARTTLS (`EMAIL_USE_TLS=true`), never unauthenticated port 25 | a sending host with no matching PTR is unrouteable-looking to most receivers, which is the spam folder by another route |
+| **No marketing envelope** | n/a | this store sends **transactional mail only** - there is no marketing surface (`retention.md`), so no consent/unsubscribe machinery applies. The SPF/DKIM/DMARC discipline above still does: bulk-sender rules are not the reason to get it right, deliverability of password resets is |
+
+### When mail lands in spam: symptom -> cause -> fix
+
+| Symptom | Likely cause | Fix |
+|---|---|---|
+| `spf=pass dkim=pass dmarc=fail` | the visible `From` domain is not the authenticated one | point `DEFAULT_FROM_EMAIL` / `EMAIL_HOST_USER` at the domain the provider signs, or publish records for the domain actually used in `From` |
+| `spf=fail` (or `permerror`) | the sending host is not in the SPF record, or the record exceeds 10 lookups | fix the provider's record; flatten `include:` chains |
+| `dkim=none` | signing is off at the provider | enable it; until then SPF alignment alone must carry DMARC |
+| `dkim=fail` on a *forwarded* copy | forwarding breaks the signature; it is not evidence about the original send | check the original in the sending mailbox, not the forwarded copy |
+| `550 relay denied` / `535` at send time | the account may not be permitted to send for that domain, or the password/app-password was rotated (SMTP step in "Secret rotation") | re-check `EMAIL_HOST_USER` / `EMAIL_HOST_PASSWORD` at the provider, then re-probe. A stale password still shows `smtp_configured: true` on `/health/` - this is exactly the case the probe exists for |
+| Delivered to junk at one provider only | reputation of that provider's shared sending IP | use a dedicated sending subdomain or a dedicated provider; do not "fix" it with the app |
+| Nothing arrives and **no bounce** | the envelope sender (`Return-Path`) is not a monitored mailbox, or the bounce was discarded upstream | make `Return-Path` a mailbox somebody reads, and watch it: an SMTP acceptance is not a delivery |
+| Bounces arrive | invalid or unreachable addresses | this store has **no bounce-processing code** - handle bounces as an operator task on the provider's suppression list. Never set the envelope sender to a customer's address; it is a data-protection problem, not just a deliverability one |
+
 ## Backups (SPEC-22-02, closes R-22.9)
 
 `manage.py backup_db` takes the backup and applies the retention policy in the
@@ -774,9 +880,14 @@ gateway requests with them, so this needs no code change and no deploy beyond
 the normal release.
 
 **3. SMTP.** Update the password/app password at the provider, put it in
-`.env`, restart the app, and verify by triggering one real send - the
-password-reset flow, or `manage.py` with `ALERT_RECIPIENTS` set. Nothing else
-in the app caches the credential, so the restart is sufficient.
+`.env`, restart the app, and verify **by delivering a probe**:
+`manage.py email_send_probe --send` against an `ALERT_RECIPIENTS` mailbox, and
+confirm it in the receiving inbox (and check its `Authentication-Results`
+header). A restart alone is not the verification: a stale credential still
+reports `smtp_configured: true` on `/health/`, and a password-reset flow would
+fail for real customers instead. See "Email delivery verification" above.
+Nothing else in the app caches the credential, so the restart is sufficient
+for the *code*, and the probe is what verifies the *delivery*.
 
 **4. Sentry DSN.** Replace the value in `.env` and restart. The SDK is
 initialised once at boot (SPEC-22-04), so a restart is the whole procedure;

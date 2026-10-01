@@ -1,0 +1,13 @@
+A delivery probe from the Perfume Store, sent by an operator on purpose.
+
+environment: {{ environment }}
+server:      {{ server }}
+from:        {{ from_address }}
+sent at:     {{ sent_at }}
+
+Nothing is wrong with the store and no action is needed: this message exists
+so the sender can confirm that outbound mail really leaves this deployment
+and really arrives, instead of only being configured to.
+
+If you did not expect it, ignore it. The only address this probe is ever
+sent to is one of the deployment's own operator mailboxes.
