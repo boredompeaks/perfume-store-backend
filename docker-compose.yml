@@ -1,0 +1,139 @@
+# SPEC-2-10b: orchestration for the deployable unit.
+#
+# Two services: the SPEC-2-10a backend image and a PostgreSQL 17 database.
+# There is deliberately NO parallel configuration here - the app is configured
+# only through the env contract backend/config/settings.py already reads
+# (DATABASE_URL + the DJANGO_* keys), so nothing in this file can drift away
+# from what the code understands.
+#
+# Local/dev:
+#   cp <this-block-into-root-.env>        # see the env contract below
+#   docker compose up -d --build
+#   curl http://localhost:8000/health/    # the healthcheck probes this same URL
+# Release (production, migrations, deploy): scripts/release.sh - this file is
+# only orchestration, so it never migrates by itself.
+#
+# ENV CONTRACT (repo-root .env, already git-ignored - never commit it, and
+# scripts/release.sh refuses to run without it). Every value is a placeholder:
+#
+#   DJANGO_SECRET_KEY=<long random string>
+#   DJANGO_ALLOWED_HOSTS=localhost,127.0.0.1
+#   DJANGO_DEBUG=false
+#   # SPEC-22-03: a non-debug boot refuses to start unless it can declare
+#   # which environment it is, so the backend service passes this through
+#   # (default production; set local for local work).
+#   DJANGO_ENV=production
+#   # ...and unless it states the origin it serves, which only the deployment
+#   # knows: compose REFUSES TO START without it rather than letting the
+#   # container crash-loop on the settings import.
+#   CSRF_TRUSTED_ORIGINS=http://localhost:3000
+#   POSTGRES_USER=perfume
+#   POSTGRES_PASSWORD=<long random string>
+#   POSTGRES_DB=perfume_store
+#   # Optional: a managed database instead of the `db` service below. Keep the
+#   # TLS setting in the URL (backend/.env.example explains why).
+#   # DATABASE_URL=postgres://user:password@host:5432/perfume_store?sslmode=require
+#
+# The app-side keys (throttles, SMTP, Razorpay, security flags) are documented
+# in backend/.env.example and flow in through `env_file`; POSTGRES_* are
+# compose's own and are consumed by the interpolation below.
+
+name: perfume-store
+
+services:
+  db:
+    image: postgres:17-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-perfume}
+      POSTGRES_DB: ${POSTGRES_DB:-perfume_store}
+      # No default on purpose: an unset password would quietly bring up a
+      # world-readable database, so compose refuses to start instead.
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in the repo-root .env}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      # pg_isready reports "accepting connections", which is the only readiness
+      # the app actually needs before `migrate` may run against it.
+      test: ["CMD-SHELL", "pg_isready -q -U \"$$POSTGRES_USER\" -d \"$$POSTGRES_DB\""]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+      start_period: 10s
+
+  backend:
+    build:
+      # backend/ is the context, which is what makes backend/.dockerignore apply
+      # (same context the Dockerfile header documents).
+      context: ./backend
+    image: perfume-backend:latest
+    restart: unless-stopped
+    depends_on:
+      db:
+        # Wait for `accepting connections`, not just "started": the release
+        # script migrates before the app is up.
+        condition: service_healthy
+    env_file:
+      - path: .env
+        required: false
+    environment:
+      # Assembled from the same POSTGRES_* variables the db service reads, so
+      # the password has exactly one home (.env) and cannot drift out of sync
+      # with the database it names. sslmode=disable is correct HERE and only
+      # here: this is the in-network container, not a remote managed database
+      # (settings forwards query params into the Postgres OPTIONS dict, so the
+      # value is real, not decorative). A DATABASE_URL in .env overrides the
+      # whole thing for a managed database - which is why it is interpolated
+      # here rather than left to env_file, which this block would outrank.
+      DATABASE_URL: "${DATABASE_URL:-postgres://${POSTGRES_USER:-perfume}:${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in the repo-root .env}@db:5432/${POSTGRES_DB:-perfume_store}?sslmode=disable}"
+      # Static files live inside the image (SPEC-22-01): whitenoise serves
+      # them from the app process, so the release only has to re-collect.
+      DJANGO_STATIC_ROOT: /app/staticfiles
+      # SPEC-22-03 [R-22.3]: the guards apply to this container exactly as they
+      # apply to any non-debug boot, so the runtime env has to carry their keys
+      # - without DJANGO_ENV and CSRF_TRUSTED_ORIGINS the image refuses to
+      # import, the gunicorn CMD crash-loops, release.sh's migration
+      # checkpoint fails and /health/ never answers.
+      # Both are pass-throughs from the repo-root .env, because only the
+      # deployment knows which environment it is and which origin it serves.
+      # DJANGO_ENV defaults to a real declared name (this file IS the
+      # production orchestrator; set DJANGO_ENV=local for local work). The
+      # origins are REQUIRED rather than defaulted: a localhost default here
+      # is precisely the unconfigured deployment the settings guard exists to
+      # refuse, so compose names the missing key up front instead of letting
+      # the container die on the settings import. Neither is a secret.
+      DJANGO_ENV: "${DJANGO_ENV:-production}"
+      CSRF_TRUSTED_ORIGINS: "${CSRF_TRUSTED_ORIGINS:?set CSRF_TRUSTED_ORIGINS in the repo-root .env}"
+    ports:
+      - "8000:8000"
+    volumes:
+      # Named volume seeded from the image, so /app/media stays owned by the
+      # non-root appuser - /health/ reports degraded if it is not writable.
+      - media_data:/app/media
+    healthcheck:
+      # The REAL endpoint (config/urls.py -> ops.views.health): it queries the
+      # database and probes the media mount, and answers 503 while degraded -
+      # so a failure here is a real signal and not just "the process is up".
+      # urlopen() raises on 503, and the except branch turns that into a
+      # non-zero exit, which is exactly what the health state should mean.
+      # The image's default PORT is 8000 (backend/Dockerfile); keep this URL in
+      # step with it, or /health/ is probed on the wrong port.
+      test:
+        - CMD
+        - python
+        - -c
+        - |
+          import sys, urllib.request
+          try:
+              with urllib.request.urlopen("http://127.0.0.1:8000/health/", timeout=5) as r:
+                  sys.exit(0 if r.status == 200 else 1)
+          except Exception:
+              sys.exit(1)
+      interval: 15s
+      timeout: 10s
+      retries: 5
+      start_period: 30s
+
+volumes:
+  postgres_data:
+  media_data:

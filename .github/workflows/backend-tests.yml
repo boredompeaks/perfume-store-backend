@@ -3,10 +3,26 @@ name: backend-tests
 on:
   push:
     branches: [spec-comp, feat/add-frontend, master]
-    paths: ["backend/**", ".github/workflows/backend-tests.yml"]
+    # The deployment wiring (SPEC-2-10b/22-07) is part of the backend's
+    # production path, so a push that only touches it still runs this gate --
+    # deploy.yml is triggered by THIS workflow's completion, and a commit with
+    # no run here could never be released.
+    paths:
+      - "backend/**"
+      - "docker-compose.yml"
+      - "Procfile"
+      - "scripts/release.sh"
+      - ".github/workflows/backend-tests.yml"
+      - ".github/workflows/deploy.yml"
   pull_request:
     branches: [spec-comp, feat/add-frontend, master]
-    paths: ["backend/**", ".github/workflows/backend-tests.yml"]
+    paths:
+      - "backend/**"
+      - "docker-compose.yml"
+      - "Procfile"
+      - "scripts/release.sh"
+      - ".github/workflows/backend-tests.yml"
+      - ".github/workflows/deploy.yml"
 
 # Least privilege: the suite only needs to read the checkout.
 permissions:

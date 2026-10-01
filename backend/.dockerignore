@@ -1,0 +1,44 @@
+# Build context exclusions for backend/Dockerfile (SPEC-2-10a). Keeps the
+# context small and, more importantly, keeps local state and secrets out of
+# an image layer: .env and db.sqlite3 below must never reach the daemon.
+
+# Virtual environments / Python build artefacts
+venv/
+.venv/
+env/
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+dist/
+
+# Secrets and local state
+.env
+.env.*
+!.env.example
+db.sqlite3
+db.sqlite3-journal
+media/
+
+# Rebuilt inside the image by `manage.py collectstatic`
+staticfiles/
+
+# Version control and CI (the image builds from copied sources, not a clone)
+.git/
+.gitignore
+.github/
+
+# Tests and docs caches — not needed to serve the app
+htmlcov/
+.coverage
+.coverage.*
+.pytest_cache/
+.tox/
+docs/
+
+# Editors / OS
+.vscode/
+.idea/
+*.swp
+.DS_Store
+Thumbs.db
