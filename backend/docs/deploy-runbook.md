@@ -945,3 +945,20 @@ A rotation nobody checked is an assumption:
 first and treat it as compromised from that moment - then remove it from
 history. Rewriting history does not un-leak anything that was pushed; only
 rotation does. Order is rotation, then cleanup, then the audit trail.
+
+
+## Owner actions (recorded here, performed by the repository owner)
+
+One item in this runbook cannot be done by an agent, because every agent works
+on a feature branch and the default branch is off limits to all of them: no
+agent pushes to it, PRs against it, or edits its files. Recording it here is
+the whole deliverable - **no agent attempts the change**.
+
+| # | Owner action | Why an owner only |
+|---|---|---|
+| 1 | **Add `.gitguardian.yml` to `master`.** The file is committed on the working branches, but the `master` copy is missing it. Copy it across (`git checkout <branch> -- .gitguardian.yml` on a branch that is then reviewed and merged, or an equivalent reviewed change). | The GitGuardian App reads its configuration from the **default branch**: with the file absent from `master`, those rules are not in effect there, however many feature branches carry the file. Changing the default branch's content - and deciding that it should change - is the owner's call. |
+
+Until that merge lands, treat the GitGuardian rules as **not enforced on the
+default branch**: `gitleaks.toml` and `.github/workflows/secret-scan.yml` still
+run on every push and pull request regardless, and "Secret rotation" above
+stands on its own - none of the three scans *rotates* a secret.
