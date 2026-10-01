@@ -115,6 +115,72 @@ keys is still refused by name. So neither file can drift back into an
 unbuildable image or a crash-looping container without a red test, and the
 production guard cannot be quietly weakened from the deployment side.
 
+## Error tracking and uptime (SPEC-22-04, R-22.13 / R-22.12)
+
+### Error tracking (SPEC-22-04, R-22.13)
+
+Optional end to end. **Without a DSN the SDK is never imported**, nothing is
+initialised and nothing leaves the process; the app, the test suite and CI are
+exactly as they were before this existed. With one set:
+
+| Key | Default | Meaning |
+| --- | --- | --- |
+| `SENTRY_DSN` | unset | the project ingest DSN; unset = off |
+| `SENTRY_ENVIRONMENT` | `DJANGO_ENV` | so staging errors are never filed as production |
+| `SENTRY_SAMPLE_RATE` | `1.0` | fraction of error events kept |
+| `SENTRY_TRACES_SAMPLE_RATE` | `0.0` | performance tracing; nothing instruments transactions, so leave it at 0 |
+
+Unparseable values fall back to the documented default with a warning (a typo
+in an env file cannot take the app down), and a DSN set on a host whose image
+predates the `sentry-sdk` pin degrades to a named warning rather than refusing
+the boot.
+
+What gets reported: unhandled exceptions, plus the `django.request` 5xx
+records the app **already** logs - SPEC-7-02 pins that channel at ERROR, and a
+`LoggingIntegration` at `event_level=ERROR` is what turns those records into
+events. So there is no second reporting path to keep in sync. PII is off:
+request bodies, cookies, headers and identifiers stay in the process unless an
+operator deliberately enables them.
+
+The DSN carries a public ingest key: it is configuration, but still
+environment-only - repo-root `.env` / your platform's secret store, never the
+repository. It is the one string in this section a scanner may flag; it belongs
+in `.env`, and the committed `.env.example` shows it commented out.
+
+### Uptime: `/health/` and the container healthcheck (SPEC-22-04, R-22.12)
+
+`/health/` is public, cheap, and answers **503** while the database is
+unreachable or the media mount is unwritable. Three things consume it:
+
+1. **The image's own `HEALTHCHECK`** (`backend/Dockerfile`): a loopback probe
+   of `/health/` on `$PORT`. A 200 exits 0; anything else - including the
+   degraded 503 - exits non-zero, so a broken storefront is `unhealthy` rather
+   than merely "running".
+2. **The compose healthcheck** (`docker-compose.yml`), with its own timings.
+   Both probes identify themselves the way a real request does: `Host` is the
+   first entry of `DJANGO_ALLOWED_HOSTS` (an unlisted host is a 400) and
+   `X-Forwarded-Proto: https` is the trusted scheme header (so the SSL redirect
+   above does not bounce the probe to an `https://` the container does not
+   serve). Both are read from the app's own env, so they cannot drift from it.
+3. **An external uptime monitor.** Register it against the public
+   `https://<host>/health/` and treat **any non-200 as down** - a 503 is a real
+   degradation signal, not a monitoring hiccup. Poll no faster than once a
+   minute: the endpoint counts orders and carts on every call. Point it at the
+   public URL through the TLS front door, not at `127.0.0.1` inside the
+   container, or it measures nothing an outage would break.
+
+Which monitor is a deployment fact and stays out of this repository - no
+vendor token, DSN or account id belongs in a runbook. Create the check in
+whichever service you already run, keep its credential in your secret store,
+and record here only the contract above: URL, expected status, what a 503
+means, poll interval.
+
+If you terminate TLS somewhere other than a reverse proxy (a CDN, a managed
+ingress), the same rule applies: whatever sends requests to this container must
+set the forwarded-scheme header for every request, and the container's own
+`8000` port must not be exposed to the internet - a direct connection would
+bypass the front door and the HSTS redirect entirely.
+
 ## Backups (SPEC-22-02, closes R-22.9)
 
 `manage.py backup_db` takes the backup and applies the retention policy in the

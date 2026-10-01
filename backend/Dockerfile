@@ -76,6 +76,30 @@ USER appuser
 ENV PORT=8000
 EXPOSE 8000
 
+# SPEC-22-04 [R-22.12]: the image probes its OWN /health/ endpoint
+# (config/urls.py -> ops.views.health), which queries the database and probes
+# the media mount and answers 503 while degraded. `status == 200` below is
+# what turns a degraded storefront into an unhealthy container: urlopen()
+# raises on 503, and the comparison catches any other non-200, so a failure
+# here is a real signal rather than just "the process is up".
+#
+# The probe identifies itself the way the TLS front door does, because a
+# hardened deployment (SPEC-22-08) would otherwise refuse it: Host is the
+# first entry of DJANGO_ALLOWED_HOSTS (a Host the app answers for - an
+# unlisted one is a 400), and X-Forwarded-Proto is the scheme header the
+# trusted-proxy pair reads, so SECURE_SSL_REDIRECT does not bounce the probe
+# to an https:// the container itself does not serve. Plain HTTP on loopback
+# from inside the container, so it needs no token and no external service.
+# ${PORT} is the variable the CMD binds, so a platform that injects a
+# different port is probed on the port it is actually served on.
+# docker-compose.yml carries its own healthcheck with its own timings; a
+# plain `docker run` gets this one.
+HEALTHCHECK --interval=30s --timeout=10s --start-period=30s --retries=3 \
+    CMD python -c "import os, sys, urllib.request; \
+host = (os.environ.get('DJANGO_ALLOWED_HOSTS') or '127.0.0.1').split(',')[0].strip(); \
+req = urllib.request.Request('http://127.0.0.1:' + os.environ.get('PORT', '8000') + '/health/', headers={'Host': host, 'X-Forwarded-Proto': 'https'}); \
+sys.exit(0 if urllib.request.urlopen(req, timeout=5).status == 200 else 1)"
+
 # Shell form so $PORT is expanded by the shell at container start. --bind
 # 0.0.0.0 is what makes the port reachable from outside the container;
 # --access-logfile - keeps access logs on stdout with the app logs.

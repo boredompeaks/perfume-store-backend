@@ -675,8 +675,11 @@ CORS_EXPOSE_HEADERS = ['X-Request-ID']
 
 
 # Logging (SPEC-7-02): an env-driven dictConfig baseline. No external
-# services are wired here — sentry/metrics/alerts stay deferred to the S22
-# deployment work.
+# service is wired into THIS dict: the only handlers are console and the
+# optional rotating file, so an unconfigured deployment cannot reach the
+# network from its logging. Error tracking is layered on top of these
+# channels further down (SPEC-22-04 [R-22.13]), and only when a DSN is
+# configured.
 
 # The levels an operator may set via LOG_LEVEL. NOTSET is deliberately
 # absent: a root logger at NOTSET logs everything, which is the opposite
@@ -764,6 +767,96 @@ def _build_logging(app_level, file_path=None):
 
 APP_LOG_LEVEL = _env_log_level("LOG_LEVEL", "INFO")
 LOGGING = _build_logging(APP_LOG_LEVEL, os.getenv("LOG_FILE"))
+
+
+# SPEC-22-04 [R-22.13]: error tracking. Optional end to end and env-gated:
+# with no SENTRY_DSN in the environment NOTHING below is imported, nothing is
+# initialised and no call leaves the process, so an unconfigured deployment -
+# local development, CI, the test suite - behaves exactly as it did before
+# this block existed. The DSN carries a public ingest key and lives in the
+# environment (backend/.env.example, the repo-root .env, the platform's secret
+# store), never in the repository.
+
+
+def _env_float(name, default):
+    """Resolve an env-driven float, never crashing startup.
+
+    Same fail-safe shape as _env_int / _env_log_level above: an unparseable
+    value falls back to the documented default with a warning instead of
+    raising, so a typo in an env file cannot take the app down at import.
+    """
+    raw = (os.getenv(name) or "").strip() or str(default)
+    try:
+        return float(raw)
+    except ValueError:
+        logging.getLogger(__name__).warning(
+            "Ignoring unparseable %s value %r; using %s", name, raw, default
+        )
+        return default
+
+
+# The declared deployment environment is the default label, so a staging
+# error can never be filed as a production one (SPEC-22-03 [R-22.3]).
+SENTRY_DSN = (os.getenv("SENTRY_DSN") or "").strip()
+SENTRY_ENVIRONMENT = (os.getenv("SENTRY_ENVIRONMENT") or "").strip() or DJANGO_ENV
+# 1.0 ships every error event; a deployment under volume pressure lowers it.
+SENTRY_SAMPLE_RATE = _env_float("SENTRY_SAMPLE_RATE", 1.0)
+# Tracing is OFF by default: this app instruments no transactions, and a
+# non-zero trace rate would be a bill nobody asked for.
+SENTRY_TRACES_SAMPLE_RATE = _env_float("SENTRY_TRACES_SAMPLE_RATE", 0.0)
+
+
+def _init_error_tracking(dsn, environment, sample_rate, traces_sample_rate):
+    """Initialise the error tracker when a DSN is configured; inert otherwise.
+
+    Returns True when the tracker is live. The SDK is imported INSIDE the
+    DSN gate rather than at module scope, so an unconfigured process never
+    loads it, never imports its transports and never opens a socket at
+    import time. An SDK that is configured but not installed degrades to a
+    warning instead of refusing the boot: losing error reporting must not be
+    able to take the storefront down, and the boot-time network is off either
+    way (the SDK sends on the first event, in a background worker).
+
+    The two integrations are what make the EXISTING logging config the
+    reporting path: `django.request` is pinned at ERROR by _build_logging
+    above, so every unhandled exception and 5xx Django logs there becomes an
+    event (event_level=ERROR) rather than only a line on stdout, and
+    DjangoIntegration captures the exception itself with the request context.
+    """
+    if not dsn:
+        return False
+    try:
+        import sentry_sdk
+        from sentry_sdk.integrations.django import DjangoIntegration
+        from sentry_sdk.integrations.logging import LoggingIntegration
+    except ImportError:
+        logging.getLogger(__name__).warning(
+            "SENTRY_DSN is set but the sentry-sdk package is not installed; "
+            "error tracking stays off for this process."
+        )
+        return False
+    sentry_sdk.init(
+        dsn=dsn,
+        environment=environment,
+        sample_rate=sample_rate,
+        traces_sample_rate=traces_sample_rate,
+        # Request bodies, cookies, headers and user identifiers stay inside
+        # the process unless an operator deliberately turns this on.
+        send_default_pii=False,
+        integrations=[
+            DjangoIntegration(),
+            LoggingIntegration(level=logging.INFO, event_level=logging.ERROR),
+        ],
+    )
+    return True
+
+
+ERROR_TRACKING_ENABLED = _init_error_tracking(
+    SENTRY_DSN,
+    SENTRY_ENVIRONMENT,
+    SENTRY_SAMPLE_RATE,
+    SENTRY_TRACES_SAMPLE_RATE,
+)
 
 
 # SPEC-17-07 [R-17.11]: transport/cookie hardening flags, every one
