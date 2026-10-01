@@ -15,7 +15,7 @@ urlpatterns = [
     # Spec 3.9 line 1185, `/track-order` - the customer-facing tracking page's
     # data source, line 1189's "secure, limited-access token or authenticated
     # account". Keyed on the CUSTOMER-FACING order number (never the pk), and
-    # the number alone authorizes nothing (shipping.views._trackable_shipment).
+    # the number alone authorizes nothing (shipping.views._trackable_shipments).
     path(
         "track/<str:order_number>/",
         ShipmentTrackingView.as_view(),

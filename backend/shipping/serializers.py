@@ -55,13 +55,19 @@ class ShipmentEventSerializer(serializers.ModelSerializer):
 
 
 class ShipmentTrackingSerializer(serializers.ModelSerializer):
-    """[R-1.08] What a customer is shown about one parcel.
+    """[R-1.08] What a customer is shown about ONE parcel.
 
     Everything here is customer-appropriate by spec 6.9 line 2027, and the
     omissions are the point rather than an oversight: there is no delivery
     address, no recipient name, no order total and no money, and
     ``internal_note`` is not on the list. The only order field carried is the
     reference the caller already supplied.
+
+    One parcel, not one order: the view serializes this ``many=True`` under a
+    ``shipments`` key so a split shipment (spec 6.9 line 2021) reports all of
+    its parcels. Every field below is a fact about the parcel being serialized,
+    which is why hoisting any of them to the envelope would have changed what
+    the body says.
 
     Every field is read-only, which is the structural half of "a client can
     never post a tracking number": a ModelSerializer is writable by default,

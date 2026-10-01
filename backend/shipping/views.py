@@ -126,8 +126,17 @@ def _tracking_lookup_miss():
     )
 
 
-def _trackable_shipment(request, order_number):
-    """The one shipment ``request`` may see for ``order_number``, or None.
+def _trackable_shipments(request, order_number):
+    """EVERY parcel of ``order_number`` that ``request`` may see, as a list.
+
+    A LIST, not a single row, and that is the whole point: spec 6.9 line 2021
+    asks for "Split shipments, if needed" and spec 10.1 line 3419 says an
+    implementation "must explicitly handle split shipments", and this app
+    models that by giving one order many parcels (see ``Shipment.order``). A
+    one-row answer silently dropped every parcel but one - and because
+    ``Shipment.Meta`` orders newest-first, the parcel that answered was the
+    one that left LAST, so an order whose first parcel had already been
+    delivered reported the still-moving one and never mentioned the delivery.
 
     Two credentials, and the order number is never one of them - spec 3.9
     line 1185 names ``/track-order`` and line 1189 defines its flow as "a
@@ -140,31 +149,40 @@ def _trackable_shipment(request, order_number):
     * An ANONYMOUS caller has no account, so possession of the B04 guest token
       IS the authorization: the filter runs against the STORED token, so a hit
       is by definition the guest order that token was minted for.
+
+    An empty list is the answer for every miss, and it is the same answer the
+    one-row version gave: the credential decides WHETHER the list is empty,
+    never what an empty one looks like (see ``_tracking_lookup_miss``).
     """
     if request.user.is_authenticated:
         owner = {"order__user": request.user}
     else:
         token = (request.headers.get(GUEST_ORDER_TOKEN_HEADER) or "").strip()
         if not token or len(token) > GUEST_TOKEN_MAX_LENGTH:
-            return None
+            return []
         owner = {"order__guest_token": token}
 
-    return (
+    # Oldest parcel first, so the customer reads the parcels in the order they
+    # were dispatched. The model's own ``-created_at`` ordering is the admin
+    # grid's (newest activity at the top) and is deliberately not what a
+    # tracking timeline should do; ``id`` breaks a same-instant tie.
+    return list(
         Shipment.objects.select_related("order")
+        .prefetch_related("events")
         .filter(order__order_number=order_number, **owner)
-        .first()
+        .order_by("created_at", "id")
     )
 
 
 class ShipmentTrackingView(APIView):
-    """GET /api/v1/store/shipping/track/<order_number>/ - your parcel.
+    """GET /api/v1/store/shipping/track/<order_number>/ - your parcels.
 
     Opened deliberately (conventions.md:26), and the shape of that opening is
     exactly B04's: a guest checks out without an account (spec line 74) and
     spec 3.9 line 1189 requires the tracking page to work for one. ``AllowAny``
-    therefore does NOT mean unguarded - ``_trackable_shipment`` is the guard,
+    therefore does NOT mean unguarded - ``_trackable_shipments`` is the guard,
     and it is a guard by possession of a credential, not by identity: it can
-    only ever return the one shipment whose order the caller owns.
+    only ever return the parcels of an order the caller owns.
 
     No throttle scope, for the same reason the estimate above has none: this
     is a read-only endpoint and the convention requires one on public MUTATING
@@ -172,7 +190,17 @@ class ShipmentTrackingView(APIView):
     order number is never the credential, so guessing one in a million earns
     the caller nothing, and the token that IS the credential is 256 bits.
 
-    The response is the customer half of the row and nothing else: spec 6.9
+    The body is a LIST of parcels under one key, ``shipments``, because an
+    order may have several (spec 6.9 line 2021, "Split shipments, if needed";
+    spec 10.1 line 3419, "must explicitly handle split shipments"). This is a
+    deliberate change of envelope from B06's first cut, which returned one
+    bare parcel object and so reported only the newest parcel of a split
+    order. The parcel object itself is unchanged -
+    ``ShipmentTrackingSerializer`` still carries exactly its six keys with
+    exactly their sensitivity, and every one of them is a per-parcel fact, so
+    none of them was hoisted or dropped to make room for the envelope.
+
+    Each parcel is the customer half of the row and nothing else: spec 6.9
     line 2027 requires the tracking page to withhold internal carrier
     credentials and warehouse notes, and the serializer is where that
     promise is kept.
@@ -181,7 +209,13 @@ class ShipmentTrackingView(APIView):
     permission_classes = [AllowAny]
 
     def get(self, request, order_number):
-        shipment = _trackable_shipment(request, order_number)
-        if shipment is None:
+        shipments = _trackable_shipments(request, order_number)
+        if not shipments:
+            # The credential decided WHETHER the list is empty; it never
+            # decides what an empty list looks like. An order that genuinely
+            # has no shipment, a stranger, and a caller with no credential at
+            # all are one byte-identical answer.
             return _tracking_lookup_miss()
-        return Response(ShipmentTrackingSerializer(shipment).data)
+        return Response(
+            {"shipments": ShipmentTrackingSerializer(shipments, many=True).data}
+        )

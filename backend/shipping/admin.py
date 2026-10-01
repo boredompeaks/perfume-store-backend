@@ -142,6 +142,11 @@ class ShipmentAdmin(RoleAwareModelAdmin):
         A row minted straight through the ORM records no opening step, and
         that is deliberate: an event means a status CHANGED, and nothing
         changed at creation.
+
+        This form is also the only writer of a status move, and
+        ``ShipmentQuerySet.update`` is what makes that true rather than merely
+        intended: a bulk ``update(status=...)`` would move a parcel with no
+        record of where it moved from, so it is refused.
         """
         with transaction.atomic():
             old = None
@@ -166,7 +171,10 @@ class ShipmentEventAdmin(RoleAwareModelAdmin):
     and even the superuser bypass is refused at add and delete - audit history
     is never creatable or deletable through the admin. The change form renders
     every field read-only, so it is a view, not an editor, and the model's
-    save guard is the second immutable layer behind this one.
+    save/delete guards plus ``ShipmentEventQuerySet`` are the immutable layers
+    behind this one: they are what a bulk ``update()``/``bulk_update()``/
+    ``delete()``/``bulk_create()`` runs into, which this admin surface never
+    does.
     """
 
     capability_map = {
