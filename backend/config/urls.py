@@ -16,6 +16,7 @@ from orders.views import (
     admin_order_detail,
     admin_order_fulfill,
     admin_order_list,
+    admin_order_refund,
 )
 
 
@@ -62,6 +63,10 @@ v1_admin_patterns = [
     path("orders/<int:order_id>/", admin_order_detail, name="orders-detail"),
     path("orders/<int:order_id>/fulfill/", admin_order_fulfill, name="orders-fulfill"),
     path("orders/<int:order_id>/cancel/", admin_order_cancel, name="orders-cancel"),
+    # [R-1.14] SPEC-1-05: the refund seam, mounted beside the fulfil/cancel
+    # edges it is the money-movement counterpart of (same admin family, same
+    # direct-mount rule).
+    path("orders/<int:order_id>/refund/", admin_order_refund, name="orders-refund"),
 ]
 
 v1_urlpatterns = [
@@ -122,6 +127,13 @@ urlpatterns = [
         "api/admin/orders/<int:order_id>/cancel/",
         admin_order_cancel,
         name="admin-orders-cancel",
+    ),
+    # [R-1.14] SPEC-1-05: the legacy alias of the v1:admin refund mount above
+    # (same view object, no duplication).
+    path(
+        "api/admin/orders/<int:order_id>/refund/",
+        admin_order_refund,
+        name="admin-orders-refund",
     ),
 
     path("admin/", admin.site.urls),

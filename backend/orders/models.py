@@ -1,7 +1,11 @@
+from decimal import Decimal
+
 from django.conf import settings
 from django.db import models
+from django.db.models import Sum
 from django.contrib.auth.models import User
 
+from common.money import quantize_money
 from products.models import products
 
 # [R-10.1] The order machine's constants live in orders.state (single
@@ -303,6 +307,19 @@ class Order(models.Model):
     def __str__(self):
         return f"Order #{self.id} - {self.user.username}"
 
+    @property
+    def refundable_remaining(self):
+        """Money still refundable against this order's captured payment.
+
+        The ceiling is ``total_amount``: no Payment model exists in this
+        schema, so an order's captured amount IS its total, and the refund
+        writer only ever runs once ``payment_status`` says the payment was
+        captured. Quantized on both sides, so the balance is a 2-dp money
+        Decimal and never a carry-over of extra decimal places (conventions.md
+        money rule, same as every other amount in this file).
+        """
+        return quantize_money(self.total_amount) - Refund.refunded_total(self)
+
 
 class OrderItem(models.Model):
 
@@ -483,3 +500,135 @@ class OrderStatusEvent(models.Model):
 
     def __str__(self):
         return f"{self.order_id}: {self.from_status}->{self.to_status} ({self.trigger})"
+
+
+class Refund(models.Model):
+    """[R-1.14] One refund issued against an order's captured payment.
+
+    Spec section 1 puts "Payment gateway, refunds, webhooks" in the payments
+    row of the system overview, and the finance operator's job is to
+    "reconcile payments, refunds and financial reports" ([1.31]) - which
+    needs a row per refund: what was returned, why, who returned it and which
+    refund the provider acknowledged.
+
+    ``kind`` records the REQUEST, not the order's resulting state: a refund
+    is FULL when it cleared the order's remaining balance (an omitted amount,
+    or an explicit one equal to what was left) and PARTIAL when it left some
+    money still refundable. The order's payment dimension is the derived
+    answer to "what is left", never a field stored here.
+
+    ``status`` is written twice inside one transaction by the refund writer:
+    PENDING the moment the attempt starts (so the requested money is a real
+    row under the order's locks while the gateway call is in flight) and
+    PROCESSED once the provider returned a refund id. A failed attempt leaves
+    NO row - the transaction rolls back - so the two values are the whole
+    vocabulary: an outstanding refund is the absence of a row, which the
+    provider's own record is the authority for.
+    """
+
+    class Status(models.TextChoices):
+        PENDING = "pending", "Pending"
+        PROCESSED = "processed", "Processed"
+
+    class Kind(models.TextChoices):
+        FULL = "full", "Full"
+        PARTIAL = "partial", "Partial"
+
+    order = models.ForeignKey(
+        Order,
+        on_delete=models.CASCADE,
+        related_name='refunds'
+    )
+
+    # The task's pinned width: two digits wider than Order.total_amount's
+    # money column. The writer refuses anything above the order's captured
+    # amount, so the extra width is headroom, never reachable money.
+    amount = models.DecimalField(
+        max_digits=12,
+        decimal_places=2
+    )
+
+    reason = models.TextField()
+
+    kind = models.CharField(
+        max_length=10,
+        choices=Kind.choices
+    )
+
+    status = models.CharField(
+        max_length=20,
+        choices=Status.choices,
+        default=Status.PENDING,
+    )
+
+    # The provider's own refund reference, nullable only for the in-flight
+    # PENDING write above and unique so one gateway refund can never be
+    # recorded against two rows (the reconciliation join key).
+    gateway_refund_id = models.CharField(
+        max_length=100,
+        blank=True,
+        null=True,
+        unique=True,
+    )
+
+    # SET_NULL for the same reason as OrderStatusEvent.actor: deleting a
+    # staff account must never cascade into the financial trail.
+    actor = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='order_refunds',
+    )
+
+    # [R-9.3.14]-shaped replay identity, scoped to the order: a client that
+    # retries the same refund after a timeout must collapse onto the refund
+    # it already produced rather than pay the customer twice. NULLs stay
+    # distinct in the constraint, so keyless attempts are unaffected.
+    idempotency_key = models.CharField(
+        max_length=128,
+        null=True,
+        blank=True,
+    )
+
+    created_at = models.DateTimeField(
+        auto_now_add=True
+    )
+
+    updated_at = models.DateTimeField(
+        auto_now=True
+    )
+
+    class Meta:
+        ordering = ("-created_at", "-id")
+        verbose_name = "refund"
+        verbose_name_plural = "refunds"
+        constraints = [
+            # The concurrency authority for a keyed retry: the writer holds the
+            # Order row lock while it probes for a replay and binds the key,
+            # and this constraint is the last-resort guarantee that one order
+            # can never hold two refunds for one key. Its backing index also
+            # serves the replay probe.
+            models.UniqueConstraint(
+                fields=['order', 'idempotency_key'],
+                name='orders_refund_order_idem_uidx',
+            ),
+        ]
+
+    @classmethod
+    def refunded_total(cls, order):
+        """Money already refunded against ``order``, quantized to 2 dp.
+
+        Only PROCESSED rows count: a PENDING row is an attempt whose
+        transaction has not settled yet, and a failed attempt left no row at
+        all, so this sum is exactly the money the provider has moved.
+        """
+        total = cls.objects.filter(
+            order=order,
+            status=cls.Status.PROCESSED,
+        ).aggregate(total=Sum("amount"))["total"]
+        return quantize_money(total if total is not None else Decimal("0.00"))
+
+    def __str__(self):
+        return f"Refund #{self.pk} {self.amount} ({self.kind})"
+

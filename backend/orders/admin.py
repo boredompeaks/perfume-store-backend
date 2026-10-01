@@ -12,7 +12,7 @@ from common.models import AuditEvent
 from common.saved_filters import SavedFilterMixin
 # [R-10.1] The order machine lives in orders.state (single source); this
 # module only consumes it.
-from .models import Coupon, Order, OrderItem, OrderStatusEvent
+from .models import Coupon, Order, OrderItem, OrderStatusEvent, Refund
 # [R-10.16] SPEC-10-05: the per-transition side-effect contract (one
 # dispatch point, shared with the JSON seam).
 from .events import notify_transition
@@ -686,3 +686,61 @@ class CouponAdmin(RoleAwareModelAdmin):
         if now > obj.valid_until:
             return "expired"
         return "running"
+
+
+@admin.register(Refund)
+class RefundAdmin(RoleAwareModelAdmin):
+    """[R-1.14] SPEC-1-05: a read-only window onto issued refunds.
+
+    ``refunds.create`` gates the surface, so it is finance who reconciles the
+    money (spec 1.1's finance operator) plus admin — support, which may read
+    and fulfil orders, gets no refund page at all. No staff role gets
+    add/change/delete, and the superuser bypass is refused on add and delete
+    too: a refund is issued by the API seam, the one writer that calls the
+    gateway, so a hand-written row here would be money movement with no
+    payment behind it. Every field renders read-only, so even the change view
+    is a read, not an editor.
+    """
+
+    capability_map = {
+        "view": "refunds.create",
+        "add": None,
+        "change": None,
+        "delete": None,
+    }
+    list_display = (
+        "id",
+        "order",
+        "amount",
+        "kind",
+        "status",
+        "gateway_refund_id",
+        "actor",
+        "created_at",
+    )
+    list_filter = ("status", "kind", "created_at")
+    search_fields = (
+        "id",
+        "order__id",
+        "order__order_number",
+        "gateway_refund_id",
+        "actor__username",
+    )
+    readonly_fields = (
+        "order",
+        "amount",
+        "reason",
+        "kind",
+        "status",
+        "gateway_refund_id",
+        "actor",
+        "idempotency_key",
+        "created_at",
+        "updated_at",
+    )
+
+    def has_add_permission(self, request):
+        return False  # issued by the refund seam, never hand-written
+
+    def has_delete_permission(self, request, obj=None):
+        return False  # money that moved is never deleted
