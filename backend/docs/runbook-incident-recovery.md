@@ -42,8 +42,10 @@ Safety contract (`ops/management/commands/restore_drill.py`, pinned by
   cannot outlive the command or be resolved by anything else.
 
 A passing drill does **not** prove your backups are complete — it proves the
-mechanism round-trips. The backup retention/volume story is the deployment
-section's (S22) concern.
+mechanism round-trips. Taking an actual backup is `manage.py backup_db`
+(`ops/management/commands/backup_db.py`), whose retention/volume/schedule
+story is in `docs/deploy-runbook.md` ("Backups") — the S22 concern this section
+used to defer to is now built. §3a below is how you consume one of those dumps.
 
 ---
 
@@ -84,6 +86,13 @@ evidence of health — `GET /health/` is the authority.
 
 ### 3a. Restore from a snapshot
 
+0. Pick the dump: `ls -1t <BACKUP_DIR>/perfume-*.dump` — the schedule keeps the
+   newest `BACKUP_RETENTION` of them (deploy runbook, "Backups"). `backup_db`
+   writes PostgreSQL dumps in pg_dump's **custom** format, so they restore with
+   `pg_restore` (the plain-SQL `psql` route does not apply):
+   `pg_restore --no-owner --no-privileges -d <fresh-database> <dump>`. A
+   `.sqlite3` dump from the same command is a complete sqlite file: copy it
+   into place as the database file while the app is stopped.
 1. Stop writes (read-only maintenance mode / scale the web tier to zero). A
    restore over a live database produces two divergent histories.
 2. Take a copy of the CURRENT database first — you need it to diff against.

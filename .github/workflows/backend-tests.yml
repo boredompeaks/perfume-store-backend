@@ -6,12 +6,15 @@ on:
     # The deployment wiring (SPEC-2-10b/22-07) is part of the backend's
     # production path, so a push that only touches it still runs this gate --
     # deploy.yml is triggered by THIS workflow's completion, and a commit with
-    # no run here could never be released.
+    # no run here could never be released. scripts/backup.sh is here for the
+    # same reason: the backup cadence (R-22.9) is the deploy host's scheduled
+    # entry point, so a commit that only changes it still runs the gate.
     paths:
       - "backend/**"
       - "docker-compose.yml"
       - "Procfile"
       - "scripts/release.sh"
+      - "scripts/backup.sh"
       - ".github/workflows/backend-tests.yml"
       - ".github/workflows/deploy.yml"
   pull_request:
@@ -21,6 +24,7 @@ on:
       - "docker-compose.yml"
       - "Procfile"
       - "scripts/release.sh"
+      - "scripts/backup.sh"
       - ".github/workflows/backend-tests.yml"
       - ".github/workflows/deploy.yml"
 
