@@ -28,7 +28,10 @@ STATUS_CHOICES = [
 ]
 
 # Legal status flow. Cancelling a *paid* order is deliberately impossible —
-# there is no refund flow yet (V-03); reconciliation is manual by design.
+# the machine declares no edge into "cancelled" from confirmed/shipped/
+# delivered. Its money comes back through the SPEC-1-05 refund seam instead,
+# which records a Refund and moves the payment dimension without moving the
+# order's status.
 ALLOWED_TRANSITIONS = {
     "pending": {"confirmed", "cancelled"},
     "confirmed": {"shipped"},
@@ -53,6 +56,14 @@ ADMIN_FULFILMENT_NEXT = {
     "confirmed": "shipped",
     "shipped": "delivered",
 }
+
+# The fulfilment queue: the statuses a packing/shipping step can still be
+# taken FROM, i.e. exactly the orders that await a packer. Derived from
+# ADMIN_FULFILMENT_NEXT rather than spelled out, so the queue can never list a
+# status the machine will not advance (or miss one it will) — the admin
+# listing that shows it and the API seam that advances it read the same
+# constant.
+FULFILMENT_QUEUE_STATUSES = tuple(ADMIN_FULFILMENT_NEXT)
 
 # ——— [R-10.19]/[R-10.14] SPEC-10-03: transition preconditions ———————————
 # ALLOWED_TRANSITIONS says WHICH moves are legal; preconditions say what
@@ -91,9 +102,9 @@ def precondition_failures(order, new_status):
 # The legacy single status conflates "did they pay" with "did we ship"; the
 # two dimensions below separate those questions. The spec's example states
 # are the canonical sets: ambiguous values like "success" or "done" are
-# deliberately absent (spec 10.2's own warning). Refund/failure/COD writers
-# are SPEC-10-04's scope — the values exist here so the machine is complete,
-# but nothing writes them yet.
+# deliberately absent (spec 10.2's own warning). The failure writer is
+# SPEC-10-04's; partially_refunded / refunded are written by the SPEC-1-05
+# refund seam; authorized has no writer yet.
 PAYMENT_STATUS_CHOICES = [
     ("pending", "Pending"),
     ("authorized", "Authorized"),
@@ -131,11 +142,12 @@ PAYMENT_METHOD_CHOICES = [
 # failure writer moves pending -> failed, and failed -> captured is the
 # RETRY edge — a failed verification leaves the order status untouched
 # (retryable by design), so the next successful verify captures normally.
-# No writer exists yet for authorized / partially_refunded / refunded
-# (gateway two-step and the refund section's writers, SPEC-1-05/6-12);
-# their edges are declared so the machine is complete and those sections
-# pin against a table that already answers them. Mirrors
-# transition_allowed (self-transitions stay legal: idempotent replays).
+# No writer exists yet for authorized (the gateway two-step capture,
+# SPEC-10-04's remaining payment work); its edge is declared so the machine
+# is complete and that work pins against a table that already answers it.
+# partially_refunded / refunded are written by the SPEC-1-05 refund seam.
+# Mirrors transition_allowed (self-transitions stay legal: idempotent
+# replays).
 PAYMENT_ALLOWED_TRANSITIONS = {
     "pending": {"captured", "failed"},
     "authorized": {"captured"},
@@ -178,6 +190,35 @@ def fulfilment_for_status(status: str) -> str:
     return LEGACY_STATUS_DIMENSIONS[status][1]
 
 
+# [R-10.4] The payment value a capture writes. Named here because the machine
+# is the single source for what a capture MEANS: verify_payment (the customer
+# callback) and the SPEC-1-06 webhook reconciler both write this value and both
+# ask this module whether the row may reach it, so neither restates it.
+PAYMENT_CAPTURED = "captured"
+
+# The lifecycle order the dimension mapping above is read in. status_for_payment
+# needs a progression, not a set: one payment value spans several statuses
+# (captured covers confirmed/shipped/delivered) and the answer to "which status
+# does a capture put the order in?" is the EARLIEST one it implies.
+LIFECYCLE_SEQUENCE = ("pending", "confirmed", "shipped", "delivered", "cancelled")
+
+
+def status_for_payment(payment_status: str) -> str:
+    """The earliest lifecycle status whose payment dimension is ``payment_status``.
+
+    The inverse of :func:`payment_for_status`, and the reason a writer never
+    has to name a status literal beside a payment value. ``None`` when no
+    status implies that payment — which is the honest answer for the
+    refund-dimension values, states the legacy single status cannot express
+    (the documented [R-10.1] divergence), so a caller must handle it rather
+    than assume a mapping exists.
+    """
+    for status in LIFECYCLE_SEQUENCE:
+        if LEGACY_STATUS_DIMENSIONS.get(status, ("", ""))[0] == payment_status:
+            return status
+    return None
+
+
 # ——— [R-10.12]/[R-10.17] SPEC-10-02: transition-audit triggers ——————————
 # Every legal status transition appends an OrderStatusEvent row naming the
 # surface that performed it. The trigger vocabulary lives here beside the
@@ -197,6 +238,13 @@ TRIGGER_ADMIN_API_CANCEL = "admin_api_cancel"
 # trigger is what names the failure — spec 10.3's "Failure/retry
 # behaviour" answer for this edge.
 TRIGGER_PAYMENT_FAILED = "payment_failed"
+# [R-1.15] SPEC-1-06: the gateway told us the money arrived, so the same
+# capture edge the customer callback drives has a second, server-to-server
+# source. It is its own trigger (not TRIGGER_PAYMENT_VERIFY) because spec
+# 10.3 asks the trail to name WHICH surface performed the transition: a
+# reconciliation from the provider's own record and a customer-initiated
+# verify are different facts about the same edge.
+TRIGGER_PAYMENT_WEBHOOK = "payment_webhook"
 
 STATUS_EVENT_TRIGGERS = [
     (TRIGGER_ORDER_CREATE, "Order created"),
@@ -206,4 +254,25 @@ STATUS_EVENT_TRIGGERS = [
     (TRIGGER_ADMIN_API_FULFIL, "Admin fulfilment API"),
     (TRIGGER_ADMIN_API_CANCEL, "Admin cancel API"),
     (TRIGGER_PAYMENT_FAILED, "Payment verification failed"),
+    (TRIGGER_PAYMENT_WEBHOOK, "Payment webhook"),
 ]
+
+# ——— [R-1.15] SPEC-1-06: the provider's webhook event vocabulary ————————
+# The names the payment gateway sends in its event header. They live here,
+# beside the machine they feed, for the same reason STATUS_EVENT_TRIGGERS
+# does: the handler dispatches on constants, so no string literal can drift
+# away from the vocabulary the rest of the file declares. An event outside
+# this vocabulary is still RECORDED (the reconciliation trail must never
+# discard a delivery the provider says happened) — it simply moves nothing.
+WEBHOOK_EVENT_CAPTURED = "payment.captured"
+WEBHOOK_EVENT_AUTHORIZED = "payment.authorized"
+WEBHOOK_EVENT_FAILED = "payment.failed"
+WEBHOOK_EVENT_REFUNDED = "payment.refunded"
+# A settled refund. Both spellings are the same fact: Razorpay's own event name
+# for a settled refund is ``refund.processed`` while ``payment.refunded`` is the
+# payment-scoped name the same provider documents for it, and accepting either
+# means a rename on the provider's side cannot silently stop the trail. The
+# constant is named for what it means (the refund is done) because its literal is
+# fixed: only the provider gets to spell that event.
+WEBHOOK_EVENT_REFUND_DONE = "refund.processed"
+WEBHOOK_REFUND_EVENTS = frozenset({WEBHOOK_EVENT_REFUNDED, WEBHOOK_EVENT_REFUND_DONE})

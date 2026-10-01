@@ -1,9 +1,10 @@
 """RBAC foundation tests (spec 6.12): staff role groups sync idempotently.
 
-``common.roles`` is the source of truth for the six staff roles; the
+``common.roles`` is the source of truth for the seven staff roles (the six
+operational ones plus the superadmin tier of spec 1.1 lines 142-146); the
 ``common`` bootstrap data migration calls ``sync_role_groups`` during
 ``migrate``. These tests pin that the sync is safe to re-run: exactly the
-six stable-named groups exist, and a deleted group is re-created rather
+stable-named role groups exist, and a deleted group is re-created rather
 than silently missing from a half-bootstrapped database.
 
 They also pin the capability permission layer built on the roles map:
@@ -11,6 +12,7 @@ allow/deny per role, the full role->capability matrix against
 ``CAPABILITY_ROLES``, and that the legacy ``IsAdminUserOrReadOnly``
 contract is untouched by the group-based layer.
 """
+
 from django.contrib.auth.models import AnonymousUser, Group, User
 from django.core.exceptions import PermissionDenied as DjangoPermissionDenied
 from django.http import HttpResponse
@@ -39,6 +41,7 @@ from common.roles import (
     ROLE_ADMIN,
     ROLE_CATALOGUE,
     ROLE_SUPPORT,
+    ROLE_SUPERADMIN,
     STAFF_ROLES,
     sync_role_groups,
 )
@@ -51,7 +54,7 @@ def _named_permission(capability):
 
 
 class StaffRoleGroupSyncTests(TestCase):
-    def test_sync_twice_leaves_exactly_six_groups_with_stable_names(self):
+    def test_sync_twice_leaves_exactly_one_group_per_role_with_stable_names(self):
         # The bootstrap migration already ran on the test database; re-running
         # the sync (ops scripts, future migrations) must not duplicate groups.
         sync_role_groups()
@@ -363,20 +366,35 @@ class AdminChromeCapabilityDecoratorTests(TestCase):
 
 
 class PrivilegeEscalationGuardTests(TestCase):
-    """Spec 6.12 line 2261: only admin-role staff may assign roles/permissions.
+    """Spec 6.12 line 2261 + spec 1.1 line 146: who may grant what.
 
-    No role-assignment surface exists yet (SPEC-6-05); until it does the
+    No role-assignment API surface exists yet (SPEC-6-05); until it does the
     guard lives at the capability layer. The matrix tests derive their
     expectations FROM the map, so they cannot catch a widened map — these
-    pins can: ``staff.manage``/``settings.manage`` are admin-exclusive, so
-    every future assignment surface built on ``HasStaffManage`` /
-    ``HasSettingsManage`` is admin-only by construction."""
+    pins can: the staff/settings capabilities are held by the two privilege
+    TIERS and by no operational role, so every future assignment surface
+    built on ``HasStaffManage`` / ``HasSettingsManage`` is tier-only by
+    construction, and ``platform.configure`` — the one capability ``admin``
+    deliberately lacks — is what separates the top tier from Admin."""
 
-    def test_sensitive_capabilities_are_admin_exclusive_in_the_map(self):
-        self.assertEqual(CAPABILITY_ROLES["staff.manage"], frozenset({ROLE_ADMIN}))
-        self.assertEqual(CAPABILITY_ROLES["settings.manage"], frozenset({ROLE_ADMIN}))
+    PRIVILEGED_TIERS = frozenset({ROLE_ADMIN, ROLE_SUPERADMIN})
 
-    def test_role_assignment_capability_denies_every_non_admin_role(self):
+    def test_sensitive_capabilities_are_held_by_the_two_tiers_only(self):
+        for capability in ("staff.manage", "settings.manage"):
+            with self.subTest(capability=capability):
+                self.assertEqual(CAPABILITY_ROLES[capability], self.PRIVILEGED_TIERS)
+                # The operational five gain nothing from the tier above them.
+                self.assertEqual(
+                    CAPABILITY_ROLES[capability] - self.PRIVILEGED_TIERS,
+                    frozenset(),
+                )
+
+    def test_platform_configuration_is_the_top_tier_only_capability(self):
+        self.assertEqual(
+            CAPABILITY_ROLES["platform.configure"], frozenset({ROLE_SUPERADMIN})
+        )
+
+    def test_role_assignment_capability_denies_every_role_below_the_tiers(self):
         groups = sync_role_groups()
         factory = APIRequestFactory()
         for role in STAFF_ROLES:
@@ -386,7 +404,7 @@ class PrivilegeEscalationGuardTests(TestCase):
             request.user = user
             with self.subTest(role=role):
                 for permission_class in (HasStaffManage, HasSettingsManage):
-                    if role == ROLE_ADMIN:
+                    if role in self.PRIVILEGED_TIERS:
                         self.assertTrue(
                             permission_class().has_permission(request, None)
                         )

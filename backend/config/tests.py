@@ -6,17 +6,26 @@ boundaries, not authorization substitutes. These tests pin that both URL
 families resolve to the identical view callables (the v1 mounts reuse the
 legacy urlconf objects — no view duplication) and that the legacy aliases
 stay alive until the coordinated frontend base-URL cutover (S9 ledger
-note). The webhooks family is pinned as reserved-but-unrouted because no
-webhook endpoint exists yet; SPEC-1-06 owns that mount (§11/§17 refs).
+note).
+
+The webhooks family is pinned positively since SPEC-1-06: it now holds the
+payment gateway's endpoint. It was previously pinned as reserved-but-unrouted
+(a ``Resolver404`` assertion that no webhook endpoint existed yet) — that pin
+asserted the absence of the thing this task built, so it was replaced by the
+routing assertion its own comment promised. The endpoint's own behaviour
+(signature verification, replay, reconciliation) is tested in
+``orders/tests_webhooks.py``; what belongs here is that the family §9 reserves
+is mounted, and where.
 """
 
 from django.test import TestCase
-from django.urls import Resolver404, resolve, reverse
+from django.urls import resolve, reverse
 
 from accounts.views import register
 from cart.views import cart_detail
 from ops.views import api_settings, audit_log, dashboard
 from orders.views import create_order
+from orders.webhooks import razorpay_webhook
 from products.views import product_list
 
 
@@ -77,8 +86,16 @@ class V1NamespacePinTests(TestCase):
         self.assertEqual(v1.status_code, 200)
         self.assertEqual(legacy.json(), v1.json())
 
-    def test_webhooks_prefix_reserved_until_webhook_endpoint_exists(self):
-        # §9 line 2587 reserves /api/v1/webhooks/; the endpoint itself does
-        # not exist yet (SPEC-1-06). Pin that nothing premature is routed.
-        with self.assertRaises(Resolver404):
-            resolve("/api/v1/webhooks/razorpay/")
+    def test_webhooks_family_carries_the_payment_webhook_endpoint(self):
+        # §9 line 2587 reserves /api/v1/webhooks/; SPEC-1-06 mounted the
+        # gateway's endpoint there. Pin the path the provider is configured
+        # with, in both directions, so a moved mount fails loudly here rather
+        # than silently in Razorpay's dashboard.
+        self.assertEqual(
+            reverse("v1:webhooks:razorpay-webhook"),
+            "/api/v1/webhooks/razorpay/",
+        )
+        self.assertIs(
+            resolve("/api/v1/webhooks/razorpay/").func,
+            razorpay_webhook,
+        )

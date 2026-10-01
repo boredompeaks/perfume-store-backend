@@ -1,7 +1,11 @@
+from decimal import Decimal
+
 from django.conf import settings
 from django.db import models
+from django.db.models import Sum
 from django.contrib.auth.models import User
 
+from common.money import quantize_money
 from products.models import products
 
 # [R-10.1] The order machine's constants live in orders.state (single
@@ -245,12 +249,13 @@ class Order(models.Model):
     # or-check; serializers and the admin expose them read-only). UTC
     # storage comes from USE_TZ=True, not from the columns. paid_at and
     # cancelled_at have live writers (verify_payment / admin cancel);
-    # fulfilled_at, shipped_at, delivered_at and refunded_at are the named
-    # pattern the later fulfilment and refund sections write -- no writer
-    # touches them yet. Historical rows stay NULL on purpose: the events
-    # predate the columns, their times are unknowable, so no backfill is
-    # possible. No index yet: spec 8.3 says add indexes from measured query
-    # patterns, and none of these dates is queried with status today.
+    # refunded_at has one too (the SPEC-1-05 refund seam); fulfilled_at,
+    # shipped_at and delivered_at are the named pattern the fulfilment
+    # section writes -- no writer touches them yet. Historical rows stay
+    # NULL on purpose: the events predate the columns, their times are
+    # unknowable, so no backfill is possible. No index yet: spec 8.3 says
+    # add indexes from measured query patterns, and none of these dates is
+    # queried with status today.
     paid_at = models.DateTimeField(null=True, blank=True)
     fulfilled_at = models.DateTimeField(null=True, blank=True)
     shipped_at = models.DateTimeField(null=True, blank=True)
@@ -302,6 +307,19 @@ class Order(models.Model):
 
     def __str__(self):
         return f"Order #{self.id} - {self.user.username}"
+
+    @property
+    def refundable_remaining(self):
+        """Money still refundable against this order's captured payment.
+
+        The ceiling is ``total_amount``: no Payment model exists in this
+        schema, so an order's captured amount IS its total, and the refund
+        writer only ever runs once ``payment_status`` says the payment was
+        captured. Quantized on both sides, so the balance is a 2-dp money
+        Decimal and never a carry-over of extra decimal places (conventions.md
+        money rule, same as every other amount in this file).
+        """
+        return quantize_money(self.total_amount) - Refund.refunded_total(self)
 
 
 class OrderItem(models.Model):
@@ -377,8 +395,16 @@ class OrderItem(models.Model):
 
 def _require_captured_payment(order):
     """Ship only after the money is real: a shipped order whose payment
-    later fails is un-reconcilable (no refund flow yet, V-03), and the
-    payment dimension (spec 10.2) is exactly where that truth lives.
+    later fails is un-reconcilable, and the payment dimension (spec 10.2) is
+    exactly where that truth lives.
+
+    [R-1.14] SPEC-1-05: ``partially_refunded`` is real money too - a capture
+    minus a recorded refund, and the Refund row is precisely what
+    reconciliation reads - so the remainder may ship. Refusing it would strand
+    paid-for inventory permanently: cancel is illegal from ``confirmed`` and
+    ``mark_shipped`` is the only path to ``fulfilled``, so there is no
+    operator route out. ``pending`` / ``authorized`` / ``failed`` are still
+    refused; none of them is captured money.
 
     [R-10.2] SPEC-10-04 COD variant: a cash-on-delivery order is paid at/
     after delivery, so demanding a capture before shipping would make COD
@@ -388,7 +414,7 @@ def _require_captured_payment(order):
     timing; the reading is documented in changes.md)."""
     if order.payment_method == PAYMENT_METHOD_COD:
         return []
-    if order.payment_status != "captured":
+    if order.payment_status not in ("captured", "partially_refunded"):
         return [f"payment must be captured (is '{order.payment_status}')"]
     return []
 
@@ -483,3 +509,242 @@ class OrderStatusEvent(models.Model):
 
     def __str__(self):
         return f"{self.order_id}: {self.from_status}->{self.to_status} ({self.trigger})"
+
+
+class Refund(models.Model):
+    """[R-1.14] One refund issued against an order's captured payment.
+
+    Spec section 1 puts "Payment gateway, refunds, webhooks" in the payments
+    row of the system overview, and the finance operator's job is to
+    "reconcile payments, refunds and financial reports" ([1.31]) - which
+    needs a row per refund: what was returned, why, who returned it and which
+    refund the provider acknowledged.
+
+    ``kind`` records the REQUEST, not the order's resulting state: a refund
+    is FULL when it cleared the order's remaining balance (an omitted amount,
+    or an explicit one equal to what was left) and PARTIAL when it left some
+    money still refundable. The order's payment dimension is the derived
+    answer to "what is left", never a field stored here.
+
+    ``status`` is written twice inside one transaction by the refund writer:
+    PENDING the moment the attempt starts (so the requested money is a real
+    row under the order's locks while the gateway call is in flight) and
+    PROCESSED once the provider returned a refund id. A failed attempt leaves
+    NO row - the transaction rolls back - so the two values are the whole
+    vocabulary: an outstanding refund is the absence of a row, which the
+    provider's own record is the authority for.
+    """
+
+    class Status(models.TextChoices):
+        PENDING = "pending", "Pending"
+        PROCESSED = "processed", "Processed"
+
+    class Kind(models.TextChoices):
+        FULL = "full", "Full"
+        PARTIAL = "partial", "Partial"
+
+    order = models.ForeignKey(
+        Order,
+        on_delete=models.CASCADE,
+        related_name='refunds'
+    )
+
+    amount = models.DecimalField(
+        max_digits=10,
+        decimal_places=2
+    )
+
+    reason = models.TextField()
+
+    kind = models.CharField(
+        max_length=10,
+        choices=Kind.choices
+    )
+
+    status = models.CharField(
+        max_length=20,
+        choices=Status.choices,
+        default=Status.PENDING,
+    )
+
+    # The provider's own refund reference, nullable only for the in-flight
+    # PENDING write above and unique so one gateway refund can never be
+    # recorded against two rows (the reconciliation join key).
+    gateway_refund_id = models.CharField(
+        max_length=100,
+        blank=True,
+        null=True,
+        unique=True,
+    )
+
+    # SET_NULL for the same reason as OrderStatusEvent.actor: deleting a
+    # staff account must never cascade into the financial trail.
+    actor = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='order_refunds',
+    )
+
+    # [R-9.3.14]-shaped replay identity, scoped to the order: a client that
+    # retries the same refund after a timeout must collapse onto the refund
+    # it already produced rather than pay the customer twice. NULLs stay
+    # distinct in the constraint, so keyless attempts are unaffected.
+    idempotency_key = models.CharField(
+        max_length=128,
+        null=True,
+        blank=True,
+    )
+
+    created_at = models.DateTimeField(
+        auto_now_add=True
+    )
+
+    updated_at = models.DateTimeField(
+        auto_now=True
+    )
+
+    class Meta:
+        ordering = ("-created_at", "-id")
+        verbose_name = "refund"
+        verbose_name_plural = "refunds"
+        constraints = [
+            # The concurrency authority for a keyed retry: the writer holds the
+            # Order row lock while it probes for a replay and binds the key,
+            # and this constraint is the last-resort guarantee that one order
+            # can never hold two refunds for one key. Its backing index also
+            # serves the replay probe.
+            models.UniqueConstraint(
+                fields=['order', 'idempotency_key'],
+                name='orders_refund_order_idem_uidx',
+            ),
+        ]
+
+    @classmethod
+    def refunded_total(cls, order):
+        """Money already refunded against ``order``, quantized to 2 dp.
+
+        Only PROCESSED rows count: a PENDING row is an attempt whose
+        transaction has not settled yet, and a failed attempt left no row at
+        all, so this sum is exactly the money the provider has moved.
+        """
+        total = cls.objects.filter(
+            order=order,
+            status=cls.Status.PROCESSED,
+        ).aggregate(total=Sum("amount"))["total"]
+        return quantize_money(total if total is not None else Decimal("0.00"))
+
+    def __str__(self):
+        return f"Refund #{self.pk} {self.amount} ({self.kind})"
+
+
+class PaymentEvent(models.Model):
+    """[R-1.15] SPEC-1-06: one delivery of one payment-provider webhook event.
+
+    Spec section 1 puts "Payment gateway, refunds, webhooks" in the payments
+    row of the system overview and spec 11.2 makes webhook signature
+    verification and duplicate-delivery handling payment requirements in their
+    own right. Until this table existed, the only statement this store had
+    about a payment was what the customer's browser said after checkout - so a
+    dropped callback left a paid order pending forever, and a forged callback
+    could claim one. Razorpay's own record is the authority; this table is the
+    store's side of hearing it.
+
+    Every delivery is recorded, whatever it turns out to be worth:
+
+    * ``event_id`` (the provider's per-delivery id) is UNIQUE, and that
+      constraint - not a check-then-write - is the replay authority. A second
+      delivery of the same event collides, the handler rolls back, and the
+      store returns success without a second effect. The unique index is the
+      guarantee; the IntegrityError-retry loop in ``orders.webhooks`` is how
+      it is honored, exactly as ``create_payment`` honors the payment-intent
+      uniqueness (conventions.md:17).
+    * ``outcome`` is what the handler decided. APPLIED means money moved onto
+      the order; REFUSED means a validly-signed event that must not move it
+      (unknown order, mismatched payment reference, wrong amount, an edge the
+      machine does not declare); RECORDED means the delivery was genuine but
+      this store has no writer for it (a refund notification, an event type
+      the vocabulary does not name). Refusals and records are kept, not
+      dropped: "the provider says this happened and we did nothing about it"
+      is the row reconciliation reads.
+    * ``order`` is SET_NULL and nullable because a refusal must outlive the
+      lookup that produced it - an event naming an order this store has never
+      seen is exactly the row an operator needs, and a financial trail must
+      not cascade away with a deleted order row.
+    * ``payload`` keeps the decoded event exactly as delivered. The
+      event-type-specific columns beside it are the reconcilable answers, but
+      they are chosen by this store's writers: when a provider adds a field or
+      a future handler needs one this batch did not anticipate, the delivered
+      event is the only record that still holds it.
+
+    ``amount`` is the store's Decimal money (never provider minor units,
+    never a float), quantized through ``common.money`` by the writer. It is
+    NULL for an event that carries no amount.
+    """
+
+    class Outcome(models.TextChoices):
+        APPLIED = "applied", "Applied"
+        REFUSED = "refused", "Refused"
+        RECORDED = "recorded", "Recorded"
+
+    # The provider's own event name (see WEBHOOK_* in orders.state). No
+    # `choices`: the provider may add event types at any time, and a delivery
+    # it considers real must be recordable even when this store has no writer
+    # for it. The behaviour vocabulary is `outcome`, not this column.
+    event_id = models.CharField(
+        max_length=100,
+        unique=True,
+    )
+
+    event_type = models.CharField(
+        max_length=50,
+    )
+
+    order = models.ForeignKey(
+        Order,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='payment_events',
+    )
+
+    # The gateway payment the event is about (a refund event carries the
+    # payment it returned money against). Blank rather than NULL: every
+    # delivery has a text answer here, and "" says "the event named no
+    # payment" without claiming one.
+    gateway_payment_id = models.CharField(
+        max_length=100,
+        blank=True,
+        default='',
+    )
+
+    amount = models.DecimalField(
+        max_digits=10,
+        decimal_places=2,
+        null=True,
+        blank=True,
+    )
+
+    payload = models.JSONField()
+
+    outcome = models.CharField(
+        max_length=10,
+        choices=Outcome.choices,
+        default=Outcome.RECORDED,
+    )
+
+    created_at = models.DateTimeField(
+        auto_now_add=True
+    )
+
+    class Meta:
+        # Newest first for the same reason OrderStatusEvent is: the trail is
+        # read most-recent-first.
+        ordering = ("-created_at", "-id")
+        verbose_name = "payment event"
+        verbose_name_plural = "payment events"
+
+    def __str__(self):
+        return f"{self.event_type} {self.event_id} ({self.outcome})"
+

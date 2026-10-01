@@ -13,14 +13,22 @@ class SiteSettingsAdmin(RoleAwareModelAdmin):
     """Singleton settings row — no add/delete, only edit."""
 
     # Store settings are the sensitive surface ``settings.manage`` guards
-    # (spec 6.12), so both seeing and editing them is admin-role territory.
+    # (spec 6.12), so both seeing and editing them is privilege-tier
+    # territory: spec 1.1 gives settings to Admin (line 137) and to the
+    # superadmin tier above it (line 146), and to no one else.
     capability_map = {
         "view": "settings.manage",
         "change": "settings.manage",
         # add/delete: the subclass overrides below keep them impossible for
         # everyone (singleton), as before.
     }
-    list_display = ("support_email", "support_phone", "whatsapp_number", "instagram_url", "updated_at")
+    list_display = (
+        "support_email",
+        "support_phone",
+        "whatsapp_number",
+        "instagram_url",
+        "updated_at",
+    )
     fieldsets = (
         (
             "Customer contact channels (blank = hidden on the storefront)",

@@ -1,10 +1,19 @@
 {# SPEC-20-6 [R-20.11]: the orders changelist renders the saved-view bar
    below the delivered grid. block.super keeps the shipped changelist
    markup — filters, bulk actions, the date hierarchy — byte-identical;
-   the bar is additive chrome. #}
+   the bar is additive chrome.
+
+   SPEC-1-B03 [R-1-B03]: the include is guarded on the bar's own context,
+   because OrderAdmin deliberately skips SavedFilterMixin.changelist_view
+   for the packing operator (its save/delete endpoints gate on
+   has_view_permission, which that role does not hold, so the bar could only
+   ever 404). Without the guard this template would reverse the save URL with
+   empty arguments and 500 the very grid the narrowing was written to give
+   that operator. saved_filter_meta is set by saved_filter_context, so its
+   presence IS "the mixin ran for this request". #}
 {% extends "admin/change_list.html" %}
 
 {% block content %}
   {{ block.super }}
-  {% include "admin/saved_filter_bar.html" %}
+  {% if saved_filter_meta %}{% include "admin/saved_filter_bar.html" %}{% endif %}
 {% endblock %}

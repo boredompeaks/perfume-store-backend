@@ -10,6 +10,7 @@
   (admin role) with Django's superuser bypass preserved: anonymous callers
   are sent to the admin login, unprivileged staff get 403.
 """
+
 import json
 
 from django.contrib.admin.models import ADDITION, CHANGE, DELETION, LogEntry
@@ -17,7 +18,14 @@ from django.contrib.auth.models import Group, User
 from django.contrib.contenttypes.models import ContentType
 from django.test import tag
 
-from common.roles import ROLE_ADMIN, ROLE_CATALOGUE, ROLE_SUPPORT, STAFF_ROLES
+from common.roles import (
+    CAPABILITY_ROLES,
+    ROLE_ADMIN,
+    ROLE_CATALOGUE,
+    ROLE_SUPPORT,
+    ROLE_SUPERADMIN,
+    STAFF_ROLES,
+)
 from common.testing import ApiTestCase
 from products.models import products
 
@@ -133,11 +141,16 @@ class AuditLogRouteTests(ApiTestCase):
         self.assertEqual(res.status_code, 302)
         self.assertTrue(res.url.startswith("/admin/login/"))
 
-    def test_every_non_admin_role_is_403(self):
-        # staff.manage is the map's admin-only capability, so the route is
-        # invisible to the other five roles: a visible 403, not a redirect.
-        non_admin_roles = [r for r in STAFF_ROLES if r != ROLE_ADMIN]
-        for role in non_admin_roles:
+    def test_every_role_without_staff_manage_is_403(self):
+        # staff.manage is the map's privilege-tier capability (admin +
+        # superadmin), so the route is invisible to the five operational
+        # roles: a visible 403, not a redirect.
+        non_grantees = [
+            r for r in STAFF_ROLES if r not in CAPABILITY_ROLES["staff.manage"]
+        ]
+        self.assertNotIn(ROLE_ADMIN, non_grantees)
+        self.assertNotIn(ROLE_SUPERADMIN, non_grantees)
+        for role in non_grantees:
             with self.subTest(role=role):
                 viewer = make_role_user(role, f"viewer-{role}")
                 self.client.force_login(viewer)

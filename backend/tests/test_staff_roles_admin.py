@@ -2,9 +2,9 @@
 
 Pins the role-management surface on StoreUserAdmin end to end:
 
-- the six staff role Groups are assignable/unassignable on staff users,
-  but only by ``staff.manage`` holders (the admin role) or the preserved
-  superuser bypass,
+- the staff role Groups are assignable/unassignable on staff users,
+  but only by ``staff.manage`` holders (the admin role and the superadmin
+  tier above it) or the preserved superuser bypass,
 - a staff user WITHOUT ``staff.manage`` cannot escalate themselves or
   anyone else: the roles field is hidden (least privilege), their POSTs
   are refused by the change gate, and a directly constructed save_model
@@ -26,6 +26,7 @@ destructive bulk actions use) before anything commits. The pins below keep
 every original assertion — the journey grew one deliberate click, the
 outcome did not move — and the new class pins the step itself.
 """
+
 from types import SimpleNamespace
 
 from django.contrib import admin
@@ -36,7 +37,13 @@ from django.test import RequestFactory, tag
 
 from common.admin import CONFIRMATION_YES, CONFIRM_FIELD
 from common.permissions import user_has_capability
-from common.roles import ROLE_ADMIN, ROLE_MARKETING, ROLE_SUPPORT, STAFF_ROLES
+from common.roles import (
+    ROLE_ADMIN,
+    ROLE_MARKETING,
+    ROLE_SUPPORT,
+    ROLE_SUPERADMIN,
+    STAFF_ROLES,
+)
 from common.testing import ApiTestCase
 
 TEST_PASSWORD = "S3cure-Passphrase!"
@@ -121,18 +128,33 @@ class StaffRoleSurfaceUITests(StaffRoleChangeMixin, ApiTestCase):
             is_staff=True,
         )
 
-    def test_roles_field_lists_exactly_the_six_roles_for_admin(self):
+    def test_roles_field_lists_exactly_the_roles_an_admin_may_assign(self):
         self.staff_target.groups.add(Group.objects.get(name=ROLE_SUPPORT))
         self.client.force_login(self.admin_user)
         res = self.client.get(f"/admin/auth/user/{self.staff_target.id}/change/")
         self.assertEqual(res.status_code, 200)
         field = res.context["adminform"].form.fields["staff_roles"]
+        # SPEC-1-B03: the selector offers every role EXCEPT the tier above
+        # admin, which an admin-role caller cannot assign (platform.configure
+        # is not in its hands). Least privilege: a role it could never commit
+        # is not on the page either.
         self.assertEqual(
-            set(field.queryset.values_list("name", flat=True)), set(STAFF_ROLES)
+            set(field.queryset.values_list("name", flat=True)),
+            set(STAFF_ROLES) - {ROLE_SUPERADMIN},
         )
         # The selector is seeded with the user's current role membership.
         self.assertEqual(
             set(field.initial.values_list("name", flat=True)), {ROLE_SUPPORT}
+        )
+
+    def test_roles_field_lists_every_role_for_the_top_tier(self):
+        self.staff_target.groups.add(Group.objects.get(name=ROLE_SUPPORT))
+        self.client.force_login(make_role_user(ROLE_SUPERADMIN, "tier-root"))
+        res = self.client.get(f"/admin/auth/user/{self.staff_target.id}/change/")
+        self.assertEqual(res.status_code, 200)
+        field = res.context["adminform"].form.fields["staff_roles"]
+        self.assertEqual(
+            set(field.queryset.values_list("name", flat=True)), set(STAFF_ROLES)
         )
 
     def test_support_role_sees_no_roles_field(self):
@@ -144,7 +166,8 @@ class StaffRoleSurfaceUITests(StaffRoleChangeMixin, ApiTestCase):
         # Least privilege is about the rendered surface: no fieldset may
         # carry the roles section for a viewer without staff.manage.
         rendered = [
-            f for _, options in res.context["adminform"].fieldsets
+            f
+            for _, options in res.context["adminform"].fieldsets
             for f in options.get("fields", ())
         ]
         self.assertNotIn("staff_roles", rendered)
@@ -193,9 +216,7 @@ class StaffRoleSurfaceUITests(StaffRoleChangeMixin, ApiTestCase):
         self.staff_target.groups.add(Group.objects.get(name=ROLE_SUPPORT))
         self.client.force_login(self.admin_user)
         url = self.change_url(self.staff_target)
-        payload = user_change_post(
-            self.staff_target, is_staff="on", staff_roles=[]
-        )
+        payload = user_change_post(self.staff_target, is_staff="on", staff_roles=[])
         step = self.client.post(url, payload)
         self.assertEqual(step.status_code, 200)
         self.assertTemplateUsed(step, "admin/action_confirmation.html")
@@ -207,9 +228,7 @@ class StaffRoleSurfaceUITests(StaffRoleChangeMixin, ApiTestCase):
         res = self.confirm_role_change(url, payload)
         self.assertEqual(res.status_code, 302)
         self.staff_target.refresh_from_db()
-        self.assertFalse(
-            self.staff_target.groups.filter(name=ROLE_SUPPORT).exists()
-        )
+        self.assertFalse(self.staff_target.groups.filter(name=ROLE_SUPPORT).exists())
         entry = LogEntry.objects.get(
             object_id=str(self.staff_target.id),
             change_message__contains='Removed role "support".',
@@ -249,16 +268,15 @@ class StaffRoleSurfaceUITests(StaffRoleChangeMixin, ApiTestCase):
         )
         self.assertEqual(res.status_code, 403)
         self.staff_target.refresh_from_db()
-        self.assertFalse(
-            self.staff_target.groups.filter(name=ROLE_ADMIN).exists()
-        )
+        self.assertFalse(self.staff_target.groups.filter(name=ROLE_ADMIN).exists())
 
     def test_customer_change_has_no_roles_field_and_tampering_is_ignored(self):
         self.client.force_login(self.admin_user)
         page = self.client.get(f"/admin/auth/user/{self.customer.id}/change/")
         self.assertEqual(page.status_code, 200)
         rendered = [
-            f for _, options in page.context["adminform"].fieldsets
+            f
+            for _, options in page.context["adminform"].fieldsets
             for f in options.get("fields", ())
         ]
         self.assertNotIn("staff_roles", rendered)
@@ -349,9 +367,7 @@ class StaffRoleSurfaceUITests(StaffRoleChangeMixin, ApiTestCase):
         self.staff_target.refresh_from_db()
         self.assertFalse(self.staff_target.is_superuser)  # grant ignored
         self.assertTrue(self.staff_target.is_staff)  # untouched (already staff)
-        self.assertTrue(
-            self.staff_target.groups.filter(name=ROLE_SUPPORT).exists()
-        )
+        self.assertTrue(self.staff_target.groups.filter(name=ROLE_SUPPORT).exists())
 
     def test_admin_role_cannot_promote_a_customer_to_staff(self):
         # The crispest form of the guard: "grant is_staff to ANY user".
@@ -376,9 +392,7 @@ class StaffRoleSurfaceUITests(StaffRoleChangeMixin, ApiTestCase):
         self.client.force_login(self.admin_user)
         res = self.client.post(
             f"/admin/auth/user/{self.staff_target.id}/change/",
-            user_change_post(
-                self.staff_target, user_permissions=[str(delete_user.pk)]
-            ),
+            user_change_post(self.staff_target, user_permissions=[str(delete_user.pk)]),
         )
         self.assertEqual(res.status_code, 302)
         self.staff_target.refresh_from_db()
@@ -449,9 +463,7 @@ class StaffRoleSurfaceUITests(StaffRoleChangeMixin, ApiTestCase):
         res = self.confirm_role_change(url, payload)
         self.assertEqual(res.status_code, 302)
         self.staff_target.refresh_from_db()
-        self.assertTrue(
-            self.staff_target.groups.filter(name=ROLE_MARKETING).exists()
-        )
+        self.assertTrue(self.staff_target.groups.filter(name=ROLE_MARKETING).exists())
         entry = LogEntry.objects.get(
             object_id=str(self.staff_target.id),
             change_message__contains='Added role "marketing".',
@@ -667,9 +679,7 @@ class StaffRoleGuardUnitTests(ApiTestCase):
         form = SimpleNamespace(
             cleaned_data={"staff_roles": [Group.objects.get(name=ROLE_SUPPORT)]}
         )
-        admin.site._registry[User]._apply_staff_roles(
-            request_for(chief), target, form
-        )
+        admin.site._registry[User]._apply_staff_roles(request_for(chief), target, form)
         self.assertEqual(
             set(target.groups.values_list("name", flat=True)),
             {"legacy-group", ROLE_SUPPORT},
