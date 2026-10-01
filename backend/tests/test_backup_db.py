@@ -26,7 +26,9 @@ make a pin vacuous.
 import io
 import os
 import re
+import shutil
 import sqlite3
+import subprocess
 from contextlib import closing, contextmanager
 from datetime import datetime
 from pathlib import Path
@@ -42,10 +44,13 @@ from ops.management.commands import backup_db as backup_module
 from ops.management.commands.backup_db import (
     DEFAULT_KEEP,
     PREFIX,
+    SIGNATURES,
     backup_name,
+    is_own_dump,
     pg_dump_binary,
     prune,
     redact,
+    scrub,
     utc_stamp,
 )
 
@@ -53,10 +58,11 @@ from ops.management.commands.backup_db import (
 # tests prove that by putting it in both the connection config and the
 # environment. It is deliberately self-describing and low-entropy: this
 # repository's own secret scan is a release gate, and a fixture that cannot be
-# mistaken for a committed credential is a better fixture for it. The URL is
-# assembled from it, so no complete `postgres://user:password@host` string is
-# ever written out in this repository.
-PROBE_PASSWORD = "probe-xxxx"
+# mistaken for a committed credential is a better fixture for it (the value
+# below carries no x-padding either, so it does not read as a redaction
+# placeholder). The URL is assembled from it, so no complete
+# `postgres://user:password@host` string is ever written out in this repository.
+PROBE_PASSWORD = "probe-fixture-only"
 PROBE_USER = "probe-user"
 PROBE_HOST = "db.internal"
 PROBE_DB = "probe_store"
@@ -64,7 +70,7 @@ PROBE_URL = (
     f"postgres://{PROBE_USER}:{PROBE_PASSWORD}@{PROBE_HOST}:5432/{PROBE_DB}"
     "?sslmode=require"
 )
-DUMP_BODY = b"PGDMP-fake-dump"
+DUMP_BODY = b"PGDMP-fake-dump"  # starts with pg_dump's custom-format signature
 
 # "Pass no --output-dir at all", distinguishable from "pass an empty one".
 UNSET = object()
@@ -107,7 +113,10 @@ class BackupTestCase(SimpleTestCase):
     @staticmethod
     def _remove_tree(root):
         for path in sorted(root.rglob("*"), reverse=True):
-            path.unlink()
+            if path.is_dir():
+                path.rmdir()
+            else:
+                path.unlink()
         root.rmdir()
 
     # -- runners ----------------------------------------------------------
@@ -171,8 +180,20 @@ class BackupTestCase(SimpleTestCase):
             and path.suffix in (".dump", ".sqlite3")
         )
 
-    def write_dump(self, stamp, suffix=".dump", content=b"dump"):
+    def write_dump(self, stamp, suffix=".dump", content=None):
+        """Write a file exactly as this command would have written it.
+
+        The name carries the scheme's stamp AND the bytes carry the engine's
+        signature, which is what retention requires before it will consider
+        deleting anything. `content` overrides that to forge a foreign file.
+        """
         path = self.backup_dir / backup_name(stamp, suffix)
+        path.write_bytes(SIGNATURES[suffix] if content is None else content)
+        return path
+
+    def write_foreign(self, name, content=b"an operator's own file"):
+        """Park a file this command did not write in the backup directory."""
+        path = self.backup_dir / name
         path.write_bytes(content)
         return path
 
@@ -276,6 +297,45 @@ class PostgresBackupTests(BackupTestCase):
         self.assertNotIn(PROBE_URL, message)
         self.assertIn("***redacted***", message)
         self.assertIn("pg_dump exited 1", message)
+
+    def test_a_failed_dumps_error_text_cannot_leak_the_connection_identity(self):
+        """The load-bearing redaction pin, in the shape libpq actually prints.
+
+        A refused connection is quoted back with the host, the address libpq
+        RESOLVED, the port, the user and the database name - none of which is
+        the password, and the resolved address is in no setting at all. Cron
+        mails that text, so none of it may survive into the exception.
+        """
+        stderr = (
+            f'pg_dump: error: connection to server at "{PROBE_HOST}" '
+            f"(10.42.0.7), port 5432 failed: FATAL:  password authentication "
+            f'failed for user "{PROBE_USER}"\n'
+            f"\tConnection parameters: host={PROBE_HOST} port=5432 "
+            f"user={PROBE_USER} dbname={PROBE_DB} sslmode=require\n"
+        ).encode()
+
+        with self.using_databases(default=POSTGRES_ENTRY), self.pg_dump(
+            returncode=1, stderr=stderr
+        ):
+            with self.assertRaises(CommandError) as caught:
+                self.run_command()
+
+        message = str(caught.exception)
+        for identity in (
+            PROBE_URL,
+            PROBE_PASSWORD,
+            PROBE_USER,
+            PROBE_HOST,
+            PROBE_DB,
+            "5432",
+            "10.42.0.7",
+        ):
+            with self.subTest(identity=identity):
+                self.assertNotIn(identity, message)
+        # the operator still learns what failed and why
+        self.assertIn("pg_dump exited 1", message)
+        self.assertIn("password authentication failed", message)
+        self.assertIn("***redacted***", message)
 
     def test_a_failure_with_no_diagnostic_output_still_says_something(self):
         with self.using_databases(default=POSTGRES_ENTRY), self.pg_dump(
@@ -455,19 +515,122 @@ class RetentionTests(BackupTestCase):
         self.assertEqual(self.dumps(), [f"{PREFIX}-20260102T000000Z.sqlite3"])
 
     def test_prune_never_touches_a_file_it_did_not_create(self):
-        """An operator's own file in the backup directory is not a retention
-        candidate: pruning is a deletion loop and must be narrow."""
-        keeper = self.backup_dir / "notes.txt"
-        keeper.write_text("an operator's own file", encoding="utf-8")
-        foreign = self.backup_dir / "someone-elses-backup.dump"
-        foreign.write_bytes(b"not ours")
+        """Retention is a deletion loop and has to be narrow. A file parked in
+        the backup directory is not a deletion candidate even when it borrows
+        this command's PREFIX: `perfume-latest.dump` and `perfume-2026.dump`
+        have no stamp, `perfume-20260101T000000ZZ.dump` has one of the wrong
+        width. Only a stamped dump of ours is."""
+        keeper = self.write_foreign("notes.txt", b"an operator's own file")
+        borrowed = self.write_foreign("someone-elses-backup.dump", SIGNATURES[".dump"])
+        unstamped = self.write_foreign(f"{PREFIX}-latest.dump", SIGNATURES[".dump"])
+        wrong_width = self.write_foreign(f"{PREFIX}-20260101T000000ZZ.dump", b"PGDMP")
+        ours = self.write_dump("20260101T000000Z")
+
+        removed = prune(self.backup_dir, 1)
+
+        self.assertEqual(removed, [])
+        for path in (keeper, borrowed, unstamped, wrong_width, ours):
+            with self.subTest(file=path.name):
+                self.assertTrue(path.is_file())
+
+    def test_prune_never_deletes_a_hand_taken_dump_that_borrowed_the_scheme(self):
+        """The load-bearing retention pin: an operator's own dump, taken by
+        hand long before this command existed, is named exactly like ours and
+        still has to survive. Its bytes are not a dump this command wrote (a
+        hand-taken `pg_dump` defaults to plain SQL), so it is left alone -
+        while a real dump older than the keep count is pruned."""
+        hand_taken = self.write_foreign(
+            f"{PREFIX}-20190101T000000Z.dump", b"-- PostgreSQL database dump\n"
+        )
         self.write_dump("20260101T000000Z")
+        self.write_dump("20260102T000000Z")
 
-        prune(self.backup_dir, 1)
+        removed = prune(self.backup_dir, 1)
 
-        self.assertEqual(self.dumps(), [f"{PREFIX}-20260101T000000Z.dump"])
-        self.assertTrue(keeper.is_file())
-        self.assertTrue(foreign.is_file())
+        self.assertEqual(removed, [f"{PREFIX}-20260101T000000Z.dump"])
+        self.assertTrue(hand_taken.is_file())
+        self.assertEqual(
+            self.dumps(),
+            [
+                f"{PREFIX}-20190101T000000Z.dump",
+                f"{PREFIX}-20260102T000000Z.dump",
+            ],
+        )
+
+    def test_prune_never_deletes_a_file_that_only_borrowed_the_name(self):
+        """A file that carries the exact name scheme but is not a dump this
+        command wrote is still not ours to delete - retention trusts the
+        content, not the name."""
+        impostor = self.write_foreign(
+            f"{PREFIX}-20251231T235959Z.dump", b"a note to self"
+        )
+        self.write_dump("20260101T000000Z")
+        self.write_dump("20260102T000000Z")
+
+        removed = prune(self.backup_dir, 1)
+
+        self.assertEqual(removed, [f"{PREFIX}-20260101T000000Z.dump"])
+        self.assertTrue(impostor.is_file())
+
+    def test_a_stamp_that_is_not_a_date_is_not_our_scheme(self):
+        """The name test is a STAMP SHAPE, not just the prefix: a file named
+        with something that is not `<8 digits>T<6 digits>Z` is never a
+        candidate, however much of our name it borrows."""
+        for name in (
+            f"{PREFIX}-9999999T00000Z.dump",  # one digit short
+            f"{PREFIX}-20260101T000000ZZ.dump",  # one character long
+            f"{PREFIX}-20260101T0000.dump",  # not a UTC stamp at all
+            f"{PREFIX}-latest.dump",  # a name, not a stamp
+        ):
+            with self.subTest(name=name):
+                self.write_foreign(name, SIGNATURES[".dump"])
+        self.write_dump("20260102T000000Z")
+
+        self.assertEqual(prune(self.backup_dir, 1), [])
+        self.assertEqual(
+            sorted(path.name for path in self.backup_dir.iterdir()),
+            sorted(
+                [
+                    f"{PREFIX}-9999999T00000Z.dump",
+                    f"{PREFIX}-20260101T000000ZZ.dump",
+                    f"{PREFIX}-20260101T0000.dump",
+                    f"{PREFIX}-latest.dump",
+                    f"{PREFIX}-20260102T000000Z.dump",
+                ]
+            ),
+        )
+
+    def test_a_directory_wearing_a_dumps_name_is_never_unlinked(self):
+        """An unreadable candidate is skipped, not deleted: a deletion loop
+        that crashes on something it cannot read is worse than one that leaves
+        it for an operator."""
+        impostor = self.backup_dir / backup_name("20251231T235959Z", ".dump")
+        impostor.mkdir()
+        self.write_dump("20260101T000000Z")
+        self.write_dump("20260102T000000Z")
+
+        self.assertEqual(
+            prune(self.backup_dir, 1), [f"{PREFIX}-20260101T000000Z.dump"]
+        )
+        self.assertTrue(impostor.is_dir())
+
+    def test_ownership_is_decided_by_the_engine_signature_not_the_name(self):
+        """`is_own_dump` is the content half of the rule retention applies,
+        pinned directly so it cannot be widened: our engine's signature and
+        nothing else. The name half is `prune`'s stamped glob."""
+        self.assertTrue(is_own_dump(self.write_dump("20260101T000000Z")))
+        self.assertTrue(is_own_dump(self.write_dump("20260101T000000Z", ".sqlite3")))
+        disambiguated = self.backup_dir / f"{PREFIX}-20260101T000000Z-1.dump"
+        disambiguated.write_bytes(SIGNATURES[".dump"])
+        self.assertTrue(is_own_dump(disambiguated))
+        # a suffix this command does not write is never ours, whatever it holds
+        self.assertFalse(
+            is_own_dump(self.write_foreign(f"{PREFIX}-20260101T000000Z.gz", b"PGDMP"))
+        )
+        # and a stamped name with foreign bytes is not ours either
+        self.assertFalse(
+            is_own_dump(self.write_foreign(f"{PREFIX}-20260101T000000Z.dump", b"x"))
+        )
 
     def test_the_command_prunes_to_the_keep_count_after_a_dump(self):
         for stamp in ("20260101T000000Z", "20260102T000000Z", "20260103T000000Z"):
@@ -623,6 +786,7 @@ class BackupScheduleArtifactTests(SimpleTestCase):
 
     SCRIPT = "scripts/backup.sh"
     RUNBOOK = "backend/docs/deploy-runbook.md"
+    WORKFLOW = ".github/workflows/backend-tests.yml"
     SECRET_NAME = re.compile(r"(?i)(secret|password|passwd|token|ssh_key|api_key)")
 
     def read(self, relative_path):
@@ -683,6 +847,23 @@ class BackupScheduleArtifactTests(SimpleTestCase):
                     f"name: {line.strip()}"
                 )
 
+    def test_the_backup_script_gates_the_backend_suite_on_both_triggers(self):
+        """A commit that changes only the backup cadence still has to run the
+        gate. `scripts/release.sh` is on the list for the same reason: the
+        cadence is the deploy host's scheduled entry point, and a change to it
+        that never runs the suite can reach a production host unremarked.
+
+        A workflow cannot be executed here, so this is a text contract - and it
+        says as much by being about the trigger list rather than about the
+        script.
+        """
+        workflow = self.read(self.WORKFLOW)
+        triggers = workflow.split("  push:", 1)[1].split("  pull_request:", 1)
+        self.assertEqual(len(triggers), 2, "the workflow lost a trigger block")
+        for block in triggers:
+            with self.subTest(trigger="push/pull_request"):
+                self.assertIn(f'"{self.SCRIPT}"', block)
+
     def test_the_cadence_is_documented_and_the_documented_prerequisite_is_true(self):
         """The runbook carries the cron entry AND the pg_dump prerequisite it
         depends on. A cron line that points at a missing binary is a schedule
@@ -693,6 +874,152 @@ class BackupScheduleArtifactTests(SimpleTestCase):
         # the client is not in the image, so the runbook must say so
         self.assertIn("pg_dump", runbook)
         self.assertRegex(runbook, r"(?i)postgresql[- ]client")
+
+
+@tag("ops")
+class BackupScriptExecutionTests(SimpleTestCase):
+    """The cadence is EXECUTED here, not read.
+
+    Every other pin on `scripts/backup.sh` in this file is a text assertion,
+    and text assertions cannot see a dead script: the shipped bug was a
+    `set -u` reference to an OPTIONAL knob, which made the documented
+    invocation - the one in the script's own header and the cron entry in the
+    runbook - abort before a single dump was taken, while every text pin
+    stayed green.
+
+    So this runs the committed script in a throwaway copy of a deploy host's
+    layout with `docker` replaced by a stub on PATH, and with an environment
+    that holds exactly what the header documents: `BACKUP_DIR`, and nothing
+    else.
+    """
+
+    # On Windows the `bash` on PATH is usually the WSL launcher, which hangs
+    # forever when no distribution is installed; Git-for-Windows ships a real
+    # bash, so it is preferred there.
+    GIT_BASH = Path(r"C:\Program Files\Git\bin\bash.exe")
+    SCRIPT = "scripts/backup.sh"
+    # Records the argv the script handed the container and succeeds: the dump
+    # itself is what the management command does, not this script's business.
+    DOCKER_STUB = (
+        "#!/usr/bin/env bash\nprintf '%s\\n' \"$*\" >> \"$DOCKER_LOG\"\nexit 0\n"
+    )
+
+    @classmethod
+    def bash_executable(cls):
+        if os.name == "nt" and cls.GIT_BASH.is_file():
+            return str(cls.GIT_BASH)
+        return shutil.which("bash")
+
+    def run_the_documented_invocation(self, extra_env=None):
+        """Run `./scripts/backup.sh` with only BACKUP_DIR set, as documented.
+
+        Returns (completed_process, docker_calls).
+        """
+        bash = self.bash_executable()
+        if not bash:
+            self.skipTest("no bash on this host, so the script cannot be run")
+
+        root = Path(mkdtemp(prefix="backup-script-test-"))
+        self.addCleanup(self._remove_tree, root)
+        (root / "scripts").mkdir()
+        # The committed script, byte for byte: a copy, not a rewrite.
+        (root / self.SCRIPT).write_bytes((REPO_ROOT / self.SCRIPT).read_bytes())
+        # The two files the script checks for before it touches anything.
+        (root / "docker-compose.yml").write_text("services: {}\n", encoding="utf-8")
+        (root / ".env").write_text("DJANGO_SECRET_KEY=dummy\n", encoding="utf-8")
+        # The one-shot container is the only thing this test cannot own.
+        stub_dir = root / "stub-bin"
+        stub_dir.mkdir()
+        (stub_dir / "docker").write_text(
+            self.DOCKER_STUB, encoding="utf-8", newline="\n"
+        )
+        os.chmod(stub_dir / "docker", 0o755)
+        # A POSIX absolute path, which is what a deploy host has and what the
+        # script insists on. On Windows the temp tree is addressed the way the
+        # bash running this test sees it (`/tmp` is %TEMP% there), so what is
+        # under test is the script, not the host's path syntax. The script
+        # creates the directory itself - that is part of what it is pinned for.
+        backups = root / "backups"
+        log = root / "docker-calls.log"
+
+        environment = {
+            # The stub first, so the real docker is never reached.
+            "PATH": os.pathsep.join([str(stub_dir), os.environ.get("PATH", "")]),
+            "BACKUP_DIR": (
+                str(backups) if os.name != "nt" else f"/tmp/{root.name}/backups"
+            ),
+            "DOCKER_LOG": str(log),
+        }
+        if os.name == "nt":
+            # MSYS bash needs these to run anything on a Windows host.
+            environment["SYSTEMROOT"] = os.environ.get("SYSTEMROOT", "")
+            environment["TEMP"] = os.environ.get("TEMP", "")
+        # The documented invocation sets BACKUP_DIR ALONE: the optional knob
+        # must not be inherited from the machine running the suite. A test that
+        # asks for it explicitly opts back in below.
+        environment.pop("BACKUP_RETENTION", None)
+        environment.update(extra_env or {})
+
+        completed = subprocess.run(
+            [bash, "./" + self.SCRIPT],
+            cwd=root,
+            env=environment,
+            capture_output=True,
+            text=True,
+            timeout=120,
+        )
+        calls = log.read_text(encoding="utf-8").splitlines() if log.is_file() else []
+        return completed, calls
+
+    @staticmethod
+    def _remove_tree(root):
+        for path in sorted(root.rglob("*"), reverse=True):
+            if path.is_dir():
+                path.rmdir()
+            else:
+                path.unlink()
+        root.rmdir()
+
+    def test_the_documented_invocation_reaches_the_dump_with_no_unset_knob(self):
+        """The cadence as the header and the cron entry invoke it: one knob,
+        no unbound variable, and the backup command actually runs."""
+        completed, calls = self.run_the_documented_invocation()
+
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+        self.assertNotIn("unbound variable", completed.stderr)
+        # it got all the way to the dump, which is the whole point
+        self.assertEqual(len(calls), 1, calls)
+        self.assertIn("compose -f docker-compose.yml run --rm -T", calls[0])
+        self.assertIn("backup_db", calls[0])
+
+    def test_the_documented_invocation_hands_the_default_retention_to_the_command(self):
+        """`docker compose run` does not forward the host environment, so the
+        retention the script resolved is passed explicitly - otherwise the
+        command applies its own default while the log claims the operator's."""
+        completed, calls = self.run_the_documented_invocation()
+
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+        self.assertIn("-e BACKUP_RETENTION=7", calls[0])
+        self.assertIn("keeping 7 dumps", completed.stdout)
+
+    def test_an_operator_retention_knob_is_forwarded_rather_than_ignored(self):
+        completed, calls = self.run_the_documented_invocation(
+            {"BACKUP_RETENTION": "21"}
+        )
+
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+        self.assertIn("-e BACKUP_RETENTION=21", calls[0])
+        self.assertIn("keeping 21 dumps", completed.stdout)
+
+    def test_the_script_still_refuses_what_it_always_refused(self):
+        """Executing the script must not soften it: the runbook's safety pins
+        are pins, not decoration."""
+        completed, _ = self.run_the_documented_invocation(
+            {"BACKUP_DIR": "relative/path"}
+        )
+
+        self.assertEqual(completed.returncode, 1)
+        self.assertIn("must be an absolute host path", completed.stderr)
 
 
 @tag("ops")
@@ -710,6 +1037,33 @@ class HelperTests(SimpleTestCase):
 
     def test_redact_ignores_empty_secrets(self):
         self.assertEqual(redact("nothing to hide", ["", None]), "nothing to hide")
+
+    def test_scrub_masks_the_connection_shape_third_party_text_adds(self):
+        """Two signals, two jobs. By shape: the address libpq RESOLVED and its
+        parameter dump, which are in no configured value. By value (the
+        caller's secret list): the host, the user, the port, the database."""
+        masked = scrub(
+            'pg_dump: error: connection to server at "db.internal" (10.42.0.7), '
+            "port 5432 failed\n\tConnection parameters: host=db.internal "
+            "user=app dbname=store\npg_dump: detail: sorry",
+            ["db.internal", "5432"],
+        )
+
+        self.assertNotIn("10.42.0.7", masked)
+        self.assertIn("Connection parameters: ***redacted***", masked)
+        self.assertNotIn("db.internal", masked)
+        self.assertNotIn("5432", masked)
+        # the operator still gets the diagnosis
+        self.assertIn("pg_dump: detail: sorry", masked)
+
+    def test_scrub_masks_an_ipv6_address_but_not_a_clock_time(self):
+        """Address masking must not shred the one numeric thing a 3am operator
+        needs from a failure: when it happened."""
+        self.assertNotIn("2001:db8::1", scrub("could not connect to 2001:db8::1", []))
+        self.assertNotIn(
+            "fe80:0:0:0:0:0:0:1", scrub("could not connect to fe80:0:0:0:0:0:0:1", [])
+        )
+        self.assertIn("02:30:00", scrub("attempt at 02:30:00 failed", []))
 
     def test_the_timestamp_is_fixed_width_and_sorts_chronologically(self):
         early = utc_stamp(datetime(2026, 1, 2, 3, 4, 5))

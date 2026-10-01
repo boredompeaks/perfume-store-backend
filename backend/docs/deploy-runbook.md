@@ -174,9 +174,14 @@ are `perfume-<UTC timestamp>.dump` (or `.sqlite3`); the timestamps are
 fixed-width, so "newest" is a name sort rather than a filesystem-metadata sort.
 Two dumps inside the same second both survive - the second is disambiguated
 (`…-1.dump`) rather than overwriting the first. Pruning matches **only** this
-filename scheme, so a file an operator parked in the backup directory is never
-a deletion candidate, and a `BACKUP_RETENTION` below 1 is refused rather than
-quietly deleting every backup the moment it finishes making one.
+filename scheme **and** the engine's own file signature (`PGDMP` for a
+`--format=custom` dump, the sqlite header for a sqlite copy), so a file an
+operator parked in the backup directory - a note, somebody else's copy, a
+hand-taken `pg_dump`, which defaults to plain SQL - is never a deletion
+candidate, and a `BACKUP_RETENTION` below 1 is refused rather than quietly
+deleting every backup the moment it finishes making one. Anything the rules
+cannot vouch for is left in place for a human to judge; that is the safe
+direction for a deletion loop.
 
 Retention is a **count, not an age**. With the daily cadence below and the
 default of 7, that is seven daily dumps on the host. Dumps accumulate at the

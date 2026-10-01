@@ -34,21 +34,27 @@ Safety, structural rather than advisory:
 * the dump always lands on a FRESH filename (`unique_path`), so a backup can
   never overwrite an existing dump - or the database, if the operator's
   database happens to be named like one;
-* **no output ever contains the database URL or the password.** Messages name
-  the alias, the engine and the file; anything captured from `pg_dump` is
-  redacted against the configured password and `DATABASE_URL` before it is
-  printed;
+* **no output ever contains the database connection.** Messages name the
+  alias, the engine and the file. Everything captured from `pg_dump` is
+  redacted against the whole connection identity - the URL, the password, the
+  host, the port, the user and the database name - and then masked by shape,
+  because libpq also prints its own parameter dump and the ADDRESS IT RESOLVED,
+  which are in no setting this command can read;
 * a failed dump exits non-zero (`CommandError`) - a backup that failed must be
   loud, or the cadence silently produces nothing;
-* retention deletes only files this command created (its own filename scheme),
-  newest first, keeping `--keep` (default `BACKUP_RETENTION`, else 7). An
-  unrelated file an operator parked in the backup directory is never touched.
+* retention deletes only files this command wrote - the stamped filename
+  scheme (`STAMP_GLOBS`) AND the engine's own file signature (`is_own_dump`)
+  must both line up - newest first, keeping `--keep` (default
+  `BACKUP_RETENTION`, else 7). A file an operator parked in the backup
+  directory, including a hand-taken dump that borrowed the prefix, is never a
+  deletion candidate.
 
 See `docs/deploy-runbook.md` ("Backups") for the schedule, the volume and
 off-host requirements, and `docs/runbook-incident-recovery.md` for restoring.
 """
 
 import os
+import re
 import shutil
 import sqlite3
 import subprocess
@@ -59,16 +65,34 @@ from pathlib import Path
 from django.conf import settings
 from django.core.management import BaseCommand, CommandError
 
-# The filename scheme this command owns: `<PREFIX>-<UTC stamp><suffix>`.
+# The filename scheme this command owns: `<PREFIX>-<UTC stamp>[-<n>]<suffix>`.
 # Fixed-width UTC stamps sort lexicographically, which is what makes "keep the
 # newest N" a name sort rather than a filesystem-metadata sort. Retention
-# matches ONLY this scheme, so pruning can never delete something this command
-# did not create.
+# matches ONLY this scheme (`STAMP_GLOBS`) and only files whose bytes are a dump
+# of ours (`is_own_dump`), so pruning can never delete something else.
 PREFIX = "perfume"
 POSTGRES_SUFFIX = ".dump"
 SQLITE_SUFFIX = ".sqlite3"
 PARTIAL_SUFFIX = ".partial"
 DEFAULT_KEEP = 7
+
+# Retention's name test, in one place: the stamped shape
+# `<PREFIX>-<8 digits>T<6 digits>Z`, plus the `-<n>` disambiguator `unique_path`
+# gives a second dump taken inside the same second. Both shapes are spelled out
+# rather than followed by a wildcard - a trailing `*` would let any junk after
+# the stamp match, which is exactly the prefix-only rule this replaces. So
+# `perfume-latest.dump` and `perfume-2026.dump`, which borrow the prefix, are
+# never even candidates.
+STAMP_GLOB = f"{PREFIX}-????????T??????Z"
+STAMP_GLOBS = (STAMP_GLOB, f"{STAMP_GLOB}-[0-9]*")
+
+# The first bytes of a file the named engine writes. Retention reads only these
+# (never the whole dump) to decide whether a candidate is one of ours:
+# `pg_dump --format=custom` and the sqlite file header.
+SIGNATURES = {
+    POSTGRES_SUFFIX: b"PGDMP",
+    SQLITE_SUFFIX: b"SQLite format 3\x00",
+}
 
 # Named in the "pg_dump is not installed" refusal. It is a hint, not a pin:
 # pg_dump from a newer major can read an older server, so an operator is not
@@ -77,6 +101,28 @@ PG_CLIENT_HINT = "postgresql-client (pg_dump from a newer major also works)"
 
 POSTGRES_ENGINE = "django.db.backends.postgresql"
 SQLITE_ENGINE = "django.db.backends.sqlite3"
+
+# Third-party error text carries the shape of a connection that no configured
+# value can match, so it is masked by shape as well as by value:
+#
+# * libpq prints its `key=value` parameter dump on failure - the whole
+#   connection in one line;
+# * libpq reports the ADDRESS IT RESOLVED (`connection to server at "db"
+#   (10.42.0.7)`), which is discovered at connect time and is in no setting this
+#   command can read. An internal address is deployment topology: not a
+#   credential, but not something a cron mail should hand out either.
+#
+# IPv4, the compressed IPv6 form and the full 8-group IPv6 form only. A clock
+# time ("02:30:00") has two colons and no "::", so it survives; an over-masked
+# excerpt is the safe direction of failure.
+PARAMETERS_LINE = re.compile(r"(?im)^.*connection parameters:.*$")
+ADDRESS = re.compile(
+    r"(?<![\w.])(?:"
+    r"(?:[0-9]{1,3}\.){3}[0-9]{1,3}"
+    r"|[0-9A-Fa-f]{0,4}(?::[0-9A-Fa-f]{0,4})*::(?:[0-9A-Fa-f]{0,4}:)*[0-9A-Fa-f]{0,4}"
+    r"|(?:[0-9A-Fa-f]{1,4}:){7}[0-9A-Fa-f]{1,4}"
+    r")(?![\w.])"
+)
 
 
 def env_int(name, default):
@@ -103,6 +149,20 @@ def redact(text, secrets):
         if secret:
             text = text.replace(secret, "***redacted***")
     return text
+
+
+def scrub(text, secrets):
+    """Redact the secrets AND the shape of a connection in third-party text.
+
+    `redact` can only hide what this command was configured with, and a
+    `pg_dump` failure quotes more than that: libpq dumps its whole parameter
+    list and names the address it resolved. Those are masked by shape, so a
+    deployment's internal topology cannot ride out of a failed backup into
+    somebody's inbox either.
+    """
+    text = redact(text, secrets)
+    text = PARAMETERS_LINE.sub("Connection parameters: ***redacted***", text)
+    return ADDRESS.sub("***redacted***", text)
 
 
 def utc_stamp(moment=None):
@@ -150,18 +210,50 @@ def validate_keep(keep):
     return keep
 
 
+def is_own_dump(path):
+    """True when ``path``'s CONTENT is a dump of the kind this command writes.
+
+    The name is `prune`'s business - it only ever hands this function files from
+    the stamped glob (`STAMP_GLOB`) - and content is what makes the claim true.
+    Retention is a deletion loop: a file an operator parked in the backup
+    directory keeps its name, but a hand-taken `pg_dump` (plain SQL, by
+    default), a note, or somebody else's copy does not carry the engine's
+    signature, so it is not a candidate and is never deleted.
+
+    Checking content rather than trusting the name alone is also what keeps the
+    documented `--prune-only` route working: a dump the postgres image's own
+    pg_dump wrote is identical by name to ours, and by signature it is exactly
+    the artefact retention is meant to keep.
+    """
+    signature = SIGNATURES.get(Path(path).suffix)
+    if signature is None:
+        return False
+    try:
+        with open(path, "rb") as handle:
+            return handle.read(len(signature)) == signature
+    except OSError:
+        # A file retention cannot read is a file retention will not delete.
+        return False
+
+
 def prune(directory, keep):
     """Delete this command's older dumps, newest first, keeping ``keep``.
 
-    Returns the names removed. Only files matching the command's own filename
-    scheme are considered, so an unrelated file an operator parked in the
+    Returns the names removed. Only files this command wrote are considered -
+    the stamped name scheme (`STAMP_GLOBS`) AND the engine's own file signature
+    (`is_own_dump`) must both line up - so a file an operator parked in the
     backup directory is never a deletion candidate.
     """
     keep = validate_keep(keep)
     directory = Path(directory)
     candidates = []
     for suffix in (POSTGRES_SUFFIX, SQLITE_SUFFIX):
-        candidates.extend(directory.glob(f"{PREFIX}-*{suffix}"))
+        for pattern in STAMP_GLOBS:
+            candidates.extend(
+                path
+                for path in directory.glob(f"{pattern}{suffix}")
+                if is_own_dump(path)
+            )
     # Newest first. Two dumps stamped in the same second are ordered by their
     # disambiguating suffix, which is arbitrary between them and does not
     # matter: retention counts files, not seconds.
@@ -182,8 +274,8 @@ class Command(BaseCommand):
     help = (
         "Back the configured database up with pg_dump (PostgreSQL) or the "
         "sqlite online backup API, then apply a retention policy. Reads the "
-        "database only, writes into BACKUP_DIR, never echoes the database URL "
-        "or the password, and exits non-zero on a failed dump."
+        "database only, writes into BACKUP_DIR, never echoes the connection "
+        "identity, and exits non-zero on a failed dump."
     )
 
     def add_arguments(self, parser):
@@ -344,9 +436,20 @@ class Command(BaseCommand):
 
     @staticmethod
     def _secrets(config):
-        """Every string that must never reach a terminal, a log or a ticket."""
+        """Every string that must never reach a terminal, a log or a ticket.
+
+        The whole postgres CONNECTION IDENTITY, not just the password: a
+        `pg_dump` failure quotes `user "..."` and `dbname=...` right next to the
+        connection error, and an operator pasting that into a ticket hands out
+        the deployment's database coordinates. Called only on the postgres path
+        - the sqlite connection has no identity to hide (its NAME is a file
+        path the operator needs in order to act on the error).
+        """
         values = [os.environ.get("DATABASE_URL") or ""]
-        values.append(str(config.get("PASSWORD") or ""))
+        values.extend(
+            str(config.get(key) or "")
+            for key in ("PASSWORD", "USER", "HOST", "PORT", "NAME")
+        )
         return [value for value in values if value]
 
     def _dump(self, alias, config, engine, directory):
@@ -390,7 +493,7 @@ class Command(BaseCommand):
         except OSError as exc:
             raise CommandError(
                 f"backup_db could not write the dump for connection '{alias}' "
-                f"into '{directory}': {redact(str(exc), secrets)}"
+                f"into '{directory}': {scrub(str(exc), secrets)}"
             ) from exc
         finally:
             if partial.exists():
@@ -441,7 +544,7 @@ class Command(BaseCommand):
     def _pg_error(completed, secrets):
         """A redacted, bounded excerpt of `pg_dump`'s own error output."""
         detail = (completed.stderr or b"").decode("utf-8", "replace").strip()
-        detail = redact(detail, secrets)
+        detail = scrub(detail, secrets)
         if not detail:
             return "pg_dump reported no diagnostic output."
         return "pg_dump said:\n" + "\n".join(detail.splitlines()[-5:])

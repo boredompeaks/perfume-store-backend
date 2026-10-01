@@ -50,6 +50,10 @@
 # Knobs (all env-driven):
 #   BACKUP_DIR      REQUIRED. Absolute host path the dumps are written to.
 #   BACKUP_RETENTION how many dumps to keep, newest first (default 7).
+#                   OPTIONAL: the cron entry above sets BACKUP_DIR alone, and
+#                   `set -u` would abort the whole cadence on an unset knob -
+#                   before a single dump was taken. So it is defaulted here,
+#                   never referenced unguarded.
 
 set -euo pipefail
 
@@ -71,6 +75,11 @@ fail() { printf 'backup: %s\n' "$*" >&2; exit 1; }
   'no .env at the repository root - it carries the deploy secrets (see the env contract at the top of docker-compose.yml). It is git-ignored and must never be committed.'
 
 BACKUP_DIR=${BACKUP_DIR:-}
+# An OPTIONAL knob needs a value before `set -u` ever sees it: the documented
+# invocation (the cron entry above) exports BACKUP_DIR and nothing else, so an
+# unguarded reference would kill the cadence before the dump. Defaulted to the
+# same 7 the command documents, so the operator can set it and not set it.
+BACKUP_RETENTION=${BACKUP_RETENTION:-7}
 [ -n "$BACKUP_DIR" ] || fail \
   'BACKUP_DIR is not set. Name an absolute HOST directory for the dumps, e.g. BACKUP_DIR=/srv/perfume-store/backups (see backend/docs/deploy-runbook.md, "Backups").'
 case "$BACKUP_DIR" in
@@ -87,11 +96,16 @@ compose() { docker compose -f "$COMPOSE_FILE" "$@"; }
 # with the backup directory bind-mounted so the dump outlives the container.
 # BACKUP_DIR is overridden with the container-side path: the key in .env names
 # a HOST path, and passing the host value through unchanged would write into
-# the container's own filesystem.
+# the container's own filesystem. BACKUP_RETENTION is passed explicitly for
+# the same reason in reverse: `docker compose run` does NOT forward the host
+# environment, so a retention the operator set on the host has to be handed
+# over, or the command silently applies its own default while the log line
+# below claims otherwise.
 manage() {
   compose run --rm -T \
     -v "$BACKUP_DIR:$CONTAINER_BACKUP_DIR" \
     -e BACKUP_DIR="$CONTAINER_BACKUP_DIR" \
+    -e BACKUP_RETENTION="$BACKUP_RETENTION" \
     "$SERVICE" python manage.py "$@"
 }
 
