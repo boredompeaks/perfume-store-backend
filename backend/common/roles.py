@@ -62,6 +62,21 @@ CAPABILITY_ROLES = {
     # the roles spec 1.1 names them for.
     "orders.fulfill": frozenset({ROLE_SUPPORT, ROLE_INVENTORY, ROLE_ADMIN}),
     "orders.cancel": frozenset({ROLE_SUPPORT, ROLE_ADMIN}),
+# [R-1.07] SPEC-1-B05: shipping methods and their rates. A rate is money
+    # every future order will be charged, so it follows the money capability
+    # `refunds.create` already sets rather than the fulfilment one: finance
+    # and admin, not the packing operator. Spec 1.1 line 110's "shipping"
+    # IS delivered to the inventory/fulfilment role - as `orders.fulfill`,
+    # the authority to ship an order (SPEC-1-B03, whose exact role set is
+    # pinned by tests/test_superadmin_tier.py) - but WORKING a shipment and
+    # SETTING the prices it will cost are different powers, and widening the
+    # operator's set here would undo a shipped decision. Support is excluded
+    # for the same reason it holds no refunds.create: its order power is
+    # working one specific order, not setting prices. The whole surface is one
+    # capability because reading the rate table is part of managing it (staff
+    # who can see a rate can work out what an order will be charged), and no
+    # shipping row holds customer data.
+    "shipping.manage": frozenset({ROLE_FINANCE, ROLE_ADMIN}),
     "refunds.create": frozenset({ROLE_FINANCE, ROLE_ADMIN}),
     "customers.read": frozenset({ROLE_SUPPORT, ROLE_FINANCE, ROLE_ADMIN}),
     "discounts.write": frozenset({ROLE_MARKETING, ROLE_ADMIN}),

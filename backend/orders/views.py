@@ -66,6 +66,11 @@ from common.permissions import (
 # line (insertion-only style): the checkout lifecycle mints them in
 # create_order and transitions them in verify_payment / admin_order_cancel.
 from products.models import StockMovement, StockReservation, products
+# [R-1.07] SPEC-1-B05: the server-side shipping price. Imported as its own
+# line so every hunk in this file stays insertion-only. The client may name a
+# delivery OPTION here and nothing else - never an amount - which is what keeps
+# the shipping cost out of the client's hands.
+from shipping.pricing import ShippingUnavailable, quote_shipping
 
 import logging
 import razorpay
@@ -372,24 +377,69 @@ def _order_lines(cart_items):
 def _same_purchase(order, cart_items, coupon, payload):
     """Does ``order`` describe the purchase this submission is making?
 
-    Three agreements beyond owner identity: the cart lines (order-
-    independent, via ``_order_lines``), the coupon, and the complete
-    shipping payload. The owner filter already checked identity; this is the
-    "same purchase attempt" test both collapse guards ask, so it is asked
-    once, here, and both of them use the same answer.
+    Four agreements beyond owner identity: the cart lines (order-
+    independent, via ``_order_lines``), the coupon, the complete
+    shipping payload, and the delivery option. The owner filter already
+    checked identity; this is the "same purchase attempt" test both collapse
+    guards ask, so it is asked once, here, and both of them use the same
+    answer.
 
     This is the P1 fix's first line of defence: an attacker holding only a
     guest's email and a low-entropy Idempotency-Key has to reproduce the
-    victim's exact cart, coupon and six shipping fields to make a collapse
-    agree -- knowledge the email and the key do not give them.
+    victim's exact cart, coupon, six shipping fields and delivery option to
+    make a collapse agree -- knowledge the email and the key do not give them.
     """
     if _order_lines(order.items.all()) != _order_lines(cart_items):
         return False
     if order.coupon_id != (coupon.pk if coupon else None):
         # a deliberate coupon difference is a new purchase, not a retry
         return False
+    if not _same_shipping_choice(order, payload):
+        return False
     shipping = tuple(payload.get(field) for field in _SHIPPING_FIELDS)
     return tuple(getattr(order, field) for field in _SHIPPING_FIELDS) == shipping
+
+
+# [R-1.07] The client-supplied delivery OPTION (SPEC-1-B05): a method code,
+# never an amount. Read through one helper so the guard and the pricing call
+# below cannot disagree about what the client asked for.
+SHIPPING_METHOD_FIELD = "shipping_method"
+
+
+def _requested_shipping_code(payload):
+    """The delivery option this submission names, normalized, or None.
+
+    An absent or blank value is None: the client offered no choice and the
+    server priced the destination itself. Normalizing here is what lets the
+    agreement test below compare a client string against a stored slug
+    without either side's whitespace deciding the answer.
+    """
+    raw = payload.get(SHIPPING_METHOD_FIELD)
+    if raw is None:
+        return None
+    return str(raw).strip() or None
+
+
+def _same_shipping_choice(order, payload):
+    """Does the delivery option this submission names agree with the order's?
+
+    A submission that NAMES a method must name the one the order was priced
+    with, so a keyed guest replay cannot ride a collapse onto an order priced
+    a different way while supplying everything else the guard checks.
+
+    A submission that names NOTHING agrees with whatever the server chose,
+    because the server chose it: pricing happens after both collapse guards,
+    so the order already holds a resolved method and a replay that never
+    expressed a preference cannot disagree with it. This is what the SPEC-1-
+    B05 client-amount property rests on - a collapse returns the ORIGINAL
+    order, with its own persisted shipping_amount and total_amount, so no
+    replay can reprice anything whatever it posts.
+    """
+    requested = _requested_shipping_code(payload)
+    if requested is None:
+        return True
+    priced_as = order.shipping_method.code if order.shipping_method_id else None
+    return priced_as == requested
 
 
 def _idempotency_key_conflict():
@@ -824,235 +874,300 @@ def create_order(request):
     # =========================
     # Final total
     # =========================
+    #
+    # [R-1.07] SPEC-1-B05: still the MERCHANDISE total. The shipping charge is
+    # added inside the atomic block below, once the collapse guards have had
+    # their say, so a replay never reprices an order that already exists.
 
-    total_amount = (
+    merchandise_total = (
         subtotal_amount - discount_amount
     )
 
     # =========================
     # Create order
     # =========================
+    #
+    # The whole block is wrapped in the try so a shipping refusal PROPAGATES
+    # out of it and rolls it back whole, rather than being answered from
+    # inside it: a return from inside an atomic block commits whatever the
+    # block had already written, and "shipping could not be priced" must
+    # never leave a partial order behind (an order with no shipping cost is
+    # a free shipment).
+    try:
+        with transaction.atomic():
 
-    with transaction.atomic():
+            # [R-21.2.6] Serialize same-session submissions on the cart row: two
+            # rapid POSTs queue here, so the loser re-runs the dedup lookup after
+            # the winner has committed and collapses onto the same order instead
+            # of minting a second payable one. The cart row is locked only on
+            # this path (verify_payment locks Order -> Products -> Coupon), so no
+            # new lock-order cycle is introduced.
+            cart = Cart.objects.select_for_update().get(pk=cart.pk)
 
-        # [R-21.2.6] Serialize same-session submissions on the cart row: two
-        # rapid POSTs queue here, so the loser re-runs the dedup lookup after
-        # the winner has committed and collapses onto the same order instead
-        # of minting a second payable one. The cart row is locked only on
-        # this path (verify_payment locks Order -> Products -> Coupon), so no
-        # new lock-order cycle is introduced.
-        cart = Cart.objects.select_for_update().get(pk=cart.pk)
-
-        duplicate = _find_duplicate_pending_order(
-            owner, cart_items, coupon, request.data
-        )
-
-        if duplicate is not None:
-            # Benign double-submit retry, so INFO: a WARNING here would spam
-            # the log on every impatient re-click (same judgement as
-            # verify_payment's already-processed skip).
-            logger.info(
-                "Checkout dedup: order %s replayed for %s "
-                "(identical pending submission)",
-                duplicate.id,
-                duplicate.customer_name,
+            duplicate = _find_duplicate_pending_order(
+                owner, cart_items, coupon, request.data
             )
+
+            if duplicate is not None:
+                # Benign double-submit retry, so INFO: a WARNING here would spam
+                # the log on every impatient re-click (same judgement as
+                # verify_payment's already-processed skip).
+                logger.info(
+                    "Checkout dedup: order %s replayed for %s "
+                    "(identical pending submission)",
+                    duplicate.id,
+                    duplicate.customer_name,
+                )
 
             # [R-1.13] The collapse returns the order but NOT the credential
-            # (`_checkout_response` discloses the token on a mint only):
-            # returning it here would make a permanent read credential
-            # replayable by anyone who can reach a collapse. Scoped by
-            # `owner` above AND by `_same_purchase`, so this can only ever
-            # hand back a submission that agrees with the caller's on
-            # identity (the guest email), on the complete shipping payload,
-            # on the cart contents and on the coupon, inside the dedup
-            # window -- four independent agreements, which is what "the same
-            # purchase attempt" means for a caller whose only identity is the
-            # address they typed.
-            return _checkout_response(
-                duplicate, status.HTTP_200_OK, disclose_guest_token=False
-            )
-
-        # [R-9.3.14]/[R-9.3.19] SPEC-9-01: key-based replay collapse. The
-        # user row is locked first so two cross-session submissions carrying
-        # the same key serialize here -- the loser's probe runs only after
-        # the winner committed, which makes the probe-then-bind below
-        # race-free (the (user, idempotency_key) unique constraint stays the
-        # last-resort authority). This composes behind the SPEC-21-1 guard
-        # above, which stays the first line of defence for keyless
-        # same-session double-clicks: a keyed replay collapses onto the
-        # original order regardless of payload drift, the dedup window, or
-        # a settled first attempt, and never mints a second order_number.
-        if idempotency_key is not None:
-            # [R-1.13] Only an account submission has a user row to serialize
-            # on. A guest submission is already serialized by the cart lock
-            # above (a same-session replay queues there), and its cross-session
-            # authority is the (guest_email, idempotency_key) constraint the
-            # migration adds -- declared conditional so the account pair keeps
-            # answering for account rows.
-            if user is not None:
-                User.objects.select_for_update().get(pk=user.pk)
-
-            replay = (
-                Order.objects.filter(**owner, idempotency_key=idempotency_key)
-                .prefetch_related("items")
-                .first()
-            )
-
-            if replay is not None:
-                # [R-1.13] P1 FIX: the agreement requirement is scoped to the
-                # guest branch on purpose. An authenticated caller proved who
-                # they are at login, so (user, key) is a strong pair and
-                # SPEC-9-01's "collapse regardless of payload drift" stands
-                # for them. A guest proved only an email and a
-                # low-entropy key -- so this guard additionally requires the
-                # whole purchase to agree (`_same_purchase`, the same
-                # question the keyless dedup guard asks), and a disagreement
-                # is a 409 rather than another guest's order body. Without
-                # this, one email plus one guessable key was enough to read a
-                # stranger's address and take their token.
-                if user is None and not _same_purchase(
-                    replay, cart_items, coupon, request.data
-                ):
-                    return _idempotency_key_conflict()
-
-                # Benign keyed retry, so INFO: same judgement as the dedup
-                # guard's collapse log above.
-                logger.info(
-                    "Checkout idempotency: order %s replayed for %s "
-                    "(Idempotency-Key)",
-                    replay.id,
-                    replay.customer_name,
-                )
-
-                # No token: see the invariant on `_checkout_response`.
+                # (`_checkout_response` discloses the token on a mint only):
+                # returning it here would make a permanent read credential
+                # replayable by anyone who can reach a collapse. Scoped by
+                # `owner` above AND by `_same_purchase`, so this can only ever
+                # hand back a submission that agrees with the caller's on
+                # identity (the guest email), on the complete shipping payload,
+                # on the delivery option, on the cart contents and on the
+                # coupon, inside the dedup window -- five independent
+                # agreements, which is what "the same purchase attempt" means
+                # for a caller whose only identity is the address they typed.
                 return _checkout_response(
-                    replay, status.HTTP_200_OK, disclose_guest_token=False
+                    duplicate, status.HTTP_200_OK, disclose_guest_token=False
                 )
 
-        # [R-8.4] The order number is minted inside this same atomic block,
-        # so a rolled-back checkout never burns a number. Each attempt runs
-        # in a savepoint: a lost race (another connection committed the same
-        # candidate first) rolls back only the failed insert and the next
-        # turn regenerates from committed state. Same-session replays never
-        # reach this loop -- the dedup guard above returns first.
-        for attempt in range(ORDER_NUMBER_ATTEMPTS):
-            candidate = _generate_order_number()
-            # [R-1.13] The guest token is minted in the same loop and is
-            # equally unique-constrained, so a collision on it converges the
-            # same way the number race does (conventions.md:17 — the
-            # constraint is the authority, the retry is how it is honored).
-            # Account orders never mint one: their token stays NULL.
-            guest_token = None if user is not None else _mint_guest_token()
-            try:
-                with transaction.atomic():
-                    order = Order.objects.create(
-                        user=user,
-                        guest_email=guest_email,
-                        guest_token=guest_token,
-                        full_name=request.data.get('full_name'),
-                        phone=request.data.get('phone'),
-                        address=request.data.get('address'),
-                        city=request.data.get('city'),
-                        state=request.data.get('state'),
-                        pincode=request.data.get('pincode'),
-                        coupon=coupon,
-                        discount_amount=discount_amount,
-                        total_amount=total_amount,
-                        order_number=candidate,
+            # [R-9.3.14]/[R-9.3.19] SPEC-9-01: key-based replay collapse. The
+            # user row is locked first so two cross-session submissions carrying
+            # the same key serialize here -- the loser's probe runs only after
+            # the winner committed, which makes the probe-then-bind below
+            # race-free (the (user, idempotency_key) unique constraint stays the
+            # last-resort authority). This composes behind the SPEC-21-1 guard
+            # above, which stays the first line of defence for keyless
+            # same-session double-clicks: a keyed replay collapses onto the
+            # original order regardless of payload drift, the dedup window, or
+            # a settled first attempt, and never mints a second order_number.
+            if idempotency_key is not None:
+                # [R-1.13] Only an account submission has a user row to serialize
+                # on. A guest submission is already serialized by the cart lock
+                # above (a same-session replay queues there), and its cross-session
+                # authority is the (guest_email, idempotency_key) constraint the
+                # migration adds -- declared conditional so the account pair keeps
+                # answering for account rows.
+                if user is not None:
+                    User.objects.select_for_update().get(pk=user.pk)
+
+                replay = (
+                    Order.objects.filter(**owner, idempotency_key=idempotency_key)
+                    .prefetch_related("items")
+                    .first()
+                )
+
+                if replay is not None:
+                    # [R-1.13] P1 FIX: the agreement requirement is scoped to the
+                    # guest branch on purpose. An authenticated caller proved who
+                    # they are at login, so (user, key) is a strong pair and
+                    # SPEC-9-01's "collapse regardless of payload drift" stands
+                    # for them. A guest proved only an email and a
+                    # low-entropy key -- so this guard additionally requires the
+                    # whole purchase to agree (`_same_purchase`, the same
+                    # question the keyless dedup guard asks), and a disagreement
+                    # is a 409 rather than another guest's order body. Without
+                    # this, one email plus one guessable key was enough to read a
+                    # stranger's address and take their token.
+                    if user is None and not _same_purchase(
+                        replay, cart_items, coupon, request.data
+                    ):
+                        return _idempotency_key_conflict()
+
+                    # Benign keyed retry, so INFO: same judgement as the dedup
+                    # guard's collapse log above.
+                    logger.info(
+                        "Checkout idempotency: order %s replayed for %s "
+                        "(Idempotency-Key)",
+                        replay.id,
+                        replay.customer_name,
                     )
-            except IntegrityError:
-                # Lost the number (or token) race: the unique constraint
-                # rejected the candidate, so the savepoint above rolled the
-                # failed insert back and this transaction stays usable for the
-                # retry. The bound is a safety net, not the expected path: one
-                # retry converges because the collision window is a single
-                # insert.
-                if attempt == ORDER_NUMBER_ATTEMPTS - 1:
-                    raise
-                continue
-            break
 
-        # [R-10.12]/[R-10.17] SPEC-10-02: creation is the lifecycle's first
-        # transition (no source state -> pending), so the audit trail opens
-        # here — inside the same outer atomic block as the order row, the
-        # minted number, the snapshots and the key binding. A rolled-back
-        # checkout leaves no order and no event; the actor is the customer
-        # who placed the order — and NULL for a guest, because there is no
-        # account to attribute it to (the row's own guest_email is the record
-        # of who placed it, and OrderStatusEvent.actor is nullable for
-        # exactly this case, like StockMovement.created_by).
-        OrderStatusEvent.objects.create(
-            order=order,
-            from_status=None,
-            to_status=order.status,
-            actor=user,
-            trigger=TRIGGER_ORDER_CREATE,
-        )
+                    # No token: see the invariant on `_checkout_response`.
+                    return _checkout_response(
+                        replay, status.HTTP_200_OK, disclose_guest_token=False
+                    )
 
-        # [R-9.3.14] SPEC-9-01: bind the submission key to the freshly
-        # minted order inside this same transaction, so a later replay's
-        # probe above finds it and collapses. The write is an UPDATE of the
-        # row this transaction just created, after the probe proved no
-        # committed order holds (user, key) and with the user-row lock
-        # excluding a concurrent keyed writer -- so the unique constraint
-        # cannot reject here.
-        if idempotency_key is not None:
-            order.idempotency_key = idempotency_key
-            order.save(update_fields=['idempotency_key'])
-
-        # Snapshot cart items. Inventory, coupon usage, and cart cleanup occur
-        # only after the payment provider confirms this specific order.
-
-        for cart_item in cart_items:
-
-            product = cart_item.product
-            quantity = cart_item.quantity
-
-            price = product.price
-
-            item_subtotal = price * quantity
-
-            OrderItem.objects.create(
-                order=order,
-                product=product,
-                product_name=product.name,
-                # [R-8.13] Freeze the catalogue identity the customer bought:
-                # no variant-selection input exists yet (CartItem is
-                # product-only, picking rides SPEC-3-21/SPEC-6-08) and the
-                # product carries no product-level SKU, so sku snapshots
-                # empty and variant_name mirrors the product name. Set once
-                # here; no later save path mutates them.
-                sku='',
-                variant_name=product.name,
-                price=price,
-                quantity=quantity,
-                subtotal=item_subtotal
+            # [R-1.07] SPEC-1-B05: price the delivery, HERE - after both
+            # collapse guards and inside the same atomic block as the order
+            # row, so a rolled-back checkout takes the shipping cost with it
+            # and a collapse can never reprice an order that already exists.
+            #
+            # The inputs are the destination the customer typed and the
+            # delivery OPTION they picked (a method code). Nothing the client
+            # sent is read as an amount - `shipping_amount`, `shipping_cost`,
+            # `shipping` and `total_amount` have no reader anywhere in this
+            # path, so a forged `shipping_amount: 0` cannot reach the total.
+            # `lock=True` row-locks the matched rate, so a staff edit
+            # committing mid-checkout cannot tear the amount the order is
+            # charged.
+            shipping_quote = quote_shipping(
+                region=request.data.get('state'),
+                postal_code=request.data.get('pincode'),
+                merchandise_total=merchandise_total,
+                method_code=_requested_shipping_code(request.data),
+                lock=True,
             )
 
-        # [R-12.6] SPEC-12-02 §12.1 step 3: mint the checkout's time-limited
-        # holds inside this same atomic block, so a rolled-back checkout
-        # never leaves a hold behind (helper above carries the semantics).
-        # [R-1.13] `user` is None for a guest, which is exactly what the
-        # nullable StockReservation.owner column accepts: a guest checkout
-        # reserves its units the same way an account one does, so the
-        # oversell guarantee is unchanged for the new caller.
-        _mint_order_reservations(order, cart_items, user)
+            # A quote of None means the store has configured no shipping at
+            # all - a real zero charge recorded as one, never a rate of zero
+            # standing in for "we could not price this".
+            shipping_amount = (
+                shipping_quote.amount
+                if shipping_quote is not None
+                else Decimal('0.00')
+            )
+            shipping_method_id = (
+                shipping_quote.method_id if shipping_quote is not None else None
+            )
+            total_amount = quantize_money(merchandise_total + shipping_amount)
 
-        # [R-7.20] Business-event trail: the order's creation is recorded in
-        # the same transaction as the order rows, so a rolled-back checkout
-        # leaves no phantom trail row and a committed order is never
-        # trail-less.
-        AuditEvent.record(
-            AuditEvent.EventType.ORDER_CREATED,
-            actor=user,
-            order=order,
-            detail={
-                "order_id": order.id,
-                "total_amount": str(order.total_amount),
-                "coupon": coupon.code if coupon else None,
-                "item_count": len(cart_items),
-            },
+            # [R-8.4] The order number is minted inside this same atomic block,
+            # so a rolled-back checkout never burns a number. Each attempt runs
+            # in a savepoint: a lost race (another connection committed the same
+            # candidate first) rolls back only the failed insert and the next
+            # turn regenerates from committed state. Same-session replays never
+            # reach this loop -- the dedup guard above returns first.
+            for attempt in range(ORDER_NUMBER_ATTEMPTS):
+                candidate = _generate_order_number()
+                # [R-1.13] The guest token is minted in the same loop and is
+                # equally unique-constrained, so a collision on it converges the
+                # same way the number race does (conventions.md:17 — the
+                # constraint is the authority, the retry is how it is honored).
+                # Account orders never mint one: their token stays NULL.
+                guest_token = None if user is not None else _mint_guest_token()
+                try:
+                    with transaction.atomic():
+                        order = Order.objects.create(
+                            user=user,
+                            guest_email=guest_email,
+                            guest_token=guest_token,
+                            full_name=request.data.get('full_name'),
+                            phone=request.data.get('phone'),
+                            address=request.data.get('address'),
+                            city=request.data.get('city'),
+                            state=request.data.get('state'),
+                            pincode=request.data.get('pincode'),
+                            coupon=coupon,
+                            discount_amount=discount_amount,
+                            shipping_method_id=shipping_method_id,
+                            shipping_amount=shipping_amount,
+                            total_amount=total_amount,
+                            order_number=candidate,
+                        )
+                except IntegrityError:
+                    # Lost the number (or token) race: the unique constraint
+                    # rejected the candidate, so the savepoint above rolled the
+                    # failed insert back and this transaction stays usable for the
+                    # retry. The bound is a safety net, not the expected path: one
+                    # retry converges because the collision window is a single
+                    # insert.
+                    if attempt == ORDER_NUMBER_ATTEMPTS - 1:
+                        raise
+                    continue
+                break
+
+            # [R-10.12]/[R-10.17] SPEC-10-02: creation is the lifecycle's first
+            # transition (no source state -> pending), so the audit trail opens
+            # here — inside the same outer atomic block as the order row, the
+            # minted number, the snapshots and the key binding. A rolled-back
+            # checkout leaves no order and no event; the actor is the customer
+            # who placed the order — and NULL for a guest, because there is no
+            # account to attribute it to (the row's own guest_email is the record
+            # of who placed it, and OrderStatusEvent.actor is nullable for
+            # exactly this case, like StockMovement.created_by).
+            OrderStatusEvent.objects.create(
+                order=order,
+                from_status=None,
+                to_status=order.status,
+                actor=user,
+                trigger=TRIGGER_ORDER_CREATE,
+            )
+
+            # [R-9.3.14] SPEC-9-01: bind the submission key to the freshly
+            # minted order inside this same transaction, so a later replay's
+            # probe above finds it and collapses. The write is an UPDATE of the
+            # row this transaction just created, after the probe proved no
+            # committed order holds (user, key) and with the user-row lock
+            # excluding a concurrent keyed writer -- so the unique constraint
+            # cannot reject here.
+            if idempotency_key is not None:
+                order.idempotency_key = idempotency_key
+                order.save(update_fields=['idempotency_key'])
+
+            # Snapshot cart items. Inventory, coupon usage, and cart cleanup occur
+            # only after the payment provider confirms this specific order.
+
+            for cart_item in cart_items:
+
+                product = cart_item.product
+                quantity = cart_item.quantity
+
+                price = product.price
+
+                item_subtotal = price * quantity
+
+                OrderItem.objects.create(
+                    order=order,
+                    product=product,
+                    product_name=product.name,
+                    # [R-8.13] Freeze the catalogue identity the customer bought:
+                    # no variant-selection input exists yet (CartItem is
+                    # product-only, picking rides SPEC-3-21/SPEC-6-08) and the
+                    # product carries no product-level SKU, so sku snapshots
+                    # empty and variant_name mirrors the product name. Set once
+                    # here; no later save path mutates them.
+                    sku='',
+                    variant_name=product.name,
+                    price=price,
+                    quantity=quantity,
+                    subtotal=item_subtotal
+                )
+
+            # [R-12.6] SPEC-12-02 §12.1 step 3: mint the checkout's time-limited
+            # holds inside this same atomic block, so a rolled-back checkout
+            # never leaves a hold behind (helper above carries the semantics).
+            # [R-1.13] `user` is None for a guest, which is exactly what the
+            # nullable StockReservation.owner column accepts: a guest checkout
+            # reserves its units the same way an account one does, so the
+            # oversell guarantee is unchanged for the new caller.
+            _mint_order_reservations(order, cart_items, user)
+
+            # [R-7.20] Business-event trail: the order's creation is recorded in
+            # the same transaction as the order rows, so a rolled-back checkout
+            # leaves no phantom trail row and a committed order is never
+            # trail-less.
+            AuditEvent.record(
+                AuditEvent.EventType.ORDER_CREATED,
+                actor=user,
+                order=order,
+                detail={
+                    "order_id": order.id,
+                    "total_amount": str(order.total_amount),
+                    "coupon": coupon.code if coupon else None,
+                    "item_count": len(cart_items),
+                    # [R-1.07] What the order was charged to deliver it, in the
+                    # same trail row: the delivery charge is money like any other
+                    # and a reconciliation asks "what did this order cost" of
+                    # the trail, not only of the order row.
+                    "shipping_method": shipping_quote.method_code
+                    if shipping_quote is not None
+                    else None,
+                    "shipping_amount": str(shipping_amount),
+                },
+            )
+
+    except ShippingUnavailable as exc:
+        # [R-1.07] The destination cannot be shipped to (or the named method
+        # does not exist), so the whole transaction above rolled back: no
+        # order, no reservations, no audit row, no burnt order number. 400
+        # with the reason -- never a 500, and never a silent free shipment.
+        return Response(
+            {"error": str(exc)},
+            status=status.HTTP_400_BAD_REQUEST,
         )
 
     # =========================

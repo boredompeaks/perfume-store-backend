@@ -68,6 +68,14 @@ class OrderSerializer(serializers.ModelSerializer):
     coupon = serializers.StringRelatedField(
         read_only=True
     )
+    # [R-1.07] SPEC-1-B05: the delivery option by its client-facing CODE, so
+    # the storefront can echo the option it priced and never learns a row id.
+    # Read-only like the money it rides with: checkout prices the option and
+    # stores the amount, and no client may set either afterwards.
+    shipping_method = serializers.SlugRelatedField(
+        slug_field="code",
+        read_only=True,
+    )
 
     class Meta:
         model = Order
@@ -102,6 +110,13 @@ class OrderSerializer(serializers.ModelSerializer):
             'coupon',
             'discount_amount',
             'total_amount',
+            # [R-1.07] SPEC-1-B05: what this order was charged to deliver it.
+            # The amount is the money record (it stays exactly as priced even
+            # if the method is retired later); the method is the label, and it
+            # is null on an order priced when the store had no shipping
+            # configured - which is a real zero charge, never a missing one.
+            'shipping_method',
+            'shipping_amount',
             # [R-8.11] The denomination of total_amount/discount_amount is
             # exposed beside them (checkout, dedup replay, and order reads
             # all serialize through here). Read-only like the money itself.
@@ -133,6 +148,8 @@ class OrderSerializer(serializers.ModelSerializer):
             'coupon',
             'discount_amount',
             'total_amount',
+            'shipping_method',
+            'shipping_amount',
             'currency',
             'items',
             'created_at',

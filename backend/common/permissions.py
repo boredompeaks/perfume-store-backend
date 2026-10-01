@@ -263,6 +263,13 @@ HasOrdersRead = capability_permission("orders.read")
 HasOrdersFulfill = capability_permission("orders.fulfill")
 HasOrdersCancel = capability_permission("orders.cancel")
 HasRefundsCreate = capability_permission("refunds.create")
+# [R-1.07] SPEC-1-B05: the shipping rate table's admin gate. No customer-
+# facing endpoint uses it (the storefront estimate is public and read-only,
+# and prices server-side), but the one-named-class-per-capability invariant
+# this module documents - and tests/test_rbac_foundation.py pins - is why it
+# exists: a capability in CAPABILITY_ROLES always has its named gate, so a
+# future shipping write endpoint cannot be bolted on without one.
+HasShippingManage = capability_permission("shipping.manage")
 HasCustomersRead = capability_permission("customers.read")
 HasDiscountsWrite = capability_permission("discounts.write")
 HasReportsRead = capability_permission("reports.read")

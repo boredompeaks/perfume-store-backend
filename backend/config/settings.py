@@ -13,11 +13,19 @@ https://docs.djangoproject.com/en/6.1/ref/settings/
 import logging
 import re
 from datetime import timedelta
+from decimal import Decimal
 from pathlib import Path
 from urllib.parse import unquote, urlparse
 import os
 from django.core.exceptions import ImproperlyConfigured
 from dotenv import load_dotenv
+
+# The one money-rounding rule in this repo, imported here rather than
+# re-implemented: `common.money` is pure `decimal` (no models, no app-registry
+# access), so reading it while the settings module is still being imported
+# cannot touch a model before the apps are ready - and duplicating the
+# rounding here would leave two definitions of what a money value IS.
+from common.money import quantize_money
 
 load_dotenv()
 RAZORPAY_KEY_ID = os.getenv('RAZORPAY_KEY_ID')
@@ -156,6 +164,9 @@ INSTALLED_APPS = [
     'cart',
     'orders',
     'accounts',
+    # SPEC-1-B05 [R-1.07]: shipping methods/rates (spec 6.9 zones + rates)
+    # and the server-side pricing both the estimate and checkout read.
+    'shipping',
     'ops',
     'common',
     'corsheaders',
@@ -551,6 +562,45 @@ ORDER_HISTORY_MAX_PAGE_SIZE = _env_int('ORDER_HISTORY_MAX_PAGE_SIZE', 100)
 # Tunable per deployment without a code change; non-integer values are
 # ignored and the default is used instead.
 RESERVATION_TTL = _env_int('RESERVATION_TTL', 900)
+
+
+def _env_money(name, default=None):
+    """Resolve an env-driven money threshold, never crashing startup.
+
+    Money is Decimal everywhere (conventions.md:15), so a threshold is read
+    as a string and quantized with the same helper the amounts use, rather
+    than through ``float()`` - a threshold that only agrees with the amounts
+    to within a float's precision is a rule that misfires on round totals.
+    A malformed or negative value falls back to the documented default (None
+    = the rule is off) with a warning, the same fail-safe pattern as
+    ``_env_int``, so a typo in an env file cannot take the app down or make
+    every shipment free.
+    """
+    raw = (os.getenv(name) or "").strip()
+    if not raw:
+        return default
+    try:
+        value = quantize_money(Decimal(raw))
+    except (ArithmeticError, ValueError):
+        logging.getLogger(__name__).warning(
+            "Ignoring unparseable %s value %r; the rule stays off", name, raw
+        )
+        return default
+    if value < Decimal("0.00"):
+        logging.getLogger(__name__).warning(
+            "Ignoring negative %s value %r; the rule stays off", name, raw
+        )
+        return default
+    return value
+
+
+# SPEC-1-B05 [R-1.07] the free-shipping rule (spec 6.9 line 2005): an order
+# whose MERCHANDISE total (subtotal after discount, before shipping) reaches
+# this amount is charged nothing for delivery. Unset - the default - means the
+# rule is off and rates are charged as configured. Rates themselves are NOT
+# config: they are staff-managed rows (shipping.models), because they change
+# per geography far more often than a deployment changes its env.
+SHIPPING_FREE_THRESHOLD = _env_money('SHIPPING_FREE_THRESHOLD')
 
 
 # ISO 4217 currency codes are exactly three uppercase letters.

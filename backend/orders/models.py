@@ -265,6 +265,33 @@ class Order(models.Model):
         decimal_places=2
     )
 
+    # [R-1.07] SPEC-1-B05: what the order was actually charged to deliver it.
+    # Two columns because the amount is the money record and the method is a
+    # label for it: the amount is what an invoice, a refund ceiling and a
+    # reconciliation read, and it stays exactly as priced even if the method
+    # row is later renamed or retired.
+    #
+    # SET_NULL, not PROTECT: retiring a delivery option must never block on
+    # the orders that used it, and a nulled label loses nothing that the
+    # amount does not already say. PROTECT would also make the admin's delete
+    # view raise on referenced rows, i.e. a 500 on a legitimate action.
+    shipping_method = models.ForeignKey(
+        'shipping.ShippingMethod',
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='orders',
+    )
+
+    # Zero on an order priced before shipping was configured, and zero on a
+    # free-shipping order: both are real zero charges, distinguished by
+    # whether shipping_method is set, never by a sentinel amount.
+    shipping_amount = models.DecimalField(
+        max_digits=10,
+        decimal_places=2,
+        default=Decimal("0.00"),
+    )
+
     # [R-8.11] Currency rides every money column (spec 8.3: "Store the
     # currency alongside the amount. Do not assume all currencies use two
     # decimal places."): total_amount and discount_amount are denominated
