@@ -143,7 +143,7 @@ class Order(models.Model):
     user = models.ForeignKey(
         User,
         on_delete=models.CASCADE,
-        related_name='orders',
+        related_name="orders",
         null=True,
         blank=True,
     )
@@ -159,7 +159,7 @@ class Order(models.Model):
     guest_email = models.EmailField(
         max_length=254,
         blank=True,
-        default='',
+        default="",
     )
 
     # [R-1.13] The guest's retrieval credential: possession of this value is
@@ -361,9 +361,9 @@ class Order(models.Model):
             # guest rows by the condition, so the account pair above keeps
             # answering for them and keyless rows (NULL key) never collide.
             models.UniqueConstraint(
-                fields=['guest_email', 'idempotency_key'],
+                fields=["guest_email", "idempotency_key"],
                 condition=Q(user__isnull=True),
-                name='orders_guest_idem_key_uidx',
+                name="orders_guest_idem_key_uidx",
             ),
             # [R-1.13] The two-owner invariant, as a database fact: a row is
             # an account order (both guest columns empty) or a guest order
@@ -372,10 +372,10 @@ class Order(models.Model):
             # "both" would put two competing owners on one sale.
             models.CheckConstraint(
                 condition=(
-                    Q(user__isnull=True, guest_email__gt='', guest_token__isnull=False)
-                    | Q(user__isnull=False, guest_email='', guest_token__isnull=True)
+                    Q(user__isnull=True, guest_email__gt="", guest_token__isnull=False)
+                    | Q(user__isnull=False, guest_email="", guest_token__isnull=True)
                 ),
-                name='orders_account_xor_guest_ck',
+                name="orders_account_xor_guest_ck",
             ),
         ]
 

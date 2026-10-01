@@ -75,13 +75,16 @@ class GuestCheckoutTestBase(ApiTestCase):
         self.guest = self.fresh_client()
         self.seed_session_cart([(self.product, 2)], client=self.guest)  # 1000.00
 
-    def guest_checkout(self, client=None, **overrides):
+    def guest_checkout(self, client=None, idempotency_key=None, **overrides):
         payload = self.checkout_payload(
             **overrides,
         )
         payload.setdefault("guest_email", GUEST_EMAIL)
+        headers = {}
+        if idempotency_key is not None:
+            headers["HTTP_IDEMPOTENCY_KEY"] = idempotency_key
         return (client or self.guest).post(
-            "/api/orders/checkout/", payload, format="json"
+            "/api/orders/checkout/", payload, format="json", **headers
         )
 
     def place_guest_order(self, client=None, **overrides):
@@ -189,6 +192,88 @@ class GuestCheckoutCreationTests(GuestCheckoutTestBase):
                 )
                 self.assertEqual(Order.objects.count(), 0)
 
+    def test_an_over_length_guest_email_is_refused_before_the_row_exists(self):
+        """[R-1.13] The Postgres max_length trap. `validate_email` accepts any
+        length and SQLite ignores `varchar(254)`, so the pre-fix endpoint
+        answered 201 and stored the address verbatim -- a DataError 500 on the
+        production database. The pin is the BEHAVIOUR (a 400, nothing
+        written), not the field declaration."""
+        limit = Order._meta.get_field("guest_email").max_length
+
+        # A syntactically valid address one character too wide.
+        too_long = "a" * (limit - len("@corp.example")) + "@corp.example"
+        self.assertEqual(len(too_long), limit)
+        too_long += "x"
+
+        res = self.guest_checkout(guest_email=too_long)
+
+        self.assertEqual(res.status_code, 400, res.data)
+        self.assertEqual(
+            res.data["error"], "guest_email must be at most 254 characters"
+        )
+        self.assertEqual(Order.objects.count(), 0)
+
+        # The width boundary itself is still accepted, so the gate is the
+        # column's width and not a rounder number.
+        at_limit = too_long[:-1]
+        self.assertEqual(len(at_limit), limit)
+        accepted = self.guest_checkout(guest_email=at_limit)
+
+        self.assertEqual(accepted.status_code, 201, accepted.data)
+        self.assertEqual(Order.objects.count(), 1)
+
+    def test_an_over_length_shipping_field_is_refused_before_the_row_exists(self):
+        """[R-1.13] The same trap on the rest of the payload: `full_name`'s 150
+        and `phone`'s 15 are varchar widths SQLite does not enforce and
+        Postgres rejects. Refused before the atomic block opens."""
+        for field, limit in (("full_name", 150), ("phone", 15)):
+            with self.subTest(field=field):
+                res = self.guest_checkout(**{field: "x" * (limit + 1)})
+
+                self.assertEqual(res.status_code, 400, res.data)
+                self.assertEqual(
+                    res.data["error"],
+                    f"{field} must be at most {limit} characters",
+                )
+                self.assertEqual(Order.objects.count(), 0)
+                # The account path shares the gate: this is the shipping
+                # payload, not a guest-only field.
+                self.auth(self.api_login("buyer")[1])
+                account = self.checkout(**{field: "x" * (limit + 1)})
+                self.assertEqual(account.status_code, 400, account.data)
+                self.assertEqual(Order.objects.count(), 0)
+                self.auth(None)
+
+    def test_the_guest_email_is_stored_in_one_canonical_form(self):
+        """[R-1.13] BUG-3: RFC 5321 local-parts are case-insensitive in
+        practice, so `Victim@Corp.Example` and `victim@corp.example` are one
+        buyer. Canonicalised at the boundary, or the owner filter addresses
+        them as two rows and one customer gets two orders."""
+        order, res = self.place_guest_order(guest_email="  Victim@Corp.Example  ")
+
+        self.assertEqual(order.guest_email, "victim@corp.example")
+        self.assertEqual(res.data["guest_email"], "victim@corp.example")
+
+    def test_a_case_variant_of_the_guest_email_is_one_owner_not_two(self):
+        """[R-1.13] BUG-3, the consequence: the keyed collapse is scoped by the
+        stored address, so a spelling variant must resolve to the SAME owner
+        and collapse -- pre-fix it minted a second, separately addressable
+        order for the same person."""
+        key = "case-variant-001"
+        first, _ = self.place_guest_order(
+            guest_email="victim@corp.example", idempotency_key=key
+        )
+
+        upper = self.fresh_client()
+        self.seed_session_cart([(self.product, 2)], client=upper)
+        replay = self.guest_checkout(
+            client=upper, guest_email="VICTIM@CORP.EXAMPLE", idempotency_key=key
+        )
+
+        self.assertEqual(replay.status_code, 200, replay.data)
+        self.assertEqual(replay.data["id"], first.id)
+        self.assertEqual(Order.objects.count(), 1)
+
     def test_a_guest_checkout_has_no_cart_too(self):
         """The cart gate is not a login gate: it answers 404 the same way for
         a guest, so a sessionless caller still cannot invent an order."""
@@ -291,16 +376,33 @@ class GuestCheckoutReplayTests(GuestCheckoutTestBase):
     """
 
     def test_an_identical_resubmission_collapses_onto_the_first_order(self):
-        first, first_res = self.place_guest_order()
+        first, _ = self.place_guest_order()
 
         replay = self.guest_checkout()
 
         self.assertEqual(replay.status_code, 200, replay.data)
         self.assertEqual(replay.data["id"], first.id)
         self.assertEqual(Order.objects.count(), 1)
-        # The collapse carries the credential too: the retry exists precisely
-        # because the first response never reached the client.
-        self.assertEqual(replay.data["guest_token"], first_res.data["guest_token"])
+
+    def test_a_collapse_never_hands_back_the_credential(self):
+        """[R-1.13] INVARIANT: `guest_token` is disclosed by the 201 that
+        mints it and by nothing else -- not the keyless dedup collapse, not
+        the keyed replay. A permanent read credential must not be replayable
+        by whoever reaches a collapse, so the disclosure does not depend on
+        any collapse guard being right."""
+        first, minted = self.place_guest_order()
+        self.assertIn("guest_token", minted.data)
+
+        unkeyed = self.guest_checkout()
+        self.assertEqual(unkeyed.status_code, 200, unkeyed.data)
+        self.assertNotIn("guest_token", unkeyed.data)
+
+        other = self.fresh_client()
+        self.seed_session_cart([(self.product, 2)], client=other)
+        keyed = self.guest_checkout(client=other, idempotency_key="collapse-token-001")
+        self.assertEqual(keyed.status_code, 200, keyed.data)
+        self.assertEqual(keyed.data["id"], first.id)
+        self.assertNotIn("guest_token", keyed.data)
 
     def test_a_different_guest_email_never_collapses_onto_another_order(self):
         """The write-side counterpart of the read-side isolation probe: an
@@ -317,29 +419,160 @@ class GuestCheckoutReplayTests(GuestCheckoutTestBase):
         self.assertEqual(Order.objects.count(), 2)
 
     def test_a_keyed_guest_resubmission_collapses_onto_the_first_order(self):
-        key = {"HTTP_IDEMPOTENCY_KEY": "guest-retry-001"}
+        """The keyed collapse still works for a genuine retry: same guest,
+        same cart, same payload, same key."""
+        key = "guest-retry-001"
 
         first = self.guest.post(
             "/api/orders/checkout/",
             self.checkout_payload(guest_email=GUEST_EMAIL),
             format="json",
-            **key,
+            HTTP_IDEMPOTENCY_KEY=key,
         )
         self.assertEqual(first.status_code, 201, first.data)
 
         replay = self.guest.post(
             "/api/orders/checkout/",
-            # Payload drift is deliberate: a keyed replay is the same
-            # submission whatever the body says.
+            self.checkout_payload(guest_email=GUEST_EMAIL),
+            format="json",
+            HTTP_IDEMPOTENCY_KEY=key,
+        )
+
+        self.assertEqual(replay.status_code, 200, replay.data)
+        self.assertEqual(replay.data["id"], first.data["id"])
+        self.assertNotIn("guest_token", replay.data)
+        self.assertEqual(Order.objects.count(), 1)
+
+    def test_a_keyed_replay_with_a_drifted_payload_is_refused(self):
+        """[R-1.13] P1 FIX: the keyed guest path requires the WHOLE purchase
+        to agree, so payload drift is a conflict, not a collapse onto
+        somebody's order. Spec 9.3.14's drift-tolerance stands for an
+        authenticated caller only."""
+        key = "guest-retry-drift"
+
+        first = self.guest.post(
+            "/api/orders/checkout/",
+            self.checkout_payload(guest_email=GUEST_EMAIL),
+            format="json",
+            HTTP_IDEMPOTENCY_KEY=key,
+        )
+        self.assertEqual(first.status_code, 201, first.data)
+
+        replay = self.guest.post(
+            "/api/orders/checkout/",
             self.checkout_payload(guest_email=GUEST_EMAIL, city="Pune"),
+            format="json",
+            HTTP_IDEMPOTENCY_KEY=key,
+        )
+
+        self.assertEqual(replay.status_code, 409, replay.data)
+        self.assertNotIn("id", replay.data)
+        self.assertNotIn("guest_token", replay.data)
+        self.assertEqual(Order.objects.count(), 1)
+
+    def test_a_stolen_email_and_key_buy_the_attacker_nothing(self):
+        """[R-1.13] P1 FIX, the exact repro: the victim checks out; an
+        attacker from a FRESH session, with a DIFFERENT cart and their own
+        address, replays the victim's email and Idempotency-Key. Before the
+        fix this answered 200 with the victim's id, the victim's address and
+        the victim's `guest_token`."""
+        key = "abc-123"
+        victim, victim_res = self.place_guest_order(
+            guest_email="victim@corp.example", idempotency_key=key
+        )
+
+        attacker = self.fresh_client()
+        self.seed_session_cart([(self.product, 1)], client=attacker)  # 500.00
+        stolen = attacker.post(
+            "/api/orders/checkout/",
+            self.checkout_payload(
+                guest_email="victim@corp.example",
+                full_name="Attacker",
+                phone="9999999999",
+                address="1 Attacker Way",
+                city="Delhi",
+                state="Delhi",
+                pincode="110001",
+            ),
+            format="json",
+            HTTP_IDEMPOTENCY_KEY=key,
+        )
+
+        self.assertEqual(stolen.status_code, 409, stolen.data)
+        # Nothing of the victim's leaks: the body is the uniform error
+        # envelope (SPEC-9-03) and carries no order detail at all.
+        self.assertEqual(stolen.data["code"], "conflict")
+        self.assertEqual(stolen.data["details"], {})
+        self.assertNotIn("id", stolen.data)
+        self.assertNotIn("guest_token", stolen.data)
+        self.assertNotIn(str(victim.id), str(stolen.data))
+        self.assertEqual(Order.objects.count(), 1)
+        victim.refresh_from_db()
+        self.assertEqual(victim.address, "12 Rose Lane")
+
+        # ...and the credential the victim was given still reads only their
+        # own order, so the attack neither leaked nor invalidated it.
+        read = attacker.get(
+            "/api/orders/guest/",
+            **self.guest_token_header(victim_res.data["guest_token"]),
+        )
+        self.assertEqual(read.status_code, 200, read.data)
+        self.assertEqual(read.data["id"], victim.id)
+
+    def test_the_trailing_space_variant_of_a_stolen_email_buys_nothing(self):
+        """[R-1.13] P1 + P2 FIX: the same replay dressed as
+        `victim@corp.example ` (one trailing space). The address is
+        canonicalised at the boundary, so it resolves to the same owner AND
+        still has to agree on the purchase."""
+        key = "abc-123"
+        victim, _ = self.place_guest_order(
+            guest_email="victim@corp.example", idempotency_key=key
+        )
+
+        attacker = self.fresh_client()
+        self.seed_session_cart([(self.product, 1)], client=attacker)
+        stolen = attacker.post(
+            "/api/orders/checkout/",
+            self.checkout_payload(
+                guest_email="victim@corp.example   ",
+                address="1 Attacker Way",
+            ),
+            format="json",
+            HTTP_IDEMPOTENCY_KEY=key,
+        )
+
+        self.assertEqual(stolen.status_code, 409, stolen.data)
+        self.assertEqual(Order.objects.count(), 1)
+        victim.refresh_from_db()
+        self.assertEqual(victim.guest_email, "victim@corp.example")
+
+    def test_an_account_keyed_replay_still_tolerates_payload_drift(self):
+        """[R-1.13] The fix is scoped to the guest branch on purpose: an
+        authenticated caller proved who they are at login, so SPEC-9.3.14's
+        "a keyed replay collapses regardless of payload drift" is unchanged
+        for them (orders.test_idempotency pins the same contract)."""
+        buyer = self.make_user("drift-buyer")
+        _, token = self.api_login("drift-buyer")
+        self.auth(token)
+        self.seed_session_cart([(self.product, 2)])
+        key = {"HTTP_IDEMPOTENCY_KEY": "account-drift-001"}
+
+        first = self.client.post(
+            "/api/orders/checkout/", self.checkout_payload(), format="json", **key
+        )
+        self.assertEqual(first.status_code, 201, first.data)
+
+        replay = self.client.post(
+            "/api/orders/checkout/",
+            self.checkout_payload(city="Pune"),
             format="json",
             **key,
         )
 
         self.assertEqual(replay.status_code, 200, replay.data)
         self.assertEqual(replay.data["id"], first.data["id"])
-        self.assertEqual(replay.data["guest_token"], first.data["guest_token"])
         self.assertEqual(Order.objects.count(), 1)
+        self.assertEqual(buyer.orders.count(), 1)
 
     def test_the_guest_key_constraint_is_the_database_authority(self):
         """conventions.md:17. The (user, key) constraint cannot see a guest row

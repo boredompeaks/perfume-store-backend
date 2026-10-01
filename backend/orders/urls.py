@@ -39,16 +39,11 @@ urlpatterns = [
     # token in the X-Guest-Order-Token header, never in the path or query.
     # Declared after the int route above, which cannot match "guest" anyway,
     # so the two never compete.
+    path("guest/", guest_order_detail, name="guest-order-detail"),
     path(
-        'guest/',
+        "guest/<str:order_number>/",
         guest_order_detail,
-        name='guest-order-detail'
-    ),
-
-    path(
-        'guest/<str:order_number>/',
-        guest_order_detail,
-        name='guest-order-detail-by-number'
+        name="guest-order-detail-by-number",
     ),
 
     path(

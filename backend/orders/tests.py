@@ -517,7 +517,9 @@ class CheckoutTests(OrderTestBase):
         # one thing a guest submission cannot do without.
         guest = self.fresh_client()
         self.seed_session_cart([(self.product, 1)], client=guest)
-        res = guest.post("/api/orders/checkout/", self.checkout_payload(), format="json")
+        res = guest.post(
+            "/api/orders/checkout/", self.checkout_payload(), format="json"
+        )
         self.assertEqual(res.status_code, 400, res.data)
         self.assertEqual(res.data["error"], "guest_email is required")
         self.assertEqual(Order.objects.count(), 0)

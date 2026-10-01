@@ -80,7 +80,7 @@ class OrderSerializer(serializers.ModelSerializer):
             # customer on the staff reads that a customer order gets. Read
             # only like `user`: identity is settled at checkout, never
             # client-chosen afterwards. Empty string on an account order.
-            'guest_email',
+            "guest_email",
             'full_name',
             'phone',
             'address',
@@ -125,7 +125,7 @@ class OrderSerializer(serializers.ModelSerializer):
             'id',
             'order_number',
             'user',
-            'guest_email',
+            "guest_email",
             'status',
             'payment_status',
             'fulfilment_status',
