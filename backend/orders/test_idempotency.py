@@ -254,6 +254,14 @@ class IdempotencyRaceAuthorityTests(IdempotencyTestBase):
         self.assertEqual(Order.objects.count(), 2)
 
     def test_unauthenticated_keyed_checkout_is_rejected(self):
+        """[R-1.13] SPEC-1-B04 moved this wall: an anonymous submission is
+        now a GUEST checkout, so it is refused for the one thing it cannot
+        supply - the guest email that is its identity - not with the 401 the
+        login requirement used to answer. A keyed guest submission that DOES
+        supply one is accepted and bound (proved in tests_guest.py); what this
+        pin keeps is that an anonymous submission never silently becomes an
+        account order, and that a rejection creates nothing.
+        """
         res = self.fresh_client().post(
             "/api/orders/checkout/",
             self.checkout_payload(),
@@ -261,5 +269,6 @@ class IdempotencyRaceAuthorityTests(IdempotencyTestBase):
             HTTP_IDEMPOTENCY_KEY="checkout-retry-001",
         )
 
-        self.assertEqual(res.status_code, 401, res.data)
+        self.assertEqual(res.status_code, 400, res.data)
+        self.assertEqual(res.data["error"], "guest_email is required")
         self.assertEqual(Order.objects.count(), 0)

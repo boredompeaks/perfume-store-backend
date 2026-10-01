@@ -498,19 +498,29 @@ class CheckoutTests(OrderTestBase):
         self.assertEqual(res.data["error"], "phone is required")
         self.assertEqual(Order.objects.count(), 0)
 
-    def test_checkout_requires_authentication_and_cart(self):
-        self.assertEqual(self.fresh_client().post("/api/orders/checkout/", self.checkout_payload(), format="json").status_code, 401)
-
-        self.auth(None)
-        res = self.client.post("/api/orders/checkout/", self.checkout_payload(), format="json")
-        self.assertEqual(res.status_code, 401, res.data)
-
-        # authenticated but no cart in this session -> documented 404 (F-18)
+    def test_checkout_requires_a_cart_and_an_owner(self):
+        """[R-1.13] SPEC-1-B04 dropped the login wall but kept every gate
+        behind it: the session cart still has to exist (F-18's documented 404),
+        and a caller with no account must now name itself with a guest_email
+        instead of being turned away at the door. A sessionless or cartless
+        caller is refused before any row is written, whichever side of the wall
+        it is on.
+        """
+        # authenticated, no cart in this session -> documented 404 (F-18)
         client = self.fresh_client()
         self.api_login("buyer", client=client)
         res = client.post("/api/orders/checkout/", self.checkout_payload(), format="json")
         self.assertEqual(res.status_code, 404, res.data)
         self.assertEqual(res.data["error"], "Cart not found")
+
+        # [R-1.13] anonymous with a cart but no guest_email: refused with the
+        # one thing a guest submission cannot do without.
+        guest = self.fresh_client()
+        self.seed_session_cart([(self.product, 1)], client=guest)
+        res = guest.post("/api/orders/checkout/", self.checkout_payload(), format="json")
+        self.assertEqual(res.status_code, 400, res.data)
+        self.assertEqual(res.data["error"], "guest_email is required")
+        self.assertEqual(Order.objects.count(), 0)
 
     def test_checkout_with_empty_cart_rejected(self):
         cart = Cart.objects.get(session_id=self.client.session.session_key)

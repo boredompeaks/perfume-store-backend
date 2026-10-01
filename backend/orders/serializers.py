@@ -50,8 +50,15 @@ class OrderSerializer(serializers.ModelSerializer):
     internal key -- it remains the URL/admin primary key and no URL changes.
     ``order_number`` (ORD-YYYY-NNNNNN, spec 8.3) is the read-only
     customer-facing reference, surfaced at checkout and on every order read.
-    Guest checkout (SPEC-3-02) will key on ``order_number``; the pk never
-    leaves server-side routing.
+    Guest checkout (SPEC-1-B04) keys on ``order_number`` + the order's own
+    ``guest_token``; the pk never leaves server-side routing.
+
+    ``guest_email`` rides the read because the staff surfaces answer "who is
+    this order for" and a guest order has no ``user`` to answer with. The
+    token itself is deliberately NOT a serializer field: it is the guest's
+    credential, so it is returned exactly once, in the checkout response
+    that minted it (views._checkout_response), and never by a list,
+    detail or admin read.
     """
 
     items = OrderItemSerializer(
@@ -69,6 +76,11 @@ class OrderSerializer(serializers.ModelSerializer):
             'id',
             'order_number',
             'user',
+            # [R-1.13] The guest's own address, so a guest order names a
+            # customer on the staff reads that a customer order gets. Read
+            # only like `user`: identity is settled at checkout, never
+            # client-chosen afterwards. Empty string on an account order.
+            'guest_email',
             'full_name',
             'phone',
             'address',
@@ -113,6 +125,7 @@ class OrderSerializer(serializers.ModelSerializer):
             'id',
             'order_number',
             'user',
+            'guest_email',
             'status',
             'payment_status',
             'fulfilment_status',

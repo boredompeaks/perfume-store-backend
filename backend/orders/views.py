@@ -2,13 +2,15 @@ from datetime import timedelta
 from decimal import Decimal
 
 from django.contrib.admin.models import ADDITION, CHANGE
+from django.core.exceptions import ValidationError
 from django.core.paginator import Paginator
+from django.core.validators import validate_email
 from django.db import IntegrityError, transaction
 from django.db.models import Q
 from django.utils import timezone
 
 from rest_framework.decorators import api_view, permission_classes, throttle_scope
-from rest_framework.permissions import IsAuthenticated
+from rest_framework.permissions import AllowAny, IsAuthenticated
 from rest_framework.response import Response
 from rest_framework import status
 
@@ -67,6 +69,7 @@ from products.models import StockMovement, StockReservation, products
 
 import logging
 import razorpay
+import secrets
 from django.conf import settings
 from django.contrib.auth.models import User
 
@@ -99,6 +102,122 @@ def _history_page_size(raw):
     if value < 1:
         return settings.ORDER_HISTORY_PAGE_SIZE
     return min(value, settings.ORDER_HISTORY_MAX_PAGE_SIZE)
+
+
+# ==================================
+# [R-1.13] SPEC-1-B04: guest checkout
+# ==================================
+
+# Spec line 74 gives the guest one role: "browse products and optionally
+# check out without an account", and spec 9.3 requires a checkout session to
+# be bound "to the correct customer or guest session". The guest's session is
+# the cart it built; its durable identity is the pair below.
+
+# How the guest presents the token on a read. A header, never a query param:
+# a URL ends up in access logs, browser history and Referer, and this value is
+# the sole credential for someone else's order details.
+GUEST_TOKEN_HEADER = "X-Guest-Order-Token"
+
+# 32 bytes of CSPRNG entropy (secrets, never random) render as 43 URL-safe
+# characters. The column is 64 wide, so this leaves headroom for a format
+# change without a migration, and the read below rejects anything wider
+# before it can reach the index.
+GUEST_TOKEN_BYTES = 32
+GUEST_TOKEN_MAX_LENGTH = 64
+
+
+def _mint_guest_token():
+    """A fresh guest credential.
+
+    ``secrets`` is the whole point: the token is the only thing standing
+    between a stranger and a stranger's address, so a predictable one (a
+    counter, a uuid4 the caller can correlate, ``random``) would make guest
+    checkout an order-enumeration oracle.
+    """
+    return secrets.token_urlsafe(GUEST_TOKEN_BYTES)
+
+
+def _checkout_owner(user, guest_email):
+    """Queryset kwargs scoping an order lookup to ONE checkout owner.
+
+    An account order and a guest order are disjoint sets, so the guest branch
+    is ``user IS NULL AND guest_email = ...`` rather than a bare
+    ``user=None`` — the latter is every guest order in the table, which would
+    let one guest collapse onto (and read) another's order.
+    """
+    if user is None:
+        return {"user__isnull": True, "guest_email": guest_email}
+    return {"user": user}
+
+
+def _resolve_checkout_owner(request):
+    """(user, guest_email, rejection) for one checkout submission.
+
+    An authenticated caller owns their account: ``guest_email`` in the body
+    is ignored outright rather than stored, because the Meta constraint on
+    Order allows exactly one owner per row and an order with both is refused
+    at the database.
+
+    An anonymous caller has no account, so the guest email IS the identity
+    spec 9.3 binds the session to — required input, and validated with the
+    same validator the model field declares, so the store never records an
+    address it would refuse to mail.
+    """
+    if request.user.is_authenticated:
+        return request.user, "", None
+
+    guest_email = (request.data.get("guest_email") or "").strip()
+    if not guest_email:
+        return (
+            None,
+            "",
+            Response(
+                {"error": "guest_email is required"},
+                status=status.HTTP_400_BAD_REQUEST,
+            ),
+        )
+    try:
+        validate_email(guest_email)
+    except ValidationError:
+        return (
+            None,
+            "",
+            Response(
+                {"error": "guest_email must be a valid email address"},
+                status=status.HTTP_400_BAD_REQUEST,
+            ),
+        )
+    return None, guest_email, None
+
+
+def _guest_lookup_miss():
+    """The one answer every guest lookup failure gets.
+
+    No token, a wrong token, an unknown order number and a token that belongs
+    to somebody else's order are byte-identical here: a different answer for
+    any of them would turn this endpoint into an oracle for guessing which
+    order numbers exist (conventions.md: uniform responses on anonymous
+    flows, no existence leaks). 404 rather than 403 for the same reason —
+    "forbidden" would confirm the order is real.
+    """
+    return Response(
+        {"error": "Order not found"},
+        status=status.HTTP_404_NOT_FOUND,
+    )
+
+
+def _checkout_response(order, status_code):
+    """The checkout body: the order, plus the guest's token when there is one.
+
+    The token is disclosed here and nowhere else. It is the guest's only
+    credential for reading the order back, this response is where it is
+    minted, and no list, detail or admin read carries it — so a leaked order
+    read cannot be replayed as a guest lookup.
+    """
+    data = dict(OrderSerializer(order).data)
+    if order.user_id is None:
+        data["guest_token"] = order.guest_token
+    return Response(data, status=status_code)
 
 
 @api_view(['GET'])
@@ -184,12 +303,12 @@ def _order_lines(cart_items):
     return sorted((item.product_id, item.quantity) for item in cart_items)
 
 
-def _find_duplicate_pending_order(user, cart_items, coupon, payload):
+def _find_duplicate_pending_order(owner, cart_items, coupon, payload):
     """[R-21.2.6] The accidental-duplicate window: checkout never clears the
     cart (cleanup happens after payment confirmation), so a double-click or
     client retry resubmits the byte-identical payload while the first order
     is still payable -- which used to mint a second payable order and with
-    it a second charge target. Returns the user's recent pending order with
+    it a second charge target. Returns the owner's recent pending order with
     the identical payload, or None to proceed with creation.
 
     Deliberately narrower than SPEC-9-01: the header-keyed idempotency
@@ -201,7 +320,7 @@ def _find_duplicate_pending_order(user, cart_items, coupon, payload):
     cutoff = timezone.now() - timedelta(seconds=settings.CHECKOUT_DEDUP_WINDOW_SECONDS)
     candidates = (
         Order.objects.filter(
-            user=user,
+            **owner,
             status="pending",
             created_at__gte=cutoff,
         )
@@ -315,12 +434,25 @@ def _mint_order_reservations(order, lines, user):
 
 
 @api_view(['POST'])
-@permission_classes([IsAuthenticated])
+# [R-1.13] SPEC-1-B04: opened deliberately (conventions.md:26). Spec line 74
+# ("optionally check out without an account") and 9.3's guest-session binding
+# both require it, and the authorization the endpoint used to lean on is not
+# removed, it is REPLACED: an authenticated caller is still scoped to their own
+# orders everywhere below, and an anonymous one is scoped to the guest email
+# they present plus the token this response mints for them. Nothing here reads
+# a body-supplied user id.
+@permission_classes([AllowAny])
+# [R-1.13] A public MUTATING endpoint, so conventions.md:24 requires a scope.
+# It shares the cart budget on purpose: checkout is the terminal mutation of
+# exactly the session-cart flow those two rates already govern (add to cart ->
+# apply coupon -> submit), so a guest's whole funnel draws on one budget
+# rather than two that can be spent independently.
+@throttle_scope('cart')
 def create_order(request):
 
     # [R-9.3.14] Honor the Idempotency-Key header when the client sends it:
     # every retry carrying the same value is the SAME submission, so the
-    # atomic block below dedupes on (user, key). Keyless clients keep the
+    # atomic block below dedupes on (owner, key). Keyless clients keep the
     # legacy contract (the SPEC-21-1 guard plus window). Blank means no
     # key, since an empty value carries no submission identity.
     idempotency_key = (
@@ -335,6 +467,15 @@ def create_order(request):
             {"error": "Idempotency-Key is too long"},
             status=status.HTTP_400_BAD_REQUEST
         )
+
+    # [R-1.13] Who this submission belongs to, settled once and reused by
+    # every writer below (dedup probe, key binding, the row, the status
+    # event and the stock holds), so no two of them can disagree about it.
+    user, guest_email, owner_rejection = _resolve_checkout_owner(request)
+    if owner_rejection is not None:
+        return owner_rejection
+
+    owner = _checkout_owner(user, guest_email)
 
     # =========================
     # Get current session
@@ -584,7 +725,7 @@ def create_order(request):
         cart = Cart.objects.select_for_update().get(pk=cart.pk)
 
         duplicate = _find_duplicate_pending_order(
-            request.user, cart_items, coupon, request.data
+            owner, cart_items, coupon, request.data
         )
 
         if duplicate is not None:
@@ -592,18 +733,23 @@ def create_order(request):
             # the log on every impatient re-click (same judgement as
             # verify_payment's already-processed skip).
             logger.info(
-                "Checkout dedup: order %s replayed for user %s "
+                "Checkout dedup: order %s replayed for %s "
                 "(identical pending submission)",
                 duplicate.id,
-                request.user.pk,
+                duplicate.customer_name,
             )
 
-            serializer = OrderSerializer(duplicate)
-
-            return Response(
-                serializer.data,
-                status=status.HTTP_200_OK
-            )
+            # [R-1.13] The collapse returns the token too: the first response
+            # that minted this order may never have reached the client (the
+            # retry exists precisely because it did not), and an order the
+            # guest cannot read back is an order they cannot track. Scoped by
+            # `owner` above, so this can only ever hand back a submission that
+            # agrees with the caller's on identity (the guest email) AND on
+            # the complete shipping payload AND on the cart contents AND falls
+            # inside the dedup window -- four independent agreements, which is
+            # what "the same purchase attempt" means for a caller whose only
+            # identity is the address they typed.
+            return _checkout_response(duplicate, status.HTTP_200_OK)
 
         # [R-9.3.14]/[R-9.3.19] SPEC-9-01: key-based replay collapse. The
         # user row is locked first so two cross-session submissions carrying
@@ -616,28 +762,30 @@ def create_order(request):
         # original order regardless of payload drift, the dedup window, or
         # a settled first attempt, and never mints a second order_number.
         if idempotency_key is not None:
-            User.objects.select_for_update().get(pk=request.user.pk)
+            # [R-1.13] Only an account submission has a user row to serialize
+            # on. A guest submission is already serialized by the cart lock
+            # above (a same-session replay queues there), and its cross-session
+            # authority is the (guest_email, idempotency_key) constraint the
+            # migration adds -- declared conditional so the account pair keeps
+            # answering for account rows.
+            if user is not None:
+                User.objects.select_for_update().get(pk=user.pk)
 
             replay = Order.objects.filter(
-                user=request.user, idempotency_key=idempotency_key
+                **owner, idempotency_key=idempotency_key
             ).first()
 
             if replay is not None:
                 # Benign keyed retry, so INFO: same judgement as the dedup
                 # guard's collapse log above.
                 logger.info(
-                    "Checkout idempotency: order %s replayed for user %s "
+                    "Checkout idempotency: order %s replayed for %s "
                     "(Idempotency-Key)",
                     replay.id,
-                    request.user.pk,
+                    replay.customer_name,
                 )
 
-                serializer = OrderSerializer(replay)
-
-                return Response(
-                    serializer.data,
-                    status=status.HTTP_200_OK
-                )
+                return _checkout_response(replay, status.HTTP_200_OK)
 
         # [R-8.4] The order number is minted inside this same atomic block,
         # so a rolled-back checkout never burns a number. Each attempt runs
@@ -647,10 +795,18 @@ def create_order(request):
         # reach this loop -- the dedup guard above returns first.
         for attempt in range(ORDER_NUMBER_ATTEMPTS):
             candidate = _generate_order_number()
+            # [R-1.13] The guest token is minted in the same loop and is
+            # equally unique-constrained, so a collision on it converges the
+            # same way the number race does (conventions.md:17 — the
+            # constraint is the authority, the retry is how it is honored).
+            # Account orders never mint one: their token stays NULL.
+            guest_token = None if user is not None else _mint_guest_token()
             try:
                 with transaction.atomic():
                     order = Order.objects.create(
-                        user=request.user,
+                        user=user,
+                        guest_email=guest_email,
+                        guest_token=guest_token,
                         full_name=request.data.get('full_name'),
                         phone=request.data.get('phone'),
                         address=request.data.get('address'),
@@ -663,11 +819,12 @@ def create_order(request):
                         order_number=candidate,
                     )
             except IntegrityError:
-                # Lost the number race: the unique constraint rejected the
-                # candidate, so the savepoint above rolled the failed insert
-                # back and this transaction stays usable for the retry. The
-                # bound is a safety net, not the expected path: one retry
-                # converges because the collision window is a single insert.
+                # Lost the number (or token) race: the unique constraint
+                # rejected the candidate, so the savepoint above rolled the
+                # failed insert back and this transaction stays usable for the
+                # retry. The bound is a safety net, not the expected path: one
+                # retry converges because the collision window is a single
+                # insert.
                 if attempt == ORDER_NUMBER_ATTEMPTS - 1:
                     raise
                 continue
@@ -678,12 +835,15 @@ def create_order(request):
         # here — inside the same outer atomic block as the order row, the
         # minted number, the snapshots and the key binding. A rolled-back
         # checkout leaves no order and no event; the actor is the customer
-        # who placed the order.
+        # who placed the order — and NULL for a guest, because there is no
+        # account to attribute it to (the row's own guest_email is the record
+        # of who placed it, and OrderStatusEvent.actor is nullable for
+        # exactly this case, like StockMovement.created_by).
         OrderStatusEvent.objects.create(
             order=order,
             from_status=None,
             to_status=order.status,
-            actor=request.user,
+            actor=user,
             trigger=TRIGGER_ORDER_CREATE,
         )
 
@@ -730,7 +890,11 @@ def create_order(request):
         # [R-12.6] SPEC-12-02 §12.1 step 3: mint the checkout's time-limited
         # holds inside this same atomic block, so a rolled-back checkout
         # never leaves a hold behind (helper above carries the semantics).
-        _mint_order_reservations(order, cart_items, request.user)
+        # [R-1.13] `user` is None for a guest, which is exactly what the
+        # nullable StockReservation.owner column accepts: a guest checkout
+        # reserves its units the same way an account one does, so the
+        # oversell guarantee is unchanged for the new caller.
+        _mint_order_reservations(order, cart_items, user)
 
         # [R-7.20] Business-event trail: the order's creation is recorded in
         # the same transaction as the order rows, so a rolled-back checkout
@@ -738,7 +902,7 @@ def create_order(request):
         # trail-less.
         AuditEvent.record(
             AuditEvent.EventType.ORDER_CREATED,
-            actor=request.user,
+            actor=user,
             order=order,
             detail={
                 "order_id": order.id,
@@ -752,12 +916,51 @@ def create_order(request):
     # Return order
     # =========================
 
-    serializer = OrderSerializer(order)
+    return _checkout_response(order, status.HTTP_201_CREATED)
 
-    return Response(
-        serializer.data,
-        status=status.HTTP_201_CREATED
-    )
+
+# ==================================
+# Guest order lookup (SPEC-1-B04)
+# ==================================
+
+
+@api_view(['GET'])
+# [R-1.13] Opened deliberately (conventions.md:26): a guest has no session to
+# authorize against, which is precisely why the credential is a 256-bit token
+# minted at checkout. AllowAny here does NOT mean unguarded - the lookup below
+# is the guard, and it is a guard by possession, not by identity: it can only
+# ever return the one row whose stored token equals the presented one.
+@permission_classes([AllowAny])
+def guest_order_detail(request, order_number=None):
+    """[R-1.13] GET /api/orders/guest/[<order_number>/] - a guest's OWN order.
+
+    Two shapes, one view, because ``guest_token`` is UNIQUE: a token alone
+    identifies exactly one order, and the order number is an optional
+    cross-check on top of it. A caller who has the token can always find the
+    order; a caller who has only the order number cannot, because the number
+    is a guessable per-year sequence and is never the credential.
+
+    The failure is one answer for every miss - no token, a wrong token, an
+    unknown number, or somebody else's number with a valid token - so the
+    endpoint confirms nothing about which orders exist (``_guest_lookup_miss``).
+    The token arrives in a header, never the URL, for the same reason.
+    """
+    token = (request.headers.get(GUEST_TOKEN_HEADER) or "").strip()
+
+    if not token or len(token) > GUEST_TOKEN_MAX_LENGTH:
+        return _guest_lookup_miss()
+
+    lookup = Order.objects.filter(guest_token=token)
+    if order_number is not None:
+        lookup = lookup.filter(order_number=order_number)
+
+    order = lookup.first()
+    if order is None:
+        return _guest_lookup_miss()
+
+    # A hit is by definition a guest row (the token is NULL everywhere else),
+    # so no separate user check is needed: the filter IS the authorization.
+    return Response(OrderSerializer(order).data)
 
 
 # ==================================
