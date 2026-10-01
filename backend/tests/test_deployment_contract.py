@@ -37,6 +37,7 @@ PROCFILE = "Procfile"
 RELEASE = "scripts/release.sh"
 DEPLOY_WORKFLOW = ".github/workflows/deploy.yml"
 BACKEND_TESTS_WORKFLOW = ".github/workflows/backend-tests.yml"
+RUNBOOK = "backend/docs/deploy-runbook.md"
 
 # Everything that decides how the deployable unit runs.
 DEPLOYMENT_FILES = (
@@ -580,6 +581,115 @@ class BuildLayerSatisfiesTheNonDebugGuardsTests(SimpleTestCase):
                 )
                 self.assertNotEqual(res.returncode, 0, res.stdout)
                 self.assertIn(key, res.stderr)
+
+
+class FrontDoorRunbookTests(SimpleTestCase):
+    """SPEC-22-06: the WAF/rotation story is a documented operator contract.
+
+    The two halves of R-22.16 (WAF) and R-22.8 (secret rotation) are
+    documentation and configuration, so the risk is not a broken test but a
+    story that is absent, contradicted, or quietly wrong in a way that hurts an
+    operator mid-incident. These pins check the properties that make it
+    usable: the WAF section complements the app-layer throttles instead of
+    duplicating them (a proxy rate limit is per-IP and must stay looser than
+    the strictest DRF scope), the rotation story names every secret the
+    deployment actually holds and says how to verify it, and neither section
+    carries a credential or a vendor token.
+    """
+
+    # Every secret the deployment really holds. A rotation table missing one of
+    # these is the failure this class exists to prevent.
+    ROTATED_SECRETS = (
+        "DJANGO_SECRET_KEY",
+        "RAZORPAY_KEY_SECRET",
+        "POSTGRES_PASSWORD",
+    )
+
+    # Values that would mean a credential or a vendor account leaked into the
+    # runbook. A DSN/API token there is the classic accident.
+    CREDENTIAL_SHAPES = (
+        re.compile(r"https://[A-Za-z0-9]{16,}@"),
+        re.compile(r"(?i)\b(?:api[_-]?key|token|password)\s*[:=]\s*\S{12,}"),
+        re.compile(r"\brzp_(?:live|test)_[A-Za-z0-9]{12,}\b"),
+    )
+
+    def setUp(self):
+        self.text = read(RUNBOOK)
+
+    def section(self, heading):
+        """Return the body of a `## ...` section, up to the next `##`."""
+        match = re.search(rf"^## {re.escape(heading)}$", self.text, re.M)
+        assert match, f"the runbook has no '{heading}' section"
+        rest = self.text[match.end() :]
+        end = re.search(r"^## ", rest, re.M)
+        return rest[: end.start()] if end else rest
+
+    def test_the_waf_section_exists_and_does_not_duplicate_the_throttles(self):
+        # The failure this prevents: an operator copies a per-IP limit equal to
+        # THROTTLE_COUPON_RATE and locks out a whole NAT range, or assumes the
+        # WAF replaced the app-layer budgets.
+        waf = self.section("WAF ruleset for the front door (SPEC-22-06, R-22.16)")
+        self.assertIn("ScopedRateThrottle", waf)
+        # ...and names the actual knob, so the advice is actionable.
+        self.assertIn("limit_req_zone", waf)
+        # The per-IP/per-identity distinction is the reason the two layers
+        # coexist; stated without it, a reader cannot tell why not to tighten.
+        self.assertIn("per-IP", waf)
+        self.assertIn("THROTTLE_RECOVERY_RATE", waf)
+        # Authorization stays in Django - a WAF is not an access-control layer.
+        self.assertIn("authorization", waf.lower())
+
+    def test_the_waf_section_still_serves_media_and_health(self):
+        # Two rules that would take the storefront or the monitoring down if
+        # followed blindly: caching /health/ hides a degraded store from both
+        # the container healthcheck and the uptime monitor, and a body limit
+        # below the app's own upload ceiling rejects images the app accepts.
+        waf = self.section("WAF ruleset for the front door (SPEC-22-06, R-22.16)")
+        self.assertIn("/health/", waf)
+        self.assertIn("MAX_UPLOAD_MB", waf)
+
+    def test_the_rotation_section_names_every_secret_the_deployment_holds(self):
+        rotation = self.section("Secret rotation (SPEC-22-06, R-22.8)")
+        for secret in self.ROTATED_SECRETS:
+            with self.subTest(secret=secret):
+                self.assertIn(secret, rotation)
+
+    def test_the_rotation_procedure_is_verifiable_and_ordered(self):
+        # Mint-then-retire is what makes it a rotation rather than an outage,
+        # and "the old credential no longer authenticates" is the only check
+        # that proves the new one is in use.
+        rotation = self.section("Secret rotation (SPEC-22-06, R-22.8)")
+        self.assertIn("before retiring the old one", rotation)
+        self.assertIn("no longer authenticates", rotation)
+        self.assertIn("/health/", rotation)
+
+    def test_the_secret_key_caveat_states_the_downtime_cost_honestly(self):
+        # Rotating SECRET_KEY is a mass logout here, because it signs the JWTs
+        # and the guest-cart sessions. A runbook that calls it transparent
+        # would be sending an operator into it unprepared.
+        rotation = self.section("Secret rotation (SPEC-22-06, R-22.8)")
+        self.assertIn("mass logout", rotation)
+        self.assertIn("SECRET_KEY", rotation)
+
+    def test_a_committed_secret_is_treated_as_compromised(self):
+        # Rotation before history cleanup: rewriting a pushed commit un-leaks
+        # nothing, and the ordering is the whole point.
+        rotation = self.section("Secret rotation (SPEC-22-06, R-22.8)")
+        self.assertIn("rotate it", rotation)
+        self.assertIn("commit", rotation.lower())
+
+    def test_neither_section_carries_a_credential_or_a_vendor_token(self):
+        for heading in (
+            "WAF ruleset for the front door (SPEC-22-06, R-22.16)",
+            "Secret rotation (SPEC-22-06, R-22.8)",
+        ):
+            body = self.section(heading)
+            for pattern in self.CREDENTIAL_SHAPES:
+                with self.subTest(heading=heading, pattern=pattern.pattern):
+                    self.assertIsNone(
+                        pattern.search(body),
+                        f"a credential-shaped value is documented in {heading}",
+                    )
 
 
 class ComposeRuntimeEnvContractTests(SimpleTestCase):

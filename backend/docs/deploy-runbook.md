@@ -396,3 +396,201 @@ migration traceback), and one real checkout path still works. If the release
 also touched **data**, the rollback is not finished until
 `docs/runbook-incident-recovery.md` §4 passes - money, stock and coupon
 counters reconciled against the gateway.
+
+## WAF ruleset for the front door (SPEC-22-06, R-22.16)
+
+The WAF lives in the reverse proxy in front of gunicorn, not in this
+application. The division of labour, and the reason the two do not fight:
+
+| Layer | Owns | Knows about |
+| --- | --- | --- |
+| WAF / proxy | connection floods, protocol abuse, known-bad payloads, request-size and method abuse, bot scans of `/admin` | IP, connection rate, bytes, raw bytes |
+| This app | per-account and per-scope abuse | DRF throttle scopes, `request.user`, session, JWT, cart identity |
+
+**The WAF must NOT duplicate the app-layer throttles.** DRF's `ScopedRateThrottle`
+already budgets the sensitive public endpoints per identity, and it is the layer
+that can distinguish one account hammering login from one IP behind a shared
+NAT - which a proxy cannot. A proxy rate limit is per-IP, so a tight one
+locks out an entire office, a school, or a mobile carrier's CGNAT range; and
+`THROTTLE_RECOVERY_RATE` is already tighter than the generic auth budget
+because each accepted request sends an email. So the proxy limits are
+**deliberately looser** than the strictest app budget and exist only to stop
+volumetric floods before they cost a worker:
+
+- `limit_req_zone` at the edge, ~**60 req/min per IP** with a small burst -
+  comfortably above `THROTTLE_COUPON_RATE` (10/min) and far below a
+  volumetric flood. If you set it near the app budgets you will 429 real
+  customers whose app-layer budget would have been per-account and generous.
+- `limit_conn` per IP (e.g. 20) to cap keep-alive abuse, not per account.
+- Connection and request-body ceilings, which the app cannot enforce before
+  reading: `client_max_body_size` should match or slightly exceed
+  `MAX_UPLOAD_MB` (`backend/.env.example`) so the proxy does not reject a
+  product image the app would have accepted.
+
+The proxy is also the right place for the rules the app must never see:
+
+- **Method allow-listing** per location: the API is `GET/POST/PATCH/DELETE`;
+  anything else (or `TRACE`) is a `405` at the edge.
+- **Path hygiene**: deny dotfiles, `/.env`, `/.git`, `*.bak`, `*.sql`, backup
+  dumps, and the `.env`-shaped paths a scanner probes. Nothing in this
+  application serves them, and the app's own 404s are cheap enough to be a
+  free hit-list for a scanner.
+- **Payload inspection**: the OWASP ModSecurity Core Rule Set, or the
+  equivalent rules your platform already provides, in **detection-only** mode
+  first. This app's legitimate traffic includes long free-text fields (product
+  copy, addresses, order notes) that SQLi/XSS heuristics false-positive on;
+  enabling blocking mode before you have read the false positives will reject
+  real checkouts. Exclusions that are correct and not negotiable: the
+  Razorpay webhook path (signature-verified body the rules will flag), the
+  admin's rich-text product fields, and `/health/`.
+- **A challenge/deny list** for repeated `401`/`403` bursts, so credential
+  stuffing is cheap at the edge. Alert on it; that pattern is the earliest
+  signal of a targeted attack.
+
+Belt and braces, and the reason the app keeps its own gates:
+
+- **Admin**: keep `/admin/` off the public internet if you can (VPN, IP
+  allow-list, or the platform's own admin-protection feature). The app's MFA
+  door (SPEC-17-05) is the real control; the proxy restriction is only a
+  reduction in exposure.
+- **Do not cache authenticated or error responses**, and never cache
+  `/health/` at the edge - a cached 200 would hide a degraded storefront from
+  both the healthcheck and the uptime monitor.
+- **Set `X-Forwarded-Proto` on every proxied request** (see "Transport
+  hardening in the deploy artifact" above). Without it the SSL redirect
+  loops, and the container healthcheck cannot reach `/health/`.
+
+A managed WAF (CDN or platform edge) is a legitimate choice for this - it
+replaces the proxy rules above and terminates TLS - and it is a **deployment
+fact**: its account, zone id and API token belong in your secret store, never
+in this repository or in CI. Configure it, then point this runbook's
+"Transport hardening in the deploy artifact" section at what it actually
+sends, and keep
+`DJANGO_ALLOWED_HOSTS` / `CSRF_TRUSTED_ORIGINS` listing its origin.
+
+**What a WAF is not.** It is not a substitute for the app's authorization: a
+rule cannot know whether *this* order belongs to *this* session. Every
+authorization decision stays in Django, where SPEC-17-03's CSRF gate, the
+ownership scopes and the capability decorators live.
+
+## Secret rotation (SPEC-22-06, R-22.8)
+
+Where the secrets live today: the repo-root `.env` on the deploy host
+(git-ignored, chmod 600, owned by the deploying user), GitHub Actions secrets
+for CI (dummy Razorpay values only - the suite never uses live credentials),
+and each provider's own console for Razorpay / SMTP / Sentry. `.env.example`
+documents the names; no value is in the repository. The scans that protect
+this are real and already wired: `gitleaks.toml`, `.gitguardian.yml`, and
+`.github/workflows/secret-scan.yml`. **None of them rotates a secret** - they
+find a leak after the fact. Rotation is the procedure below, and it is manual
+by design.
+
+### Rotation schedule
+
+| Secret | Rotate | Why / cost of delay |
+| --- | --- | --- |
+| `DJANGO_SECRET_KEY` | **quarterly**, or on any suspicion of exposure | signs sessions and cookies; a leak is session forgery until rotated. Rotating logs everyone out (see the caveat) |
+| `RAZORPAY_KEY_SECRET` | **quarterly**, or on any staff-offboarding event | holds money-movement authority; the key id alone is not secret |
+| `POSTGRES_PASSWORD` / `DATABASE_URL` | **quarterly** | full read/write on the store, including customer data |
+| SMTP password / app password | **every 6 months** (provider policy) | outbound mail from your domain; a leak enables spoofed mail, not account access |
+| `SENTRY_DSN` | **on request from the provider**, and if a former employee's project access is revoked | an ingest DSN is a write-only public key: a leak lets an outsider submit noise, not read your errors |
+| Deploy host SSH key | **on staff offboarding**, immediately | the key that can deploy |
+| Third-party tokens (CDN, WAF, error tracker API) | on offboarding, and when a vendor's key is past its expiry | outside this repository; see each provider's policy |
+
+Quarterly means a calendar reminder with an owner, not "when someone
+remembers". Put the dates in the same place as the deploy log.
+
+### Rotating without downtime
+
+Order matters: **mint the new credential before retiring the old one**, then
+roll, then retire. Each step below is reversible until the last.
+
+**1. Database password.** Postgres has no dual-password state, so this is the
+one rotation with a genuine (short) window:
+
+```bash
+# a. change the role's password in place (existing sessions keep working)
+docker compose exec -T db psql -U "$POSTGRES_USER" -d "$POSTGRES_DB" \
+  -c "ALTER ROLE \"$POSTGRES_USER\" WITH PASSWORD '<new>';"
+
+# b. update the repo-root .env (DATABASE_URL if set, else POSTGRES_PASSWORD)
+# c. recreate the app so it connects with the new password
+./scripts/release.sh          # build -> migrate check -> migrate -> collectstatic -> restart
+
+# d. verify before touching anything else
+curl -fsS https://<host>/health/ | grep '"status": *"ok"'
+```
+
+Because `docker-compose.yml` assembles `DATABASE_URL` from the same
+`POSTGRES_*` variables the `db` service reads, the password has exactly one
+home (`.env`) and step (b) cannot drift out of sync with the database it
+names. Old connections drain as gunicorn workers recycle; `SIGTERM` on the
+restart is graceful, so in-flight requests finish. If the release script ever
+runs with a password that no longer matches, `/health/` answers **503** and
+`release.sh` fails at its `--wait` checkpoint - fail-closed, and the fix is the
+correct `.env`.
+
+**2. Razorpay.** Create the new key pair in the Razorpay dashboard **while the
+old one is live**, update `RAZORPAY_KEY_ID` / `RAZORPAY_KEY_SECRET`, run
+`./scripts/release.sh`, and verify a real checkout end to end
+(`docs/runbook-incident-recovery.md` §4 reconciles the counters). Only then
+revoke the old pair. The app reads both values from the environment and signs
+gateway requests with them, so this needs no code change and no deploy beyond
+the normal release.
+
+**3. SMTP.** Update the password/app password at the provider, put it in
+`.env`, restart the app, and verify by triggering one real send - the
+password-reset flow, or `manage.py` with `ALERT_RECIPIENTS` set. Nothing else
+in the app caches the credential, so the restart is sufficient.
+
+**4. Sentry DSN.** Replace the value in `.env` and restart. The SDK is
+initialised once at boot (SPEC-22-04), so a restart is the whole procedure;
+with no DSN the app is simply unmonitored, never broken.
+
+**5. SSH deploy key.** Add the new public key to the host's `authorized_keys`
+**before** removing the old one, then re-run a deploy to prove it works, then
+remove the old key. GitHub Actions' deploy job uses
+`core.ssh_command`/`ssh-key` from repository secrets - update the secret, run
+one deploy, then revoke the old key in the provider.
+
+### The `SECRET_KEY` caveat (read before rotating it)
+
+`DJANGO_SECRET_KEY` signs sessions, the signed cookies, and - because
+simplejwt signs with it - **every outstanding access and refresh token**.
+Rotating it is therefore a **mass logout plus a mass token invalidation**, not
+a transparent operation:
+
+- Decide the window deliberately (an announced low-traffic period). There is
+  no way to keep existing sessions across a rotation in this codebase.
+- Outstanding refresh tokens die with it. Customers are asked to sign in
+  again; carts are **guest/session-owned**, so a customer cart that was not
+  checked out is lost for that customer. Say so in advance if it matters.
+- Per-environment isolation is why this is safe to do at all: a rotation in
+  one environment does not affect the others, because each has its own key
+  (SPEC-22-03 [R-22.3]).
+- Rotate **one environment at a time**, and never rotate staging and
+  production in the same window - you want to know which one broke.
+
+### Verify a rotation actually happened
+
+A rotation nobody checked is an assumption:
+
+1. `curl -fsS https://<host>/health/` answers 200 (the app boots with the new
+   configuration).
+2. The old credential no longer authenticates - the honest test, and the only
+   one that proves anything: try the **previous** `DATABASE_URL` password and
+   the **previous** Razorpay secret against the live services and expect
+   refusal. Do this from a throwaway shell, never from a machine whose `.env`
+   has been updated.
+3. One real flow per rotated credential: a login, a checkout, a password-reset
+   email.
+4. `git log -p -- backend/.env.example docker-compose.yml Procfile scripts/` and
+   a `gitleaks detect` sweep show no value was introduced into the repository
+   while rotating.
+5. The deployment still passes its own gates: a release, a green
+   `docker compose ps` (healthy), and the uptime monitor seeing 200.
+
+**If a secret was ever committed, pushed, or pasted into a ticket:** rotate it
+first and treat it as compromised from that moment - then remove it from
+history. Rewriting history does not un-leak anything that was pushed; only
+rotation does. Order is rotation, then cleanup, then the audit trail.
