@@ -307,7 +307,7 @@ class Order(models.Model):
     shipping_method_code = models.CharField(
         max_length=40,  # ShippingMethod.code width, so the label always fits
         blank=True,
-        default='',
+        default="",
     )
 
     # Zero on an order priced before shipping was configured, and zero on a
