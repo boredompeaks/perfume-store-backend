@@ -1220,7 +1220,7 @@ all six of those and the auditor re-verified them clean, so there was nothing to
   whose text Black actually rewrites), intersected per file with the line numbers this task's diff ADDS. Two
   coarser measures were tried and REJECTED as over-counting, and the reason is worth recording so the next agent
   does not re-invent them: taking a hunk's whole old-side range counts every line in a hunk that is dirty because
-  any OTHER line in it is dirty (measured 19 for `orders/models.py` instead of 1), and diffing the worktree instead
+  any OTHER line in it is dirty (measured 11 for `orders/models.py` instead of 1), and diffing the worktree instead
   of the committed content measures the wrong file entirely once the fix is applied (it reports 0 for the very line
   under dispute, because the worktree no longer has the defect). Run against `5d42952..b2ebe1a` the accepted
   method returns **5 Black-dirty files and an intersection of exactly 1, at `orders/models.py:310` `default='',`** -
