@@ -115,6 +115,72 @@ keys is still refused by name. So neither file can drift back into an
 unbuildable image or a crash-looping container without a red test, and the
 production guard cannot be quietly weakened from the deployment side.
 
+## Transport hardening in the deploy artifact (SPEC-22-08, closes V-06)
+
+SPEC-17-07 shipped the flags; SPEC-22-08 turns them on. `docker-compose.yml`
+sets them, so a compose deployment is hardened with nothing to remember:
+
+| Key | compose default | Effect |
+| --- | --- | --- |
+| `SECURE_SSL_REDIRECT` | `true` | plain-HTTP requests get a 301 to HTTPS |
+| `SECURE_HSTS_SECONDS` | `31536000` | browsers refuse plain HTTP for a year |
+| `SECURE_HSTS_INCLUDE_SUBDOMAINS` | `false` | **operator opt-in** - see below |
+| `SECURE_HSTS_PRELOAD` | `false` | **operator opt-in** - see below |
+| `SECURE_PROXY_SSL_HEADER_NAME` | `HTTP_X_FORWARDED_PROTO` | the trusted forwarded-scheme header |
+| `SECURE_PROXY_SSL_HEADER_VALUE` | `https` | its value |
+
+**The header name is the WSGI environ name, not the wire header.** Django
+reads `request.META[SECURE_PROXY_SSL_HEADER_NAME]`, and gunicorn maps the wire
+header `X-Forwarded-Proto` to `HTTP_X_FORWARDED_PROTO`. Setting
+`X-Forwarded-Proto` would silently never match: every proxied request would
+look like plain HTTP and be redirected to HTTPS, forever. Your front door must
+actually send the header on every request and overwrite any client-supplied
+copy - nginx:
+
+```nginx
+location / {
+    proxy_pass http://127.0.0.1:8000;
+    proxy_set_header Host              $host;
+    proxy_set_header X-Forwarded-Proto $scheme;   # required: the SSL redirect
+    proxy_set_header X-Forwarded-For   $proxy_add_x_forwarded_for;
+}
+```
+
+A client-supplied `X-Forwarded-Proto` must never survive to Django. If your
+proxy appends rather than overwrites, strip the inbound header first; a
+forgeable pair lets a client claim HTTPS over a plain connection and bypass
+the redirect.
+
+**Plain-HTTP local run.** `docker compose up` over `http://localhost` has no
+TLS terminator, so put these two in the repo-root `.env` for local work (both
+are pass-throughs - nothing else needs editing):
+
+```bash
+SECURE_SSL_REDIRECT=false
+SECURE_HSTS_SECONDS=0
+```
+
+Leaving them on locally is the failure mode worth knowing: the redirect sends
+the browser to an `https://` nothing serves, and HSTS makes the browser refuse
+plain HTTP for a year - a localhost lockout you cannot undo from the browser.
+
+**`includeSubDomains` and `preload` are deliberately not defaults.**
+`includeSubDomains` breaks every plain-HTTP subdomain (including ones outside
+this app's control), and the HSTS preload list is effectively irreversible -
+removal takes months. Turn them on only once every host in the tree is HTTPS
+for real, and treat preload as a one-way door. Coordinate with
+`CSRF_TRUSTED_ORIGINS` and `CORS_ALLOWED_ORIGINS`, which must list the
+deployed `https://` storefront origin.
+
+`SESSION_COOKIE_SECURE` / `CSRF_COOKIE_SECURE` need no configuration: they
+already default to secure whenever `DJANGO_DEBUG=false`.
+
+Both halves are pinned: `TlsHardeningDeployContractTests` reads the defaults
+out of the committed compose file, boots the app with them, and asserts that
+`DJANGO_DEBUG=true` with no hardening keys keeps the development-safe
+defaults - so the deploy layer can be hardened without the settings defaults
+(and therefore local development and the test suite) moving.
+
 ## Error tracking and uptime (SPEC-22-04, R-22.13 / R-22.12)
 
 ### Error tracking (SPEC-22-04, R-22.13)
