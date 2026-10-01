@@ -260,11 +260,11 @@ WEBHOOK_EVENT_CAPTURED = "payment.captured"
 WEBHOOK_EVENT_AUTHORIZED = "payment.authorized"
 WEBHOOK_EVENT_FAILED = "payment.failed"
 WEBHOOK_EVENT_REFUNDED = "payment.refunded"
-
-# A completed refund. Both spellings are the same fact: Razorpay's own event
-# name for a settled refund is ``refund.processed``, while ``payment.refunded``
-# is the payment-scoped name the same provider documents for it. Accepting
-# either means a rename on the provider's side cannot silently stop the trail.
-WEBHOOK_REFUND_EVENTS = frozenset(
-    {WEBHOOK_EVENT_REFUNDED, "refund.processed"}
-)
+# A settled refund. Both spellings are the same fact: Razorpay's own event name
+# for a settled refund is ``refund.processed`` while ``payment.refunded`` is the
+# payment-scoped name the same provider documents for it, and accepting either
+# means a rename on the provider's side cannot silently stop the trail. The
+# constant is named for what it means (the refund is done) because its literal is
+# fixed: only the provider gets to spell that event.
+WEBHOOK_EVENT_REFUND_DONE = "refund.processed"
+WEBHOOK_REFUND_EVENTS = frozenset({WEBHOOK_EVENT_REFUNDED, WEBHOOK_EVENT_REFUND_DONE})

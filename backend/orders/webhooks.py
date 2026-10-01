@@ -114,6 +114,11 @@ PAYMENT_EVENT_INSERT_ATTEMPTS = 3
 # arithmetic, never float: a provider count must not become binary-float money.
 MINOR_UNITS_PER_MAJOR = Decimal(100)
 
+# The provider's signature is a hex-encoded SHA-256 digest, so its length is
+# fixed by the digest (not by a chosen constant): anything else is not a
+# signature and is refused before the comparison, which keeps the check total.
+WEBHOOK_SIGNATURE_HEX_LENGTH = hashlib.sha256().digest_size * 2
+
 # A payment dimension that already means "the money is in". A second capture
 # event for one of these is a duplicate delivery of a fact we already hold, and
 # re-applying it would append a second transition to the audit trail.
@@ -151,13 +156,50 @@ def _signature_matches(raw_body, provided):
     expected digest one character at a time from response timing. The secret is
     a guaranteed non-empty deployment setting here: the view refuses an
     unconfigured deployment before reaching this function.
+
+    The candidate is normalized and length-checked BEFORE the comparison
+    because the comparison is total only over matching types: a non-ASCII
+    signature header makes ``compare_digest`` raise ``TypeError``, which on an
+    unauthenticated endpoint is an attacker-reachable 500 (and a 500 tells the
+    provider to retry). ``provided`` is compared VERBATIM - the provider signs
+    and compares a hex digest, so a value with surrounding whitespace is not
+    what it sent and must not be quietly accepted.
     """
+    try:
+        candidate = provided.encode("ascii")
+    except UnicodeEncodeError:
+        return False
+    if len(candidate) != WEBHOOK_SIGNATURE_HEX_LENGTH:
+        return False
     expected = hmac.new(
         settings.RAZORPAY_WEBHOOK_SECRET.encode("utf-8"),
         raw_body,
         hashlib.sha256,
     ).hexdigest()
-    return hmac.compare_digest(expected, provided.strip())
+    return hmac.compare_digest(expected.encode("ascii"), candidate)
+
+
+def _fits(value, field_name):
+    """True when ``value`` fits the ``PaymentEvent`` column it is written to.
+
+    SQLite ignores a VARCHAR width and Postgres enforces it, so an unbounded
+    provider string is a silent success in development and a ``DataError`` 500
+    in production - on an unauthenticated money endpoint, which is exactly
+    where it surfaces. The bound is read off the column itself, so the check
+    cannot drift from the schema it protects.
+    """
+    return len(value) <= PaymentEvent._meta.get_field(field_name).max_length
+
+
+def _stored_reference(value):
+    """The provider payment reference as this store can store it.
+
+    A reference that does not fit the column is stored as the empty reference
+    (which the model already means by "the event named no payment") rather than
+    truncated: a truncated id is a plausible-looking reference that reconciles
+    against nothing.
+    """
+    return value if _fits(value, "gateway_payment_id") else ""
 
 
 def _apply_captured(event, body):
@@ -173,17 +215,25 @@ def _apply_captured(event, body):
     gateway_order_id = str(payment.get("order_id") or "")
     amount = _store_money(payment.get("amount"))
     target_status = status_for_payment(PAYMENT_CAPTURED)
+    # An oversized reference is refused like any other unbindable one, and the
+    # row keeps no reference rather than a truncated one (see _stored_reference).
+    oversized_reference = not _fits(gateway_payment_id, "gateway_payment_id")
 
-    event.gateway_payment_id = gateway_payment_id
+    event.gateway_payment_id = _stored_reference(gateway_payment_id)
     event.amount = amount
 
-    if not gateway_order_id or not gateway_payment_id or amount is None:
+    if (
+        not gateway_order_id
+        or not gateway_payment_id
+        or amount is None
+        or oversized_reference
+    ):
         logger.warning(
             "Payment webhook %s: malformed capture payload (order %r, "
             "payment %r); nothing applied",
             event.event_id,
             gateway_order_id,
-            gateway_payment_id,
+            gateway_payment_id[:16],
         )
         AuditEvent.record(
             AuditEvent.EventType.PAYMENT_REFERENCE_MISMATCH,
@@ -387,10 +437,13 @@ def _apply_refunded(event, body):
     refund = _entity(body, "refund")
     gateway_payment_id = str(refund.get("payment_id") or "")
 
-    event.gateway_payment_id = gateway_payment_id
+    event.gateway_payment_id = _stored_reference(gateway_payment_id)
     event.amount = _store_money(refund.get("amount"))
 
-    if not gateway_payment_id:
+    if not event.gateway_payment_id:
+        # Nothing to bind the refund to: either the event named no payment or
+        # the reference does not fit the column (an empty stored reference is
+        # this model's "the event named no payment"). Recorded, moved nothing.
         return PaymentEvent.Outcome.RECORDED
 
     with transaction.atomic():
@@ -526,6 +579,24 @@ def razorpay_webhook(request):
         )
 
     event_type = str(body.get("event") or "")
+
+    if not _fits(event_id, "event_id") or not _fits(event_type, "event_type"):
+        # A delivery whose identifying columns cannot be stored is refused
+        # rather than truncated: `event_id` is the replay key (a truncated one
+        # would dedupe two different deliveries onto one row) and a truncated
+        # event_type names an event this store never received. Bounding here -
+        # against the column widths, not a hardcoded number - is what keeps the
+        # answer identical on SQLite and Postgres (see _fits).
+        logger.warning(
+            "Payment webhook rejected: event id or event type exceeds the "
+            "stored width (event id %s chars, event type %s chars)",
+            len(event_id),
+            len(event_type),
+        )
+        return Response(
+            {"error": "Invalid webhook event"},
+            status=status.HTTP_400_BAD_REQUEST,
+        )
 
     for attempt in range(PAYMENT_EVENT_INSERT_ATTEMPTS):
         try:

@@ -237,6 +237,42 @@ class SignatureVerificationTests(WebhookTestCase):
         self.assertEqual(order.payment_status, "pending")
         self.assertFalse(PaymentEvent.objects.exists())
 
+    def test_non_ascii_signature_header_is_refused_not_crashed(self):
+        # compare_digest raises TypeError on a non-ASCII str, so comparing the
+        # header verbatim would make an anonymous caller able to force a 500 on
+        # a money endpoint (and a 500 tells the provider to retry).
+        order = self.make_pending_order()
+
+        response = self.deliver(self.capture_event(order), signature="é" * 64)
+
+        self.assertEqual(response.status_code, 400)
+        order.refresh_from_db()
+        self.assertEqual(order.payment_status, "pending")
+        self.assertFalse(PaymentEvent.objects.exists())
+
+    def test_signature_with_surrounding_whitespace_is_refused(self):
+        # The provider signs and compares a hex digest literally; a value with a
+        # trailing newline is not what it sent.
+        order = self.make_pending_order()
+        payload = json.dumps(self.capture_event(order)).encode("utf-8")
+
+        response = self.deliver(
+            self.capture_event(order),
+            signature=self.sign(payload) + "\n",
+        )
+
+        self.assertEqual(response.status_code, 400)
+        order.refresh_from_db()
+        self.assertEqual(order.payment_status, "pending")
+
+    def test_signature_of_the_wrong_length_is_refused(self):
+        order = self.make_pending_order()
+
+        response = self.deliver(self.capture_event(order), signature="ab")
+
+        self.assertEqual(response.status_code, 400)
+        self.assertFalse(PaymentEvent.objects.exists())
+
 
 class ReplayProtectionTests(WebhookTestCase):
     """Property 2: one delivery, one effect (spec 11.2's duplicate handling)."""
@@ -588,6 +624,75 @@ class UnhandledEventTests(WebhookTestCase):
 
 class MalformedDeliveryTests(WebhookTestCase):
     """A correctly signed delivery that carries nothing to reconcile."""
+
+    def test_oversized_event_id_is_refused_and_writes_no_row(self):
+        # event_id is the replay key AND a bounded column: an oversized one is
+        # refused rather than truncated (a truncated key would dedupe two
+        # deliveries onto one row). Bounded in code because SQLite would accept
+        # the value and Postgres would raise DataError on the same request.
+        order = self.make_pending_order()
+        oversized = "evt_" + ("X" * PaymentEvent._meta.get_field("event_id").max_length)
+
+        response = self.deliver(self.capture_event(order), event_id=oversized)
+
+        self.assertEqual(response.status_code, 400)
+        self.assertFalse(PaymentEvent.objects.exists())
+        order.refresh_from_db()
+        self.assertEqual(order.payment_status, "pending")
+
+    def test_oversized_event_type_is_refused_and_writes_no_row(self):
+        order = self.make_pending_order()
+        body = self.capture_event(order)
+        body["event"] = "e" * (
+            PaymentEvent._meta.get_field("event_type").max_length + 1
+        )
+
+        response = self.deliver(body)
+
+        self.assertEqual(response.status_code, 400)
+        self.assertFalse(PaymentEvent.objects.exists())
+        order.refresh_from_db()
+        self.assertEqual(order.payment_status, "pending")
+
+    def test_oversized_payment_reference_is_recorded_and_refused(self):
+        # The reference lives in the payload, so the delivery IS recordable —
+        # but the row keeps no reference (a truncated one would read like a real
+        # payment id) and no money moves.
+        order = self.make_pending_order()
+        oversized = "pay_" + (
+            "Y" * PaymentEvent._meta.get_field("gateway_payment_id").max_length
+        )
+
+        response = self.deliver(self.capture_event(order, payment_id=oversized))
+
+        self.assertEqual(response.status_code, 200)
+        event = PaymentEvent.objects.get()
+        self.assertEqual(event.outcome, PaymentEvent.Outcome.REFUSED)
+        self.assertEqual(event.gateway_payment_id, "")
+        order.refresh_from_db()
+        self.assertEqual(order.payment_status, "pending")
+        self.assertIsNone(order.razorpay_payment_id)
+
+    def test_oversized_refund_reference_is_recorded_with_no_reference(self):
+        order = self.make_pending_order(gateway_payment="pay_TEST9")
+        oversized = "pay_" + (
+            "Z" * PaymentEvent._meta.get_field("gateway_payment_id").max_length
+        )
+
+        response = self.deliver(
+            {
+                "event": "payment.refunded",
+                "payload": {"refund": {"id": "rfnd_X", "payment_id": oversized}},
+            },
+            event_id="evt_REFUND_BIG",
+        )
+
+        self.assertEqual(response.status_code, 200)
+        event = PaymentEvent.objects.get()
+        self.assertEqual(event.outcome, PaymentEvent.Outcome.RECORDED)
+        self.assertEqual(event.gateway_payment_id, "")
+        self.assertIsNone(event.order)
+        self.assertFalse(Refund.objects.exists())
 
     def test_signed_but_non_json_body_is_refused(self):
         response = self.deliver(None, event_id="evt_BAD1", raw=b"not json at all")
