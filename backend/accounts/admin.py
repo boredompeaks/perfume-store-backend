@@ -12,8 +12,8 @@ from common import totp
 from common.admin import CONFIRM_FIELD, CONFIRMATION_YES, RoleAwareModelAdmin
 from common.audit import log_mutation
 from common.models import AuditEvent
-from common.permissions import is_privileged
-from common.roles import STAFF_ROLES
+from common.permissions import is_privileged, user_may_assign_role
+from common.roles import ROLE_GRANT_CAPABILITY, STAFF_ROLES
 from orders.models import Order
 
 from . import mfa_trust
@@ -23,6 +23,7 @@ from .models import (
     MFA_ENROLLMENT_REQUIRED,
     TOTPDevice,
 )
+
 # Replace auth's default User admin with the store-aware one below.
 admin.site.unregister(User)
 
@@ -106,18 +107,24 @@ class StoreUserChangeForm(UserChangeForm):
     """UserChangeForm plus the role-scoped staff management field.
 
     The raw ``groups`` M2M stays out of the fieldsets deliberately: the
-    roles surface (spec 6.12, [6.12.1]) manages exactly the six staff role
+    roles surface (spec 6.12, [6.12.1]) manages exactly the staff role
     Groups, so the form exposes only those — a plain Groups selector would
     let even an admin grant unmapped, non-role authority. Any other group
     membership is not this surface's business and survives saves here.
+
+    SPEC-1-B03: the queryset it is seeded with is narrowed per caller by
+    ``StoreUserAdmin.get_form``, so a caller who may not assign a role is
+    never even offered it (least privilege); the write path refuses such a
+    submission regardless.
     """
 
     staff_roles = forms.ModelMultipleChoiceField(
         queryset=Group.objects.none(),
         required=False,
         label="Staff roles",
-        help_text="The six staff roles from the RBAC map (spec 6.12). "
-        "Assigning or removing them requires the staff.manage capability.",
+        help_text="The staff roles from the RBAC map (spec 1.1). "
+        "Assigning or removing them requires the staff.manage capability; "
+        "the superadmin role additionally requires platform.configure.",
         widget=FilteredSelectMultiple("Staff roles", is_stacked=False),
     )
 
@@ -158,13 +165,19 @@ class StoreUserAdmin(RoleAwareModelAdmin, DjangoUserAdmin):
     may inspect customer records, but the User row is also where
     ``is_staff`` and the role groups live — viewing/creating/editing/
     deleting it is privilege management, so every mutation rides
-    ``staff.manage`` (admin only). This base class must precede
-    ``DjangoUserAdmin`` so the capability-driven permission methods win
-    the MRO.
+    ``staff.manage`` (admin, and the superadmin tier above it). This base
+    class must precede ``DjangoUserAdmin`` so the capability-driven
+    permission methods win the MRO.
 
     The roles field renders only for ``staff.manage`` holders on staff
     users (hidden otherwise, least privilege); every Group add/remove it
     causes writes its own LogEntry naming the acting user ([6.12.5]).
+
+    SPEC-1-B03 adds a second, narrower gate on that field: assigning the
+    ``superadmin`` role is itself a high-privilege access change (spec 1.1
+    line 146), so it needs ``platform.configure`` — which ``admin`` does not
+    hold. ``_assignable_roles`` hides the tier from callers who cannot grant
+    it, and ``_refuse_restricted_roles`` refuses the submission itself.
     """
 
     form = StoreUserChangeForm
@@ -243,24 +256,61 @@ class StoreUserAdmin(RoleAwareModelAdmin, DjangoUserAdmin):
         # roles on non-staff targets. Seeding stays capability-gated so
         # stripped renders never expose even the choices list.
         if obj is not None and self._map_grants(request, "change") and obj.is_staff:
-            # Exactly the six role groups (never arbitrary Groups), seeded
-            # with the user's current role membership.
+            # Exactly the role groups (never arbitrary Groups), seeded
+            # with the user's current role membership. SPEC-1-B03: the
+            # queryset is narrowed to the roles this caller may actually
+            # assign, so the top tier is not even offered to an Admin that
+            # could not commit it (least privilege — the refusal below is
+            # the authority, this is what keeps the offer honest).
             form.base_fields["staff_roles"].queryset = Group.objects.filter(
-                name__in=STAFF_ROLES
+                name__in=self._assignable_roles(request)
             ).order_by("name")
             form.base_fields["staff_roles"].initial = obj.groups.filter(
                 name__in=STAFF_ROLES
             )
         return form
 
+    # ——— the escalation guard on role assignment (SPEC-1-B03) ———
+
+    def _assignable_roles(self, request):
+        """Role names this caller may add or remove on the roles field."""
+        return tuple(
+            role for role in STAFF_ROLES if user_may_assign_role(request.user, role)
+        )
+
+    def _restricted_roles(self, request, groups):
+        """The subset of ``groups`` this caller may not add or remove."""
+        return sorted(
+            group.name
+            for group in groups
+            if not user_may_assign_role(request.user, group.name)
+        )
+
+    def _refuse_restricted_roles(self, request, groups):
+        """Refuse a role change the caller has no authority to make.
+
+        The check is on the DIFF, both directions: minting the top tier is an
+        escalation and so is unminting it, and an Admin may do neither. It
+        raises rather than silently dropping the role from the submission,
+        because a caller who asked for a change they cannot make deserves the
+        refusal, not a save that quietly did something else.
+        """
+        for role in self._restricted_roles(request, groups):
+            raise PermissionDenied(
+                f'Assigning the "{role}" role requires the '
+                f"{ROLE_GRANT_CAPABILITY[role]} capability."
+            )
+
     # Spec 6.12 (line 2261): a non-superuser editor — the admin role
-    # included — may reassign the six staff roles but must never grant the
-    # user flags themselves. is_staff opens the admin door, is_superuser is
-    # the trust anchor, and user_permissions is the same "permission
-    # change" escalation channel. Read-only keeps the current values
-    # visible while ModelForm excludes the fields entirely, so a crafted
-    # POST is ignored rather than validated away — only the superuser
-    # bypass grants flags. Role assignment (staff.manage) is unaffected.
+    # included — may reassign the staff roles it holds authority over but
+    # must never grant the user flags themselves. is_staff opens the admin
+    # door, is_superuser is the trust anchor, and user_permissions is the
+    # same "permission change" escalation channel. Read-only keeps the
+    # current values visible while ModelForm excludes the fields entirely,
+    # so a crafted POST is ignored rather than validated away — only the
+    # superuser bypass grants flags. Role assignment (staff.manage) is
+    # unaffected; SPEC-1-B03 gates the TOP TIER separately, on
+    # platform.configure, which an admin-role editor does not hold.
     PRIVILEGE_FLAGS = ("is_staff", "is_superuser", "user_permissions")
 
     def get_readonly_fields(self, request, obj=None):
@@ -277,19 +327,22 @@ class StoreUserAdmin(RoleAwareModelAdmin, DjangoUserAdmin):
             # (spec 6.12): the field only renders for staff.manage holders,
             # so role data reaching this point means the caller bypassed
             # the view flow — refuse before the user row is written at all.
-            raise PermissionDenied(
-                "Role changes require the staff.manage capability."
-            )
+            raise PermissionDenied("Role changes require the staff.manage capability.")
         super().save_model(request, obj, form, change)
         self._apply_staff_roles(request, obj, form)
 
     def _apply_staff_roles(self, request, obj, form):
-        """Sync the six staff role groups, auditing each add/remove.
+        """Sync the staff role groups, auditing each add/remove.
 
         The diff runs only across the role groups — any other group
         membership is not this surface's business and survives the save.
         Each direction logs separately via ``log_change``, which records
         the acting user (``request.user``) and the role changed ([6.12.5]).
+
+        SPEC-1-B03: the diff is checked against the escalation guard before
+        a single membership row moves, so this holds for the confirmed
+        commit leg and for any caller that reaches the sync off the view
+        flow — an Admin can never mint or unmint the tier above itself.
 
         SPEC-20-4 [R-20.27]/[R-20.29]: those per-direction messages are
         prose, so they cannot answer what the account's authority was before
@@ -301,6 +354,7 @@ class StoreUserAdmin(RoleAwareModelAdmin, DjangoUserAdmin):
             return
         desired = set(form.cleaned_data["staff_roles"])
         held = {g for g in obj.groups.all() if g.name in STAFF_ROLES}
+        self._refuse_restricted_roles(request, held ^ desired)
         for group in sorted(held - desired, key=lambda g: g.name):
             obj.groups.remove(group)
             self.log_change(request, obj, f'Removed role "{group.name}".')
@@ -367,7 +421,8 @@ class StoreUserAdmin(RoleAwareModelAdmin, DjangoUserAdmin):
 
         - the commit leg returns ``None``: ``confirm=yes`` means the user
           already confirmed this exact submission and the normal, fully
-          validated save must now run;
+          validated save must now run — which is where the SPEC-1-B03
+          escalation guard refuses a role change it has no authority for;
         - a caller without ``staff.manage`` returns ``None``: it must be
           refused by the view's own change gate, never shown a confirmation
           page for a privilege change they may not make;
@@ -390,7 +445,7 @@ class StoreUserAdmin(RoleAwareModelAdmin, DjangoUserAdmin):
             return None
         held = set(target.groups.filter(name__in=STAFF_ROLES))
         # The interstitial REPORTS the diff; it does not validate it. Only
-        # the six role groups are resolved (the rendered choices), and a
+        # the role groups are resolved (the rendered choices), and a
         # non-numeric or foreign pk is simply not part of the diff — the
         # form's own queryset validation stays the authority on the commit
         # leg, so a crafted value can never 500 the confirmation or, worse,
@@ -399,6 +454,10 @@ class StoreUserAdmin(RoleAwareModelAdmin, DjangoUserAdmin):
         desired = set(Group.objects.filter(pk__in=submitted, name__in=STAFF_ROLES))
         added = sorted(desired - held, key=lambda group: group.name)
         removed = sorted(held - desired, key=lambda group: group.name)
+        # SPEC-1-B03: a change this caller may not commit gets a refusal, not
+        # a confirmation — asking an Admin to confirm granting the tier above
+        # itself, only to be refused after they click, would be theatre.
+        self._refuse_restricted_roles(request, set(added) | set(removed))
         if not (added or removed):
             return None
         return {

@@ -9,6 +9,7 @@ Pins the capability-driven admin base end to end:
   confirmation-gated, including through the real admin UI,
 - the superuser bypass behaves like Django's own (unchanged trust anchor).
 """
+
 from decimal import Decimal
 
 from django.contrib import admin
@@ -211,7 +212,12 @@ class RoleAwareAdminActionGatingTests(ApiTestCase):
             "finance": {"export_csv"},
             "marketing": set(),
             "catalogue": set(),
-            "inventory": set(),
+            # SPEC-1-B03 (spec 1.1 line 110): the inventory/fulfilment
+            # operator manages "packing, shipping and returns", so it now
+            # packs and ships like support does — and nothing else. Before
+            # this the case below was an empty set, which is the live
+            # DEVIATE this task closed.
+            "inventory": {"mark_confirmed", "mark_shipped", "mark_delivered"},
         }
         for role, expected in cases.items():
             with self.subTest(role=role):

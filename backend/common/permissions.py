@@ -6,6 +6,7 @@ plain-Django twin for admin-chrome routes that are not DRF views, and it
 reuses that same staff flag as a second gate (SPEC-20-6b): its routes live
 inside ``/admin/``, which is staff-only everywhere else.
 """
+
 from functools import wraps
 
 from django.contrib.auth.views import redirect_to_login
@@ -14,7 +15,11 @@ from django.urls import reverse
 from rest_framework.exceptions import PermissionDenied
 from rest_framework.permissions import SAFE_METHODS, BasePermission
 
-from common.roles import CAPABILITY_ROLES, STAFF_ROLES
+from common.roles import (
+    CAPABILITY_ROLES,
+    ROLE_GRANT_CAPABILITY,
+    STAFF_ROLES,
+)
 
 
 class IsAdminUserOrReadOnly(BasePermission):
@@ -202,6 +207,32 @@ def capability_permission(capability):
     )
 
 
+def user_may_assign_role(user, role):
+    """Whether ``user`` may add or remove ``role`` on a staff account.
+
+    This is the escalation guard for role assignment itself (spec 1.1 lines
+    142-146). ``staff.manage`` answers "may this caller work roles at all",
+    which the assignment surfaces already enforce; this answers the narrower
+    question the map cannot: may this caller touch the tier ABOVE admin?
+
+    A role listed in ``ROLE_GRANT_CAPABILITY`` needs its own capability —
+    ``platform.configure`` for ``superadmin``, granted to that tier alone — so
+    an Admin can reassign the operational roles all day and still cannot
+    promote anyone, or itself, above its own tier. Every other role answers
+    ``True`` here: the guard adds no second gate on the operational six.
+
+    Django's ``is_superuser`` bypass is preserved verbatim, mirroring
+    ``capability_required`` and ``RoleAwareModelAdmin._holds_capability``: the
+    trust anchor keeps working exactly as it does on every other surface.
+    """
+    required = ROLE_GRANT_CAPABILITY.get(role)
+    if required is None:
+        return True
+    if user is None:
+        return False
+    return user.is_superuser or user_has_capability(user, required)
+
+
 def capability_or_read_only(capability):
     """Factory: SAFE_METHODS stay public, writes need the pinned capability.
 
@@ -237,6 +268,10 @@ HasDiscountsWrite = capability_permission("discounts.write")
 HasReportsRead = capability_permission("reports.read")
 HasStaffManage = capability_permission("staff.manage")
 HasSettingsManage = capability_permission("settings.manage")
+# SPEC-1-B03: the one capability the ``superadmin`` tier holds and ``admin``
+# does not (spec 1.1 line 146, "platform configuration"). It authorises
+# granting the tier itself — see ``user_may_assign_role``.
+HasPlatformConfigure = capability_permission("platform.configure")
 
 # SPEC-6-03c: the product views are the read/write split shape — public
 # catalogue reads, writes gated by ``products.write`` (catalogue + admin).
@@ -246,12 +281,19 @@ HasProductsWriteOrReadOnly = capability_or_read_only("products.write")
 def is_privileged(user):
     """SPEC-17-05 [R-17.9]: the accounts mandatory MFA applies to.
 
-    The ``staff.manage`` capability holders (the ``admin`` role per
-    ``CAPABILITY_ROLES``) plus Django superusers — the trust anchor every
-    admin surface deliberately preserves a bypass for, which therefore
-    must not be able to slip past the factor that anchors it. Everything
-    else (customers, the five non-admin staff roles, role-less staff)
-    is unaffected by MFA enforcement.
+    The ``staff.manage`` capability holders (the ``admin`` and ``superadmin``
+    roles per ``CAPABILITY_ROLES`` — the two tiers that manage access, spec
+    1.1 lines 137/146) plus Django superusers — the trust anchor every admin
+    surface deliberately preserves a bypass for, which therefore must not be
+    able to slip past the factor that anchors it. Everything else (customers,
+    the five operational staff roles, role-less staff) is unaffected by MFA
+    enforcement.
+
+    SPEC-1-B03 note: the bypass itself is byte-for-byte unchanged and the new
+    tier is covered by the existing rule rather than a widened one — the top
+    tier holds ``staff.manage`` because it manages access, so it is privileged
+    the moment it exists, with no second privileged-population definition to
+    keep in step with this one.
     """
     if not (user and user.is_authenticated):
         return False

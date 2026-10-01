@@ -1,0 +1,613 @@
+"""SPEC-1-B03: the superadmin tier (spec 1.1, lines 133-150).
+
+Spec 1.1 names seven staff roles and the last two are tiers:
+
+- line 137 — Admin: "Manage users, roles, settings and operational access";
+- line 146 — Superadmin: "Manage high-privilege settings, access and
+  platform configuration";
+- line 150 — "Admin is not one giant permission", so a tier ABOVE admin is
+  not the same permission: the top tier exists precisely to hold powers
+  ``admin`` must not have.
+
+Two contracts are pinned here, both by behaviour:
+
+1. the tier is real, not a label. ``platform.configure`` is granted to the
+   superadmin role only and to no other role in the map, while the two
+   capabilities the spec gives both tiers (``staff.manage`` = access,
+   ``settings.manage`` = high-privilege settings) are shared. The top tier
+   holds NO operational capability — least privilege, and the map stays
+   deny-by-default for it exactly as for everyone else.
+2. an Admin manages staff roles but can never mint or unmint its own
+   superior: granting the ``superadmin`` role group needs
+   ``platform.configure``, which the map never grants ``admin``. Django's
+   ``is_superuser`` bypass keeps working exactly as before.
+
+The module also pins the line-110 fix: the inventory/fulfilment operator
+("Manage stock, packing, shipping and returns") could not pack or ship at
+all, because ``orders.fulfill`` sat on support+admin alone. It now holds
+that capability — and nothing else beyond it.
+"""
+
+import importlib
+from decimal import Decimal
+
+from django.contrib import admin
+from django.contrib.admin.models import LogEntry
+from django.contrib.auth.models import AnonymousUser, Group, User
+from django.core.exceptions import PermissionDenied
+from django.apps import apps
+from django.test import RequestFactory, TestCase, tag
+from rest_framework.exceptions import PermissionDenied as DRFPermissionDenied
+from rest_framework.request import Request
+from rest_framework.test import APIRequestFactory
+
+from common.admin import CONFIRMATION_YES, CONFIRM_FIELD, RoleAwareModelAdmin
+from common.permissions import (
+    CapabilityPermission,
+    HasPlatformConfigure,
+    HasStaffManage,
+    get_user_roles,
+    is_privileged,
+    user_has_capability,
+    user_may_assign_role,
+)
+from common.roles import (
+    CAPABILITY_ROLES,
+    ROLE_ADMIN,
+    ROLE_GRANT_CAPABILITY,
+    ROLE_INVENTORY,
+    ROLE_MARKETING,
+    ROLE_SUPPORT,
+    ROLE_SUPERADMIN,
+    STAFF_ROLES,
+    sync_role_groups,
+)
+from common.testing import ApiTestCase
+from orders.models import Order, OrderItem
+
+from .test_staff_roles_admin import user_change_post
+
+TEST_PASSWORD = "S3cure-Passphrase!"
+
+# The capabilities the spec's superadmin row grants (line 146): "high-privilege
+# settings, access and platform configuration". Nothing operational.
+TOP_TIER_CAPABILITIES = frozenset(
+    {"platform.configure", "settings.manage", "staff.manage"}
+)
+
+# The capabilities the inventory/fulfilment operator holds after SPEC-1-B03:
+# stock (inventory.*), the catalogue read it needs to pick items, and
+# packing/shipping (orders.fulfill) per line 110.
+INVENTORY_CAPABILITIES = frozenset(
+    {"products.read", "inventory.read", "inventory.adjust", "orders.fulfill"}
+)
+
+
+def make_role_user(role, username):
+    user = User.objects.create_user(
+        username=username,
+        email=f"{username}@example.com",
+        password=TEST_PASSWORD,
+        is_staff=True,
+    )
+    user.groups.add(Group.objects.get_or_create(name=role)[0])
+    return user
+
+
+def request_for(user):
+    request = RequestFactory().post("/admin/")
+    request.user = user
+    return request
+
+
+def held_capabilities(user):
+    """Every capability identifier ``user``'s roles grant."""
+    return frozenset(
+        capability
+        for capability in CAPABILITY_ROLES
+        if user_has_capability(user, capability)
+    )
+
+
+class SuperadminTierDeclarationTests(TestCase):
+    """The tier is declared, ordered above admin, and synced like the rest."""
+
+    def test_superadmin_is_declared_and_ordered_above_admin(self):
+        self.assertIn(ROLE_SUPERADMIN, STAFF_ROLES)
+        self.assertLess(
+            STAFF_ROLES.index(ROLE_ADMIN),
+            STAFF_ROLES.index(ROLE_SUPERADMIN),
+        )
+        self.assertIs(STAFF_ROLES[-1], ROLE_SUPERADMIN)
+
+    def test_the_six_operational_roles_keep_their_place_below_it(self):
+        self.assertEqual(
+            STAFF_ROLES[:-1],
+            (
+                ROLE_SUPPORT,
+                "catalogue",
+                ROLE_INVENTORY,
+                "marketing",
+                "finance",
+                ROLE_ADMIN,
+            ),
+        )
+
+    def test_every_capability_names_only_roles_that_exist(self):
+        for capability, roles in CAPABILITY_ROLES.items():
+            with self.subTest(capability=capability):
+                self.assertLessEqual(roles, set(STAFF_ROLES))
+
+    def test_the_group_exists_on_a_bootstrapped_database(self):
+        # The migrations ran to build this test database: the group is there
+        # without any application code running sync_role_groups().
+        self.assertTrue(Group.objects.filter(name=ROLE_SUPERADMIN).exists())
+        self.assertEqual(
+            set(Group.objects.values_list("name", flat=True)), set(STAFF_ROLES)
+        )
+
+    def test_sync_recreates_a_deleted_superadmin_group(self):
+        Group.objects.filter(name=ROLE_SUPERADMIN).delete()
+
+        groups = sync_role_groups()
+
+        self.assertTrue(Group.objects.filter(name=ROLE_SUPERADMIN).exists())
+        self.assertEqual(groups[ROLE_SUPERADMIN].name, ROLE_SUPERADMIN)
+
+    def test_the_rebootstrap_migration_adds_the_group_to_a_populated_database(self):
+        # Existing deployments already ran 0001, so adding a role to the map
+        # cannot reach their database: this migration is what puts the new
+        # group there, and it must leave the pre-existing groups alone.
+        Group.objects.filter(name=ROLE_SUPERADMIN).delete()
+        survivor = Group.objects.get(name=ROLE_ADMIN)
+        user = make_role_user(ROLE_ADMIN, "survivor")
+
+        self.rebootstrap_migration().sync_staff_role_groups(None, None)
+
+        self.assertTrue(Group.objects.filter(name=ROLE_SUPERADMIN).exists())
+        self.assertTrue(Group.objects.filter(pk=survivor.pk).exists())
+        self.assertTrue(user.groups.filter(pk=survivor.pk).exists())
+
+    def test_the_rebootstrap_migration_reverse_removes_only_the_added_group(self):
+        # 0001's reverse deletes every role group; repeating that here would
+        # drop live role assignments that predate this migration.
+        module = self.rebootstrap_migration()
+        keeper = make_role_user(ROLE_ADMIN, "keeper")
+
+        module.remove_superadmin_role_group(apps, None)
+
+        self.assertFalse(Group.objects.filter(name=ROLE_SUPERADMIN).exists())
+        self.assertEqual(
+            set(Group.objects.values_list("name", flat=True)),
+            set(STAFF_ROLES) - {ROLE_SUPERADMIN},
+        )
+        self.assertTrue(keeper.groups.filter(name=ROLE_ADMIN).exists())
+
+    @staticmethod
+    def rebootstrap_migration():
+        return importlib.import_module(
+            "common.migrations.0006_sync_staff_role_groups_superadmin"
+        )
+
+
+class SuperadminCapabilityTests(TestCase):
+    """The tier's authority, and the map's deny-by-default, per spec line 146."""
+
+    def setUp(self):
+        groups = sync_role_groups()
+        self.superadmin = User.objects.create_user(username="root-role")
+        self.superadmin.groups.add(groups[ROLE_SUPERADMIN])
+        self.admin = User.objects.create_user(username="chief-role")
+        self.admin.groups.add(groups[ROLE_ADMIN])
+        self.support = User.objects.create_user(username="supp-role")
+        self.support.groups.add(groups[ROLE_SUPPORT])
+        self.customer = User.objects.create_user(username="plain-customer")
+
+    def _request(self, user):
+        request = Request(APIRequestFactory().generic("GET", "/api/staff/"))
+        request.user = user
+        return request
+
+    def test_the_top_tier_holds_exactly_the_capabilities_the_spec_names(self):
+        # "high-privilege settings, access and platform configuration" — and
+        # nothing operational, because the spec grants the top tier no
+        # catalogue, fulfilment, refund or reporting authority.
+        self.assertEqual(held_capabilities(self.superadmin), TOP_TIER_CAPABILITIES)
+
+    def test_platform_configuration_is_the_superadmin_only_capability(self):
+        self.assertTrue(user_has_capability(self.superadmin, "platform.configure"))
+        for user in (self.admin, self.support, self.customer):
+            with self.subTest(username=user.username):
+                self.assertFalse(user_has_capability(user, "platform.configure"))
+
+    def test_an_admin_cannot_configure_the_platform_through_the_permission_class(self):
+        # The API-side twin of the map: an Admin is refused the capability
+        # with the same uniform 403 every other capability denial raises.
+        with self.assertRaises(DRFPermissionDenied):
+            HasPlatformConfigure().has_permission(self._request(self.admin), None)
+        self.assertTrue(
+            HasPlatformConfigure().has_permission(self._request(self.superadmin), None)
+        )
+
+    def test_the_named_class_is_pinned_to_the_new_capability(self):
+        self.assertTrue(issubclass(HasPlatformConfigure, CapabilityPermission))
+        self.assertEqual(HasPlatformConfigure.capability, "platform.configure")
+        self.assertEqual(HasPlatformConfigure.__name__, "HasPlatformConfigure")
+
+    def test_the_top_tier_manages_access_and_high_privilege_settings(self):
+        # Spec line 146 gives the tier "access" and "high-privilege
+        # settings" — the same two surfaces spec line 137 gives Admin, so
+        # both tiers hold them and the tier is strictly above Admin on both.
+        for capability in ("staff.manage", "settings.manage"):
+            with self.subTest(capability=capability):
+                self.assertTrue(user_has_capability(self.superadmin, capability))
+                self.assertTrue(user_has_capability(self.admin, capability))
+
+    def test_no_operational_role_reaches_the_privileged_capabilities(self):
+        # Spec line 150: admin is not one giant permission, and it is not
+        # spread down the tiers either.
+        for capability in TOP_TIER_CAPABILITIES:
+            with self.subTest(capability=capability):
+                self.assertEqual(
+                    CAPABILITY_ROLES[capability] - {ROLE_ADMIN, ROLE_SUPERADMIN},
+                    frozenset(),
+                )
+
+    def test_deny_by_default_holds_for_the_new_tier(self):
+        # An identifier nobody wired must not open access, least of all for
+        # the highest role in the map.
+        self.assertFalse(user_has_capability(self.superadmin, "platform.selfdestruct"))
+        self.assertFalse(user_has_capability(self.superadmin, "orders.demolish"))
+
+    def test_anonymous_and_role_less_callers_are_denied_the_tier(self):
+        anonymous = AnonymousUser()
+        for user in (anonymous, self.customer):
+            with self.subTest(username=getattr(user, "username", "anonymous")):
+                for capability in TOP_TIER_CAPABILITIES:
+                    self.assertFalse(user_has_capability(user, capability))
+                with self.assertRaises(DRFPermissionDenied):
+                    HasPlatformConfigure().has_permission(self._request(user), None)
+
+
+@tag("e2e")
+class SuperadminEscalationGuardTests(ApiTestCase):
+    """An Admin manages staff roles; it can never mint or unmint its superior."""
+
+    def setUp(self):
+        self.admin_user = make_role_user(ROLE_ADMIN, "chief")
+        self.superadmin_user = make_role_user(ROLE_SUPERADMIN, "tier-root")
+        self.target = User.objects.create_user(
+            username="temp",
+            email="temp@example.com",
+            password=TEST_PASSWORD,
+            is_staff=True,
+        )
+
+    # helpers -----------------------------------------------------------------
+    def change_url(self, target=None):
+        target = target or self.target
+        return f"/admin/auth/user/{target.id}/change/"
+
+    def post_roles(self, roles, *, target=None, confirm=False, **extra):
+        target = target or self.target
+        payload = user_change_post(
+            target,
+            staff_roles=[str(Group.objects.get(name=role).pk) for role in roles],
+            **extra,
+        )
+        if confirm:
+            payload[CONFIRM_FIELD] = CONFIRMATION_YES
+        return self.client.post(self.change_url(target), payload)
+
+    def assert_no_superadmin_grant(self, target=None):
+        target = target or self.target
+        target.refresh_from_db()
+        self.assertFalse(
+            target.groups.filter(name=ROLE_SUPERADMIN).exists(),
+            "the top tier must never reach an account without platform.configure",
+        )
+        self.assertFalse(
+            LogEntry.objects.filter(change_message__icontains=ROLE_SUPERADMIN).exists(),
+            "a refused escalation must not write a role audit entry",
+        )
+
+    # the field ---------------------------------------------------------------
+    def test_the_roles_field_never_offers_the_top_tier_to_an_admin(self):
+        self.client.force_login(self.admin_user)
+
+        res = self.client.get(self.change_url())
+
+        self.assertEqual(res.status_code, 200)
+        offered = set(
+            res.context["adminform"]
+            .form.fields["staff_roles"]
+            .queryset.values_list("name", flat=True)
+        )
+        self.assertNotIn(ROLE_SUPERADMIN, offered)
+        self.assertEqual(offered, set(STAFF_ROLES) - {ROLE_SUPERADMIN})
+
+    def test_the_roles_field_offers_every_role_to_the_top_tier(self):
+        self.client.force_login(self.superadmin_user)
+
+        res = self.client.get(self.change_url())
+
+        self.assertEqual(res.status_code, 200)
+        self.assertEqual(
+            set(
+                res.context["adminform"]
+                .form.fields["staff_roles"]
+                .queryset.values_list("name", flat=True)
+            ),
+            set(STAFF_ROLES),
+        )
+
+    # the refusals ------------------------------------------------------------
+    def test_an_admin_cannot_grant_the_superadmin_role(self):
+        self.client.force_login(self.admin_user)
+
+        res = self.post_roles([ROLE_SUPERADMIN])
+
+        self.assertEqual(res.status_code, 403)
+        self.assert_no_superadmin_grant()
+
+    def test_an_admin_cannot_grant_itself_the_superadmin_role(self):
+        self.client.force_login(self.admin_user)
+
+        res = self.post_roles([ROLE_ADMIN, ROLE_SUPERADMIN], target=self.admin_user)
+
+        self.assertEqual(res.status_code, 403)
+        self.assert_no_superadmin_grant(self.admin_user)
+        self.assertTrue(self.admin_user.groups.filter(name=ROLE_ADMIN).exists())
+
+    def test_an_admin_cannot_strip_the_top_tier_from_an_account(self):
+        # The escalation guard is symmetric: unminting the tier is as much a
+        # high-privilege access change as minting it, and an Admin may not do
+        # either — so the top tier's accounts are off-limits to them.
+        self.target.groups.add(Group.objects.get(name=ROLE_SUPERADMIN))
+        self.client.force_login(self.admin_user)
+
+        res = self.post_roles([])
+
+        self.assertEqual(res.status_code, 403)
+        self.target.refresh_from_db()
+        self.assertTrue(self.target.groups.filter(name=ROLE_SUPERADMIN).exists())
+
+    def test_a_direct_role_sync_is_refused_for_an_admin(self):
+        # Defence in depth, off the view flow (the same shape as the
+        # staff.manage guard): even a caller that reaches the sync with a
+        # cleaned_data the form would never produce is refused before any
+        # group membership is written.
+        user_admin = admin.site._registry[User]
+
+        with self.assertRaises(PermissionDenied):
+            user_admin._apply_staff_roles(
+                request_for(self.admin_user),
+                self.target,
+                type(
+                    "FakeForm",
+                    (),
+                    {
+                        "cleaned_data": {
+                            "staff_roles": [Group.objects.get(name=ROLE_SUPERADMIN)]
+                        }
+                    },
+                )(),
+            )
+
+        self.assert_no_superadmin_grant()
+
+    # no regression -----------------------------------------------------------
+    def test_an_admin_may_still_reassign_the_operational_roles(self):
+        self.target.groups.add(Group.objects.get(name=ROLE_SUPPORT))
+        self.client.force_login(self.admin_user)
+
+        first = self.post_roles([ROLE_MARKETING])
+        self.assertEqual(first.status_code, 200)
+        self.assert_no_superadmin_grant()
+        committed = self.post_roles([ROLE_MARKETING], confirm=True)
+
+        self.assertEqual(committed.status_code, 302)
+        self.target.refresh_from_db()
+        self.assertEqual(
+            set(self.target.groups.values_list("name", flat=True)), {ROLE_MARKETING}
+        )
+        self.assertTrue(
+            LogEntry.objects.filter(change_message='Removed role "support".').exists()
+        )
+
+    # the tier and the bypass -------------------------------------------------
+    def test_the_top_tier_grants_the_superadmin_role_through_the_confirm_step(self):
+        self.client.force_login(self.superadmin_user)
+
+        first = self.post_roles([ROLE_SUPERADMIN])
+        self.assertEqual(first.status_code, 200)
+        self.assert_no_superadmin_grant()
+
+        committed = self.post_roles([ROLE_SUPERADMIN], confirm=True)
+
+        self.assertEqual(committed.status_code, 302)
+        self.target.refresh_from_db()
+        self.assertTrue(self.target.groups.filter(name=ROLE_SUPERADMIN).exists())
+        self.assertTrue(
+            LogEntry.objects.filter(
+                change_message=f'Added role "{ROLE_SUPERADMIN}".'
+            ).exists()
+        )
+
+    def test_the_django_superuser_bypass_still_grants_the_top_tier(self):
+        root = User.objects.create_superuser("root", "root@example.com", None)
+        self.client.force_login(root)
+        # A Django superuser editor also OWNS the privilege flags (they are
+        # not read-only for them), so the payload states is_staff explicitly.
+        flags = {"is_staff": "on"}
+
+        first = self.post_roles([ROLE_SUPERADMIN], **flags)
+        self.assertEqual(first.status_code, 200)
+        committed = self.post_roles([ROLE_SUPERADMIN], confirm=True, **flags)
+
+        self.assertEqual(committed.status_code, 302)
+        self.target.refresh_from_db()
+        self.assertTrue(self.target.groups.filter(name=ROLE_SUPERADMIN).exists())
+
+    # the predicate itself ----------------------------------------------------
+    def test_the_top_tier_is_the_only_role_whose_grant_needs_platform_configure(self):
+        self.assertEqual(ROLE_GRANT_CAPABILITY, {ROLE_SUPERADMIN: "platform.configure"})
+        for role in STAFF_ROLES:
+            with self.subTest(role=role):
+                user = make_role_user(role, f"assign-{role}")
+                # Only the tier that already holds platform.configure can
+                # grant it — which is why the grant can never climb.
+                self.assertEqual(
+                    user_may_assign_role(user, ROLE_SUPERADMIN),
+                    role == ROLE_SUPERADMIN,
+                )
+                # Every other role keeps the plain staff.manage contract, so
+                # the guard adds no second gate on the operational six.
+                self.assertTrue(user_may_assign_role(user, ROLE_ADMIN))
+
+    def test_the_guard_never_opens_a_role_to_an_unauthenticated_caller(self):
+        self.assertFalse(user_may_assign_role(None, ROLE_SUPERADMIN))
+        self.assertFalse(user_may_assign_role(AnonymousUser(), ROLE_SUPERADMIN))
+
+    def test_the_django_superuser_flag_is_the_only_bypass_on_the_guard(self):
+        superuser = User.objects.create_superuser("root", "root@example.com", None)
+        self.assertTrue(user_may_assign_role(superuser, ROLE_SUPERADMIN))
+        # The flag is not itself a role: it grants the grant, nothing else.
+        self.assertEqual(get_user_roles(superuser), frozenset())
+
+
+class InventoryFulfilmentAuthorityTests(ApiTestCase):
+    """Spec line 110: "Manage stock, packing, shipping and returns".
+
+    The operator could not pack or ship at all — ``orders.fulfill`` sat on
+    support+admin alone. The fix grants that one capability and nothing
+    else: the spec names packing and shipping for this role, not order
+    visibility, cancellation, refunds or customer records.
+    """
+
+    def setUp(self):
+        self.operator = make_role_user(ROLE_INVENTORY, "packer")
+        self.support = make_role_user(ROLE_SUPPORT, "supp")
+        self.buyer = self.make_user("buyer")
+
+    def _order(self, username="buyer", **overrides):
+        fields = dict(
+            user=self.buyer,
+            full_name="Seam Buyer",
+            phone="9999999999",
+            address="1 Test Lane",
+            city="Indore",
+            state="MP",
+            pincode="452001",
+            total_amount=Decimal("750.00"),
+        )
+        fields.update(overrides)
+        return Order.objects.create(**fields)
+
+    def _walk_ready_order(self, name):
+        order = self._order()
+        product = self.make_product(name=name, price="750.00", stock=5)
+        OrderItem.objects.create(
+            order=order,
+            product=product,
+            product_name=product.name,
+            price=product.price,
+            quantity=1,
+            subtotal=product.price,
+        )
+        Order.objects.filter(pk=order.pk).update(payment_status="captured")
+        return order
+
+    def test_the_operator_can_pack_and_ship(self):
+        order = self._walk_ready_order("Walk Rose")
+        self.client.force_authenticate(self.operator)
+
+        for expected in ("confirmed", "shipped", "delivered"):
+            with self.subTest(status=expected):
+                res = self.client.post(f"/api/admin/orders/{order.id}/fulfill/")
+                self.assertEqual(res.status_code, 200, res.data)
+                self.assertEqual(res.data["status"], expected)
+        order.refresh_from_db()
+        self.assertEqual(order.status, "delivered")
+
+    def test_the_operator_holds_packing_and_shipping_and_nothing_more(self):
+        self.assertEqual(held_capabilities(self.operator), INVENTORY_CAPABILITIES)
+
+    def test_packing_does_not_grant_the_other_order_powers(self):
+        order = self._order()
+        self.client.force_authenticate(self.operator)
+
+        for path in ("cancel", "refund"):
+            with self.subTest(path=path):
+                res = self.client.post(f"/api/admin/orders/{order.id}/{path}/")
+                self.assertEqual(res.status_code, 403)
+                self.assertEqual(res.data["code"], "permission_denied")
+        self.assertEqual(self.client.get("/api/admin/orders/").status_code, 403)
+
+    def test_the_operator_keeps_its_stock_authority(self):
+        self.assertTrue(user_has_capability(self.operator, "inventory.adjust"))
+        self.assertTrue(user_has_capability(self.operator, "inventory.read"))
+
+    def test_packing_does_not_grant_staff_or_platform_management(self):
+        request = Request(APIRequestFactory().generic("POST", "/api/staff/"))
+        request.user = self.operator
+        with self.assertRaises(DRFPermissionDenied):
+            HasStaffManage().has_permission(request, None)
+        with self.assertRaises(DRFPermissionDenied):
+            HasPlatformConfigure().has_permission(request, None)
+
+    def test_support_keeps_fulfilment_authority(self):
+        # No regression from the line-110 fix: support's "permitted order
+        # issues" (line 92) still walks the fulfilment path.
+        order = self._order()
+        self.client.force_authenticate(self.support)
+
+        res = self.client.post(f"/api/admin/orders/{order.id}/fulfill/")
+
+        self.assertEqual(res.status_code, 200, res.data)
+        self.assertEqual(res.data["status"], "confirmed")
+
+
+class SuperuserBypassTests(TestCase):
+    """SPEC-1-B03 must not move Django's own superuser bypass (permissions.py)."""
+
+    def setUp(self):
+        self.superuser = User.objects.create_superuser(
+            "root-bypass", "root-bypass@example.com", None
+        )
+        groups = sync_role_groups()
+        self.superadmin = User.objects.create_user(username="tier-bypass")
+        self.superadmin.groups.add(groups[ROLE_SUPERADMIN])
+        self.admin = User.objects.create_user(username="admin-bypass")
+        self.admin.groups.add(groups[ROLE_ADMIN])
+        self.model_admin = RoleAwareModelAdmin(Order, admin.site)
+
+    def test_is_privileged_still_short_circuits_on_the_superuser_flag(self):
+        # The bypass line itself is untouched: a superuser with no role group
+        # at all is still privileged, which is what makes the MFA enrollment
+        # surface reachable for them.
+        self.assertFalse(self.superuser.groups.exists())
+        self.assertTrue(is_privileged(self.superuser))
+
+    def test_the_top_tier_is_privileged_for_mandatory_mfa(self):
+        # The tier holds ``staff.manage`` (it manages access), so R-17.9
+        # reaches it through the existing rule rather than a new one.
+        self.assertTrue(is_privileged(self.superadmin))
+        self.assertTrue(is_privileged(self.admin))
+
+    def test_the_bypass_is_not_narrowed_to_the_roles_map(self):
+        request = request_for(self.superuser)
+        # Even an identifier no role grants: the superuser bypass answers
+        # before the map is consulted, exactly as before SPEC-1-B03.
+        self.assertTrue(
+            self.model_admin._holds_capability(request, "platform.selfdestruct")
+        )
+        self.assertTrue(self.model_admin._map_grants(request, "add"))
+        self.assertTrue(self.model_admin._map_grants(request, "change"))
+
+    def test_the_bypass_does_not_leak_into_the_roles_map(self):
+        self.assertFalse(
+            self.model_admin._holds_capability(
+                request_for(self.admin), "platform.configure"
+            )
+        )
