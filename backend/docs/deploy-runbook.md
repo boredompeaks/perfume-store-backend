@@ -115,6 +115,175 @@ keys is still refused by name. So neither file can drift back into an
 unbuildable image or a crash-looping container without a red test, and the
 production guard cannot be quietly weakened from the deployment side.
 
+## Non-production data: the controlled process (SPEC-22-09, closes R-22.4)
+
+The staging contract above says the staging database is "restored from a
+sanitised dump or seeded fresh". This section is that sentence made
+concrete, because *how a non-production environment gets data* is a privacy
+decision, not a convenience one, and "just copy the prod database to my
+laptop" is the failure this closes.
+
+Companion register: `backend/docs/retention.md` says which fields are
+personal, why each is collected and how long it lives. This section says who
+may hold a copy of them outside production.
+
+### The rule
+
+1. **Production customer data stays in production.** No production order,
+   address, phone, email, username, MFA secret, audit payload or gateway
+   identifier is copied to a laptop, a staging host, a CI job, a shared drive
+   or a ticket.
+2. **There is no ad-hoc production dump for a developer machine.** A dump is
+   for *restore* (`docs/runbook-incident-recovery.md` §3a) and
+   `manage.py restore_drill` refuses unsafe targets - that refusal protects a
+   restore from landing on a live database, and it is **not** a licence to
+   make a second copy somewhere new. `manage.py backup_db` exists for the
+   restore path and for nothing else.
+3. **A non-production environment that needs realistic-looking rows gets
+   synthetic rows** (next subsection). If something can only be reproduced
+   against real data, that is a request for the approved exception path below,
+   not an ad-hoc dump.
+
+### Default path: synthetic data
+
+This project's realistic dataset already exists and it is synthetic: the
+committed factories in `backend/common/testing.py` (`make_product`,
+`make_coupon`, `make_user`, `make_staff`) are what the suite exercises every
+list, detail, checkout, admin and health surface against. Anything a
+developer needs locally that those factories do not already express is a
+**shape** requirement - volume, key distribution, pagination depth, stock
+out-of-stock edges - and shape is what synthetic data is for.
+
+Recipe (no new code, synthetic values only, safe to run repeatedly):
+
+```bash
+venv\Scripts\python manage.py shell
+```
+
+```python
+from decimal import Decimal
+from django.contrib.auth.models import User
+from orders.models import Coupon
+from products.models import products
+
+# A synthetic catalogue. Invented names/prices; `category` is a CharField.
+for i, (name, price) in enumerate(
+    [("Rose Aurum", "1499.00"), ("Amber Nocturne", "1899.50"), ("Cedre Blanc", "1299.00")]
+):
+    products.objects.get_or_create(
+        slug=f"sample-{i}",
+        defaults=dict(
+            name=name,
+            description="Synthetic demo row (SPEC-22-09). No customer data.",
+            price=Decimal(price),
+            size=50,
+            stock=25,
+            category="Floral",
+        ),
+    )
+
+# A live coupon, so the discount path is exercisable end to end.
+Coupon.objects.get_or_create(
+    code="DEMO10",
+    defaults=dict(
+        discount_type="percentage",
+        discount_value="10",
+        minimum_order_amount="0",
+        maximum_discount=Decimal("500.00"),
+        active=True,
+        usage_limit=100,
+    ),
+)
+
+# A demo account with NO usable password: it cannot authenticate until the
+# developer sets one locally (`manage.py changepassword demo-buyer`), so no
+# shared credential exists to leak. The address is on a reserved
+# documentation domain, so mail to it can never reach a person.
+User.objects.get_or_create(
+    username="demo-buyer",
+    defaults={"email": "demo-buyer@example.com"},
+)
+```
+
+Rules that make this the safe default rather than a convenient one:
+
+- **Addresses live on reserved documentation domains** - `example.com`,
+  `example.net`, `example.org`, `example.invalid` (RFC 2606). That keeps
+  synthetic rows out of real inboxes and out of the operator allowlist that
+  `manage.py email_send_probe` (below) sends to.
+- **Invented names, addresses and phone numbers only.** A synthetic row that
+  accidentally carries a real person's details is a production-data copy, and
+  it is indistinguishable from one once it is in a dump.
+- **No production media.** Product images come from a placeholder file; a
+  customer's uploaded photo is personal data too and lives on the
+  `media_data` volume, not in your checkout.
+- **CI needs no data step at all**: `.github/workflows/backend-tests.yml` runs
+  the suite against the database the test runner creates, and the factories
+  fill it. Never add a step that loads data into CI.
+- **Staging is seeded fresh** from this recipe (or an approved artefact,
+  below). Staging's own `DATABASE_URL` and secret key keep it a separate
+  environment (SPEC-22-03 [R-22.3]) - a seeded staging database still never
+  contains a production row.
+
+The production catalogue seed is **SPEC-14-1's** (section 14,
+"Recommended backend project structure") and is owned there, not here: this
+section does not build it and does not describe its contents. What it does
+say is the boundary - a seed builds the *catalogue*, and the catalogue is
+never a vehicle for customer rows.
+
+### Exception path: an approved anonymised or derived dataset
+
+Sometimes synthetic data genuinely cannot express the thing being worked on
+(a specific unicode/locale mix, a specific legacy value shape). Then the
+answer is an **approved, sanitised artefact**, not a dump:
+
+| Rule | Why |
+|---|---|
+| Written approval from the privacy owner **and** the deployment owner, recorded before any production row is read (who, when, purpose, which fields, which environment, who holds the artefact) | a data copy without a named owner and an end date is how personal data goes missing |
+| The transformation runs **inside the production perimeter** (the deploy host or a controlled copy there); the raw dump never leaves it, and the artefact is the sanitised output only | a sanitiser on a laptop has already copied the raw data |
+| Every field in the `retention.md` register is dropped or replaced, by **data class**, not by a hand-picked column list: `User.email`, `User.username`, `Order.full_name` / `.phone` / `.address` / `.city` / `.state` / `.pincode` / guest `.email`, `TOTPDevice.secret` (MFA secrets never leave, transformed or not), `AuditEvent.detail` (it carries usernames - [R-17.32]) | a field-level mapping that misses one column ships a customer's name |
+| **Free text is the trap**: `products.description`, order notes, `StockMovement.note`, admin `LogEntry` messages and any string inside `AuditEvent.detail` can hold a human-typed name, so the artefact is **reviewed by a human** before it is loaded anywhere | redaction rules over structured columns cannot see a name typed into a text area |
+| Keep shape, drop values: volumes, key distributions, index selectivity and pagination depth survive sanitisation, which is what a non-prod environment is for | the point of the artefact is realism of *behaviour*, not of *people* |
+| The artefact is named with its approval, loaded into a throwaway database, and deleted when the work ends - never committed, never uploaded to a shared drive, never attached to a ticket | it is still personal data until proven otherwise |
+| If it reaches a developer machine, that machine is a production-data machine: full-disk encryption, no cloud sync, no backup, and it is wiped at the end | the copy outlives the ticket that justified it otherwise |
+| The decision and the artefact's fate are recorded in `retention.md`'s register and in `docs/changes.md` | an unrecorded copy is an unmanageable copy |
+
+### Why the answer is not "just dump production"
+
+The failure modes, in the order they actually bite:
+
+- **It is a second, unmanaged store of personal data.** It inherits none of
+  the retention, access-control or deletion machinery that
+  `backend/docs/retention.md` describes, so it is precisely what that
+  register exists to prevent.
+- **Erasure stops being complete.** A deletion request processed in
+  production leaves the copy intact, and nobody knows who holds it - the right
+  is only honoured if every copy is known.
+- **Laptops multiply it.** The dump lands in a cloud-sync folder, in the
+  laptop's own backups, and in a screenshot pasted into a chat thread.
+- **It scales the wrong way.** Every developer who asks gets a copy, so the
+  count of uncontrolled stores grows with headcount while the register
+  documents none of them.
+- **It is the wrong default to teach.** The safe answer has to be the short
+  one, which is why synthetic data is the default and this is the exception.
+
+### Self-check before any dataset leaves your machine
+
+```python
+# 1. every account address is on a reserved documentation domain
+from django.contrib.auth.models import User
+list(User.objects.exclude(email__endswith="@example.com").values_list("email", flat=True))  # must be []
+
+# 2. eyeball the first rows: every value must be obviously invented
+from orders.models import Order
+list(Order.objects.values_list("full_name", "city", "phone", flat=True)[:10])  # synthetic only
+```
+
+Both empty/obviously-invented means the dataset is clean. A non-empty result
+in a non-production environment means real customer data is present: delete
+the database, and if the rows came from anywhere but a test fixture, treat it
+as the disclosure it is and follow `docs/runbook-incident-recovery.md` §5.
+
 ## Transport hardening in the deploy artifact (SPEC-22-08, closes V-06)
 
 SPEC-17-07 shipped the flags; SPEC-22-08 turns them on. `docker-compose.yml`
