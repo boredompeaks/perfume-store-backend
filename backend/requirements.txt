@@ -14,6 +14,12 @@ razorpay==2.0.1
 # crashes the moment prod takes its first query. [binary] ships prebuilt
 # libpq wheels (no compiler needed in the image).
 psycopg[binary]==3.3.6
+# SPEC-22-04 [R-22.13]: error tracking, imported ONLY when SENTRY_DSN is set
+# (config/settings.py _init_error_tracking). Without a DSN the package is
+# never imported, so the app boots and behaves exactly as it did before it
+# was added - which is also why the test suite never needs it: the SDK init
+# is stubbed. Official SDK, pinned like everything else here.
+sentry-sdk==2.71.0
 # WSGI server for config.wsgi (the Dockerfile CMD); Django's dev server is
 # not a production server.
 gunicorn==26.2.0

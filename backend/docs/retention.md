@@ -111,6 +111,34 @@ that a deletion right exists and is documented; both hold:
   processing queue, and the data-export half of the access right. This
   document is the field register that workflow must operate against.
 
+## Copies outside production (SPEC-22-09, R-22.4)
+
+This register governs **what may ever be copied** out of production; the
+procedure that says how a developer or a staging host obtains a realistic
+dataset lives in `deploy-runbook.md` ("Non-production data: the controlled
+process"). The two halves of that rule, restated here so neither is read
+without the other:
+
+- The default is **synthetic data** - this project's own committed test
+  factories (`backend/common/testing.py`), on reserved documentation
+  addresses. No production customer row is copied to a laptop, a staging
+  host, a CI job or a shared drive, and **no ad-hoc production dump is ever
+  taken for a developer machine**.
+- An **anonymised/derived** dataset is an exception, not a shortcut: it needs
+  recorded approval, runs inside the production perimeter, is sanitised by the
+  data classes in the register above (every `AuditEvent.detail` payload and
+  every free-text field included, since a name typed into a description is
+  still personal data), is human-reviewed before use, and is deleted when the
+  work ends.
+
+Why the register has to say this at all: a copy made outside production
+carries none of the retention or erasure machinery described above, so an
+erasure request honoured in production is not honoured in that copy - and a
+copy nobody recorded is a copy nobody can delete. `manage.py backup_db` and
+`manage.py restore_drill` exist for the restore path only
+(`deploy-runbook.md`, "Backups"); `restore_drill`'s refusal of unsafe
+restore targets is a restore guard, not permission to duplicate a dump.
+
 ## Log-hygiene decision: usernames in the audit mirror logger (R-17.32)
 
 **Decision: RETAIN the username in AuditEvent rows and the `common.audit`

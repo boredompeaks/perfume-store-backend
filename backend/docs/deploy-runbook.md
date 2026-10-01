@@ -115,6 +115,413 @@ keys is still refused by name. So neither file can drift back into an
 unbuildable image or a crash-looping container without a red test, and the
 production guard cannot be quietly weakened from the deployment side.
 
+## Non-production data: the controlled process (SPEC-22-09, closes R-22.4)
+
+The staging contract above says the staging database is "restored from a
+sanitised dump or seeded fresh". This section is that sentence made
+concrete, because *how a non-production environment gets data* is a privacy
+decision, not a convenience one, and "just copy the prod database to my
+laptop" is the failure this closes.
+
+Companion register: `backend/docs/retention.md` says which fields are
+personal, why each is collected and how long it lives. This section says who
+may hold a copy of them outside production.
+
+### The rule
+
+1. **Production customer data stays in production.** No production order,
+   address, phone, email, username, MFA secret, audit payload or gateway
+   identifier is copied to a laptop, a staging host, a CI job, a shared drive
+   or a ticket.
+2. **There is no ad-hoc production dump for a developer machine.** A dump is
+   for *restore* (`docs/runbook-incident-recovery.md` §3a) and
+   `manage.py restore_drill` refuses unsafe targets - that refusal protects a
+   restore from landing on a live database, and it is **not** a licence to
+   make a second copy somewhere new. `manage.py backup_db` exists for the
+   restore path and for nothing else.
+3. **A non-production environment that needs realistic-looking rows gets
+   synthetic rows** (next subsection). If something can only be reproduced
+   against real data, that is a request for the approved exception path below,
+   not an ad-hoc dump.
+
+### Default path: synthetic data
+
+This project's realistic dataset already exists and it is synthetic: the
+committed factories in `backend/common/testing.py` (`make_product`,
+`make_coupon`, `make_user`, `make_staff`) are what the suite exercises every
+list, detail, checkout, admin and health surface against. Anything a
+developer needs locally that those factories do not already express is a
+**shape** requirement - volume, key distribution, pagination depth, stock
+out-of-stock edges - and shape is what synthetic data is for.
+
+Recipe (no new code, synthetic values only, safe to run repeatedly):
+
+```bash
+venv\Scripts\python manage.py shell
+```
+
+```python
+from decimal import Decimal
+from django.contrib.auth.models import User
+from orders.models import Coupon
+from products.models import products
+
+# A synthetic catalogue. Invented names/prices; `category` is a CharField.
+for i, (name, price) in enumerate(
+    [("Rose Aurum", "1499.00"), ("Amber Nocturne", "1899.50"), ("Cedre Blanc", "1299.00")]
+):
+    products.objects.get_or_create(
+        slug=f"sample-{i}",
+        defaults=dict(
+            name=name,
+            description="Synthetic demo row (SPEC-22-09). No customer data.",
+            price=Decimal(price),
+            size=50,
+            stock=25,
+            category="Floral",
+        ),
+    )
+
+# A live coupon, so the discount path is exercisable end to end.
+Coupon.objects.get_or_create(
+    code="DEMO10",
+    defaults=dict(
+        discount_type="percentage",
+        discount_value="10",
+        minimum_order_amount="0",
+        maximum_discount=Decimal("500.00"),
+        active=True,
+        usage_limit=100,
+    ),
+)
+
+# A demo account with NO usable password: it cannot authenticate until the
+# developer sets one locally (`manage.py changepassword demo-buyer`), so no
+# shared credential exists to leak. The address is on a reserved
+# documentation domain, so mail to it can never reach a person.
+User.objects.get_or_create(
+    username="demo-buyer",
+    defaults={"email": "demo-buyer@example.com"},
+)
+```
+
+Rules that make this the safe default rather than a convenient one:
+
+- **Addresses live on reserved documentation domains** - `example.com`,
+  `example.net`, `example.org`, `example.invalid` (RFC 2606). That keeps
+  synthetic rows out of real inboxes and out of the operator allowlist that
+  `manage.py email_send_probe` (below) sends to.
+- **Invented names, addresses and phone numbers only.** A synthetic row that
+  accidentally carries a real person's details is a production-data copy, and
+  it is indistinguishable from one once it is in a dump.
+- **No production media.** Product images come from a placeholder file; a
+  customer's uploaded photo is personal data too and lives on the
+  `media_data` volume, not in your checkout.
+- **CI needs no data step at all**: `.github/workflows/backend-tests.yml` runs
+  the suite against the database the test runner creates, and the factories
+  fill it. Never add a step that loads data into CI.
+- **Staging is seeded fresh** from this recipe (or an approved artefact,
+  below). Staging's own `DATABASE_URL` and secret key keep it a separate
+  environment (SPEC-22-03 [R-22.3]) - a seeded staging database still never
+  contains a production row.
+
+The production catalogue seed is **SPEC-14-1's** (section 14,
+"Recommended backend project structure") and is owned there, not here: this
+section does not build it and does not describe its contents. What it does
+say is the boundary - a seed builds the *catalogue*, and the catalogue is
+never a vehicle for customer rows.
+
+### Exception path: an approved anonymised or derived dataset
+
+Sometimes synthetic data genuinely cannot express the thing being worked on
+(a specific unicode/locale mix, a specific legacy value shape). Then the
+answer is an **approved, sanitised artefact**, not a dump:
+
+| Rule | Why |
+|---|---|
+| Written approval from the privacy owner **and** the deployment owner, recorded before any production row is read (who, when, purpose, which fields, which environment, who holds the artefact) | a data copy without a named owner and an end date is how personal data goes missing |
+| The transformation runs **inside the production perimeter** (the deploy host or a controlled copy there); the raw dump never leaves it, and the artefact is the sanitised output only | a sanitiser on a laptop has already copied the raw data |
+| Every field in the `retention.md` register is dropped or replaced, by **data class**, not by a hand-picked column list: `User.email`, `User.username`, `Order.full_name` / `.phone` / `.address` / `.city` / `.state` / `.pincode` / guest `.email`, `TOTPDevice.secret` (MFA secrets never leave, transformed or not), `AuditEvent.detail` (it carries usernames - [R-17.32]) | a field-level mapping that misses one column ships a customer's name |
+| **Free text is the trap**: `products.description`, order notes, `StockMovement.note`, admin `LogEntry` messages and any string inside `AuditEvent.detail` can hold a human-typed name, so the artefact is **reviewed by a human** before it is loaded anywhere | redaction rules over structured columns cannot see a name typed into a text area |
+| Keep shape, drop values: volumes, key distributions, index selectivity and pagination depth survive sanitisation, which is what a non-prod environment is for | the point of the artefact is realism of *behaviour*, not of *people* |
+| The artefact is named with its approval, loaded into a throwaway database, and deleted when the work ends - never committed, never uploaded to a shared drive, never attached to a ticket | it is still personal data until proven otherwise |
+| If it reaches a developer machine, that machine is a production-data machine: full-disk encryption, no cloud sync, no backup, and it is wiped at the end | the copy outlives the ticket that justified it otherwise |
+| The decision and the artefact's fate are recorded in `retention.md`'s register and in `docs/changes.md` | an unrecorded copy is an unmanageable copy |
+
+### Why the answer is not "just dump production"
+
+The failure modes, in the order they actually bite:
+
+- **It is a second, unmanaged store of personal data.** It inherits none of
+  the retention, access-control or deletion machinery that
+  `backend/docs/retention.md` describes, so it is precisely what that
+  register exists to prevent.
+- **Erasure stops being complete.** A deletion request processed in
+  production leaves the copy intact, and nobody knows who holds it - the right
+  is only honoured if every copy is known.
+- **Laptops multiply it.** The dump lands in a cloud-sync folder, in the
+  laptop's own backups, and in a screenshot pasted into a chat thread.
+- **It scales the wrong way.** Every developer who asks gets a copy, so the
+  count of uncontrolled stores grows with headcount while the register
+  documents none of them.
+- **It is the wrong default to teach.** The safe answer has to be the short
+  one, which is why synthetic data is the default and this is the exception.
+
+### Self-check before any dataset leaves your machine
+
+```python
+# 1. every account address is on a reserved documentation domain
+from django.contrib.auth.models import User
+list(User.objects.exclude(email__endswith="@example.com").values_list("email", flat=True))  # must be []
+
+# 2. eyeball the first rows: every value must be obviously invented
+from orders.models import Order
+list(Order.objects.values_list("full_name", "city", "phone", flat=True)[:10])  # synthetic only
+```
+
+Both empty/obviously-invented means the dataset is clean. A non-empty result
+in a non-production environment means real customer data is present: delete
+the database, and if the rows came from anywhere but a test fixture, treat it
+as the disclosure it is and follow `docs/runbook-incident-recovery.md` §5.
+
+## Transport hardening in the deploy artifact (SPEC-22-08, closes V-06)
+
+SPEC-17-07 shipped the flags; SPEC-22-08 turns them on. `docker-compose.yml`
+sets them, so a compose deployment is hardened with nothing to remember:
+
+| Key | compose default | Effect |
+| --- | --- | --- |
+| `SECURE_SSL_REDIRECT` | `true` | plain-HTTP requests get a 301 to HTTPS |
+| `SECURE_HSTS_SECONDS` | `31536000` | browsers refuse plain HTTP for a year |
+| `SECURE_HSTS_INCLUDE_SUBDOMAINS` | `false` | **operator opt-in** - see below |
+| `SECURE_HSTS_PRELOAD` | `false` | **operator opt-in** - see below |
+| `SECURE_PROXY_SSL_HEADER_NAME` | `HTTP_X_FORWARDED_PROTO` | the trusted forwarded-scheme header |
+| `SECURE_PROXY_SSL_HEADER_VALUE` | `https` | its value |
+
+**The header name is the WSGI environ name, not the wire header.** Django
+reads `request.META[SECURE_PROXY_SSL_HEADER_NAME]`, and gunicorn maps the wire
+header `X-Forwarded-Proto` to `HTTP_X_FORWARDED_PROTO`. Setting
+`X-Forwarded-Proto` would silently never match: every proxied request would
+look like plain HTTP and be redirected to HTTPS, forever. Your front door must
+actually send the header on every request and overwrite any client-supplied
+copy - nginx:
+
+```nginx
+location / {
+    proxy_pass http://127.0.0.1:8000;
+    proxy_set_header Host              $host;
+    proxy_set_header X-Forwarded-Proto $scheme;   # required: the SSL redirect
+    proxy_set_header X-Forwarded-For   $proxy_add_x_forwarded_for;
+}
+```
+
+A client-supplied `X-Forwarded-Proto` must never survive to Django. If your
+proxy appends rather than overwrites, strip the inbound header first; a
+forgeable pair lets a client claim HTTPS over a plain connection and bypass
+the redirect.
+
+**Plain-HTTP local run.** `docker compose up` over `http://localhost` has no
+TLS terminator, so put these two in the repo-root `.env` for local work (both
+are pass-throughs - nothing else needs editing):
+
+```bash
+SECURE_SSL_REDIRECT=false
+SECURE_HSTS_SECONDS=0
+```
+
+Leaving them on locally is the failure mode worth knowing: the redirect sends
+the browser to an `https://` nothing serves, and HSTS makes the browser refuse
+plain HTTP for a year - a localhost lockout you cannot undo from the browser.
+
+**`includeSubDomains` and `preload` are deliberately not defaults.**
+`includeSubDomains` breaks every plain-HTTP subdomain (including ones outside
+this app's control), and the HSTS preload list is effectively irreversible -
+removal takes months. Turn them on only once every host in the tree is HTTPS
+for real, and treat preload as a one-way door. Coordinate with
+`CSRF_TRUSTED_ORIGINS` and `CORS_ALLOWED_ORIGINS`, which must list the
+deployed `https://` storefront origin.
+
+`SESSION_COOKIE_SECURE` / `CSRF_COOKIE_SECURE` need no configuration: they
+already default to secure whenever `DJANGO_DEBUG=false`.
+
+Both halves are pinned: `TlsHardeningDeployContractTests` reads the defaults
+out of the committed compose file, boots the app with them, and asserts that
+`DJANGO_DEBUG=true` with no hardening keys keeps the development-safe
+defaults - so the deploy layer can be hardened without the settings defaults
+(and therefore local development and the test suite) moving.
+
+## Error tracking and uptime (SPEC-22-04, R-22.13 / R-22.12)
+
+### Error tracking (SPEC-22-04, R-22.13)
+
+Optional end to end. **Without a DSN the SDK is never imported**, nothing is
+initialised and nothing leaves the process; the app, the test suite and CI are
+exactly as they were before this existed. With one set:
+
+| Key | Default | Meaning |
+| --- | --- | --- |
+| `SENTRY_DSN` | unset | the project ingest DSN; unset = off |
+| `SENTRY_ENVIRONMENT` | `DJANGO_ENV` | so staging errors are never filed as production |
+| `SENTRY_SAMPLE_RATE` | `1.0` | fraction of error events kept |
+| `SENTRY_TRACES_SAMPLE_RATE` | `0.0` | performance tracing; nothing instruments transactions, so leave it at 0 |
+
+Unparseable values fall back to the documented default with a warning (a typo
+in an env file cannot take the app down), and a DSN set on a host whose image
+predates the `sentry-sdk` pin degrades to a named warning rather than refusing
+the boot.
+
+What gets reported: unhandled exceptions, plus the `django.request` 5xx
+records the app **already** logs - SPEC-7-02 pins that channel at ERROR, and a
+`LoggingIntegration` at `event_level=ERROR` is what turns those records into
+events. So there is no second reporting path to keep in sync. PII is off:
+request bodies, cookies, headers and identifiers stay in the process unless an
+operator deliberately enables them.
+
+The DSN carries a public ingest key: it is configuration, but still
+environment-only - repo-root `.env` / your platform's secret store, never the
+repository. It is the one string in this section a scanner may flag; it belongs
+in `.env`, and the committed `.env.example` shows it commented out.
+
+### Uptime: `/health/` and the container healthcheck (SPEC-22-04, R-22.12)
+
+`/health/` is public, cheap, and answers **503** while the database is
+unreachable or the media mount is unwritable. Three things consume it:
+
+1. **The image's own `HEALTHCHECK`** (`backend/Dockerfile`): a loopback probe
+   of `/health/` on `$PORT`. A 200 exits 0; anything else - including the
+   degraded 503 - exits non-zero, so a broken storefront is `unhealthy` rather
+   than merely "running".
+2. **The compose healthcheck** (`docker-compose.yml`), with its own timings.
+   Both probes identify themselves the way a real request does: `Host` is the
+   first entry of `DJANGO_ALLOWED_HOSTS` (an unlisted host is a 400) and
+   `X-Forwarded-Proto: https` is the trusted scheme header (so the SSL redirect
+   above does not bounce the probe to an `https://` the container does not
+   serve). Both are read from the app's own env, so they cannot drift from it.
+3. **An external uptime monitor.** Register it against the public
+   `https://<host>/health/` and treat **any non-200 as down** - a 503 is a real
+   degradation signal, not a monitoring hiccup. Poll no faster than once a
+   minute: the endpoint counts orders and carts on every call. Point it at the
+   public URL through the TLS front door, not at `127.0.0.1` inside the
+   container, or it measures nothing an outage would break.
+
+Which monitor is a deployment fact and stays out of this repository - no
+vendor token, DSN or account id belongs in a runbook. Create the check in
+whichever service you already run, keep its credential in your secret store,
+and record here only the contract above: URL, expected status, what a 503
+means, poll interval.
+
+If you terminate TLS somewhere other than a reverse proxy (a CDN, a managed
+ingress), the same rule applies: whatever sends requests to this container must
+set the forwarded-scheme header for every request, and the container's own
+`8000` port must not be exposed to the internet - a direct connection would
+bypass the front door and the HSTS redirect entirely.
+
+## Email delivery verification (SPEC-22-10, closes R-22.18)
+
+### What `/health/` proves, and what it cannot
+
+`/health/`'s `smtp_configured` check is a **configuration** check: it is true
+when `EMAIL_HOST_USER` and `EMAIL_HOST_PASSWORD` are non-empty
+(`ops/services.py`, `get_health`). It cannot tell you the difference between
+
+- the app can *attempt* a send,
+- the server *accepted* the message, and
+- the message *arrived* in an inbox,
+
+and it is blind to the two failures that hurt customers: a **wrong password
+(accepted at boot, `535` at send time)** and **spam-folder delivery** (the send
+succeeds and the mail is silently filed). Delivery is the provider's and the
+receiver's business, so it is verified from the **receiving** end - by a human
+confirming that one message actually arrived. That is what this section is
+for.
+
+### The probe: `manage.py email_send_probe`
+
+```bash
+# 1. the plan, and the default: NOTHING is sent
+docker compose run --rm -T backend python manage.py email_send_probe
+
+# 2. deliver one probe to every allowlisted operator mailbox
+docker compose run --rm -T backend python manage.py email_send_probe --send
+
+# 3. or to one of them (must already be allowlisted)
+docker compose run --rm -T backend python manage.py email_send_probe --send \
+    --recipient ops@your-domain.example
+```
+
+Run it with the deployment's own environment (inside the compose project, or
+over the same `ssh` the release script uses), because the probe reports and
+uses exactly the `EMAIL_*` configuration the deployed container runs with. It
+goes through `common.notifications.send_email` (SPEC-19-1's single send path),
+so the sender address and the backend are the app's real ones - a probe on a
+private code path could pass while the app's own mail failed.
+
+Gates, all of which refuse by name rather than guess:
+
+| Gate | Behaviour | Why it is structural |
+|---|---|---|
+| **Allowlisted recipients only** | the recipient must be in `settings.ALERT_RECIPIENTS` - your own staff mailboxes, which already receive every admin alert. Empty allowlist = refused. `--recipient` naming anything else = refused, naming nothing = every allowlisted entry | the probe cannot be aimed at a customer, and it never reads a `User.email`, so it cannot leak another person's address because it never looks at one |
+| **Dry run by default** | nothing is sent without `--send` | the safe answer to "what would this do?" is the answer you get |
+| **A backend that never speaks SMTP is refused** | `console`, `locmem` and `dummy` backends accept the message and report success | probing one would report a delivery that never happened - and it is why the test suite, which runs on `locmem`, can never send real mail through this command |
+| **Deployment facts only** | the body carries environment, server, sender and timestamp; no order, no username, no product data | the probe is filed in mailboxes that may be forwarded |
+| **A refused delivery is loud** | an SMTP rejection exits non-zero with the server's own status text (`535` auth, `550` relay denied, connection refused) and never echoes the credential | an accepted-looking probe that quietly failed is the failure this replaces |
+
+### The operator procedure
+
+1. **Dry run.** Read the plan: the environment name, the backend, the server,
+   the sender address and the recipients. Two things are worth catching here
+   before any mail leaves: a sender address on the *wrong* domain (see
+   alignment below) and a recipient list that is empty or stale.
+2. **Send**, then **confirm on the receiving end**: inbox *and* spam folder. A
+   probe that is "sent" and never seen is a failure, not a slow mail server.
+3. **Keep the receipt.** In the recipient's mail client, "show original" /
+   "view source" and keep the `Authentication-Results` header (below) with the
+   deploy log entry. That header is the evidence; the command's own output is
+   only the claim that the server accepted the message.
+4. **When to run it:** after any SMTP credential change (the SMTP step in
+   "Secret rotation" above), after a DNS or mail-provider change, after a
+   restore to a new host (the new host's outbound IP is not in SPF until it
+   is), and whenever a customer reports an email that never arrived
+   (`docs/runbook-incident-recovery.md` §1, "Order exists but customer says
+   they never got it" is the order-side twin of this).
+
+### Reading the receipt: the three headers that matter
+
+| Header | Good | What a failure means |
+|---|---|---|
+| `Authentication-Results` - `spf=pass` | the sending host is authorized for the envelope sender's domain | the provider's SPF record is missing, or the sending host is not in it, or the record exceeds 10 DNS lookups (which makes SPF fail with `permerror`) |
+| `Authentication-Results` - `dkim=pass` | the message was cryptographically signed and the public key is published | signing is off at the provider, or the selector's `_domainkey` TXT record is unpublished/rotated away. Note a *forwarded* copy legitimately fails this - it is not evidence about the original send |
+| `Authentication-Results` - `dmarc=pass` | an authenticated (SPF or DKIM) identifier **aligned** with the visible `From` domain | neither SPF nor DKIM aligned with the `From:` domain, so the provider applies its DMARC policy (usually quarantine or reject) |
+| `Return-Path` vs `From` | same domain, or the provider's aligned bounce domain | **the single most common cause of spam-folder delivery**: `DEFAULT_FROM_EMAIL` on a domain the SPF/DKIM records do not authorize. `DEFAULT_FROM_EMAIL` defaults to `EMAIL_HOST_USER` (`config/settings.py`), so the mailbox you send from must live on the sending domain |
+
+### SPF, DKIM and DMARC for the sending domain
+
+This application does **not** sign its mail itself: there is no DKIM library in
+`backend/requirements.txt`, and signing is the provider's job. What this
+repository owes is the configuration contract, and `DEFAULT_FROM_EMAIL` /
+`EMAIL_HOST_USER` landing on the sending domain.
+
+| Record | What to publish | Rules that matter |
+|---|---|---|
+| **SPF** (TXT on the sending domain, or its mail subdomain) | `v=spf1 include:<your provider's selector> -all` | the selector is a **provider fact** - copy it from the provider's dashboard, never invent it. `-all` (hard fail), never `+all`: `+all` authorizes the whole internet to mail as your domain. Keep the record under the **10-DNS-lookup limit** (`include:` costs lookups; flatten when you approach it). One SPF record per domain - a second one is a permanent error |
+| **DKIM** | enable signing at the provider; publish its `_domainkey.<selector>` TXT record (2048-bit RSA) in DNS | the selector must be in the SPF record too if the provider relies on SPF alignment. Rotate the key when you decommission a provider, and delete the old `_domainkey` TXT record with it, or a leaked signing key stays usable |
+| **DMARC** | `_dmarc.<domain>` TXT, published in **three stages**: `v=DMARC1; p=none; rua=mailto:<dmarc-reports-address>` -> read the aggregate reports for a full reporting cycle -> `p=quarantine; pct=...` -> `p=reject` | start at `p=none`: jumping straight to `p=reject` with misaligned `From` silently breaks every transactional mail this store sends. Review the aggregate reports monthly; they are the only source that says who is failing alignment and why. Keep the DMARC domain aligned with whatever `DEFAULT_FROM_EMAIL` is |
+| **Sending host hygiene** | PTR/reverse DNS matching the hostname, submission on 587 with STARTTLS (`EMAIL_USE_TLS=true`), never unauthenticated port 25 | a sending host with no matching PTR is unrouteable-looking to most receivers, which is the spam folder by another route |
+| **No marketing envelope** | n/a | this store sends **transactional mail only** - there is no marketing surface (`retention.md`), so no consent/unsubscribe machinery applies. The SPF/DKIM/DMARC discipline above still does: bulk-sender rules are not the reason to get it right, deliverability of password resets is |
+
+### When mail lands in spam: symptom -> cause -> fix
+
+| Symptom | Likely cause | Fix |
+|---|---|---|
+| `spf=pass dkim=pass dmarc=fail` | the visible `From` domain is not the authenticated one | point `DEFAULT_FROM_EMAIL` / `EMAIL_HOST_USER` at the domain the provider signs, or publish records for the domain actually used in `From` |
+| `spf=fail` (or `permerror`) | the sending host is not in the SPF record, or the record exceeds 10 lookups | fix the provider's record; flatten `include:` chains |
+| `dkim=none` | signing is off at the provider | enable it; until then SPF alignment alone must carry DMARC |
+| `dkim=fail` on a *forwarded* copy | forwarding breaks the signature; it is not evidence about the original send | check the original in the sending mailbox, not the forwarded copy |
+| `550 relay denied` / `535` at send time | the account may not be permitted to send for that domain, or the password/app-password was rotated (SMTP step in "Secret rotation") | re-check `EMAIL_HOST_USER` / `EMAIL_HOST_PASSWORD` at the provider, then re-probe. A stale password still shows `smtp_configured: true` on `/health/` - this is exactly the case the probe exists for |
+| Delivered to junk at one provider only | reputation of that provider's shared sending IP | use a dedicated sending subdomain or a dedicated provider; do not "fix" it with the app |
+| Nothing arrives and **no bounce** | the envelope sender (`Return-Path`) is not a monitored mailbox, or the bounce was discarded upstream | make `Return-Path` a mailbox somebody reads, and watch it: an SMTP acceptance is not a delivery |
+| Bounces arrive | invalid or unreachable addresses | this store has **no bounce-processing code** - handle bounces as an operator task on the provider's suppression list. Never set the envelope sender to a customer's address; it is a data-protection problem, not just a deliverability one |
+
 ## Backups (SPEC-22-02, closes R-22.9)
 
 `manage.py backup_db` takes the backup and applies the retention policy in the
@@ -330,3 +737,228 @@ migration traceback), and one real checkout path still works. If the release
 also touched **data**, the rollback is not finished until
 `docs/runbook-incident-recovery.md` §4 passes - money, stock and coupon
 counters reconciled against the gateway.
+
+## WAF ruleset for the front door (SPEC-22-06, R-22.16)
+
+The WAF lives in the reverse proxy in front of gunicorn, not in this
+application. The division of labour, and the reason the two do not fight:
+
+| Layer | Owns | Knows about |
+| --- | --- | --- |
+| WAF / proxy | connection floods, protocol abuse, known-bad payloads, request-size and method abuse, bot scans of `/admin` | IP, connection rate, bytes, raw bytes |
+| This app | per-account and per-scope abuse | DRF throttle scopes, `request.user`, session, JWT, cart identity |
+
+**The WAF must NOT duplicate the app-layer throttles.** DRF's `ScopedRateThrottle`
+already budgets the sensitive public endpoints per identity, and it is the layer
+that can distinguish one account hammering login from one IP behind a shared
+NAT - which a proxy cannot. A proxy rate limit is per-IP, so a tight one
+locks out an entire office, a school, or a mobile carrier's CGNAT range; and
+`THROTTLE_RECOVERY_RATE` is already tighter than the generic auth budget
+because each accepted request sends an email. So the proxy limits are
+**deliberately looser** than the strictest app budget and exist only to stop
+volumetric floods before they cost a worker:
+
+- `limit_req_zone` at the edge, ~**60 req/min per IP** with a small burst -
+  comfortably above `THROTTLE_COUPON_RATE` (10/min) and far below a
+  volumetric flood. If you set it near the app budgets you will 429 real
+  customers whose app-layer budget would have been per-account and generous.
+- `limit_conn` per IP (e.g. 20) to cap keep-alive abuse, not per account.
+- Connection and request-body ceilings, which the app cannot enforce before
+  reading: `client_max_body_size` should match or slightly exceed
+  `MAX_UPLOAD_MB` (`backend/.env.example`) so the proxy does not reject a
+  product image the app would have accepted.
+
+The proxy is also the right place for the rules the app must never see:
+
+- **Method allow-listing** per location: the API is `GET/POST/PATCH/DELETE`;
+  anything else (or `TRACE`) is a `405` at the edge.
+- **Path hygiene**: deny dotfiles, `/.env`, `/.git`, `*.bak`, `*.sql`, backup
+  dumps, and the `.env`-shaped paths a scanner probes. Nothing in this
+  application serves them, and the app's own 404s are cheap enough to be a
+  free hit-list for a scanner.
+- **Payload inspection**: the OWASP ModSecurity Core Rule Set, or the
+  equivalent rules your platform already provides, in **detection-only** mode
+  first. This app's legitimate traffic includes long free-text fields (product
+  copy, addresses, order notes) that SQLi/XSS heuristics false-positive on;
+  enabling blocking mode before you have read the false positives will reject
+  real checkouts. Exclusions that are correct and not negotiable: the
+  Razorpay webhook path (signature-verified body the rules will flag), the
+  admin's rich-text product fields, and `/health/`.
+- **A challenge/deny list** for repeated `401`/`403` bursts, so credential
+  stuffing is cheap at the edge. Alert on it; that pattern is the earliest
+  signal of a targeted attack.
+
+Belt and braces, and the reason the app keeps its own gates:
+
+- **Admin**: keep `/admin/` off the public internet if you can (VPN, IP
+  allow-list, or the platform's own admin-protection feature). The app's MFA
+  door (SPEC-17-05) is the real control; the proxy restriction is only a
+  reduction in exposure.
+- **Do not cache authenticated or error responses**, and never cache
+  `/health/` at the edge - a cached 200 would hide a degraded storefront from
+  both the healthcheck and the uptime monitor.
+- **Set `X-Forwarded-Proto` on every proxied request** (see "Transport
+  hardening in the deploy artifact" above). Without it the SSL redirect
+  loops, and the container healthcheck cannot reach `/health/`.
+
+A managed WAF (CDN or platform edge) is a legitimate choice for this - it
+replaces the proxy rules above and terminates TLS - and it is a **deployment
+fact**: its account, zone id and API token belong in your secret store, never
+in this repository or in CI. Configure it, then point this runbook's
+"Transport hardening in the deploy artifact" section at what it actually
+sends, and keep
+`DJANGO_ALLOWED_HOSTS` / `CSRF_TRUSTED_ORIGINS` listing its origin.
+
+**What a WAF is not.** It is not a substitute for the app's authorization: a
+rule cannot know whether *this* order belongs to *this* session. Every
+authorization decision stays in Django, where SPEC-17-03's CSRF gate, the
+ownership scopes and the capability decorators live.
+
+## Secret rotation (SPEC-22-06, R-22.8)
+
+Where the secrets live today: the repo-root `.env` on the deploy host
+(git-ignored, chmod 600, owned by the deploying user), GitHub Actions secrets
+for CI (dummy Razorpay values only - the suite never uses live credentials),
+and each provider's own console for Razorpay / SMTP / Sentry. `.env.example`
+documents the names; no value is in the repository. The scans that protect
+this are real and already wired: `gitleaks.toml`, `.gitguardian.yml`, and
+`.github/workflows/secret-scan.yml`. **None of them rotates a secret** - they
+find a leak after the fact. Rotation is the procedure below, and it is manual
+by design.
+
+### Rotation schedule
+
+| Secret | Rotate | Why / cost of delay |
+| --- | --- | --- |
+| `DJANGO_SECRET_KEY` | **quarterly**, or on any suspicion of exposure | signs sessions and cookies; a leak is session forgery until rotated. Rotating logs everyone out (see the caveat) |
+| `RAZORPAY_KEY_SECRET` | **quarterly**, or on any staff-offboarding event | holds money-movement authority; the key id alone is not secret |
+| `POSTGRES_PASSWORD` / `DATABASE_URL` | **quarterly** | full read/write on the store, including customer data |
+| SMTP password / app password | **every 6 months** (provider policy) | outbound mail from your domain; a leak enables spoofed mail, not account access |
+| `SENTRY_DSN` | **on request from the provider**, and if a former employee's project access is revoked | an ingest DSN is a write-only public key: a leak lets an outsider submit noise, not read your errors |
+| Deploy host SSH key | **on staff offboarding**, immediately | the key that can deploy |
+| Third-party tokens (CDN, WAF, error tracker API) | on offboarding, and when a vendor's key is past its expiry | outside this repository; see each provider's policy |
+
+Quarterly means a calendar reminder with an owner, not "when someone
+remembers". Put the dates in the same place as the deploy log.
+
+### Rotating without downtime
+
+Order matters: **mint the new credential before retiring the old one**, then
+roll, then retire. Each step below is reversible until the last.
+
+**1. Database password.** Postgres has no dual-password state, so this is the
+one rotation with a genuine (short) window:
+
+```bash
+# a. change the role's password in place (existing sessions keep working)
+docker compose exec -T db psql -U "$POSTGRES_USER" -d "$POSTGRES_DB" \
+  -c "ALTER ROLE \"$POSTGRES_USER\" WITH PASSWORD '<new>';"
+
+# b. update the repo-root .env (DATABASE_URL if set, else POSTGRES_PASSWORD)
+# c. recreate the app so it connects with the new password
+./scripts/release.sh          # build -> migrate check -> migrate -> collectstatic -> restart
+
+# d. verify before touching anything else
+curl -fsS https://<host>/health/ | grep '"status": *"ok"'
+```
+
+Because `docker-compose.yml` assembles `DATABASE_URL` from the same
+`POSTGRES_*` variables the `db` service reads, the password has exactly one
+home (`.env`) and step (b) cannot drift out of sync with the database it
+names. Old connections drain as gunicorn workers recycle; `SIGTERM` on the
+restart is graceful, so in-flight requests finish. If the release script ever
+runs with a password that no longer matches, `/health/` answers **503** and
+`release.sh` fails at its `--wait` checkpoint - fail-closed, and the fix is the
+correct `.env`.
+
+**2. Razorpay.** Create the new key pair in the Razorpay dashboard **while the
+old one is live**, update `RAZORPAY_KEY_ID` / `RAZORPAY_KEY_SECRET`, run
+`./scripts/release.sh`, and verify a real checkout end to end
+(`docs/runbook-incident-recovery.md` §4 reconciles the counters). Only then
+revoke the old pair. The app reads both values from the environment and signs
+gateway requests with them, so this needs no code change and no deploy beyond
+the normal release.
+
+**3. SMTP.** Update the password/app password at the provider, put it in
+`.env`, restart the app, and verify **by delivering a probe**:
+`manage.py email_send_probe --send` against an `ALERT_RECIPIENTS` mailbox, and
+confirm it in the receiving inbox (and check its `Authentication-Results`
+header). A restart alone is not the verification: a stale credential still
+reports `smtp_configured: true` on `/health/`, and a password-reset flow would
+fail for real customers instead. See "Email delivery verification" above.
+Nothing else in the app caches the credential, so the restart is sufficient
+for the *code*, and the probe is what verifies the *delivery*.
+
+**4. Sentry DSN.** Replace the value in `.env` and restart. The SDK is
+initialised once at boot (SPEC-22-04), so a restart is the whole procedure;
+with no DSN the app is simply unmonitored, never broken.
+
+**5. SSH deploy key.** Add the new public key to the host's `authorized_keys`
+**before** removing the old one, then re-run a deploy to prove it works, then
+remove the old key. The deploy job runs **no** ssh-agent and sets no
+`core.ssh_command`: it writes the `DEPLOY_SSH_KEY` repository secret to a
+`mktemp` file under `umask 077` - with `DEPLOY_KNOWN_HOSTS` beside it (empty
+means `StrictHostKeyChecking=accept-new`), both removed by an `EXIT` trap,
+nothing echoed and no `set -x` - and calls `ssh -i "$key" -o
+IdentitiesOnly=yes`. Rotation is therefore: replace the `DEPLOY_SSH_KEY`
+secret, run one deploy to prove the new key authenticates, then delete the old
+public key from the host.
+
+### The `SECRET_KEY` caveat (read before rotating it)
+
+`DJANGO_SECRET_KEY` signs sessions, the signed cookies, and - because
+simplejwt signs with it - **every outstanding access and refresh token**.
+Rotating it is therefore a **mass logout plus a mass token invalidation**, not
+a transparent operation:
+
+- Decide the window deliberately (an announced low-traffic period). There is
+  no way to keep existing sessions across a rotation in this codebase.
+- Outstanding refresh tokens die with it. Customers are asked to sign in
+  again; carts are **guest/session-owned**, so a customer cart that was not
+  checked out is lost for that customer. Say so in advance if it matters.
+- Per-environment isolation is why this is safe to do at all: a rotation in
+  one environment does not affect the others, because each has its own key
+  (SPEC-22-03 [R-22.3]).
+- Rotate **one environment at a time**, and never rotate staging and
+  production in the same window - you want to know which one broke.
+
+### Verify a rotation actually happened
+
+A rotation nobody checked is an assumption:
+
+1. `curl -fsS https://<host>/health/` answers 200 (the app boots with the new
+   configuration).
+2. The old credential no longer authenticates - the honest test, and the only
+   one that proves anything: try the **previous** `DATABASE_URL` password and
+   the **previous** Razorpay secret against the live services and expect
+   refusal. Do this from a throwaway shell, never from a machine whose `.env`
+   has been updated.
+3. One real flow per rotated credential: a login, a checkout, a password-reset
+   email.
+4. `git log -p -- backend/.env.example docker-compose.yml Procfile scripts/` and
+   a `gitleaks detect` sweep show no value was introduced into the repository
+   while rotating.
+5. The deployment still passes its own gates: a release, a green
+   `docker compose ps` (healthy), and the uptime monitor seeing 200.
+
+**If a secret was ever committed, pushed, or pasted into a ticket:** rotate it
+first and treat it as compromised from that moment - then remove it from
+history. Rewriting history does not un-leak anything that was pushed; only
+rotation does. Order is rotation, then cleanup, then the audit trail.
+
+
+## Owner actions (recorded here, performed by the repository owner)
+
+One item in this runbook cannot be done by an agent, because every agent works
+on a feature branch and the default branch is off limits to all of them: no
+agent pushes to it, PRs against it, or edits its files. Recording it here is
+the whole deliverable - **no agent attempts the change**.
+
+| # | Owner action | Why an owner only |
+|---|---|---|
+| 1 | **Add `.gitguardian.yml` to `master`.** The file is committed on the working branches, but the `master` copy is missing it. Copy it across (`git checkout <branch> -- .gitguardian.yml` on a branch that is then reviewed and merged, or an equivalent reviewed change). | The GitGuardian App reads its configuration from the **default branch**: with the file absent from `master`, those rules are not in effect there, however many feature branches carry the file. Changing the default branch's content - and deciding that it should change - is the owner's call. |
+
+Until that merge lands, treat the GitGuardian rules as **not enforced on the
+default branch**: `gitleaks.toml` and `.github/workflows/secret-scan.yml` still
+run on every push and pull request regardless, and "Secret rotation" above
+stands on its own - none of the three scans *rotates* a secret.

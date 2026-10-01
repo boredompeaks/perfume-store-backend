@@ -27,6 +27,15 @@
 #   # knows: compose REFUSES TO START without it rather than letting the
 #   # container crash-loop on the settings import.
 #   CSRF_TRUSTED_ORIGINS=http://localhost:3000
+#   # SPEC-22-08 [R-22.6]: TLS hardening is ON in this file, with a
+#   # production default per key. A deployment behind a TLS-terminating proxy
+#   # needs none of these (the defaults are the hardened posture). A plain-HTTP
+#   # local `docker compose up` must override two of them:
+#   #   SECURE_SSL_REDIRECT=false       # otherwise http://localhost is 301'd
+#   #   SECURE_HSTS_SECONDS=0           # otherwise the browser is told to
+#   #                                  # refuse plain HTTP for a year
+#   SECURE_SSL_REDIRECT=true
+#   SECURE_HSTS_SECONDS=31536000
 #   POSTGRES_USER=perfume
 #   POSTGRES_PASSWORD=<long random string>
 #   POSTGRES_DB=perfume_store
@@ -104,6 +113,35 @@ services:
       # the container die on the settings import. Neither is a secret.
       DJANGO_ENV: "${DJANGO_ENV:-production}"
       CSRF_TRUSTED_ORIGINS: "${CSRF_TRUSTED_ORIGINS:?set CSRF_TRUSTED_ORIGINS in the repo-root .env}"
+      # SPEC-22-08 [R-22.6]: the SPEC-17-07 transport hardening, turned ON
+      # here so a deployment actually gets it. Those settings are env-gated
+      # with development-safe defaults (SECURE_SSL_REDIRECT=False,
+      # SECURE_HSTS_SECONDS=0, no trusted proxy header), and until now nothing
+      # in the deploy path set any of them - so "HTTPS is enabled" was true of
+      # no real deployment (V-06). The defaults below are the production
+      # posture and each one is a pass-through, so a deployment that serves
+      # plain HTTP (local `docker compose up` over http://localhost) sets
+      # SECURE_SSL_REDIRECT=false / SECURE_HSTS_SECONDS=0 in the repo-root
+      # .env; a TLS-fronted deployment leaves them and gets HTTPS-only.
+      #
+      # SECURE_PROXY_SSL_HEADER_NAME is the WSGI environ NAME (Django reads
+      # request.META[header], and gunicorn maps the wire header
+      # X-Forwarded-Proto to HTTP_X_FORWARDED_PROTO) - not the bare header
+      # name. Setting "X-Forwarded-Proto" here would silently never match, so
+      # every proxied request would look plain HTTP and be redirected to HTTPS
+      # forever. Only set it when a proxy in front of this container actually
+      # sets that header on every request (nginx: `proxy_set_header
+      # X-Forwarded-Proto $scheme;`).
+      SECURE_SSL_REDIRECT: "${SECURE_SSL_REDIRECT:-true}"
+      SECURE_HSTS_SECONDS: "${SECURE_HSTS_SECONDS:-31536000}"
+      # Subdomains/preload are deliberately NOT defaulted on: HSTS
+      # includeSubDomains breaks any plain-HTTP subdomain and the preload list
+      # is effectively irreversible, so an operator opts in once the whole
+      # host tree is HTTPS (see backend/.env.example and the deploy runbook).
+      SECURE_HSTS_INCLUDE_SUBDOMAINS: "${SECURE_HSTS_INCLUDE_SUBDOMAINS:-false}"
+      SECURE_HSTS_PRELOAD: "${SECURE_HSTS_PRELOAD:-false}"
+      SECURE_PROXY_SSL_HEADER_NAME: "${SECURE_PROXY_SSL_HEADER_NAME:-HTTP_X_FORWARDED_PROTO}"
+      SECURE_PROXY_SSL_HEADER_VALUE: "${SECURE_PROXY_SSL_HEADER_VALUE:-https}"
     ports:
       - "8000:8000"
     volumes:
@@ -118,14 +156,28 @@ services:
       # non-zero exit, which is exactly what the health state should mean.
       # The image's default PORT is 8000 (backend/Dockerfile); keep this URL in
       # step with it, or /health/ is probed on the wrong port.
+      #
+      # SPEC-22-08: the probe identifies itself the way the TLS front door
+      # does, because the hardening enabled above would otherwise refuse it -
+      # Host is the first entry of DJANGO_ALLOWED_HOSTS (an unlisted Host is a
+      # 400 under the SPEC-22-03 guard) and X-Forwarded-Proto is the scheme
+      # header SECURE_PROXY_SSL_HEADER_NAME reads, so SECURE_SSL_REDIRECT does
+      # not bounce the probe to an https:// this container does not serve.
+      # Both are read from the same env the app itself is configured with, so
+      # the probe cannot drift from the deployment's real values.
       test:
         - CMD
         - python
         - -c
         - |
-          import sys, urllib.request
+          import os, sys, urllib.request
+          host = (os.environ.get("DJANGO_ALLOWED_HOSTS") or "").split(",")[0].strip()
+          req = urllib.request.Request(
+              "http://127.0.0.1:8000/health/",
+              headers={"Host": host, "X-Forwarded-Proto": "https"},
+          )
           try:
-              with urllib.request.urlopen("http://127.0.0.1:8000/health/", timeout=5) as r:
+              with urllib.request.urlopen(req, timeout=5) as r:
                   sys.exit(0 if r.status == 200 else 1)
           except Exception:
               sys.exit(1)

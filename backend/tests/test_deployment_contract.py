@@ -37,6 +37,7 @@ PROCFILE = "Procfile"
 RELEASE = "scripts/release.sh"
 DEPLOY_WORKFLOW = ".github/workflows/deploy.yml"
 BACKEND_TESTS_WORKFLOW = ".github/workflows/backend-tests.yml"
+RUNBOOK = "backend/docs/deploy-runbook.md"
 
 # Everything that decides how the deployable unit runs.
 DEPLOYMENT_FILES = (
@@ -582,6 +583,329 @@ class BuildLayerSatisfiesTheNonDebugGuardsTests(SimpleTestCase):
                 self.assertIn(key, res.stderr)
 
 
+class FrontDoorRunbookTests(SimpleTestCase):
+    """SPEC-22-06: the WAF/rotation story is a documented operator contract.
+
+    The two halves of R-22.16 (WAF) and R-22.8 (secret rotation) are
+    documentation and configuration, so the risk is not a broken test but a
+    story that is absent, contradicted, or quietly wrong in a way that hurts an
+    operator mid-incident. These pins check the properties that make it
+    usable: the WAF section complements the app-layer throttles instead of
+    duplicating them (a proxy rate limit is per-IP and must stay looser than
+    the strictest DRF scope), the rotation story names every secret the
+    deployment actually holds and says how to verify it, and neither section
+    carries a credential or a vendor token.
+    """
+
+    # Every secret the deployment really holds. A rotation table missing one of
+    # these is the failure this class exists to prevent.
+    ROTATED_SECRETS = (
+        "DJANGO_SECRET_KEY",
+        "RAZORPAY_KEY_SECRET",
+        "POSTGRES_PASSWORD",
+    )
+
+    # Values that would mean a credential or a vendor account leaked into the
+    # runbook. A DSN/API token there is the classic accident.
+    CREDENTIAL_SHAPES = (
+        re.compile(r"https://[A-Za-z0-9]{16,}@"),
+        re.compile(r"(?i)\b(?:api[_-]?key|token|password)\s*[:=]\s*\S{12,}"),
+        re.compile(r"\brzp_(?:live|test)_[A-Za-z0-9]{12,}\b"),
+    )
+
+    def setUp(self):
+        self.text = read(RUNBOOK)
+
+    def section(self, heading):
+        """Return the body of a `## ...` section, up to the next `##`."""
+        match = re.search(rf"^## {re.escape(heading)}$", self.text, re.M)
+        assert match, f"the runbook has no '{heading}' section"
+        rest = self.text[match.end() :]
+        end = re.search(r"^## ", rest, re.M)
+        return rest[: end.start()] if end else rest
+
+    def test_the_waf_section_exists_and_does_not_duplicate_the_throttles(self):
+        # The failure this prevents: an operator copies a per-IP limit equal to
+        # THROTTLE_COUPON_RATE and locks out a whole NAT range, or assumes the
+        # WAF replaced the app-layer budgets.
+        waf = self.section("WAF ruleset for the front door (SPEC-22-06, R-22.16)")
+        self.assertIn("ScopedRateThrottle", waf)
+        # ...and names the actual knob, so the advice is actionable.
+        self.assertIn("limit_req_zone", waf)
+        # The per-IP/per-identity distinction is the reason the two layers
+        # coexist; stated without it, a reader cannot tell why not to tighten.
+        self.assertIn("per-IP", waf)
+        self.assertIn("THROTTLE_RECOVERY_RATE", waf)
+        # Authorization stays in Django - a WAF is not an access-control layer.
+        self.assertIn("authorization", waf.lower())
+
+    def test_the_waf_section_still_serves_media_and_health(self):
+        # Two rules that would take the storefront or the monitoring down if
+        # followed blindly: caching /health/ hides a degraded store from both
+        # the container healthcheck and the uptime monitor, and a body limit
+        # below the app's own upload ceiling rejects images the app accepts.
+        waf = self.section("WAF ruleset for the front door (SPEC-22-06, R-22.16)")
+        self.assertIn("/health/", waf)
+        self.assertIn("MAX_UPLOAD_MB", waf)
+
+    def test_the_rotation_section_names_every_secret_the_deployment_holds(self):
+        rotation = self.section("Secret rotation (SPEC-22-06, R-22.8)")
+        for secret in self.ROTATED_SECRETS:
+            with self.subTest(secret=secret):
+                self.assertIn(secret, rotation)
+
+    def test_the_rotation_procedure_is_verifiable_and_ordered(self):
+        # Mint-then-retire is what makes it a rotation rather than an outage,
+        # and "the old credential no longer authenticates" is the only check
+        # that proves the new one is in use.
+        rotation = self.section("Secret rotation (SPEC-22-06, R-22.8)")
+        self.assertIn("before retiring the old one", rotation)
+        self.assertIn("no longer authenticates", rotation)
+        self.assertIn("/health/", rotation)
+
+    def test_the_secret_key_caveat_states_the_downtime_cost_honestly(self):
+        # Rotating SECRET_KEY is a mass logout here, because it signs the JWTs
+        # and the guest-cart sessions. A runbook that calls it transparent
+        # would be sending an operator into it unprepared.
+        rotation = self.section("Secret rotation (SPEC-22-06, R-22.8)")
+        self.assertIn("mass logout", rotation)
+        self.assertIn("SECRET_KEY", rotation)
+
+    def test_a_committed_secret_is_treated_as_compromised(self):
+        # Rotation before history cleanup: rewriting a pushed commit un-leaks
+        # nothing, and the ordering is the whole point.
+        rotation = self.section("Secret rotation (SPEC-22-06, R-22.8)")
+        self.assertIn("rotate it", rotation)
+        self.assertIn("commit", rotation.lower())
+
+    def test_neither_section_carries_a_credential_or_a_vendor_token(self):
+        for heading in (
+            "WAF ruleset for the front door (SPEC-22-06, R-22.16)",
+            "Secret rotation (SPEC-22-06, R-22.8)",
+        ):
+            body = self.section(heading)
+            for pattern in self.CREDENTIAL_SHAPES:
+                with self.subTest(heading=heading, pattern=pattern.pattern):
+                    self.assertIsNone(
+                        pattern.search(body),
+                        f"a credential-shaped value is documented in {heading}",
+                    )
+
+
+class TlsHardeningDeployContractTests(SimpleTestCase):
+    """SPEC-22-08 [R-22.6] (V-06): the hardening is turned ON, not merely
+    reachable.
+
+    settings.py has shipped the SECURE_SSL_REDIRECT / HSTS / trusted-proxy-header
+    flags since SPEC-17-07, every one of them env-gated with a
+    development-safe default. Until this contract existed nothing in the deploy
+    path set any of them, so "HTTPS is enabled" was true of no real deployment.
+    These pins assert the compose env really carries the hardened posture, and -
+    just as importantly - that it is a pass-through so a plain-HTTP local run
+    can turn it off, and that the DEV/DEBUG path is not forced into a redirect
+    loop.
+    """
+
+    # The production posture, read out of the committed compose file rather
+    # than restated, so a pin cannot agree with a stale expectation.
+    HARDENING_KEYS = (
+        "SECURE_SSL_REDIRECT",
+        "SECURE_HSTS_SECONDS",
+        "SECURE_HSTS_INCLUDE_SUBDOMAINS",
+        "SECURE_HSTS_PRELOAD",
+        "SECURE_PROXY_SSL_HEADER_NAME",
+        "SECURE_PROXY_SSL_HEADER_VALUE",
+    )
+
+    def setUp(self):
+        self.environment = compose_backend_environment()
+
+    def compose_default(self, key):
+        """Return the default compose supplies for a key, with its `${..:-..}`.
+
+        Raises for a missing key or a `:?` (required) form - both of which
+        would mean the key is not deployment-tunable the way the others are.
+        """
+        # Compose writes the interpolation in quotes when the value could be
+        # read as YAML of another type (a bare `true` is a boolean), so the
+        # quotes are part of the spelling, not of the value.
+        value = self.environment[key].strip()
+        if len(value) >= 2 and value[0] == value[-1] == '"':
+            value = value[1:-1]
+        match = re.match(r"^\$\{" + key + r":-([^}]*)\}$", value)
+        assert match, f"{key} is not a defaulted pass-through: {value!r}"
+        return match.group(1)
+
+    def test_every_hardening_key_is_in_the_deployed_environment(self):
+        for key in self.HARDENING_KEYS:
+            with self.subTest(key=key):
+                self.assertIn(key, self.environment)
+
+    def test_https_redirect_is_on_and_hsts_has_a_real_window(self):
+        # SECURE_SSL_REDIRECT=true and a non-zero HSTS window are what "HTTPS
+        # enabled" means to a browser; a 0 here would ship the gap unchanged.
+        self.assertEqual(self.compose_default("SECURE_SSL_REDIRECT"), "true")
+        hsts = self.compose_default("SECURE_HSTS_SECONDS")
+        self.assertTrue(hsts.isdigit() and int(hsts) > 0, hsts)
+
+    def test_the_trusted_proxy_header_is_the_wsgi_environ_name(self):
+        # Django reads request.META[SECURE_PROXY_SSL_HEADER_NAME], and gunicorn
+        # maps the wire header X-Forwarded-Proto to HTTP_X_FORWARDED_PROTO. The
+        # bare header name would never match, so every proxied request would
+        # look like plain HTTP and be redirected to HTTPS forever - a redirect
+        # loop, which is worse than no hardening at all.
+        self.assertEqual(
+            self.compose_default("SECURE_PROXY_SSL_HEADER_NAME"),
+            "HTTP_X_FORWARDED_PROTO",
+        )
+        self.assertEqual(self.compose_default("SECURE_PROXY_SSL_HEADER_VALUE"), "https")
+
+    def test_subdomain_and_preload_hsts_are_not_enabled_by_default(self):
+        # includeSubDomains breaks any plain-HTTP subdomain and the preload
+        # list is effectively irreversible: both are an operator's deliberate
+        # decision once the whole host tree is HTTPS, never a default.
+        self.assertEqual(
+            self.compose_default("SECURE_HSTS_INCLUDE_SUBDOMAINS"), "false"
+        )
+        self.assertEqual(self.compose_default("SECURE_HSTS_PRELOAD"), "false")
+
+    def test_each_key_is_a_pass_through_so_a_plain_http_run_can_opt_out(self):
+        # Every one is `${KEY:-default}`, never a literal: a repo-root .env can
+        # override any of them, which is how `docker compose up` over http://
+        # localhost avoids the redirect and the HSTS window.
+        for key in self.HARDENING_KEYS:
+            with self.subTest(key=key):
+                self.assertIn("${" + key + ":-", self.environment[key])
+
+    def test_the_compose_env_boots_the_app_into_the_hardened_posture(self):
+        # Proved by booting, with the values compose actually declares: the
+        # settings the container runs with are the ones the pins above claim.
+        defaults = {key: self.compose_default(key) for key in self.HARDENING_KEYS}
+        snippet = (
+            "import config.settings as s;"
+            "print('REDIRECT', s.SECURE_SSL_REDIRECT);"
+            "print('HSTS', s.SECURE_HSTS_SECONDS);"
+            "print('SUBDOMAINS', s.SECURE_HSTS_INCLUDE_SUBDOMAINS);"
+            "print('PRELOAD', s.SECURE_HSTS_PRELOAD);"
+            "print('PROXY_HEADER', s.SECURE_PROXY_SSL_HEADER)"
+        )
+        res = run_settings_import(
+            {
+                "DJANGO_SECRET_KEY": "x" * 50,
+                "DJANGO_ENV": "production",
+                "DATABASE_URL": "postgres://u:p@db.example.com:5432/perfume_store",
+                "DJANGO_ALLOWED_HOSTS": "shop.example.test",
+                "CSRF_TRUSTED_ORIGINS": "https://shop.example.test",
+                **defaults,
+            },
+            snippet=snippet,
+        )
+        self.assertEqual(res.returncode, 0, res.stdout + res.stderr)
+        self.assertIn("REDIRECT True", res.stdout)
+        self.assertIn(f"HSTS {self.compose_default('SECURE_HSTS_SECONDS')}", res.stdout)
+        self.assertIn("SUBDOMAINS False", res.stdout)
+        self.assertIn("PRELOAD False", res.stdout)
+        self.assertIn("PROXY_HEADER ('HTTP_X_FORWARDED_PROTO', 'https')", res.stdout)
+
+    def test_the_development_path_is_not_hardened(self):
+        # The other half, and the reason the flags can be on in production at
+        # all: DJANGO_DEBUG=true with no hardening keys must keep the
+        # development-safe defaults, or a developer would be fighting a
+        # redirect loop and an HSTS lockout on localhost.
+        snippet = (
+            "import config.settings as s;"
+            "print('DEBUG', s.DEBUG);"
+            "print('REDIRECT', s.SECURE_SSL_REDIRECT);"
+            "print('HSTS', s.SECURE_HSTS_SECONDS);"
+            "print('PROXY_HEADER', s.SECURE_PROXY_SSL_HEADER)"
+        )
+        res = run_settings_import({"DJANGO_DEBUG": "true"}, snippet=snippet)
+        self.assertEqual(res.returncode, 0, res.stdout + res.stderr)
+        self.assertIn("DEBUG True", res.stdout)
+        self.assertIn("REDIRECT False", res.stdout)
+        self.assertIn("HSTS 0", res.stdout)
+        self.assertIn("PROXY_HEADER None", res.stdout)
+
+    def test_settings_defaults_are_untouched_by_the_deploy_layer(self):
+        # This task enables the hardening at the DEPLOY layer only. If someone
+        # ever "fixes" it by changing a default in settings.py, local
+        # development and the test suite break - so the defaults are pinned.
+        res = run_settings_import(
+            {"DJANGO_DEBUG": "true"},
+            snippet=(
+                "import config.settings as s;"
+                "print('REDIRECT', s.SECURE_SSL_REDIRECT);"
+                "print('HSTS', s.SECURE_HSTS_SECONDS);"
+                "print('SUBDOMAINS', s.SECURE_HSTS_INCLUDE_SUBDOMAINS);"
+                "print('PRELOAD', s.SECURE_HSTS_PRELOAD);"
+                "print('PROXY_HEADER', s.SECURE_PROXY_SSL_HEADER)"
+            ),
+        )
+        self.assertEqual(res.returncode, 0, res.stdout + res.stderr)
+        for line in ("REDIRECT False", "HSTS 0", "PROXY_HEADER None"):
+            with self.subTest(line=line):
+                self.assertIn(line, res.stdout)
+
+    def test_the_compose_healthcheck_identifies_itself_as_a_deployment_would(self):
+        # The compose probe must carry the same Host and forwarded scheme the
+        # image probe does, or the hardening this file turns on would make the
+        # container report itself unhealthy forever (proved by the boot test
+        # below, which shows a naive probe getting 301).
+        compose = "\n".join(code_lines(read(COMPOSE)))
+        self.assertIn("DJANGO_ALLOWED_HOSTS", compose)
+        self.assertIn("X-Forwarded-Proto", compose)
+
+    def test_the_env_example_documents_every_key_the_deploy_layer_sets(self):
+        # An operator reading the env template has to find the same keys the
+        # deploy artifact sets; a key the artifact sets but the template omits
+        # is a support ticket waiting to happen.
+        example = read("backend/.env.example")
+        for key in self.HARDENING_KEYS:
+            with self.subTest(key=key):
+                self.assertIn(key, example)
+
+    def test_the_healthcheck_still_passes_under_the_hardening_it_enables(self):
+        # SECURE_SSL_REDIRECT plus the SPEC-22-03 host guard are exactly what a
+        # naive loopback probe would trip over: a bare http request is 301'd to
+        # an https:// the container does not serve, and an unlisted Host is a
+        # 400. So the probe must present the deployment's own host and forwarded
+        # scheme - proved here by booting the app and probing /health/ the way
+        # the healthcheck does.
+        with tempfile.TemporaryDirectory() as workdir:
+            env = {
+                "DJANGO_SECRET_KEY": "x" * 50,
+                "DJANGO_ENV": "production",
+                "DJANGO_ALLOWED_HOSTS": "shop.example.test",
+                "CSRF_TRUSTED_ORIGINS": "https://shop.example.test",
+                "DATABASE_URL": "sqlite:///"
+                + (Path(workdir) / "hardened.sqlite3").as_posix(),
+                "DJANGO_MEDIA_ROOT": workdir,
+                "DJANGO_STATIC_ROOT": workdir,
+            }
+            for key in self.HARDENING_KEYS:
+                env[key] = self.compose_default(key)
+            migrated = manage("migrate", "--noinput", env=env)
+            self.assertEqual(migrated.returncode, 0, migrated.stdout + migrated.stderr)
+            # config.wsgi is what the image CMD hands gunicorn, and importing
+            # it is what configures Django in this child process.
+            snippet = (
+                "import config.wsgi;"
+                "from django.test import Client;"
+                "probe = {'host': 'shop.example.test', "
+                "'x-forwarded-proto': 'https'};"
+                "print('PROBE', Client(headers=probe).get('/health/').status_code);"
+                "print('NAIVE', Client(headers={'host': 'shop.example.test'})"
+                ".get('/health/').status_code)"
+            )
+            res = run_backend([sys.executable, "-c", snippet], env)
+        self.assertEqual(res.returncode, 0, res.stdout + res.stderr)
+        # The probe the healthcheck performs gets the real answer...
+        self.assertIn("PROBE 200", res.stdout)
+        # ...while a probe without it would 301, which is why the healthcheck
+        # cannot simply be "does the port answer".
+        self.assertIn("NAIVE 301", res.stdout)
+
+
 class ComposeRuntimeEnvContractTests(SimpleTestCase):
     """Gate fix cycle 1 (SPEC-2-04/22-03): the runtime service has to boot.
 
@@ -652,5 +976,4 @@ class ComposeRuntimeEnvContractTests(SimpleTestCase):
         # What the container CMD loads, and what the compose healthcheck probes.
         self.assertIn("WSGI WSGIHandler", res.stdout)
         self.assertIn("HEALTH 200", res.stdout)
-
 
