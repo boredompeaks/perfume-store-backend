@@ -2810,16 +2810,15 @@ class ReturnEligibilityWindowTests(ReturnTestCase):
         self.assertContains(res, "return_window_days")
 
     def test_the_window_column_is_bounded_on_both_database_backends(self):
-        # CHECK 5, the SQLite/Postgres split. SQLite has no integer width and
-        # would store a value no Postgres integer could hold, so a bound that
-        # lives only in the column type is enforced by one backend and not the
-        # other - and Postgres answers the overflow with a DataError that
-        # surfaces as a 500 on the merchant's save, not as a form error.
-        # The bound is therefore asserted at the FORM - where both backends
-        # meet it - and not at the database, so this probe fails on SQLite too
-        # rather than passing here and 500-ing in production. A negative window
-        # is definitional nonsense; the ceiling is a representability bound no
-        # return policy needs to exceed.
+        # CHECK 5, the SQLite/Postgres split. The ceiling is a POLICY bound, not
+        # a storage limit - past ten years a return window stops being one a
+        # merchant can honour - and it is asserted at the FORM deliberately:
+        # ``MaxValueValidator`` is Python, so it is the same code path on every
+        # backend, whereas the column's own bounds are Postgres-enforced and
+        # ignored by SQLite. An earlier version of this comment called the
+        # ceiling a representability bound and predicted a DataError; 3650 sits
+        # far below Postgres int4's 2,147,483,647, so that was false. A
+        # negative window is definitional nonsense.
         form_class = modelform_factory(
             SiteSettings,
             fields=["return_window_days"],
