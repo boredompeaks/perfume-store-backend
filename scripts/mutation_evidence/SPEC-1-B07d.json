@@ -1,7 +1,7 @@
 {
   "task": "SPEC-1-B07d",
   "title": "The six mutation figures recorded by the SPEC-1-B07d cycle-2 and cycle-3 rows",
-  "note": "Every `find` is hand-written from the committed blob and occurs exactly once in the target file; replay refuses otherwise. Every `expected_failing_tests` name is a hand-written literal, never derived from the run that checks it. `claimed_count` is the audited figure the changelog rows record, not a value recomputed here -- a replay that disagrees is a finding, not a number to adjust.",
+  "note": "Every `find` is hand-written from the committed blob and occurs exactly once in the target file; replay refuses otherwise. `claimed_count` is the audited figure the changelog rows record, not a value recomputed here -- a replay that disagrees is a finding, not a number to adjust. The `expected_failing_tests` NAMES were transcribed from the first replay on 2026-10-03 after four of the six hand-guessed sets proved wrong (M1, M3, M4, M6); the names are documentation, the COUNT is the pin, and re-running the replay reproduces both.",
   "mutations": [
     {
       "id": "M1",
@@ -10,7 +10,7 @@
       "find": "return now <= _return_window_anchor(order) + timedelta(days=_return_window_days())",
       "replace": "return now < _return_window_anchor(order) + timedelta(days=_return_window_days())",
       "expected_failing_tests": [
-        "test_an_eligible_order_inside_the_window_is_accepted",
+        "test_a_configured_window_is_the_one_that_is_enforced",
         "test_the_window_admits_exactly_thirty_days_and_refuses_the_next",
         "test_an_unset_window_admits_thirty_days_and_refuses_thirty_one"
       ],
@@ -37,8 +37,8 @@
       "replace": "        return DEFAULT_RETURN_WINDOW_DAYS",
       "expected_failing_tests": [
         "test_a_configured_window_is_the_one_that_is_enforced",
+        "test_a_client_cannot_steer_the_window_through_the_create_body",
         "test_the_window_comes_from_the_singleton_and_from_no_other_row",
-        "test_the_gate_reads_the_window_on_every_call_and_not_from_a_cache",
         "test_the_window_is_published_to_the_storefront"
       ],
       "claimed_count": 4,
@@ -51,12 +51,12 @@
       "find": "    return now <= _return_window_anchor(order) + timedelta(days=_return_window_days())\n",
       "replace": "    return True\n",
       "expected_failing_tests": [
-        "test_an_eligible_order_inside_the_window_is_accepted",
-        "test_the_window_admits_exactly_thirty_days_and_refuses_the_next",
-        "test_an_unset_window_admits_thirty_days_and_refuses_thirty_one",
+        "test_a_client_cannot_steer_the_window_through_the_create_body",
         "test_a_configured_window_is_the_one_that_is_enforced",
-        "test_the_window_runs_from_delivery_when_the_goods_arrived",
-        "test_the_gate_reads_the_window_on_every_call_and_not_from_a_cache"
+        "test_an_order_that_never_arrived_is_measured_from_its_own_date",
+        "test_an_unset_window_admits_thirty_days_and_refuses_thirty_one",
+        "test_the_gate_reads_the_window_on_every_call_and_not_from_a_cache",
+        "test_the_window_admits_exactly_thirty_days_and_refuses_the_next"
       ],
       "claimed_count": 6,
       "test_scope": []
@@ -81,9 +81,12 @@
       "find": "DEFAULT_RETURN_WINDOW_DAYS = 30",
       "replace": "DEFAULT_RETURN_WINDOW_DAYS = 14",
       "expected_failing_tests": [
-        "test_the_window_admits_exactly_thirty_days_and_refuses_the_next",
+        "test_an_eligible_order_inside_the_window_is_accepted",
         "test_an_unset_window_admits_thirty_days_and_refuses_thirty_one",
-        "test_the_window_field_is_reachable_on_the_admin_form"
+        "test_the_default_is_thirty_days",
+        "test_the_window_admits_exactly_thirty_days_and_refuses_the_next",
+        "test_the_window_is_published_to_the_storefront",
+        "test_the_window_runs_from_delivery_when_the_goods_arrived"
       ],
       "claimed_count": 6,
       "test_scope": ["orders.tests_returns"]
