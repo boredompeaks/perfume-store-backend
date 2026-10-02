@@ -13,17 +13,27 @@ on:
     # The deployment wiring (SPEC-2-10b/22-07) is part of the backend's
     # production path, so a push that only touches it still runs this gate --
     # deploy.yml is triggered by THIS workflow's completion, and a commit with
-    # no run here could never be released. scripts/ is here for the same
-    # reason plus one more: backup.sh and release.sh are the deploy host's
-    # scheduled entry points (R-22.9), and the whole of scripts/ is now gated
-    # because scripts/doc_claims.py is a BUILD GATE -- the "Documentation claim
-    # scan" step below runs it, so a commit that only touches the tooling must
-    # still run the gate that executes the tooling. `scripts/**` (not two named
-    # .sh files) is what keeps that true for a file added tomorrow.
+    # no run here could never be released. scripts/backup.sh is here for the
+    # same reason: the backup cadence (R-22.9) is the deploy host's scheduled
+    # entry point, so a commit that only changes it still runs the gate.
+    #
+    # scripts/** sits here IN ADDITION to the two named .sh files, not instead
+    # of them, and the two earn their place differently. The named entries are
+    # a text contract the suite pins -- tests/test_backup_db.py and
+    # tests/test_deployment_contract.py assert these literals in the trigger
+    # list -- so a deploy entry point cannot be dropped from the gate by a
+    # well-meaning refactor of this file. The glob is what makes the same
+    # guarantee true for a file added tomorrow: scripts/doc_claims.py is a
+    # BUILD GATE (the "Documentation claim scan" step below runs it), and a
+    # commit that only touches the gate's own tooling must still run the gate
+    # that executes the tooling. Naming two .sh files stops being true the day
+    # a third script lands.
     paths:
       - "backend/**"
       - "docker-compose.yml"
       - "Procfile"
+      - "scripts/backup.sh"
+      - "scripts/release.sh"
       - "scripts/**"
       - ".github/workflows/backend-tests.yml"
       - ".github/workflows/deploy.yml"
@@ -33,6 +43,8 @@ on:
       - "backend/**"
       - "docker-compose.yml"
       - "Procfile"
+      - "scripts/backup.sh"
+      - "scripts/release.sh"
       - "scripts/**"
       - ".github/workflows/backend-tests.yml"
       - ".github/workflows/deploy.yml"
