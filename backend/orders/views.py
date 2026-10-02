@@ -34,7 +34,7 @@ from .state import (
 from .events import notify_transition
 # [R-10.1] SPEC-10-01b: dimension mappings for the writers. Kept as its own
 # line so every hunk in this file stays insertion-only.
-from .state import PAYMENT_CAPTURED
+from .state import CAPTURED_MONEY_PAYMENT_STATUSES
 from .state import fulfilment_for_status, payment_for_status
 # [R-10.12] SPEC-10-02: transition-audit writers. Own import lines so every
 # hunk in this file stays insertion-only.
@@ -2579,35 +2579,60 @@ def _return_eligible(order):
     other was a contradiction dressed as a policy; this is the honest form.
 
     THE RULE: an order is ineligible only while NEITHER dimension says anything
-    happened - the money has not been captured AND nothing has shipped. Both
-    halves are read off the row, both halves are the machine's own vocabulary
-    (``PAYMENT_CAPTURED`` is state.py's declared capture point;
-    ``unfulfilled`` is the declared default of ``Order.fulfilment_status``),
-    and neither is a window or a threshold.
+    happened - the money is not held AND nothing has shipped. Both halves are
+    read off the row, and neither is a window or a threshold.
 
-    Consequences, all of them read off that one rule rather than appended as
-    special cases:
+    THE MONEY HALF IS NOT ``payment_status == "captured"``. It is membership of
+    ``CAPTURED_MONEY_PAYMENT_STATUSES`` (orders.state), which is itself derived
+    from ``PAYMENT_ALLOWED_TRANSITIONS`` rather than written out here: the
+    values reachable from the capture point that the machine can still move a
+    refund out of. That is ``captured`` and ``partially_refunded``. Cycle 3's
+    audit is why: ``PAYMENT_ALLOWED_TRANSITIONS`` places
+    ``partially_refunded`` STRICTLY AFTER ``captured``, orders/models.py's
+    shipped-edge precondition admits it ALONGSIDE ``captured`` as real money
+    ("a capture minus a recorded refund"), and the SPEC-1-05 refund seam is the
+    writer that produces it - and that seam writes ``payment_status`` and NEVER
+    ``fulfilment_status``, so the row a partly-refunded order is in is exactly
+    ``partially_refunded / unfulfilled``. Testing the money half against the
+    single capture literal refused that row 409 "This order is not eligible for
+    a return" on the strength of a rule whose own sentence said the money had
+    moved - the code and the rationale disagreeing, which is the defect class
+    this docstring exists to prevent.
 
-    * accepted: confirmed, shipped, delivered - the statuses whose machine
-      mapping says the money was captured;
-    * refused: pending and cancelled, which the machine maps identically;
-    * refused: an order whose payment verification FAILED. The machine reaches
-      ``failed`` only from ``pending`` and declares no capture there
-      (``PAYMENT_ALLOWED_TRANSITIONS``), so "never paid for" is the first half
-      of this same predicate - a return against an order the store holds no
-      money for is not a return, and it is not answered 201-with-nothing-in-it.
+    The other half of the money half is a deliberate exclusion rather than an
+    oversight: ``refunded`` is the one captured-money value that is NOT here,
+    because ``PAYMENT_ALLOWED_TRANSITIONS`` declares no edge out of it - the
+    money has all gone back and there is nothing left to send anything against.
+    That refusal is a policy, it is now said out loud here and pinned by
+    ``test_every_machine_value_gets_the_answer_this_rationale_claims``.
 
-    The second half of the conjunction, rather than demanding capture alone, is
-    deliberate: the machine WAIVES the capture precondition for COD orders and
-    puts their capture point at delivery (``orders.models``), so a COD order
-    that has SHIPPED must stay returnable while its money is still uncaptured.
+    CONSEQUENCES, all of them read off that one rule rather than appended as
+    special cases. The full enumeration of what the machine admits, both
+    dimensions, is:
+
+    * ``captured / unfulfilled`` and ``partially_refunded / unfulfilled``:
+      ACCEPTED. Money is held, so there is a purchase to be returning against.
+    * ``pending``, ``authorized`` and ``failed / unfulfilled``: REFUSED. The
+      machine reaches ``failed`` only from ``pending`` and declares no capture
+      there, so "never paid for" is the same first half of this predicate - a
+      return against an order the store holds no money for is not a return.
+      ``authorized`` is the gateway's step BEFORE capture, so the store holds
+      no funds on it either.
+    * ``refunded / unfulfilled``: REFUSED, per the exclusion above.
+    * ANY payment value with ``fulfilled`` or ``partially_fulfilled``: ACCEPTED.
+      The goods went out, which is the half of the disjunction that does not
+      care about the money at all - it is why this is a disjunction and not
+      "payment == captured": the machine WAIVES the capture precondition for
+      COD orders and puts their capture point at delivery (``orders.models``),
+      so a COD order that has SHIPPED must stay returnable while its money is
+      still ``pending``.
 
     No window, and no invented number: the spec's "where eligible" (line 1083)
     and its "Eligibility validation" (6.8 line 1959) describe a WINDOW it never
     defines. This predicate answers only "has anything happened yet"; the window
     policy and its tunability belong to SPEC-1-B07b.
     """
-    money_moved = order.payment_status == PAYMENT_CAPTURED
+    money_moved = order.payment_status in CAPTURED_MONEY_PAYMENT_STATUSES
     goods_moved = order.fulfilment_status != "unfulfilled"
     return money_moved or goods_moved
 

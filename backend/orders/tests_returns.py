@@ -28,7 +28,14 @@ already been bitten by.
   (``WidthGateTests`` / ``QuerysetGuardTests``);
 * a guest order with ``user is None`` is exercised throughout - not because
   guest returns are supported (they are not, by decision) but because the miss
-  it must produce is the same one a stranger gets (``GuestOrderTests``).
+  it must produce is the same one a stranger gets (``GuestOrderTests``);
+* the eligibility gate is pinned value by value over the FULL payment x
+  fulfilment cross-product the machine admits, against a HAND-WRITTEN oracle
+  rather than a recomputation of the gate's own constant
+  (``EligibilityDerivationTests``), and a REAL partial refund is driven through
+  the SPEC-1-05 refund seam before the return seam is asked its opinion
+  (``RefundSeamIntegrationTests``) - cycle 3's bug was that nothing joined the
+  two features, so 100% line coverage could not see it.
 """
 
 from decimal import Decimal
@@ -40,7 +47,13 @@ from django.db import IntegrityError, transaction
 from django.test import tag
 from rest_framework.test import APIClient
 
-from common.roles import ROLE_ADMIN, ROLE_MARKETING, ROLE_SUPPORT, sync_role_groups
+from common.roles import (
+    ROLE_ADMIN,
+    ROLE_FINANCE,
+    ROLE_MARKETING,
+    ROLE_SUPPORT,
+    sync_role_groups,
+)
 from common.testing import ApiTestCase
 from orders.models import (
     RETURN_ALLOWED_TRANSITIONS,
@@ -60,9 +73,13 @@ from orders.admin import (
     ReturnRequestAdminForm,
 )
 from orders.state import (
+    CAPTURED_MONEY_PAYMENT_STATUSES,
+    FULFILMENT_STATUS_CHOICES,
     LEGACY_STATUS_DIMENSIONS,
+    PAYMENT_ALLOWED_TRANSITIONS,
     PAYMENT_CAPTURED,
     PAYMENT_METHOD_COD,
+    PAYMENT_STATUS_CHOICES,
     fulfilment_for_status,
     payment_for_status,
 )
@@ -521,6 +538,259 @@ class EligibilityDerivationTests(ReturnTestCase):
         res = self.ask(cod.order_number)
 
         self.assertEqual(res.status_code, 201, res.data)
+
+    # --- cycle 3: every value the machine admits, answered individually -----
+    #
+    # Cycle 2 fixed the gate's derivation and PINNED it against the machine,
+    # and still 100% line coverage missed that the gate tracked only
+    # ``captured`` on the payment axis while the machine tracks ``captured``
+    # AND ``partially_refunded``. Two reasons the old pin could not see it: it
+    # iterated ``LEGACY_STATUS_DIMENSIONS`` (five rows, none of which is a
+    # refund value, because the legacy single status cannot express one), and
+    # it recomputed the expected set from the SAME constant the gate used, so
+    # a wrong constant looks right from both sides. The two pins below fix both
+    # holes: the oracle is HAND-WRITTEN here (so it cannot inherit the gate's
+    # mistake) and it covers the FULL payment x fulfilment cross-product (so
+    # every value the machine admits has to appear in it).
+
+    # What each payment value must be answered with, written out rather than
+    # computed. Keyed by payment value; the value is the set of fulfilment
+    # values on which that payment is ACCEPTED - the goods went out, so the
+    # money half is irrelevant. Everything outside the set is refused.
+    MACHINE_ADMITS = {
+        "pending": {"fulfilled", "partially_fulfilled"},
+        "authorized": {"fulfilled", "partially_fulfilled"},
+        "captured": {"unfulfilled", "fulfilled", "partially_fulfilled"},
+        "failed": {"fulfilled", "partially_fulfilled"},
+        "partially_refunded": {"unfulfilled", "fulfilled", "partially_fulfilled"},
+        "refunded": {"fulfilled", "partially_fulfilled"},
+    }
+
+    def refused_pairs_by_the_derivation(self):
+        """The refused (payment, fulfilment) pairs, computed from the machine.
+
+        The same run-time derivation the view's gate performs, over the FULL
+        cross-product the machine admits instead of only the five legacy rows:
+        refused iff the payment value is outside the machine-derived
+        captured-money set AND the goods have not moved. Restating the set as a
+        literal in the test is what let the cycle-2 gate and the cycle-2 pin
+        agree with each other while both were wrong about ``partially_refunded``
+        - so this reads the set the view reads.
+        """
+        return {
+            (payment, fulfilment)
+            for payment, _ in PAYMENT_STATUS_CHOICES
+            for fulfilment, _ in FULFILMENT_STATUS_CHOICES
+            if payment not in CAPTURED_MONEY_PAYMENT_STATUSES
+            and fulfilment == "unfulfilled"
+        }
+
+    def test_the_captured_money_set_is_the_two_values_the_machine_reaches(self):
+        # The derivation itself, pinned against the table it is derived from -
+        # and against the two independent pieces of evidence that make
+        # ``partially_refunded`` captured money: the transition table puts it
+        # strictly after ``captured``, and the shipped-edge precondition in
+        # orders/models.py admits it alongside ``captured``. Asserting the
+        # reachability too means a future edit to the table that DROPS the edge
+        # fails here instead of quietly narrowing the returns gate.
+        self.assertEqual(
+            CAPTURED_MONEY_PAYMENT_STATUSES, {"captured", "partially_refunded"}
+        )
+        self.assertIn(
+            "partially_refunded",
+            PAYMENT_ALLOWED_TRANSITIONS[PAYMENT_CAPTURED],
+        )
+        self.assertIn("partially_refunded", CAPTURED_MONEY_PAYMENT_STATUSES)
+        # ...and the value that is NOT there for a machine reason: the table
+        # declares no edge out of it, so its money has all gone back.
+        self.assertEqual(PAYMENT_ALLOWED_TRANSITIONS["refunded"], set())
+        self.assertNotIn("refunded", CAPTURED_MONEY_PAYMENT_STATUSES)
+
+    def test_the_oracle_covers_every_value_the_machine_admits(self):
+        # Completeness, so the hand-written oracle cannot quietly go stale: a
+        # new payment or fulfilment value in the machine's own choice tuples
+        # fails here rather than being un-enumerated.
+        self.assertEqual(
+            set(self.MACHINE_ADMITS), {p for p, _ in PAYMENT_STATUS_CHOICES}
+        )
+        every_fulfilment = {f for f, _ in FULFILMENT_STATUS_CHOICES}
+        for payment, accepted in self.MACHINE_ADMITS.items():
+            with self.subTest(payment=payment):
+                self.assertTrue(accepted <= every_fulfilment, accepted)
+
+    def test_the_derivation_agrees_with_the_hand_written_oracle(self):
+        expected = {
+            (payment, fulfilment)
+            for payment, _ in PAYMENT_STATUS_CHOICES
+            for fulfilment, _ in FULFILMENT_STATUS_CHOICES
+            if fulfilment not in self.MACHINE_ADMITS[payment]
+        }
+        self.assertEqual(self.refused_pairs_by_the_derivation(), expected)
+
+    def test_every_machine_value_gets_the_answer_this_rationale_claims(self):
+        # The probe cycle 2 should have had: every payment value the machine
+        # admits, crossed with every fulfilment value, driven through the
+        # endpoint. Under the old single-literal gate this FAILS on
+        # (partially_refunded, unfulfilled) with 409 - the state the shipped
+        # SPEC-1-05 refund writer actually produces.
+        self.login_as(self.buyer)
+        index = 0
+
+        for payment, _ in PAYMENT_STATUS_CHOICES:
+            for fulfilment, _ in FULFILMENT_STATUS_CHOICES:
+                index += 1
+                with self.subTest(payment=payment, fulfilment=fulfilment):
+                    order = self._order(
+                        f"RET-2026-0012{index:02d}", self.buyer, status="confirmed"
+                    )
+                    Order.objects.filter(pk=order.pk).update(
+                        payment_status=payment, fulfilment_status=fulfilment
+                    )
+                    order.refresh_from_db()
+
+                    res = self.ask(order.order_number)
+
+                    accepted = fulfilment in self.MACHINE_ADMITS[payment]
+                    self.assertEqual(
+                        res.status_code, 201 if accepted else 409, res.data
+                    )
+                    self.assertEqual(_return_eligible(order), accepted)
+                    self.assertEqual(order.return_requests.exists(), accepted)
+
+
+class RefundSeamIntegrationTests(ReturnTestCase):
+    """The returns seam and the SPEC-1-05 refund seam must not disagree.
+
+    Cycle 3's bug was not in the arithmetic of the gate: it was that no test
+    drove a REAL refund through the real refund seam and then asked the return
+    seam what it thought of the resulting row. The two features touch the same
+    order and the refund seam writes ``payment_status`` WITHOUT EVER writing
+    ``fulfilment_status``, so it manufactures rows the returns path has to have
+    an answer for - ``partially_refunded / unfulfilled`` and
+    ``refunded / unfulfilled`` - and nothing asserted those answers.
+
+    Every row here is produced by the refund endpoint itself (mocked gateway,
+    no network), not by an ORM write standing in for it.
+    """
+
+    REFUND_PATH = "/api/admin/orders/{order_id}/refund/"
+
+    def setUp(self):
+        super().setUp()
+        self.treasurer = role_user(ROLE_FINANCE, "returns-treasurer")
+        # A second client so the refund call is carried by the treasurer's own
+        # real JWT and the customer's bearer is still on the default client.
+        self.finance_client = self.fresh_client()
+        res, token = self.api_login(self.treasurer.username, client=self.finance_client)
+        self.assertEqual(res.status_code, 200, res.data)
+        self.assertTrue(token, res.data)
+        gateway = self.razorpay_mock()
+        gateway.refund.create.return_value = {"id": "rfnd_RETURNS1"}
+
+    def payable_order(self, order_number):
+        """A confirmed order the refund seam will accept: captured, with a
+        provider payment id to reverse. The provider id is unique across
+        orders, so it is derived from the order number rather than reused."""
+        order = self._order(order_number, self.buyer, status="confirmed")
+        Order.objects.filter(pk=order.pk).update(
+            razorpay_order_id=f"order_{order_number}",
+            razorpay_payment_id=f"pay_{order_number}",
+        )
+        order.refresh_from_db()
+        return order
+
+    def refund(self, order, amount):
+        return self.finance_client.post(
+            self.REFUND_PATH.format(order_id=order.id),
+            {"amount": amount, "reason": "Damaged on arrival"},
+            format="json",
+        )
+
+    def test_a_partly_refunded_order_is_still_returnable(self):
+        # The regression this cycle exists for. A refund of part of the total
+        # is money that HAS moved, so the rationale admits this order and the
+        # gate must too; the old gate answered 409 on a state this repo's own
+        # shipped refund writer produces.
+        order = self.payable_order("RET-2026-001300")
+
+        refunded = self.refund(order, "300.00")
+
+        self.assertEqual(refunded.status_code, 201, refunded.data)
+        order.refresh_from_db()
+        self.assertEqual(order.payment_status, "partially_refunded")
+        self.assertEqual(order.fulfilment_status, "unfulfilled")
+
+        self.login_as(self.buyer)
+        res = self.ask(order.order_number)
+
+        self.assertEqual(res.status_code, 201, res.data)
+        self.assertTrue(_return_eligible(order))
+        # ...and the return itself still moves no money: the refund seam's
+        # write is still exactly what it was before the return was filed.
+        order.refresh_from_db()
+        self.assertEqual(order.payment_status, "partially_refunded")
+        self.assertEqual(order.refundable_remaining, Decimal("900.00"))
+        self.assertEqual(Refund.objects.count(), 1)
+
+    def test_a_fully_refunded_order_is_refused_and_says_why_it_is_a_policy(self):
+        # The sibling refusal, pinned rather than left as an accident: the
+        # money has all come back, so there is nothing left to send anything
+        # against. Asserted here so the day anyone widens it, this test is the
+        # thing that says the policy CHANGED rather than the behaviour drifting.
+        order = self.payable_order("RET-2026-001301")
+
+        refunded = self.refund(order, "1200.00")
+
+        self.assertEqual(refunded.status_code, 201, refunded.data)
+        order.refresh_from_db()
+        self.assertEqual(order.payment_status, "refunded")
+
+        self.login_as(self.buyer)
+        res = self.ask(order.order_number)
+
+        self.assertEqual(res.status_code, 409, res.data)
+        self.assertFalse(order.return_requests.exists())
+        self.assertEqual(Refund.objects.count(), 1)
+
+    def test_a_refund_leaves_a_shipped_order_returnable_whatever_it_did(self):
+        # The disjunction's other half, on a row the refund seam produced: a
+        # COD-style order whose money never became ``captured`` but whose goods
+        # went out stays returnable, and a partial refund cannot change that.
+        order = self._order("RET-2026-001302", self.buyer, status="confirmed")
+        Order.objects.filter(pk=order.pk).update(
+            payment_method=PAYMENT_METHOD_COD,
+            payment_status="captured",
+            fulfilment_status="fulfilled",
+            razorpay_payment_id="pay_RETURNS2",
+        )
+        order.refresh_from_db()
+        self.refund(order, "100.00")
+        order.refresh_from_db()
+        self.assertEqual(order.payment_status, "partially_refunded")
+        self.login_as(self.buyer)
+
+        res = self.ask(order.order_number)
+
+        self.assertEqual(res.status_code, 201, res.data)
+
+    def test_the_refund_seam_refuses_the_payment_values_the_gate_also_refuses(self):
+        # The two features agree on the OTHER end of the payment axis too:
+        # pending / authorized / failed hold no money, so neither a refund nor
+        # a return is possible against them. Driven through the real endpoints.
+        for index, payment in enumerate(("pending", "authorized", "failed")):
+            with self.subTest(payment=payment):
+                order = self.payable_order(f"RET-2026-00131{index}")
+                Order.objects.filter(pk=order.pk).update(payment_status=payment)
+                order.refresh_from_db()
+
+                refund_res = self.refund(order, "100.00")
+                self.login_as(self.buyer)
+                return_res = self.ask(order.order_number)
+
+                self.assertEqual(refund_res.status_code, 409, refund_res.data)
+                self.assertEqual(return_res.status_code, 409, return_res.data)
+                self.assertFalse(Refund.objects.exists())
+                self.assertFalse(order.return_requests.exists())
 
 
 class MissShapeTests(ReturnTestCase):
