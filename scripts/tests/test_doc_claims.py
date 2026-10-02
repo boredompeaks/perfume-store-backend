@@ -10,6 +10,7 @@ Run from the repo root::
 
 from __future__ import annotations
 
+import json
 import sys
 import unittest
 from pathlib import Path
@@ -18,12 +19,24 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from doc_claims import (  # noqa: E402
     _path_exists,
+    _resolve_path,
     check_byte_integrity,
+    empty_scan_notice,
     extract_claims,
+    parse_counter_examples,
+    resolve_base,
     verify_claims,
 )
+from doc_claims import FALLBACK_BASE, MIN_REASON_CHARS  # noqa: E402
 
 DOC = "backend/docs/changes.md"
+
+# A well-formed counter-example directive. The reason clears
+# MIN_REASON_CHARS on purpose: a bare token is not a statement.
+DIRECTIVE = (
+    "<!-- doc-claims:absent test_retired_name (renamed-to test_real_one)"
+    " ; reason: renamed in B07d, cited to report the old name -->"
+)
 
 
 def kinds(claims, kind):
@@ -265,6 +278,294 @@ class ByteIntegrityTests(unittest.TestCase):
         # which is why the invariant is "must not shrink", not "must match".
         result = check_byte_integrity(b"a\nb\nc\n", {"lines": 3})
         self.assertTrue(result["ok"], result["problems"])
+
+
+class PartialPathResolutionTests(unittest.TestCase):
+    """BUG-3 (TOOL-01): an app-relative citation must not be an error.
+
+    Four apps each own a ``views.py``, so the basename fallback is ambiguous
+    for all of them and prose that cites ``orders/views.py`` -- which is what
+    this changelog writes several hundred times -- was reported as a missing
+    file. 94 of the 121 errors on the wide base were exactly this.
+    """
+
+    KNOWN = {
+        "backend/orders/views.py": 900,
+        "backend/ops/views.py": 400,
+        "backend/cart/views.py": 300,
+        "backend/common/views.py": 120,
+        "backend/orders/models.py": 200,
+        "backend/orders/tests_returns.py": 2600,
+        "backend/config/urls.py": 60,
+    }
+
+    def test_app_relative_path_resolves_despite_four_views_py(self):
+        self.assertTrue(_path_exists("orders/views.py", self.KNOWN))
+        self.assertEqual(
+            _resolve_path("orders/views.py", self.KNOWN), "backend/orders/views.py"
+        )
+
+    def test_bare_basename_is_still_refused_when_ambiguous(self):
+        # The regression guard on the fix: the middle pass must not make a
+        # genuinely ambiguous citation resolvable.
+        self.assertFalse(_path_exists("views.py", self.KNOWN))
+
+    def test_suffix_match_needs_a_path_boundary(self):
+        # "ders/views.py" is not a path suffix of anything; matching on the
+        # bare string would resolve a typo to a real file, which is a gate that
+        # passes on prose nobody checked.
+        self.assertFalse(_path_exists("ders/views.py", self.KNOWN))
+        self.assertFalse(_path_exists("s/views.py", self.KNOWN))
+
+    def test_exact_path_still_wins(self):
+        self.assertEqual(
+            _resolve_path("backend/orders/views.py", self.KNOWN),
+            "backend/orders/views.py",
+        )
+
+    def test_leading_dot_slash_resolves(self):
+        self.assertEqual(
+            _resolve_path("./orders/models.py", self.KNOWN),
+            "backend/orders/models.py",
+        )
+
+    def test_ambiguous_suffix_is_still_refused(self):
+        # Two apps can nest the same directory name; a suffix that matches two
+        # tracked paths resolves to neither rather than to the first one found.
+        index = {
+            "backend/a/orders/views.py": 10,
+            "backend/b/orders/views.py": 10,
+        }
+        self.assertFalse(_path_exists("orders/views.py", index))
+
+    def test_resolving_a_path_does_not_disable_the_line_check(self):
+        # The fix must move resolution, not skip the check: the line is still
+        # verified against the file it resolved to.
+        errors, warnings = verify_claims(
+            extract_claims("see `orders/views.py:4000`", DOC), set(), self.KNOWN
+        )
+        self.assertEqual([c.kind for c in errors], ["path_line"])
+        self.assertIn("past the end", errors[0].detail)
+        self.assertIn("backend/orders/views.py", errors[0].detail)
+
+        errors, warnings = verify_claims(
+            extract_claims("see `orders/views.py:400`", DOC), set(), self.KNOWN
+        )
+        self.assertEqual(errors, [])
+        self.assertEqual(len(warnings), 1)
+
+    def test_a_genuinely_missing_app_relative_path_is_still_an_error(self):
+        errors, _ = verify_claims(
+            extract_claims("changed `orders/nope.py`", DOC), set(), self.KNOWN
+        )
+        self.assertEqual([c.kind for c in errors], ["module_path"])
+
+
+class CounterExampleDirectiveTests(unittest.TestCase):
+    """BUG-4 (TOOL-01): a quoted absent name is not a claim that it exists.
+
+    Both directions are pinned, because a directive that only ever suppresses
+    is as broken as one that never does: a real missing-name claim must still
+    fail, and a genuine counter-example must stop failing.
+    """
+
+    KNOWN = {"test_real_one"}
+    PATHS = {"backend/orders/tests_returns.py": 2600}
+
+    def verify(self, line, first_line=1):
+        return verify_claims(
+            extract_claims(line, DOC, first_line), self.KNOWN, self.PATHS
+        )
+
+    def test_a_genuine_counter_example_stops_failing(self):
+        errors, warnings = self.verify(
+            f"the row quoted `test_retired_name` {DIRECTIVE}"
+        )
+        self.assertEqual(errors, [])
+        self.assertEqual(len(warnings), 1)
+        self.assertIn("counter-example", warnings[0].detail)
+
+    def test_a_real_missing_name_still_fails(self):
+        errors, _ = self.verify("fixed `test_does_not_exist`")
+        self.assertEqual([c.kind for c in errors], ["test_name"])
+        self.assertIn("no `def`", errors[0].detail)
+
+    def test_a_directive_excuses_only_the_name_it_names(self):
+        # THE narrowness test. Two absent names on one line, one directive.
+        errors, _ = self.verify(
+            f"`test_retired_name` {DIRECTIVE} and `test_also_missing`"
+        )
+        self.assertEqual([c.value for c in errors], ["test_also_missing"])
+
+    def test_adding_the_word_not_does_not_stop_the_error(self):
+        # The directive cannot be faked by editing the sentence, which is the
+        # difference between a statement and a wording.
+        errors, _ = self.verify("there is not a test named `test_does_not_exist`")
+        self.assertEqual([c.kind for c in errors], ["test_name"])
+
+    def test_a_directive_does_not_excuse_a_bad_path_on_the_same_line(self):
+        errors, _ = self.verify(f"`test_retired_name` {DIRECTIVE} in gone.py")
+        self.assertEqual(sorted(c.kind for c in errors), ["module_path"])
+
+    def test_a_witness_that_does_not_exist_is_refused(self):
+        # Otherwise a directive is a general escape hatch: swap one missing
+        # name for another missing name and the claim is suppressed.
+        liar = DIRECTIVE.replace("test_real_one", "test_also_missing")
+        errors, _ = self.verify(f"`test_retired_name` {liar}")
+        self.assertEqual([c.value for c in errors], ["test_retired_name"])
+        self.assertIn("does not exist either", errors[0].detail)
+
+    def test_retired_needs_no_witness(self):
+        directive = (
+            "<!-- doc-claims:absent test_retired_name (retired)"
+            " ; reason: the pin was retired in B07d and is quoted as absent -->"
+        )
+        errors, _ = self.verify(f"`test_retired_name` {directive}")
+        self.assertEqual(errors, [])
+
+    def test_a_reason_under_the_floor_is_not_a_directive(self):
+        terse = (
+            "<!-- doc-claims:absent test_retired_name (renamed-to test_real_one)"
+            " ; reason: renamed -->"
+        )
+        self.assertEqual(parse_counter_examples(terse), {})
+        errors, _ = self.verify(f"`test_retired_name` {terse}")
+        self.assertEqual([c.kind for c in errors], ["test_name"])
+
+    def test_a_renamed_to_without_a_witness_is_not_a_directive(self):
+        malformed = (
+            "<!-- doc-claims:absent test_retired_name (renamed-to)"
+            " ; reason: renamed in B07d and cited here -->"
+        )
+        self.assertEqual(parse_counter_examples(malformed), {})
+        errors, _ = self.verify(f"`test_retired_name` {malformed}")
+        self.assertEqual([c.kind for c in errors], ["test_name"])
+
+    def test_an_unknown_kind_is_not_a_directive(self):
+        malformed = DIRECTIVE.replace("(renamed-to", "(was-renamed-to")
+        self.assertEqual(parse_counter_examples(malformed), {})
+        errors, _ = self.verify(f"`test_retired_name` {malformed}")
+        self.assertEqual([c.kind for c in errors], ["test_name"])
+
+    def test_a_plain_mention_of_the_keyword_is_not_a_directive(self):
+        self.assertEqual(parse_counter_examples("doc-claims:absent test_x"), {})
+        self.assertEqual(parse_counter_examples("<!-- doc-claims:absent -->"), {})
+
+    def test_a_directive_is_bound_to_its_own_line(self):
+        text = (
+            f"quoted `test_retired_name` {DIRECTIVE}\n"
+            "and `test_retired_name` again, uncited-as-absent"
+        )
+        errors, warnings = verify_claims(
+            extract_claims(text, DOC), self.KNOWN, self.PATHS
+        )
+        self.assertEqual([c.line for c in errors], [2])
+
+    def test_two_directives_for_one_name_that_disagree_honour_nothing(self):
+        other = (
+            "<!-- doc-claims:absent test_retired_name (misspelling-of"
+            " test_also_missing) ; reason: a different story entirely -->"
+        )
+        errors, _ = self.verify(f"`test_retired_name` {DIRECTIVE} {other}")
+        self.assertEqual([c.kind for c in errors], ["test_name"])
+
+    def test_the_claim_carries_the_reason_so_the_log_can_show_it(self):
+        claims = kinds(
+            extract_claims(f"`test_retired_name` {DIRECTIVE}", DOC), "test_name"
+        )
+        self.assertIn("renamed-to", claims[0].detail)
+        self.assertIn("B07d", claims[0].detail)
+
+    def test_an_honoured_claim_is_not_an_error(self):
+        _, warnings = self.verify(f"`test_retired_name` {DIRECTIVE}")
+        self.assertEqual(warnings[0].severity, "warn")
+
+    def test_parse_returns_the_witness(self):
+        parsed = parse_counter_examples(DIRECTIVE)
+        self.assertEqual(parsed["test_retired_name"].witness, "test_real_one")
+        self.assertEqual(parsed["test_retired_name"].kind, "renamed-to")
+        self.assertGreaterEqual(
+            len(parsed["test_retired_name"].reason), MIN_REASON_CHARS
+        )
+
+
+class BaseResolutionTests(unittest.TestCase):
+    """BUG-5 (TOOL-01): the base has to move with the promotion."""
+
+    def test_flag_wins_over_everything(self):
+        base, source = resolve_base("v1", {"DOC_CLAIMS_BASE": "v2", "CI": "true"})
+        self.assertEqual(base, "v1")
+        self.assertEqual(source, "--base")
+
+    def test_env_var_is_used_when_no_flag(self):
+        base, source = resolve_base(None, {"DOC_CLAIMS_BASE": "abc123"})
+        self.assertEqual(base, "abc123")
+        self.assertEqual(source, "$DOC_CLAIMS_BASE")
+
+    def test_ci_falls_back_to_the_pr_base_ref(self):
+        base, source = resolve_base(None, {"CI": "true", "GITHUB_BASE_REF": "master"})
+        self.assertEqual(base, "origin/master")
+        self.assertIn("GITHUB_BASE_REF", source)
+
+    def test_pr_base_ref_is_ignored_outside_ci(self):
+        base, _ = resolve_base(None, {"GITHUB_BASE_REF": "master"})
+        self.assertEqual(base, FALLBACK_BASE)
+
+    def test_ci_without_a_pr_base_ref_falls_back(self):
+        base, source = resolve_base(None, {"CI": "true"})
+        self.assertEqual(base, FALLBACK_BASE)
+        self.assertEqual(source, "default")
+
+    def test_a_blank_env_var_is_ignored_not_used(self):
+        base, source = resolve_base(None, {"DOC_CLAIMS_BASE": "   "})
+        self.assertEqual(base, FALLBACK_BASE)
+        self.assertEqual(source, "default")
+
+    def test_local_default_is_unchanged(self):
+        base, source = resolve_base(None, {})
+        self.assertEqual(base, FALLBACK_BASE)
+        self.assertEqual(source, "default")
+
+    def test_no_source_is_ever_empty(self):
+        # An unlabelled base is how "which diff did that even scan?" goes
+        # unanswerable in a CI log three weeks later.
+        for env in ({}, {"CI": "true"}, {"CI": "true", "GITHUB_BASE_REF": "main"}):
+            with self.subTest(env=env):
+                self.assertTrue(resolve_base(None, env)[1])
+
+    def test_empty_scan_is_silent_when_files_were_scanned(self):
+        self.assertEqual(empty_scan_notice(["a.md"], "b", "HEAD"), "")
+
+    def test_empty_scan_says_so_and_names_the_fix(self):
+        notice = empty_scan_notice([], "origin/spec-comp", "HEAD")
+        self.assertIn("0 file(s)", notice)
+        self.assertIn("origin/spec-comp", notice)
+        self.assertIn("DOC_CLAIMS_BASE", notice)
+
+
+class BaselineShapeTests(unittest.TestCase):
+    """The baseline holds byte FACTS. A claims entry in it is the defect."""
+
+    BYTE_FACTS = {"control_bytes", "cr", "crlf_pairs", "lines", "trailing_lf"}
+
+    def test_baseline_records_byte_facts_and_nothing_else(self):
+        path = Path(__file__).resolve().parent.parent / "doc_claims_baseline.json"
+        baseline = json.loads(path.read_text(encoding="utf-8"))
+        self.assertTrue(baseline, "baseline is empty; byte integrity is unchecked")
+        for doc, recorded in baseline.items():
+            with self.subTest(doc=doc):
+                self.assertIsInstance(recorded, dict)
+                self.assertLessEqual(set(recorded), self.BYTE_FACTS)
+                for key, value in recorded.items():
+                    self.assertIsInstance(value, (int, bool), f"{doc}.{key}")
+
+    def test_baseline_grew_no_new_top_level_sections(self):
+        # A "claims" or "known_errors" key here would be an allowlist wearing
+        # a baseline's name, and it is what this whole script exists to stop.
+        path = Path(__file__).resolve().parent.parent / "doc_claims_baseline.json"
+        baseline = json.loads(path.read_text(encoding="utf-8"))
+        for doc in baseline:
+            self.assertIn(".", doc, f"{doc} is not a documentation path")
 
 
 if __name__ == "__main__":
