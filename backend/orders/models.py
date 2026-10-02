@@ -941,11 +941,21 @@ class ReturnRequestQuerySet(models.QuerySet):
 
     ``ReturnRequestAdmin.save_model`` is the sanctioned writer of a status move:
     it checks the edge against ``RETURN_ALLOWED_TRANSITIONS`` and refuses an
-    illegal one rather than applying it silently. The bulk paths -
-    ``update()`` and ``bulk_update()`` - never reach that method, so both are
-    refused here instead of being left as a way to move a return request with no
-    machine check at all. The other columns stay updatable, because none of them
+    illegal one rather than applying it silently. The bulk paths that never
+    reach that method - ``update()`` and ``bulk_update()`` - are refused here
+    instead of being left as a way to move a return request with no machine
+    check at all. The other columns stay updatable, because none of them
     is a transition.
+
+    EXACTLY those two paths are gated, and naming them is the point: the width
+    gate below rides ``update()``/``bulk_update()`` but NOT ``bulk_create()``,
+    which writes its rows through the compiler rather than through either
+    method. A ``bulk_create`` of over-width values is therefore a clean write
+    on SQLite and a DataError on the production database. That path is
+    reachable from the ORM and the admin shell only, never from HTTP (the
+    change form saves one row through ``save()``), which is why it is a
+    documented gap rather than a gate here - narrowing this sentence is what
+    stops the claim from outrunning the code.
     """
 
     def update(self, **kwargs):

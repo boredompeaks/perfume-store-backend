@@ -34,6 +34,7 @@ from .state import (
 from .events import notify_transition
 # [R-10.1] SPEC-10-01b: dimension mappings for the writers. Kept as its own
 # line so every hunk in this file stays insertion-only.
+from .state import PAYMENT_CAPTURED
 from .state import fulfilment_for_status, payment_for_status
 # [R-10.12] SPEC-10-02: transition-audit writers. Own import lines so every
 # hunk in this file stays insertion-only.
@@ -2500,6 +2501,117 @@ def admin_order_refund(request, order_id):
 # ==================================
 
 
+# Every body field this seam reads. One tuple so the type gate below and its
+# test cannot drift apart: a field added to the view without being listed here
+# would be read without the gate that keeps it out of a string operation.
+_RETURN_BODY_FIELDS = ("order_number", "reason_code", "reason_note")
+
+
+class MalformedReturnRequestBody(Exception):
+    """A body this seam cannot read as text. Carries its own answer.
+
+    The message is built from the REQUEST alone - the field name, or the fact
+    that the body was not an object - so it is identical whatever the order
+    number in that body would have turned out to name. That is what keeps the
+    refusal from becoming an order-existence oracle (see
+    ``_return_request_miss``).
+    """
+
+    def __init__(self, error):
+        super().__init__(error)
+        self.error = error
+
+
+def _return_body(request):
+    """The three text fields of this seam's body, stripped.
+
+    TYPE-GATED BEFORE ANY STRING OPERATION, and that is the whole point of
+    this function: a request body is attacker-controlled JSON, so
+    ``order_number: 1`` / ``["x"]`` / ``{"a": 1}`` / ``reason_note: true`` /
+    ``null`` all arrive as non-``str``. Reading those with
+    ``(request.data.get(...) or "").strip()`` raised AttributeError, i.e. a 500
+    on a public endpoint, and the 500 was byte-identical for an existing and a
+    non-existent order - so it was not an existence oracle, just a crash the
+    auditor could reach with any JSON client.
+
+    Rules, uniformly across all three fields:
+
+    * absent or ``null`` reads as the empty string, which keeps ``reason_note``
+      optional (it is the only field that may be omitted) and keeps a null
+      ``order_number`` on the "required" refusal it has always got;
+    * a ``str`` is stripped, so padding is still tolerated;
+    * anything else - ``int``, ``float``, ``bool``, ``list``, ``dict`` - is a
+      malformed body and is refused, never coerced. Coercing would mean
+      inventing an order number out of ``["x"]`` and guessing a note out of
+      ``{"a": 1}``; refusing says the truth about what the caller sent.
+
+    A body that is not a JSON object at all (a bare list or a bare string) has
+    no ``.get`` to call, so it is refused on the same path rather than
+    crashing on the lookup that follows.
+    """
+    data = request.data
+    if not isinstance(data, dict):
+        raise MalformedReturnRequestBody("A JSON object body is required")
+    fields = {}
+    for field in _RETURN_BODY_FIELDS:
+        raw = data.get(field)
+        if raw is None:
+            fields[field] = ""
+        elif isinstance(raw, str):
+            fields[field] = raw.strip()
+        else:
+            raise MalformedReturnRequestBody(f"{field} must be a string")
+    return fields
+
+
+def _return_eligible(order):
+    """Whether ``order`` has anything at all a customer could send back.
+
+    DERIVED FROM THE MACHINE, NOT LISTED. The cycle-2 audit caught the earlier
+    version of this gate refusing ``cancelled`` with the rationale "nothing was
+    fulfilled" and then ACCEPTING ``pending`` for the identical reason. It had
+    to accept it: ``LEGACY_STATUS_DIMENSIONS`` (orders.state) is the machine's
+    own map of every status onto the two dimensions spec 10.2 declares, and it
+    records ``pending`` and ``cancelled`` as the same row twice -
+    ``("pending", "unfulfilled")`` both. So any rule that refuses a cancelled
+    order for "never fulfilled, nothing to send back" necessarily refuses a
+    pending one for exactly the same reason. Refusing one and admitting the
+    other was a contradiction dressed as a policy; this is the honest form.
+
+    THE RULE: an order is ineligible only while NEITHER dimension says anything
+    happened - the money has not been captured AND nothing has shipped. Both
+    halves are read off the row, both halves are the machine's own vocabulary
+    (``PAYMENT_CAPTURED`` is state.py's declared capture point;
+    ``unfulfilled`` is the declared default of ``Order.fulfilment_status``),
+    and neither is a window or a threshold.
+
+    Consequences, all of them read off that one rule rather than appended as
+    special cases:
+
+    * accepted: confirmed, shipped, delivered - the statuses whose machine
+      mapping says the money was captured;
+    * refused: pending and cancelled, which the machine maps identically;
+    * refused: an order whose payment verification FAILED. The machine reaches
+      ``failed`` only from ``pending`` and declares no capture there
+      (``PAYMENT_ALLOWED_TRANSITIONS``), so "never paid for" is the first half
+      of this same predicate - a return against an order the store holds no
+      money for is not a return, and it is not answered 201-with-nothing-in-it.
+
+    The second half of the conjunction, rather than demanding capture alone, is
+    deliberate: the machine WAIVES the capture precondition for COD orders and
+    puts their capture point at delivery (``orders.models``), so a COD order
+    that has SHIPPED must stay returnable while its money is still uncaptured.
+
+    No window, and no invented number: the spec's "where eligible" (line 1083)
+    and its "Eligibility validation" (6.8 line 1959) describe a WINDOW it never
+    defines. This predicate answers only "has anything happened yet"; the window
+    policy and its tunability belong to SPEC-1-B07b.
+    """
+    money_moved = order.payment_status == PAYMENT_CAPTURED
+    goods_moved = order.fulfilment_status != "unfulfilled"
+    return money_moved or goods_moved
+
+
 def _return_request_miss():
     """The one answer every return-request LOOKUP failure gets.
 
@@ -2512,12 +2624,17 @@ def _return_request_miss():
     existence leaks). 404 rather than 403 for the same reason: "forbidden"
     would confirm the order is real.
 
-    Deliberately NOT the answer for a malformed request: a body with no order
-    number, or with a reason code outside the vocabulary, is refused with a 400
-    BEFORE any lookup runs. Those refusals are identical whatever the order
-    number would have turned out to be, so they cannot disclose anything about
-    an order - and folding them into this 404 would only hide a real input error
-    from the customer who made it.
+    Deliberately NOT the answer for a malformed request: a body ``_return_body``
+    cannot read as text - no order number, a reason code outside the
+    vocabulary, a non-string or ``null`` where text is required, a body that is
+    not an object at all - is refused with a 400 BEFORE any lookup runs. That
+    is now true of EVERY malformed shape and not just of a missing field or a
+    bad vocabulary string (cycle 1 overclaimed it here, and the gap was real:
+    a non-string field raised AttributeError instead of being refused). Those
+    refusals are built from the request alone and are identical whatever the
+    order number would have turned out to be, so they cannot disclose anything
+    about an order - and folding them into this 404 would only hide a real
+    input error from the customer who made it.
     """
     return Response(
         {"error": "Order not found"},
@@ -2546,7 +2663,7 @@ def _return_request_payload(request_row):
     }
 
 
-@api_view(['POST'])
+@api_view(["POST"])
 @permission_classes([IsAuthenticated])
 def return_request_create(request):
     """[R-1.16] POST /api/v1/store/orders/returns/ - request a return.
@@ -2591,9 +2708,16 @@ def return_request_create(request):
     is outside this task's scope; the rate policy for this surface belongs to
     the task that owns the customer returns API.
     """
-    order_number = (request.data.get("order_number") or "").strip()
-    reason_code = (request.data.get("reason_code") or "").strip()
-    reason_note = (request.data.get("reason_note") or "").strip()
+    try:
+        body = _return_body(request)
+    except MalformedReturnRequestBody as malformed:
+        return Response(
+            {"error": malformed.error},
+            status=status.HTTP_400_BAD_REQUEST,
+        )
+    order_number = body["order_number"]
+    reason_code = body["reason_code"]
+    reason_note = body["reason_note"]
 
     # Input validation runs BEFORE the order lookup and answers 400s that are
     # identical whatever the order number turns out to be, so no combination of
@@ -2623,16 +2747,14 @@ def return_request_create(request):
             # One shape for "no such order", "not yours" and "a guest order".
             return _return_request_miss()
 
-        if order.status == "cancelled":
-            # A cancelled order was never fulfilled - the machine declares the
-            # cancel edge only from ``pending`` (orders.state) - so there is
-            # nothing to send back. This is a fact read off the order machine,
-            # not a return policy: spec 6.8 line 1959's "Eligibility validation"
-            # and spec 4 line 1083's "where eligible" both describe a WINDOW
-            # the spec never defines, so no window is invented here. That
-            # policy, and its tunability, belongs to SPEC-1-B07b.
+        if not _return_eligible(order):
+            # Reads the two dimensions spec 10.2 declares, off the order machine
+            # (see _return_eligible). A pending and a cancelled order are
+            # refused for the same reason because the machine maps them onto the
+            # same dimension pair; a never-paid one is refused on the capture
+            # half of that same test, whichever status it happens to wear.
             return Response(
-                {"error": "A cancelled order cannot be returned"},
+                {"error": "This order is not eligible for a return"},
                 status=status.HTTP_409_CONFLICT,
             )
 

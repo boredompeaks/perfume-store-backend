@@ -973,9 +973,11 @@ class ReturnRequestAdminForm(forms.ModelForm):
             # honest if that ever changes rather than raising DoesNotExist.
             return status
         with transaction.atomic():
-            old = ReturnRequest.objects.select_for_update().get(
-                pk=self.instance.pk
-            ).status
+            old = (
+                ReturnRequest.objects.select_for_update()
+                .get(pk=self.instance.pk)
+                .status
+            )
         if not return_transition_allowed(old, status):
             raise forms.ValidationError(
                 f"A return request cannot move from '{old}' to '{status}'. "

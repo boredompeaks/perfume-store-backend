@@ -59,7 +59,19 @@ from orders.admin import (
     RETURN_CAPABILITY_MAP,
     ReturnRequestAdminForm,
 )
-from orders.views import _return_request_miss
+from orders.state import (
+    LEGACY_STATUS_DIMENSIONS,
+    PAYMENT_CAPTURED,
+    PAYMENT_METHOD_COD,
+    fulfilment_for_status,
+    payment_for_status,
+)
+from orders.views import (
+    MalformedReturnRequestBody,
+    _return_body,
+    _return_eligible,
+    _return_request_miss,
+)
 
 CREATE_URL = "/api/v1/store/orders/returns/"
 CHANGELIST = "/admin/orders/returnrequest/"
@@ -96,6 +108,14 @@ class ReturnTestCase(ApiTestCase):
         self.cancelled = self._order("RET-2026-000003", self.buyer, status="cancelled")
 
     def _order(self, order_number, user, status="confirmed"):
+        # The two dimension columns are derived from the machine's own status
+        # map rather than hand-written. Cycle 1 wrote
+        # ``"captured" if status != "pending" else "pending"``, which put a
+        # CANCELLED order on ``captured`` - disagreeing with
+        # LEGACY_STATUS_DIMENSIONS, where cancelled is ``("pending",
+        # "unfulfilled")`` because cancel is legal only from pending. The
+        # fixtures have to say what the machine says, or the eligibility probe
+        # below is testing a row the machine cannot produce.
         return Order.objects.create(
             user=user,
             order_number=order_number,
@@ -107,7 +127,8 @@ class ReturnTestCase(ApiTestCase):
             pincode="452001",
             status=status,
             total_amount=Decimal("1200.00"),
-            payment_status="captured" if status != "pending" else "pending",
+            payment_status=payment_for_status(status),
+            fulfilment_status=fulfilment_for_status(status),
         )
 
     def guest_order(self, order_number="RET-2026-000900", email="guest@example.com"):
@@ -232,14 +253,274 @@ class RequestShapeTests(ReturnTestCase):
         self.assertEqual(res.status_code, 201, res.data)
 
     def test_a_cancelled_order_is_refused(self):
-        # A cancelled order was never fulfilled (the machine declares the
-        # cancel edge only from pending), so there is nothing to send back.
+        # Nothing was ever paid for it and nothing shipped (the machine maps
+        # cancelled onto ("pending", "unfulfilled")), so there is nothing to
+        # send back. The pin that keeps this refusal and the pending refusal
+        # from coming apart is in EligibilityDerivationTests.
         self.login_as(self.buyer)
 
         res = self.ask(self.cancelled.order_number)
 
         self.assertEqual(res.status_code, 409, res.data)
         self.assertFalse(self.cancelled.return_requests.exists())
+
+
+@tag("e2e")
+class MalformedBodyTests(ReturnTestCase):
+    """Every body shape that is not text is REFUSED, not crashed on.
+
+    Cycle 1 read the three fields with
+    ``(request.data.get(field) or "").strip()``, so any non-``str`` value
+    reached ``.strip()`` and raised AttributeError - HTTP 500 on a public
+    endpoint, reachable with any JSON client. Each case below returned 500
+    before this class existed.
+    """
+
+    # field -> the shapes that must all be refused with the same 400.
+    NON_TEXT = {
+        "order_number": [1, ["x"], {"a": 1}, True, 2.5],
+        "reason_code": [5, ["damaged"], {"a": 1}, True],
+        "reason_note": [{"a": 1}, ["x"], 7, True],
+    }
+
+    def setUp(self):
+        super().setUp()
+        # Logged in ONCE: the login endpoint carries a throttle scope, and a
+        # per-request re-login inside these loops trips it (429) long before it
+        # tests anything about the return seam.
+        self.login_as(self.buyer)
+
+    def _post(self, payload):
+        return self.client.post(CREATE_URL, payload, format="json")
+
+    def test_every_non_string_field_shape_is_a_400_not_a_500(self):
+        for field, shapes in self.NON_TEXT.items():
+            for shape in shapes:
+                with self.subTest(field=field, shape=shape):
+                    payload = {
+                        "order_number": self.order.order_number,
+                        "reason_code": REASON,
+                        "reason_note": "note",
+                    }
+                    payload[field] = shape
+
+                    res = self._post(payload)
+
+                    self.assertEqual(res.status_code, 400, res.data)
+                    self.assertEqual(res.data["error"], f"{field} must be a string")
+                    self.assertFalse(ReturnRequest.objects.exists())
+
+    def test_a_null_in_either_required_field_is_still_the_old_400(self):
+        # None is not malformed, it is absent: the note is optional and a null
+        # order_number has always got the "required" refusal. Both answers are
+        # unchanged from cycle 1 - only the CRASHES are new.
+        for field, expected in (
+            ("order_number", "order_number is required"),
+            ("reason_code", "A valid reason_code is required"),
+        ):
+            with self.subTest(field=field):
+                payload = {
+                    "order_number": self.order.order_number,
+                    "reason_code": REASON,
+                }
+                payload[field] = None
+
+                res = self._post(payload)
+
+                self.assertEqual(res.status_code, 400, res.data)
+                self.assertEqual(res.data["error"], expected)
+
+    def test_a_null_note_is_filed_as_the_empty_note(self):
+        res = self._post(
+            {
+                "order_number": self.order.order_number,
+                "reason_code": REASON,
+                "reason_note": None,
+            }
+        )
+
+        self.assertEqual(res.status_code, 201, res.data)
+        self.assertEqual(ReturnRequest.objects.get(pk=res.data["id"]).reason_note, "")
+
+    def test_a_body_that_is_not_an_object_is_refused_rather_than_crashed_on(self):
+        # A bare JSON list/scalar parses fine and has no ``.get`` to call, so it
+        # is refused on the same path as any other unreadable body.
+        for body in ([1, 2], "RET-2026-000001", 42):
+            with self.subTest(body=body):
+                res = self._post(body)
+
+                self.assertEqual(res.status_code, 400, res.data)
+                self.assertEqual(res.data["error"], "A JSON object body is required")
+
+    def test_the_gate_is_listed_not_hand_written(self):
+        # A field the view reads must be in the gate's tuple. This is what keeps
+        # "every field is type-checked" true when the next field is added.
+        with self.subTest():
+            request = type(
+                "R", (), {"data": {"order_number": "X", "reason_code": "y"}}
+            )()
+            self.assertEqual(
+                set(_return_body(request)),
+                {"order_number", "reason_code", "reason_note"},
+            )
+            self.assertEqual(_return_body(request)["reason_note"], "")
+
+    def test_the_gate_raises_rather_than_coercing_a_bad_shape(self):
+        request = type("R", (), {"data": {"order_number": ["x"]}})()
+
+        with self.assertRaises(MalformedReturnRequestBody) as caught:
+            _return_body(request)
+
+        self.assertEqual(caught.exception.error, "order_number must be a string")
+
+    def test_malformed_input_is_still_not_an_order_existence_oracle(self):
+        """The property that matters most here: byte-identical either way.
+
+        A 400 whose body or code differed between an existing and a
+        non-existent order would be a NEW oracle - worse than the 500 it
+        replaces, because it would be reachable by anyone. Two axes, compared
+        on raw response content and not on the status code alone:
+
+        * every REFUSED body that still names an order is sent twice, once
+          against the caller's real order and once against an order number
+          that does not exist. Refusals are the whole of the property - a 201
+          against your own order is the feature working, not a leak, and
+          MissShapeTests already pins the 404 as the one answer for a miss;
+        * every body whose order_number is ITSELF malformed names no order at
+          all, so there is no existence to vary; it is sent by two accounts
+          holding different orders instead, proving the answer is built from
+          the request alone.
+        """
+        missing = "RET-2026-999999"
+        refused_but_named = [
+            {"order_number": self.order.order_number, "reason_code": "not_a_reason"},
+            {"order_number": self.order.order_number},
+            {"order_number": self.order.order_number, "reason_code": 5},
+            {"order_number": self.order.order_number, "reason_code": ["damaged"]},
+            {"order_number": self.order.order_number, "reason_code": None},
+            {
+                "order_number": self.order.order_number,
+                "reason_code": REASON,
+                "reason_note": {"a": 1},
+            },
+            {"order_number": self.order.order_number, "reason_note": ["x"]},
+        ]
+
+        for body in refused_but_named:
+            with self.subTest(body=body):
+                real = self._post(body)
+                absent = self._post({**body, "order_number": missing})
+                self.assertEqual(real.status_code, 400, body)
+                self.assertEqual(real.status_code, absent.status_code, body)
+                self.assertEqual(real.content, absent.content, body)
+
+        malformed = [
+            {"order_number": ["x"], "reason_code": REASON},
+            {"order_number": 1, "reason_code": REASON},
+        ]
+        for body in malformed:
+            with self.subTest(body=body):
+                as_buyer = self._post(body)
+                self.login_as(self.stranger)
+                as_stranger = self._post(body)
+                self.assertEqual(as_buyer.status_code, 400, body)
+                self.assertEqual(as_buyer.content, as_stranger.content, body)
+
+
+@tag("e2e")
+class EligibilityDerivationTests(ReturnTestCase):
+    """The accepted set IS the derivation - the two cannot drift apart.
+
+    Cycle 1's gate refused ``cancelled`` with the rationale "nothing was
+    fulfilled" and accepted ``pending``, which the audit called a contradiction:
+    the machine maps both statuses onto ``("pending", "unfulfilled")``. The
+    pin below computes the refused set from ``LEGACY_STATUS_DIMENSIONS`` at run
+    time and drives the endpoint for every status in it, so a hand-listed
+    accepted set that stops matching the derivation fails here rather than
+    being discovered by an auditor.
+    """
+
+    def refused_by_the_machine(self):
+        """The set a dimension-reading gate refuses, straight off the machine.
+
+        Computed from ``LEGACY_STATUS_DIMENSIONS`` and the machine's declared
+        capture point, never restated here: this is the derivation the view's
+        gate must agree with, so that a hand-listed accepted set cannot drift
+        away from it unnoticed.
+        """
+        return {
+            status
+            for status, (payment, fulfilment) in LEGACY_STATUS_DIMENSIONS.items()
+            if payment != PAYMENT_CAPTURED and fulfilment == "unfulfilled"
+        }
+
+    def test_the_machine_says_pending_and_cancelled_are_the_same_order(self):
+        # The fact the whole derivation leans on. If a future migration ever
+        # separates these two rows, this test says so before the gate's
+        # rationale quietly becomes false again.
+        self.assertEqual(
+            LEGACY_STATUS_DIMENSIONS["pending"],
+            LEGACY_STATUS_DIMENSIONS["cancelled"],
+        )
+        self.assertEqual(self.refused_by_the_machine(), {"pending", "cancelled"})
+
+    def test_the_accepted_set_matches_the_derivation_for_every_status(self):
+        self.login_as(self.buyer)
+        refused = self.refused_by_the_machine()
+
+        for index, status in enumerate(LEGACY_STATUS_DIMENSIONS):
+            with self.subTest(status=status):
+                order = self._order(f"RET-2026-0010{index}", self.buyer, status=status)
+
+                res = self.ask(order.order_number)
+
+                expected = 409 if status in refused else 201
+                self.assertEqual(res.status_code, expected, res.data)
+                # And the row-level predicate agrees with what the seam did, so
+                # the gate cannot pass by accident.
+                self.assertEqual(not _return_eligible(order), status in refused)
+
+    def test_a_pending_order_is_refused_like_a_cancelled_one(self):
+        pending = self._order("RET-2026-001100", self.buyer, status="pending")
+        self.login_as(self.buyer)
+
+        res = self.ask(pending.order_number)
+
+        self.assertEqual(res.status_code, 409, res.data)
+        self.assertFalse(pending.return_requests.exists())
+
+    def test_a_never_paid_order_is_refused_on_the_payment_dimension_alone(self):
+        # Zero items, zero amount, verification FAILED: there is no return to
+        # make against an order the store never took money for, and the rule
+        # that refuses it is the payment dimension reading "pending has not
+        # moved" - not a special case bolted on for this probe.
+        unpaid = self._order("RET-2026-001101", self.buyer, status="pending")
+        Order.objects.filter(pk=unpaid.pk).update(
+            payment_status="failed", total_amount=Decimal("0.00")
+        )
+        unpaid.refresh_from_db()
+        self.login_as(self.buyer)
+
+        res = self.ask(unpaid.order_number)
+
+        self.assertEqual(res.status_code, 409, res.data)
+        self.assertFalse(unpaid.return_requests.exists())
+
+    def test_a_cod_order_that_shipped_is_still_returnable_uncaptured(self):
+        # The reason the gate is a conjunction and not "payment == captured":
+        # the machine waives the capture precondition for COD and puts the
+        # capture point at delivery (orders.models), so a COD order that has
+        # shipped arrives with its money still pending and must not be refused.
+        cod = self._order("RET-2026-001102", self.buyer, status="shipped")
+        Order.objects.filter(pk=cod.pk).update(
+            payment_method=PAYMENT_METHOD_COD, payment_status="pending"
+        )
+        cod.refresh_from_db()
+        self.login_as(self.buyer)
+
+        res = self.ask(cod.order_number)
+
+        self.assertEqual(res.status_code, 201, res.data)
 
 
 class MissShapeTests(ReturnTestCase):
@@ -923,10 +1204,17 @@ class CapabilityTests(ReturnTestCase):
         operator = role_user("inventory", "returns-packer")
 
         self.assertEqual(held_capabilities(operator), INVENTORY_CAPABILITIES)
-        # The consequence of that pin, stated as a test rather than a comment:
-        # spec 1.1 line 110's "returns" is NOT reachable by this role today.
-        self.client.force_login(operator)
-        self.assertEqual(self.client.get(CHANGELIST).status_code, 403)
+        # NO assertion here on whether this role can reach the return-request
+        # admin. Cycle 1 asserted the 403, which hardened a KNOWN GAP into an
+        # asserted contract: spec 1.1 line 110 reads
+        # ``Inventory/fulfilment operator -> Manage stock, packing, shipping and
+        # returns``, so returns SHOULD be reachable for this role and today is
+        # not. The cycle-2 audit ruled that omission a MISSING requirement
+        # rather than a defect and ledgered it as SPEC-1-B07c, which widens
+        # returns.read/returns.write to the inventory role AND widens the
+        # INVENTORY_CAPABILITIES pin imported above in the same commit. Until
+        # that lands, the set-equality above is the honest statement of what
+        # this task does not touch.
 
 
 class WidthGateTests(ReturnTestCase):

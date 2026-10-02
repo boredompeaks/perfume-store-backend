@@ -74,5 +74,4 @@ urlpatterns = [
     # the two never compete. Mounted in both families by config/urls.py because
     # this urlconf is already included under store/orders/ and api/orders/.
     path("returns/", return_request_create, name="return-request-create"),
-
 ]
