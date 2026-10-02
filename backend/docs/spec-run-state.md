@@ -2,6 +2,36 @@
 
 Source of truth for the spec-compliance run. Updated at every status transition with evidence (commit SHA, test command + result, or report verdict).
 
+## Standing operating rules (orchestrator — read before every dispatch)
+
+These are rules for the ORCHESTRATOR, not for the agents. They live here
+because this file is read at every session start; a rule that exists only in
+one session's context dies with that session.
+
+1. **Hand over the METHOD, never the VALUE.** When briefing a fix cycle, give
+   the finding, the method that produced the number, and the verdict — never
+   a table of correct values. Where a figure must be cited, mark it
+   *"previously wrong twice — reproduce or contradict"*.
+   **Why:** this is the single largest self-inflicted finding of the run. In
+   SPEC-1-B07d cycle 2 the orchestrator's brief supplied a six-row table of
+   mutation counts *and* said "re-derive all six yourself". That is a
+   contradiction, the builder resolved it the cheap way, and **two of the five
+   numbers the brief supplied were themselves wrong** — one of them, M4, had
+   been carried from an audit finding that was also wrong. The brief built to
+   prevent drift was the drift's proximate cause.
+   **Self-check, greppable:** if a handoff contains a bare measured value the
+   agent has been asked to verify, the handoff is non-compliant. Run this read
+   before dispatching, not after.
+2. **Do not restate a previous agent's report into a new handoff.** Relay
+   structured fields only — paths, line ranges, verdicts, SHAs. Pasting prose
+   between agents is how a wrong figure acquires two apparent sources.
+3. **A rule given verbally to an agent is a rule the agent will break.** Every
+   standing instruction must live in this file or in
+   `backend/docs/conventions.md`, both of which are read at session start.
+4. **When an agent's fix is refused or narrowed, say so in the ledger.** A
+   finding closed out-of-band by owner ruling is not precedent and must never
+   be generalised by a later session that was not present.
+
 ## Run pointers
 
 - active section: **1** | phase: **ESCALATED — AWAITING USER RULING** | held audits: none
