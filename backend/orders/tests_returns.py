@@ -2859,6 +2859,40 @@ class ReturnEligibilityWindowTests(ReturnTestCase):
         self.assertEqual(res.status_code, 200)
         self.assertIsNone(SiteSettings.load().return_window_days)
 
+    def test_the_ceiling_is_the_policy_value_written_out_by_hand(self):
+        # The load-bearing half of the ceiling probe, and the half that is NOT
+        # derived from the constant. The probe above takes BOTH of its
+        # expectations FROM ``MAX_RETURN_WINDOW_DAYS`` - the accepted value IS
+        # the constant and the refused value is the constant + 1 - so it agrees
+        # with whatever that constant says, and setting it to 999999 leaves it
+        # green because the value under test and the value expected of it move
+        # together. A pin whose expectation is recomputed from the constant
+        # under test cannot fail, so the number 3650 is spelled out below as a
+        # literal: not imported, not computed, not ``MAX + anything``.
+        #
+        # Two independent literal expectations, because either alone is half a
+        # pin. The FORM half is asserted first and inside ``subTest`` so that
+        # under a mutated constant BOTH halves are reported rather than the
+        # first one masking the second.
+        form_class = modelform_factory(
+            SiteSettings,
+            fields=["return_window_days"],
+            widgets={"return_window_days": forms.NumberInput},
+        )
+
+        for accepted_value, should_be_valid in ((3650, True), (3651, False)):
+            with self.subTest(days=accepted_value):
+                probe = form_class(data={"return_window_days": accepted_value})
+
+                self.assertEqual(probe.is_valid(), should_be_valid, probe.errors)
+
+        # 3650 is the POLICY value - ten years - and not a storage limit. (The
+        # probe above still calls the ceiling a representability bound, which
+        # this cycle's changelog entry records as a superseded description:
+        # ``PositiveIntegerField`` is an int4 on Postgres, which holds
+        # 2,147,483,647, so nothing is refused here for being unrepresentable.)
+        self.assertEqual(MAX_RETURN_WINDOW_DAYS, 3650)
+
 
 @tag("e2e")
 class ReturnsSurfaceNotWidenedTests(ReturnTestCase):
