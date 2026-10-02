@@ -562,14 +562,19 @@ ORDER_HISTORY_MAX_PAGE_SIZE = _env_int('ORDER_HISTORY_MAX_PAGE_SIZE', 100)
 # (conventions.md: no hardcoded thresholds); non-integer values are ignored and
 # the defaults are used instead. The spec pins no number for either.
 #
-# NOTE: there is deliberately NO return-window setting here. Spec 4 line 1083
-# ("Return/refund request where eligible") and spec 6.8 line 1959 ("Eligibility
-# validation") describe a window the spec never defines anywhere - a whole-file
-# sweep for a day count finds exactly one hit, and it is about deployment
-# cadence, not returns. Inventing a number would be fabricated policy, so
-# eligibility is the machine-derived rule in orders.views._return_eligible and
-# nothing else. If a window is ever wanted, it arrives as an env-driven key here
-# with its own documented default, never as a literal in the view.
+# NOTE: there is deliberately NO return-window key here, and that is a build-
+# order state rather than a settled policy. Spec 4 line 1083 ("Return/refund
+# request where eligible") and spec 6.8 line 1959 ("Eligibility validation")
+# describe a window the spec never numbers anywhere - a whole-file sweep for a
+# day count finds exactly one hit, and it is about deployment cadence, not
+# returns - so this task invented no number. THE PRODUCT OWNER HAS SINCE
+# REQUIRED a configurable site-wide return window, and it overrides that
+# outcome; SPEC-1-B07d owns it. It will NOT arrive as a key here: a return
+# window is merchant-facing policy that each store sets for itself, so it is
+# an ops.SiteSettings row, not deployment config. The two keys below stay
+# env-driven precisely because they are the OTHER kind - a page density is a
+# property of the deployment and does not vary per store. Until B07d lands an
+# order's AGE IS NOT AN INPUT to eligibility (orders.views._return_eligible).
 RETURNS_HISTORY_PAGE_SIZE = _env_int('RETURNS_HISTORY_PAGE_SIZE', 10)
 RETURNS_HISTORY_MAX_PAGE_SIZE = _env_int('RETURNS_HISTORY_MAX_PAGE_SIZE', 100)
 

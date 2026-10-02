@@ -1794,13 +1794,23 @@ class ReturnSerializerContractTests(ReturnTestCase):
         self.assertNotIn("internal_note", model_fields)
         self.assertNotIn("internal_note", ReturnRequestSerializer().fields)
 
-    def test_the_projection_reveals_nothing_the_allowlist_does_not_name(self):
-        # Completeness, so the hand-written oracle cannot quietly go stale: if
-        # the model grows a customer-visible column, this fails rather than the
-        # column silently riding a ``fields`` list nobody re-read. It asserts
-        # the SUBSET direction (every exposed field is a declared, permitted
-        # one), which is the direction that is a leak - a field absent from the
+    def test_the_projection_names_no_field_outside_the_permitted_set(self):
+        # What this actually pins, stated exactly. It asserts the SUBSET
+        # direction - every EXPOSED field is a declared, permitted one - and
+        # that is the direction that is a leak; a field absent from the
         # projection is a documented omission, never a vulnerability.
+        #
+        # What it does NOT do, and an earlier comment here wrongly claimed: it
+        # does not detect a MODEL column that was never added to the projection.
+        # ``Meta.fields`` is an explicit allowlist, so a new column is
+        # structurally unable to leak - it never reaches ``serializer.fields``
+        # until somebody edits that list by hand, and THAT edit is what these
+        # two tests catch: this one rejects an unpermitted name the moment it
+        # appears, and ``test_the_projection_is_exactly_the_hand_written_field_set``
+        # rejects the field set changing at all.
+        #
+        # (Verified: adding ``staff_hint`` to the model alone, with no
+        # ``Meta.fields`` edit, leaves both tests passing - which is the point.)
         permitted = self.CUSTOMER_FIELDS | {"order_number"}
         for name in ReturnRequestSerializer().fields:
             with self.subTest(field=name):
@@ -1998,11 +2008,28 @@ class ReturnListTests(ReturnTestCase):
         self.assertIs(res.data["next_page"], True)
 
     def test_a_page_size_caller_is_clamped_and_never_unbounded(self):
-        with override_settings(RETURNS_HISTORY_MAX_PAGE_SIZE=3):
+        # THE FIXTURE MUST EXCEED THE CAP, or this pin is vacuous. It once
+        # overrode MAX=3 against the two-row setUp, where clamping and not
+        # clamping return the SAME two rows - dropping the ``min()`` in
+        # ``_returns_page_size`` left the suite green. Five rows against a cap
+        # of two makes truncation observable: clamped gives 2 results over 3
+        # pages, unclamped gives all 5 over 1 page.
+        for index in range(3):
+            order = self._order(
+                f"RET-2026-00160{index}", self.buyer, status="delivered"
+            )
+            self.file_request(order, ReturnRequest.Status.REQUESTED)
+
+        with override_settings(RETURNS_HISTORY_MAX_PAGE_SIZE=2):
             res = self.client.get(LIST_URL, {"page_size": 10000})
 
         self.assertEqual(res.status_code, 200, res.data)
+        # There ARE more rows than the cap allows on one page...
+        self.assertEqual(res.data["count"], 5)
+        # ...and the caller's request for 10000 was clamped to the cap.
         self.assertEqual(len(res.data["results"]), 2)
+        self.assertEqual(res.data["total_pages"], 3)
+        self.assertIs(res.data["next_page"], True)
         # A non-numeric or non-positive value falls back to the configured
         # default rather than erroring - the order-history resolver's contract,
         # which this resolver deliberately mirrors.
@@ -2013,10 +2040,20 @@ class ReturnListTests(ReturnTestCase):
                 self.assertEqual(fallback.data["current_page"], 1)
 
     def test_a_page_past_the_end_lands_on_the_last_page_rather_than_404ing(self):
-        res = self.client.get(LIST_URL, {"page": 99})
+        # Same vacuity, different trap: at the shipped default page size the
+        # two-row fixture is a SINGLE page, so "landed on the last page" and
+        # "silently fell back to page 1" are the same number and the pin
+        # cannot see which one happened. Sizing the page to 1 row against the
+        # same two rows makes the listing genuinely multi-page, so a fallback
+        # to page 1 now reads 1 where a correct answer reads 2.
+        with override_settings(RETURNS_HISTORY_PAGE_SIZE=1):
+            res = self.client.get(LIST_URL, {"page": 99})
 
         self.assertEqual(res.status_code, 200, res.data)
-        self.assertEqual(res.data["current_page"], 1)
+        self.assertEqual(res.data["total_pages"], 2)
+        self.assertEqual(res.data["current_page"], 2)
+        self.assertIs(res.data["previous_page"], True)
+        self.assertEqual(len(res.data["results"]), 1)
 
     def test_reading_the_listing_moves_no_money(self):
         before = Order.objects.filter(user=self.buyer).values_list(

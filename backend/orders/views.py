@@ -2635,26 +2635,32 @@ def _return_eligible(order):
       so a COD order that has SHIPPED must stay returnable while its money is
       still ``pending``.
 
-    NO WINDOW, AND THE CHOICE IS DELIBERATE. SPEC-1-B07b owned the window
-    question and answered it with NO WINDOW at all, because the spec never
-    defines one: line 1083's "Return/refund request where eligible" and line
-    1959's "Eligibility validation" both describe a window that a whole-file
-    sweep for a day count cannot find (the single hit is about deployment
-    cadence, not returns). So the age of an order is NOT an input to this
+    NO WINDOW TODAY - WHICH IS A BUILD-ORDER STATE, NOT A SETTLED POLICY.
+    SPEC-1-B07b found the spec silent on the NUMBER: line 1083's "Return/
+    refund request where eligible" and line 1959's "Eligibility validation"
+    both describe a window that a whole-file sweep for a day count cannot find
+    (the single hit is about deployment cadence, not returns). Inventing one
+    would have been fabricated policy wearing a configuration key, so B07b
+    shipped without one - which left the age of an order out of this
     predicate: a delivered order from five years ago is exactly as returnable
-    as one delivered this morning, and a pending order from five years ago is
-    exactly as ineligible. The alternative - an env-driven
-    ``RETURN_WINDOW_DAYS`` - was rejected because any value for it would have
-    been invented here rather than derived from anything, which is fabricated
-    policy wearing a config key. This predicate therefore asks a question the
-    machine can answer ("has anything happened yet") and never one only the
-    calendar can.
+    as one delivered this morning, and a pending one exactly as ineligible.
 
-    The consequence is deliberate and worth stating: a store that DOES want a
-    return window must add one as an env-driven setting with its own documented
-    default (the seam is already this function, and nothing about adding a
-    time clause here would need a migration). Until a merchant configures one,
-    nothing silently expires a customer's right to ask.
+    THE PRODUCT OWNER HAS SINCE REQUIRED A CONFIGURABLE SITE-WIDE RETURN
+    WINDOW, and that overrides B07b's no-window outcome rather than
+    complementing it. It is ledgered as SPEC-1-B07d, which owns it. Nothing
+    about this seam resists it: the seam is already this function and a time
+    clause needs no migration. Two things B07d inherits from here, so they are
+    recorded where the seam can be read:
+
+    * the window is a MERCHANT-FACING SETTING, not deployment config - each
+      store sets its own - so its number belongs in ``ops.SiteSettings``, NOT
+      in env and NOT here. (The page-size keys B07b DID add beside the
+      deployment config stay env-driven, because a page density is a property
+      of the deployment and does not vary per store. The two differ in kind,
+      and that difference is why they do not share a home.)
+    * until B07d lands, this predicate still asks a question the machine can
+      answer ("has anything happened yet") and never one only the calendar
+      can. That is what ships now; it is not the answer to the question.
     """
     money_moved = order.payment_status in CAPTURED_MONEY_PAYMENT_STATUSES
     goods_moved = order.fulfilment_status != "unfulfilled"
@@ -2916,15 +2922,27 @@ def _create_return_request(request):
     ask. A retry that arrives after the first committed is the 409 above, which
     is honest about what happened rather than pretending to create a second one.
 
-    No throttle scope: the seam is authenticated (``IsAuthenticated``, not
-    ``AllowAny``), and conventions.md requires a scope on public MUTATING
-    endpoints. SPEC-1-B07b, which owns the rest of this family, considered and
-    declined one here: the rates that would be meaningful (the repo's existing
-    ones run 5-120/min) sit at or below the count of the enumeration probes
-    that prove the eligibility gate answers for EVERY payment x fulfilment pair
-    the machine admits, so any rate low enough to be worth having would 429
-    those probes and the only way to avoid it would be to raise the rate until
-    it stopped meaning anything.
+    No throttle scope, DECLINED ON AUTHORIZATION GROUNDS - and the reason is
+    what the seam IS, not what its tests happen to do. conventions.md requires
+    a scope on public MUTATING endpoints; this one is ``IsAuthenticated`` and
+    never ``AllowAny``, so it is not that class of endpoint. A throttle would
+    buy little here specifically: an anonymous caller cannot reach the seam at
+    all, and a caller looping over their OWN orders cannot amplify rows - the
+    partial unique index allows at most one OPEN request per order, so the
+    write is bounded by the number of orders the account owns rather than by
+    the number of requests it sends.
+
+    The cost a future scope would carry is real, and it is recorded here as
+    that - a cost to solve, NOT the reason to skip the scope. The enumeration
+    probe that proves the eligibility gate answers for EVERY payment x
+    fulfilment pair issues ~18 requests inside one test, and
+    ``ScopedRateThrottle`` keys on user pk, so any rate worth having (the
+    repo's existing ones run 5-120/min) would 429 it. Restructuring that probe
+    - distinct users per cell, or a cache reset between cells - is precisely
+    the work a throttle on this seam would require. Until then the two
+    authorization facts above are the decision, and the probe cost is the
+    reason the eventual scope will need test work rather than a one-line
+    decorator.
     """
     try:
         body = _return_body(request)
