@@ -1,6 +1,7 @@
 import csv
 from decimal import Decimal
 
+from django import forms
 from django.contrib import admin, messages
 from django.db import transaction
 from django.http import HttpResponse
@@ -13,6 +14,10 @@ from common.saved_filters import SavedFilterMixin
 # [R-10.1] The order machine lives in orders.state (single source); this
 # module only consumes it.
 from .models import Coupon, Order, OrderItem, OrderStatusEvent, Refund
+# [R-1.16] SPEC-1-B07a: the return-request row and its own machine. Kept on
+# its own import line so every hunk above stays insertion-only, and kept out
+# of orders.state on purpose (that module is capability-scoped and audited).
+from .models import ReturnRequest, _allowed_from, return_transition_allowed
 # [R-10.16] SPEC-10-05: the per-transition side-effect contract (one
 # dispatch point, shared with the JSON seam).
 from .events import notify_transition
@@ -912,3 +917,124 @@ class RefundAdmin(RoleAwareModelAdmin):
 
     def has_delete_permission(self, request, obj=None):
         return False  # money that moved is never deleted
+
+
+# [R-1.16] SPEC-1-B07a: the return-request surface (spec 6.8 line 1949's
+# `/admin/returns`). Read is ``returns.read`` and every write is
+# ``returns.write``, so a role can be given the queue without the decision.
+RETURNS_READ = "returns.read"
+RETURNS_WRITE = "returns.write"
+
+RETURN_CAPABILITY_MAP = {
+    "view": RETURNS_READ,
+    # A return request is the CUSTOMER's ask (spec 4 line 1083), filed through
+    # the API seam; a hand-written row here would be a return nobody asked for.
+    "add": None,
+    "change": RETURNS_WRITE,
+    # Deleting one erases the review trail spec 6.8 line 1983 requires, so no
+    # staff role gets it - not even the superuser bypass reaches the form.
+    "delete": None,
+}
+
+
+class ReturnRequestAdminForm(forms.ModelForm):
+    """The change form's machine check, and the operator's answer when it fails.
+
+    Validation is the right layer for "this value is not a legal value FOR THIS
+    ROW", and putting it here rather than in ``save_model`` is deliberate: an
+    aborted ``save_model`` still gets logged by Django's own ``log_change``
+    (it runs after ``save_model`` returns, unconditionally), so a refusal that
+    way would leave a "Changed status" entry on a row whose status never moved.
+    A field error is refused before ``save_model`` is reached at all, so the
+    refusal leaves the row untouched AND writes no misleading audit entry.
+
+    ``old`` is read under ``select_for_update()`` inside an explicit atomic
+    block - and Django already wraps the whole change-form view in a
+    transaction, so the lock is held for the check AND the subsequent write: two
+    operators editing the same request cannot both pass against a status the
+    database has already left. (SQLite emits no FOR UPDATE, so the lock is inert
+    there; ``ReturnRequest.save`` re-checks the edge against the stored status
+    regardless, which is what makes the guarantee engine-independent.)
+    """
+
+    class Meta:
+        model = ReturnRequest
+        # ``status`` is the only editable field on this surface. The admin
+        # overrides this with its own field list (built from ``readonly_fields``
+        # below), so the declaration here is what lets the form be built and
+        # unit-tested on its own.
+        fields = ("status",)
+
+    def clean_status(self):
+        status = self.cleaned_data["status"]
+        if not self.instance.pk:
+            # The add form cannot be reached (has_add_permission is False below),
+            # so a row with no pk never gets here; the guard keeps the lookup
+            # honest if that ever changes rather than raising DoesNotExist.
+            return status
+        with transaction.atomic():
+            old = ReturnRequest.objects.select_for_update().get(
+                pk=self.instance.pk
+            ).status
+        if not return_transition_allowed(old, status):
+            raise forms.ValidationError(
+                f"A return request cannot move from '{old}' to '{status}'. "
+                f"Allowed from '{old}': {_allowed_from(old)}."
+            )
+        return status
+
+
+@admin.register(ReturnRequest)
+class ReturnRequestAdmin(RoleAwareModelAdmin):
+    """[R-1.16] The staff half of a return: review it, then walk it.
+
+    This is the whole of spec 6.8 line 1957's "Return request review" for this
+    task: the queue is the changelist, and the decision is the ``status`` field
+    on the change form, checked against the return machine by
+    ``ReturnRequestAdminForm.clean_status`` and again by ``ReturnRequest.save``
+    behind it. ``order``, ``reason_code`` and ``reason_note`` are the customer's
+    own input and render read-only, so an operator acts on a request by walking
+    its status and can never rewrite what was asked for.
+
+    That leaves this surface with no place for an operator's own words - the
+    spec's "Manual exception workflow" and the decision note have nowhere to
+    live yet. It is a named gap, not an oversight: SPEC-1-B07b owns the
+    returns serializer and the return/refund audit trail (spec 6.8 line 1983),
+    and a staff note belongs with that work rather than as a second column
+    invented here.
+
+    NO ``scoped_view_capability``: this surface has one door. The narrow second
+    door SPEC-1-B03 built for the packing operator has no business here, and
+    declaring one would also be the way to widen a role's capability set that
+    ``tests/test_superadmin_tier.py`` pins exactly.
+
+    ONE write path. There is no ``list_editable`` cell and no bulk action on
+    this surface, so the change form is the only admin path that can move a
+    status - which is what makes ``ReturnRequestQuerySet`` refusing
+    ``update(status=...)`` a statement about the whole surface rather than
+    about one of two doors. ``ReturnRequestAdminForm`` is what that one path
+    asks before it writes.
+    """
+
+    form = ReturnRequestAdminForm
+    capability_map = RETURN_CAPABILITY_MAP
+    list_display = ("id", "order", "status", "reason_code", "created_at", "updated_at")
+    list_filter = ("status", "reason_code", "created_at")
+    # The order reference is how staff find the request (spec 6.8 pairs every
+    # returns surface with its order); the pk is here for the same reason
+    # RefundAdmin carries it.
+    search_fields = ("id", "order__id", "order__order_number", "reason_code")
+    readonly_fields = (
+        "order",
+        "reason_code",
+        "reason_note",
+        "created_at",
+        "updated_at",
+    )
+    date_hierarchy = "created_at"
+
+    def has_add_permission(self, request):
+        return False  # asked for by the customer, never hand-written
+
+    def has_delete_permission(self, request, obj=None):
+        return False  # the review trail is never erased

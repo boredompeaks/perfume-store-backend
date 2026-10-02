@@ -38,6 +38,10 @@ from .state import fulfilment_for_status, payment_for_status
 # [R-10.12] SPEC-10-02: transition-audit writers. Own import lines so every
 # hunk in this file stays insertion-only.
 from .models import OrderStatusEvent
+# [R-1.16] SPEC-1-B07a: the return-request row and the open-status tuple its
+# duplicate guard reads. Own import line so every hunk above stays
+# insertion-only.
+from .models import RETURN_OPEN_STATUSES, ReturnRequest
 from .state import (
     TRIGGER_ADMIN_API_CANCEL,
     TRIGGER_ADMIN_API_FULFIL,
@@ -2490,3 +2494,176 @@ def admin_order_refund(request, order_id):
         "refundable_remaining": order.refundable_remaining,
         "refund": _refund_payload(refund),
     }, status=status.HTTP_201_CREATED)
+
+# ==================================
+# [R-1.16] SPEC-1-B07a: the customer's return request
+# ==================================
+
+
+def _return_request_miss():
+    """The one answer every return-request LOOKUP failure gets.
+
+    Byte-identical for: an order number that does not exist, an order number
+    belonging to somebody else, and an order number belonging to a GUEST order.
+    Any difference between those cases would make this endpoint an
+    order-existence oracle for a stranger, which is the exact leak
+    ``_guest_lookup_miss`` and ``shipping.views._tracking_lookup_miss`` were each
+    built to close (conventions.md: uniform responses on anonymous flows, no
+    existence leaks). 404 rather than 403 for the same reason: "forbidden"
+    would confirm the order is real.
+
+    Deliberately NOT the answer for a malformed request: a body with no order
+    number, or with a reason code outside the vocabulary, is refused with a 400
+    BEFORE any lookup runs. Those refusals are identical whatever the order
+    number would have turned out to be, so they cannot disclose anything about
+    an order - and folding them into this 404 would only hide a real input error
+    from the customer who made it.
+    """
+    return Response(
+        {"error": "Order not found"},
+        status=status.HTTP_404_NOT_FOUND,
+    )
+
+
+def _return_request_payload(request_row):
+    """The confirmation body this seam returns (explicit keys).
+
+    Built inline rather than through a serializer module, and that is a
+    SCOPE DECISION rather than an omission: SPEC-1-B07b owns the returns
+    serializer (the customer list/detail surface reads the same row through it),
+    and a second, narrower representation invented here would be a second body
+    to keep in step. Every key is a per-request fact the caller already knows
+    or is entitled to know - the row's own id, the order it names, the status
+    it starts in and its reason. Nothing about the order's money, its customer
+    record or any other return is on it.
+    """
+    return {
+        "id": request_row.id,
+        "order_number": request_row.order.order_number,
+        "status": request_row.status,
+        "reason_code": request_row.reason_code,
+        "created_at": request_row.created_at,
+    }
+
+
+@api_view(['POST'])
+@permission_classes([IsAuthenticated])
+def return_request_create(request):
+    """[R-1.16] POST /api/v1/store/orders/returns/ - request a return.
+
+    Spec 4 line 1083 makes the return request a customer self-service feature
+    ("Return/refund request where eligible", under the account's Orders page and
+    line 1045's ``/account/returns``). The body names the order by its
+    CUSTOMER-FACING reference, never by pk, and the reference alone authorizes
+    nothing: the lookup below filters on ``user=request.user``, so a hit is by
+    definition one of the caller's own account orders.
+
+    ACCOUNT-ONLY, deliberately. The spec routes returns under the account
+    section (line 1045) and gives the guest (line 74) browsing and checkout
+    only - it never names returns among the guest's powers - so this seam does
+    not accept the B04 guest token. A guest order is therefore not addressable
+    here at all, and naming one answers the uniform miss above like any other
+    miss. Half-building a guest path (a token accepted for orders but a
+    different answer for guest rows) would have been worse than none.
+
+    NOTHING HERE MOVES MONEY. No ``Refund`` is created, no ``payment_status``
+    and no ``total_amount`` changes: spec 6.8 line 1985 ("Never equate 'refund
+    requested' with 'refund completed'") makes the refund seam (SPEC-1-05,
+    ``refunds.create``) the only writer of the payment dimension, and approval
+    is a separate staff act rather than something this request implies.
+
+    DUPLICATES ARE PREVENTED, atomically, twice over. The Order row is locked
+    for the whole attempt and the existing open request for it is probed under
+    that lock (a second, concurrent insert for the same order is caught by the
+    partial unique index on ``ReturnRequest.order``), and a racing insert that
+    still slips through raises IntegrityError, which the savepoint catches and
+    answers with the same 409. So one order carries at most one OPEN request
+    (``RETURN_OPEN_STATUSES``) at a time; after it is rejected or closed a
+    later request may be filed.
+
+    Not idempotent by design: each accepted request is one visible customer
+    ask. A retry that arrives after the first committed is the 409 above, which
+    is honest about what happened rather than pretending to create a second one.
+
+    No throttle scope: the seam is authenticated (``IsAuthenticated``, not
+    ``AllowAny``), and conventions.md requires a scope on public MUTATING
+    endpoints. Adding one would mean a new rate in ``config/settings.py``, which
+    is outside this task's scope; the rate policy for this surface belongs to
+    the task that owns the customer returns API.
+    """
+    order_number = (request.data.get("order_number") or "").strip()
+    reason_code = (request.data.get("reason_code") or "").strip()
+    reason_note = (request.data.get("reason_note") or "").strip()
+
+    # Input validation runs BEFORE the order lookup and answers 400s that are
+    # identical whatever the order number turns out to be, so no combination of
+    # refusals can disclose whether an order exists.
+    if not order_number:
+        return Response(
+            {"error": "order_number is required"},
+            status=status.HTTP_400_BAD_REQUEST,
+        )
+    if reason_code not in ReturnRequest.ReasonCode.values:
+        return Response(
+            {"error": "A valid reason_code is required"},
+            status=status.HTTP_400_BAD_REQUEST,
+        )
+
+    with transaction.atomic():
+        # select_for_update on the ORDER row, not on the return rows: every
+        # requester for this order takes this lock first, so no other writer can
+        # insert an open request between this probe and this commit. The order
+        # number is unique, so get() cannot hide a second row behind the first.
+        try:
+            order = Order.objects.select_for_update().get(
+                order_number=order_number,
+                user=request.user,
+            )
+        except Order.DoesNotExist:
+            # One shape for "no such order", "not yours" and "a guest order".
+            return _return_request_miss()
+
+        if order.status == "cancelled":
+            # A cancelled order was never fulfilled - the machine declares the
+            # cancel edge only from ``pending`` (orders.state) - so there is
+            # nothing to send back. This is a fact read off the order machine,
+            # not a return policy: spec 6.8 line 1959's "Eligibility validation"
+            # and spec 4 line 1083's "where eligible" both describe a WINDOW
+            # the spec never defines, so no window is invented here. That
+            # policy, and its tunability, belongs to SPEC-1-B07b.
+            return Response(
+                {"error": "A cancelled order cannot be returned"},
+                status=status.HTTP_409_CONFLICT,
+            )
+
+        already_open = ReturnRequest.objects.filter(
+            order=order,
+            status__in=RETURN_OPEN_STATUSES,
+        ).exists()
+        if already_open:
+            return Response(
+                {"error": "This order already has an open return request"},
+                status=status.HTTP_409_CONFLICT,
+            )
+
+        try:
+            # The savepoint is what makes the racing-insert refusal recoverable:
+            # an IntegrityError raised inside this transaction would otherwise
+            # poison the outer block, so the duplicate would be reported as a
+            # 500 instead of the 409 it is.
+            with transaction.atomic():
+                return_request = ReturnRequest.objects.create(
+                    order=order,
+                    reason_code=reason_code,
+                    reason_note=reason_note,
+                )
+        except IntegrityError:
+            return Response(
+                {"error": "This order already has an open return request"},
+                status=status.HTTP_409_CONFLICT,
+            )
+
+    return Response(
+        _return_request_payload(return_request),
+        status=status.HTTP_201_CREATED,
+    )

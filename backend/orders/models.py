@@ -795,6 +795,360 @@ class Refund(models.Model):
         return f"Refund #{self.pk} {self.amount} ({self.kind})"
 
 
+# ==================================
+# [R-1.16] SPEC-1-B07a: the return-request lifecycle
+# ==================================
+#
+# Spec 10.2 line 3470-3474 gives the return its OWN lifecycle dimension, listed
+# beside order, payment, fulfilment, shipment and refund: "Requested, approved,
+# rejected, received, inspected, closed". Those six words are the vocabulary of
+# ``ReturnRequest.status`` verbatim, and none of the ambiguous words spec line
+# 3487 warns about ("success", "done") is among them.
+#
+# It is deliberately NOT wired into ``orders.state``: that module is
+# capability-scoped and audited (SPEC-1-B03) and holds the ORDER status and
+# PAYMENT dimensions only, so the return table and its edges live here beside
+# the model they describe. Spec 10.1 line 3409 is the reason they must stay
+# separate: "Payment, fulfilment, cancellation, returns and refunds are related,
+# but they are not the same thing."
+
+
+class ReturnStatus(models.TextChoices):
+    """The return dimension's vocabulary, as a choices enum.
+
+    Declared at module level rather than inside ``ReturnRequest`` because the
+    machine table and the partial unique index below are built from these values
+    BEFORE the model class exists, and the model then aliases it
+    (``ReturnRequest.Status``) so this and ``Shipment.Status`` /
+    ``Refund.Status`` are reached the same way from a caller. One definition,
+    two names - never two vocabularies.
+    """
+
+    REQUESTED = "requested", "Requested"
+    APPROVED = "approved", "Approved"
+    REJECTED = "rejected", "Rejected"
+    RECEIVED = "received", "Received"
+    INSPECTED = "inspected", "Inspected"
+    CLOSED = "closed", "Closed"
+
+
+RETURN_STATUS_CHOICES = ReturnStatus.choices
+
+# The legal edges, in the spec's own order. ``requested`` is the only branching
+# point - it is the decision spec 19.1 line 4692 calls "Return approved/
+# rejected" - and the approved branch then walks the physical work the spec
+# splits into three facts: the parcel came back (received), the warehouse
+# looked at it (inspected), and the case is done (closed). Both leaves are
+# terminal, and "rejected" is a decision rather than a stage: a rejected
+# request never becomes a return that arrived.
+RETURN_ALLOWED_TRANSITIONS = {
+    ReturnStatus.REQUESTED: {ReturnStatus.APPROVED, ReturnStatus.REJECTED},
+    ReturnStatus.APPROVED: {ReturnStatus.RECEIVED},
+    ReturnStatus.RECEIVED: {ReturnStatus.INSPECTED},
+    ReturnStatus.INSPECTED: {ReturnStatus.CLOSED},
+    ReturnStatus.REJECTED: set(),
+    ReturnStatus.CLOSED: set(),
+}
+
+
+def return_transition_allowed(old_status, new_status):
+    """Whether a return request may move from ``old_status`` to ``new_status``.
+
+    Mirrors ``orders.state.transition_allowed``, including its self-transition
+    rule (a replay of the current status is legal, an edit that leaves the
+    status alone is not a move at all). Kept as a separate function rather than
+    a second table argument because ``ALLOWED_TRANSITIONS`` is the audited
+    order machine and must not acquire a return's vocabulary.
+    """
+    return new_status == old_status or new_status in RETURN_ALLOWED_TRANSITIONS.get(
+        old_status, set()
+    )
+
+
+# The statuses in which a request is still being worked. A customer may hold
+# only ONE of these per order, which is what the partial unique constraint on
+# ``order`` below enforces at the database: "request, request again" cannot fan
+# out into parallel claims over the same goods. A closed or rejected request is
+# terminal, so the index releases the order and a later request is allowed
+# against it.
+RETURN_OPEN_STATUSES = (
+    ReturnStatus.REQUESTED,
+    ReturnStatus.APPROVED,
+    ReturnStatus.RECEIVED,
+    ReturnStatus.INSPECTED,
+)
+
+
+def _allowed_from(status):
+    """The statuses ``status`` may move to, as one human-readable clause.
+
+    One formatter for both refusal messages (this model's ``save`` guard and
+    the admin form's validation error), so the operator is never told two
+    different things about the same machine. ``"nothing"`` rather than an empty
+    string for a terminal status, which is what a reviewer actually needs to
+    read.
+    """
+    allowed = ", ".join(sorted(RETURN_ALLOWED_TRANSITIONS.get(status, set())))
+    return allowed or "nothing"
+
+
+def _reject_oversized_value(model, field_name, value):
+    """Raise when ``value`` is a string wider than the column it is written to.
+
+    A per-app copy of ``shipping.models._reject_oversized``, for the same
+    reason that helper is per-app in the first place: SQLite does not enforce a
+    ``varchar(n)`` width while Postgres raises ``DataError``, so a suite that
+    saves an over-length value cleanly reports a write that 500s in production.
+    The bound is read off the field, so the refusal and the schema cannot drift
+    apart, and a field with no width is never checked.
+
+    Deliberately NOT imported from the shipping app: that name is private to
+    it, and reaching into another app's private helper (or refactoring it into
+    ``common``, which is outside this task's scope) would couple the two model
+    layers for one function. Only ``str`` is measured - Django routes
+    ``bulk_update`` values through the same ``QuerySet.update`` as a ``Case``
+    expression rather than as the string that produced it, and an expression's
+    width is the database's business.
+    """
+    max_length = getattr(model._meta.get_field(field_name), "max_length", None)
+    if max_length is None or not isinstance(value, str):
+        return
+    if len(value) > max_length:
+        raise ValueError(
+            f"{model.__name__}.{field_name} must be at most {max_length} characters"
+        )
+
+
+def _reject_oversized_return_values(instance):
+    """Apply :func:`_reject_oversized_value` to every bounded column of ``instance``.
+
+    Called from ``ReturnRequest.save``, the write boundary the admin form
+    funnels into: the form validates its own choices, so a width that reaches
+    the database can only have come from a direct ORM write. The queryset paths
+    that bypass ``save`` are covered by the same helper in
+    ``ReturnRequestQuerySet``.
+    """
+    for field in type(instance)._meta.concrete_fields:
+        if not isinstance(field, models.CharField):
+            continue
+        _reject_oversized_value(
+            type(instance), field.name, getattr(instance, field.attname)
+        )
+
+
+class ReturnRequestQuerySet(models.QuerySet):
+    """A ``ReturnRequest`` queryset that will not move a status behind the machine.
+
+    ``ReturnRequestAdmin.save_model`` is the sanctioned writer of a status move:
+    it checks the edge against ``RETURN_ALLOWED_TRANSITIONS`` and refuses an
+    illegal one rather than applying it silently. The bulk paths -
+    ``update()`` and ``bulk_update()`` - never reach that method, so both are
+    refused here instead of being left as a way to move a return request with no
+    machine check at all. The other columns stay updatable, because none of them
+    is a transition.
+    """
+
+    def update(self, **kwargs):
+        if "status" in kwargs:
+            raise ValueError(
+                "ReturnRequest.status is moved only through the admin change "
+                "form, which checks the return machine first; a bulk update "
+                "cannot."
+            )
+        # The width gate rides here too: a bulk update writes straight to the
+        # column, so without this an over-length value is a clean write on
+        # SQLite and a DataError on the production database.
+        for field_name, value in kwargs.items():
+            _reject_oversized_value(ReturnRequest, field_name, value)
+        return super().update(**kwargs)
+
+    def bulk_update(self, objs, fields, batch_size=None):
+        """Refuse a status move here too, and width-gate the rest.
+
+        ``bulk_update`` is already caught by the ``update`` guard above, because
+        Django compiles the values into a CASE expression and issues it through
+        ``queryset.filter(...).update(...)``. It is refused HERE as well for the
+        two reasons ``ShipmentQuerySet`` records: the internal route is a Django
+        implementation detail rather than a documented contract, and Django
+        wraps the whole operation in ``transaction.atomic(savepoint=False)``, so
+        a refusal raised from inside it poisons the caller's transaction.
+        Raising before the block opens makes the refusal recoverable.
+        """
+        fields = list(fields)
+        if "status" in fields:
+            raise ValueError(
+                "ReturnRequest.status is moved only through the admin change "
+                "form, which checks the return machine first; a bulk update "
+                "cannot."
+            )
+        for obj in objs:
+            for field_name in fields:
+                _reject_oversized_value(
+                    ReturnRequest, field_name, getattr(obj, field_name)
+                )
+        return super().bulk_update(objs, fields, batch_size=batch_size)
+
+
+class ReturnRequest(models.Model):
+    """[R-1.16] SPEC-1-B07a: one customer's request to send an order back.
+
+    Spec 4 line 1083 makes it a customer self-service feature ("Return/refund
+    request where eligible", under the account's Orders page, line 1045's
+    ``/account/returns``) and spec 6.8 line 1957 makes it a staff feature ("Return
+    request review"). One row is the customer's ask; the staff half is the
+    status walk below, not a separate table.
+
+    THE ASK MOVES NO MONEY. This row creates no ``Refund``, changes no
+    ``payment_status`` and touches no ``total_amount``: spec 6.8 line 1985 is the
+    rule ("Never equate 'refund requested' with 'refund completed'"), and the
+    refund seam (SPEC-1-05, ``refunds.create``) is the only writer of the
+    payment dimension. Requesting and approving are also two separate acts:
+    approval is a staff decision, so nothing here auto-approves.
+
+    Ownership is read off the ORDER rather than stored a second time. The row's
+    owner is whoever owns ``self.order`` - the account holder, or the guest the
+    B04 token was minted for - so a request can never disagree with the order it
+    hangs from, and the "only your own returns" filter is the same
+    ``order__user`` filter the tracking endpoint already uses.
+
+    Guest requests are NOT offered, by decision rather than omission: the spec
+    routes returns under the ACCOUNT section (line 1045) and gives the guest
+    (line 74) browsing and checkout only, so an anonymous caller naming a guest
+    order gets the same uniform miss as any other miss.
+    """
+
+    class ReasonCode(models.TextChoices):
+        # Spec 6.8 line 1959 lists "Reason codes" as a returns feature, so the
+        # reason is a code from a bounded vocabulary and not free text: a code
+        # is what staff filter and report on, and the note below carries the
+        # customer's own words. No value here is invented money or policy -
+        # they are the reasons a buyer can state about a delivered parcel.
+        DAMAGED = "damaged", "Damaged in transit"
+        DEFECTIVE = "defective", "Defective product"
+        WRONG_ITEM = "wrong_item", "Wrong item received"
+        NOT_AS_DESCRIBED = "not_as_described", "Not as described"
+        CHANGED_MIND = "changed_mind", "Changed mind"
+
+    # The spec's lifecycle vocabulary, aliased so a caller reaches it the same
+    # way it reaches ``Shipment.Status`` and ``Refund.Status``. It is the
+    # module-level ``ReturnStatus``, not a second declaration - see that class.
+    Status = ReturnStatus
+
+    order = models.ForeignKey(
+        Order,
+        # CASCADE for the same reason Shipment.order is: a return request is a
+        # record OF one order, with no referent once that order is gone, and
+        # three surfaces in this codebase (the admin grid's order column, the
+        # search by order number, the staff detail view) join to it.
+        on_delete=models.CASCADE,
+        related_name="return_requests",
+    )
+
+    status = models.CharField(
+        # 20 wide for the longest vocabulary value ("not_as_described" is a
+        # reason code, not a status; "inspected" is the longest status at 9),
+        # and the width is enforced at every write boundary below because
+        # SQLite would not.
+        max_length=20,
+        choices=RETURN_STATUS_CHOICES,
+        default="requested",
+    )
+
+    reason_code = models.CharField(
+        max_length=30,
+        choices=ReasonCode.choices,
+    )
+
+    # A TextField, not a CharField: the customer's own words have no length the
+    # store can honestly bound, so there is no width to enforce (the same reason
+    # ``Order.address`` is unbounded).
+    reason_note = models.TextField(
+        blank=True,
+        default="",
+    )
+
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ("-created_at", "-id")
+        verbose_name = "return request"
+        verbose_name_plural = "return requests"
+        constraints = [
+            # The concurrency authority for "one live request per order": the
+            # writer holds the Order row lock while it probes, and this
+            # partial unique index is the last-resort guarantee that two
+            # concurrent requests can never both create an open one - the
+            # second INSERT raises IntegrityError rather than fanning out into
+            # parallel claims over the same goods. Scoped by the condition to
+            # the open statuses (RETURN_OPEN_STATUSES), so a closed or rejected
+            # request releases the order and a later request may be filed.
+            models.UniqueConstraint(
+                fields=["order"],
+                condition=Q(status__in=RETURN_OPEN_STATUSES),
+                name="orders_returnrequest_open_uidx",
+            ),
+        ]
+
+    objects = ReturnRequestQuerySet.as_manager()
+
+    def save(self, *args, **kwargs):
+        """Refuse a width violation and an illegal status edge, then write.
+
+        Two guards on the one write boundary every sanctioned writer funnels
+        into (the admin change form, and any direct ORM write).
+
+        The WIDTH guard exists because the admin form validates its own fields,
+        so a width violation can only reach this line from a direct ORM write -
+        and SQLite would accept it where the production Postgres raises
+        ``DataError``.
+
+        The EDGE guard is what makes "no illegal transition is applied" a
+        property of the model rather than of one admin form: ``requested ->
+        inspected`` raises here, so a caller that reaches the row by any other
+        route cannot skip a stage. A CREATION is not a move, so a row with no
+        pk yet is written whatever status it was given (the customer seam always
+        files ``requested``, the opening state of spec 10.2's vocabulary).
+
+        What this guard is NOT: a lock. The stored status is read, not locked,
+        so two concurrent saves could both pass it. The admin change form holds
+        the row with ``select_for_update()`` inside its own transaction, so on
+        the surface that exists today the check and the write are one critical
+        section; this layer is the backstop behind that, not a substitute for
+        it. The bulk paths that never reach ``save`` at all are refused in
+        ``ReturnRequestQuerySet``.
+        """
+        _reject_oversized_return_values(self)
+        if self.pk is not None:
+            stored = (
+                type(self)
+                ._default_manager.filter(pk=self.pk)
+                .values_list("status", flat=True)
+                .first()
+            )
+            if stored is not None and not return_transition_allowed(
+                stored, self.status
+            ):
+                raise ValueError(
+                    f"ReturnRequest #{self.pk} cannot move from '{stored}' to "
+                    f"'{self.status}'. Allowed from '{stored}': "
+                    f"{_allowed_from(stored)}."
+                )
+        return super().save(*args, **kwargs)
+
+    @property
+    def is_open(self):
+        """Whether this request is still being worked (see RETURN_OPEN_STATUSES)."""
+        return self.status in RETURN_OPEN_STATUSES
+
+    def __str__(self):
+        # No `order` traversal: this label is what the admin grid, the CSV
+        # export and LogEntry render per row, and an order can be a guest row
+        # whose own __str__ is already null-safe (SPEC-1-B04).
+        return f"Return request #{self.pk} ({self.status})"
+
+
 class PaymentEvent(models.Model):
     """[R-1.15] SPEC-1-06: one delivery of one payment-provider webhook event.
 

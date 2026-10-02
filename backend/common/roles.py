@@ -93,6 +93,26 @@ CAPABILITY_ROLES = {
     # them for free.
     "shipments.read": frozenset({ROLE_SUPPORT, ROLE_ADMIN}),
     "shipments.write": frozenset({ROLE_SUPPORT, ROLE_ADMIN}),
+    # [R-1.16] SPEC-1-B07a: the return-request queue and the lifecycle walk
+    # over it. Support + admin, and the division of labour is spec 6.8's own:
+    # "Return request review" (line 1957) is customer order-issue work, which
+    # is the support agent's mandate (spec 1.1 line 92, "Handle customer
+    # enquiries and permitted order issues") and admin's. Read and write are
+    # split for the same reason B06 split shipments: a return row reaches one
+    # customer's order and their address through ``order``, so the review queue
+    # is customer data, and a role can be given the queue without the decision.
+    #
+    # NOT granted to the inventory/fulfilment operator, and that is a RECORDED
+    # DEVIATION from spec 1.1 line 110 ("Manage stock, packing, shipping and
+    # returns") rather than an oversight: SPEC-1-B03 pinned that role's
+    # capability set to exactly {products.read, inventory.read,
+    # inventory.adjust, orders.fulfill} in tests/test_superadmin_tier.py, and
+    # widening it here would undo a shipped, audited contract. The consequence,
+    # stated plainly: the physical half of a return - receiving and inspecting
+    # the parcel back - is not reachable by that role today. The task that
+    # revisits the B03 pin is the one to grant it; this one must not.
+    "returns.read": frozenset({ROLE_SUPPORT, ROLE_ADMIN}),
+    "returns.write": frozenset({ROLE_SUPPORT, ROLE_ADMIN}),
     "refunds.create": frozenset({ROLE_FINANCE, ROLE_ADMIN}),
     "customers.read": frozenset({ROLE_SUPPORT, ROLE_FINANCE, ROLE_ADMIN}),
     "discounts.write": frozenset({ROLE_MARKETING, ROLE_ADMIN}),

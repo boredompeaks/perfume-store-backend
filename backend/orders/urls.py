@@ -10,6 +10,10 @@ from .views import (
     # [R-1.13] SPEC-1-B04: the guest's own order, keyed on the token minted
     # at checkout rather than on a session.
     guest_order_detail,
+    # [R-1.16] SPEC-1-B07a: the customer asks to send an order back. The body
+    # names the order, so this is a POST against the family rather than a
+    # keyed detail route.
+    return_request_create,
 )
 
 
@@ -63,5 +67,12 @@ urlpatterns = [
     verify_payment,
     name='verify-payment'
 ),
+
+    # [R-1.16] SPEC-1-B07a: the customer's return request (spec 4 line 1083,
+    # under the account's `/account/returns` page of line 1045). Declared after
+    # the `<int:order_id>` route above, which cannot match a non-integer, so
+    # the two never compete. Mounted in both families by config/urls.py because
+    # this urlconf is already included under store/orders/ and api/orders/.
+    path("returns/", return_request_create, name="return-request-create"),
 
 ]
