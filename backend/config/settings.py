@@ -554,6 +554,25 @@ CHECKOUT_DEDUP_WINDOW_SECONDS = _env_int('CHECKOUT_DEDUP_WINDOW_SECONDS', 300)
 ORDER_HISTORY_PAGE_SIZE = _env_int('ORDER_HISTORY_PAGE_SIZE', 10)
 ORDER_HISTORY_MAX_PAGE_SIZE = _env_int('ORDER_HISTORY_MAX_PAGE_SIZE', 100)
 
+# SPEC-1-B07b [R-1.16] Customer returns listing (GET /api/orders/returns/):
+# rows per page, and the ceiling a ?page_size caller may request. Declared as
+# its OWN pair rather than reusing ORDER_HISTORY_* because the store may want a
+# different density for a short returns list than for a long order history, and
+# one page size for both would force that choice. Both are deployment config
+# (conventions.md: no hardcoded thresholds); non-integer values are ignored and
+# the defaults are used instead. The spec pins no number for either.
+#
+# NOTE: there is deliberately NO return-window setting here. Spec 4 line 1083
+# ("Return/refund request where eligible") and spec 6.8 line 1959 ("Eligibility
+# validation") describe a window the spec never defines anywhere - a whole-file
+# sweep for a day count finds exactly one hit, and it is about deployment
+# cadence, not returns. Inventing a number would be fabricated policy, so
+# eligibility is the machine-derived rule in orders.views._return_eligible and
+# nothing else. If a window is ever wanted, it arrives as an env-driven key here
+# with its own documented default, never as a literal in the view.
+RETURNS_HISTORY_PAGE_SIZE = _env_int('RETURNS_HISTORY_PAGE_SIZE', 10)
+RETURNS_HISTORY_MAX_PAGE_SIZE = _env_int('RETURNS_HISTORY_MAX_PAGE_SIZE', 100)
+
 # SPEC-12-01 [R-12.2] Inventory reservation: seconds a checkout's stock
 # reservation holds units before it goes stale and becomes releasable by
 # the reconciler (SPEC-12-03). Coordinate with the payment-provider session

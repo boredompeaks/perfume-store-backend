@@ -22,6 +22,7 @@ from .models import Order, OrderItem, Coupon
 from .models import Refund
 from .refunds import RefundGatewayError, refund_payment
 from .serializers import OrderSerializer
+from .serializers import ReturnRequestSerializer
 from .state import (
     ADMIN_FULFILMENT_NEXT,
     ALLOWED_TRANSITIONS,
@@ -99,6 +100,13 @@ IDEMPOTENCY_KEY_MAX_LENGTH = 128
 # deployment config (conventions.md: no hardcoded thresholds), capped for
 # ?page_size callers so a client cannot request unbounded pages.
 HISTORY_PAGE_SIZE_QUERY_PARAM = "page_size"
+
+# SPEC-1-B07b [R-1.16]: the same query param name the order-history listing
+# accepts, for the returns listing that replaces the interim bare enumeration.
+# One name across both account listings is deliberate: a storefront page that
+# paginates orders should be able to paginate returns with the same query string
+# and get the same envelope.
+RETURNS_PAGE_SIZE_QUERY_PARAM = HISTORY_PAGE_SIZE_QUERY_PARAM
 
 
 def _history_page_size(raw):
@@ -2627,10 +2635,26 @@ def _return_eligible(order):
       so a COD order that has SHIPPED must stay returnable while its money is
       still ``pending``.
 
-    No window, and no invented number: the spec's "where eligible" (line 1083)
-    and its "Eligibility validation" (6.8 line 1959) describe a WINDOW it never
-    defines. This predicate answers only "has anything happened yet"; the window
-    policy and its tunability belong to SPEC-1-B07b.
+    NO WINDOW, AND THE CHOICE IS DELIBERATE. SPEC-1-B07b owned the window
+    question and answered it with NO WINDOW at all, because the spec never
+    defines one: line 1083's "Return/refund request where eligible" and line
+    1959's "Eligibility validation" both describe a window that a whole-file
+    sweep for a day count cannot find (the single hit is about deployment
+    cadence, not returns). So the age of an order is NOT an input to this
+    predicate: a delivered order from five years ago is exactly as returnable
+    as one delivered this morning, and a pending order from five years ago is
+    exactly as ineligible. The alternative - an env-driven
+    ``RETURN_WINDOW_DAYS`` - was rejected because any value for it would have
+    been invented here rather than derived from anything, which is fabricated
+    policy wearing a config key. This predicate therefore asks a question the
+    machine can answer ("has anything happened yet") and never one only the
+    calendar can.
+
+    The consequence is deliberate and worth stating: a store that DOES want a
+    return window must add one as an env-driven setting with its own documented
+    default (the seam is already this function, and nothing about adding a
+    time clause here would need a migration). Until a merchant configures one,
+    nothing silently expires a customer's right to ask.
     """
     money_moved = order.payment_status in CAPTURED_MONEY_PAYMENT_STATUSES
     goods_moved = order.fulfilment_status != "unfulfilled"
@@ -2668,30 +2692,195 @@ def _return_request_miss():
 
 
 def _return_request_payload(request_row):
-    """The confirmation body this seam returns (explicit keys).
+    """The confirmation body this seam returns.
 
-    Built inline rather than through a serializer module, and that is a
-    SCOPE DECISION rather than an omission: SPEC-1-B07b owns the returns
-    serializer (the customer list/detail surface reads the same row through it),
-    and a second, narrower representation invented here would be a second body
-    to keep in step. Every key is a per-request fact the caller already knows
-    or is entitled to know - the row's own id, the order it names, the status
-    it starts in and its reason. Nothing about the order's money, its customer
-    record or any other return is on it.
+    Now driven by ``ReturnRequestSerializer`` (SPEC-1-B07b), so the create
+    confirmation and the list/detail bodies are ONE representation. B07a built
+    this inline as an explicit interim shape and left the real serializer to
+    B07b precisely so there would not be a second body to keep in step; the
+    five keys it returned are a strict SUBSET of the serializer's seven, so
+    nothing B07a documented is lost and the leak assertions over its bytes
+    still hold.
     """
-    return {
-        "id": request_row.id,
-        "order_number": request_row.order.order_number,
-        "status": request_row.status,
-        "reason_code": request_row.reason_code,
-        "created_at": request_row.created_at,
-    }
+    return ReturnRequestSerializer(request_row).data
 
 
-@api_view(["POST"])
+def _return_detail_miss():
+    """The one answer every return-request DETAIL lookup miss gets.
+
+    Byte-identical for: a pk that does not exist, a pk belonging to another
+    customer's order, and a pk belonging to a GUEST order's return (which
+    cannot exist today - guest returns are structurally unreachable - but the
+    same answer is what it would get).
+
+    404, never 403, and never a different BODY, for the same reason
+    ``_return_request_miss`` and ``order_detail`` are: "forbidden" would
+    confirm the pk is real and is a stranger's, which is precisely the IDOR
+    oracle spec 17 line 4285 asks this API to be tested against. The lookup
+    below folds ownership into the queryset so a stranger's row is simply not
+    in the result set - it never reaches a view branch that could answer
+    differently from a nonexistent pk.
+
+    Deliberately its OWN helper rather than a reuse of ``_return_request_miss``:
+    the two answer about different resources, so a future change to one miss
+    contract (e.g. the order seam gaining a field) cannot silently move the
+    detail seam's body with it. Each names the resource it is missing.
+    """
+    return Response(
+        {"error": "Return request not found"},
+        status=status.HTTP_404_NOT_FOUND,
+    )
+
+
+def _returns_page_size(raw):
+    """Resolve the ?page_size query param for the returns listing.
+
+    Identical in shape and intent to ``_history_page_size`` above: an integer
+    in [1, RETURNS_HISTORY_MAX_PAGE_SIZE]; anything unparseable or non-positive
+    falls back to the configured default, and an over-cap request is clamped to
+    the cap. Not shared with the order-history resolver because each surface
+    has its OWN configured default and cap in settings - the store may want a
+    50-row returns page and a 10-row order page - and threading two setting
+    names through one helper would be a signature that reads as though the two
+    listings share one knob.
+    """
+    try:
+        value = int(raw)
+    except (TypeError, ValueError):
+        return settings.RETURNS_HISTORY_PAGE_SIZE
+    if value < 1:
+        return settings.RETURNS_HISTORY_PAGE_SIZE
+    return min(value, settings.RETURNS_HISTORY_MAX_PAGE_SIZE)
+
+
+@api_view(["GET", "POST"])
 @permission_classes([IsAuthenticated])
-def return_request_create(request):
+def return_requests(request):
+    """[R-1.16] SPEC-1-B07a/B07b: the customer's returns family root.
+
+    GET lists the caller's own returns and POST creates one, because Django
+    resolves the FIRST matching url pattern - two patterns on ``returns/``
+    would leave the second unreachable behind the first (a listing that answers
+    405 to every GET). One pattern, one dispatch.
+
+    Splitting the work into two plain functions rather than an if/else with two
+    bodies is what keeps SPEC-1-B07a's create contract intact: its function is
+    byte-for-byte the one B07a shipped (only its decorators moved up here), and
+    its docstring travels with it. ``permission_classes`` is declared ONCE, on
+    this view, rather than repeated on two functions that are never routed
+    independently - the single authorization point for the whole family
+    (conventions.md:14).
+    """
+    if request.method == "POST":
+        return _create_return_request(request)
+    return _list_return_requests(request)
+
+
+def _list_return_requests(request):
+    """[R-1.16] SPEC-1-B07b: GET .../returns/ - the caller's OWN returns.
+
+    The one sentence this exists to satisfy: spec 4 line 1083 puts "Return/refund
+    request where eligible" on the account's Orders page, and spec 4 line 1045
+    gives that page its own ``/account/returns`` route - a page that has to
+    show the customer the returns they have already asked for, not only the one
+    they can create.
+
+    OWNERSHIP IS THE FILTER, not a check after the fetch. Scoping on
+    ``order__user=request.user`` means a stranger's row is never in the
+    queryset at all, so there is no branch in this code that could answer
+    differently for "yours" and "theirs". The same filter makes GUEST returns
+    structurally unreachable: a guest order's ``user`` is NULL and can never
+    equal an authenticated user, so a NULL-user row cannot appear here. (Guest
+    returns are not offered by decision - SPEC-1-B04 gives the guest browsing
+    and checkout only.)
+
+    A LIST, never a single row. This is the trap SPEC-1-B06's split-shipment bug
+    was (a listing that reported only the newest row, so an older parcel
+    vanished). ``.first()`` here would answer "the returns this customer has"
+    with an arbitrary one of them and silently drop the rest; the
+    ``RETURN_OPEN_STATUSES`` probe in the create path exists to prevent exactly
+    that shape of loss on the write side.
+
+    PAGINATED, in the house page-number envelope with the ORDER_HISTORY
+    settings convention (SPEC-9-04 [R-9.2.14]): ``settings`` supplies the
+    default page size and the cap, a ``?page_size`` caller is clamped to the
+    cap, and an unparsable page falls back rather than 404-ing.
+    conventions.md forbids a hardcoded page size, so the number lives in
+    config/settings.py (env-driven) and not here.
+
+    The queryset is explicitly ``order_by``-ed on the model's ``-created_at,
+    -id`` with the unique-id tiebreaker, so the sort is TOTAL and a paginated
+    partition can never repeat or skip a row across requests (the reasoning
+    ``order_list`` records). ``ReturnRequest.Meta.ordering`` already declares
+    that exact pair, and it is re-stated here so the guarantee does not depend
+    on a model default that a future edit could change silently.
+    """
+    returns = (
+        ReturnRequest.objects.filter(order__user=request.user)
+        .select_related("order")
+        .order_by("-created_at", "-id")
+    )
+
+    paginator = Paginator(
+        returns,
+        _returns_page_size(request.query_params.get(RETURNS_PAGE_SIZE_QUERY_PARAM)),
+    )
+    # get_page never raises: an unparsable page falls back to 1, a page past
+    # the end to the last page - no 404 for a stale page link.
+    page = paginator.get_page(request.query_params.get("page", 1))
+
+    # House page-number envelope (products-listing parity).
+    return Response(
+        {
+            "count": paginator.count,
+            "total_pages": paginator.num_pages,
+            "current_page": page.number,
+            "next_page": page.has_next(),
+            "previous_page": page.has_previous(),
+            "results": ReturnRequestSerializer(page.object_list, many=True).data,
+        }
+    )
+
+
+@api_view(["GET"])
+@permission_classes([IsAuthenticated])
+def return_request_detail(request, return_request_id):
+    """[R-1.16] SPEC-1-B07b: GET .../returns/<pk>/ - ONE of the caller's returns.
+
+    The classic IDOR surface, so the lookup is ownership-scoped and the miss is
+    ONE uniform 404 (``_return_detail_miss``). A stranger probing another
+    customer's return by its pk gets the byte-identical body and status a
+    nonexistent pk gets - never a 200 (the leak) and never a 403 that confirms
+    the pk is real (the existence oracle). This is exactly the property spec 17
+    line 4285 asks to be tested ("insecure direct object references (IDOR),
+    especially in order, address, return and customer APIs"), and the probe is
+    in tests_returns.ReturnReadIdorTests.
+
+    Account-only and guest-blind by the same structural argument as the list:
+    the filter is ``order__user=request.user``, so a NULL-user guest order's
+    row cannot match. It never traverses the order to decide anything - it asks
+    the database for rows this caller owns and nothing else.
+    """
+    try:
+        return_row = ReturnRequest.objects.select_related("order").get(
+            pk=return_request_id,
+            order__user=request.user,
+        )
+    except ReturnRequest.DoesNotExist:
+        return _return_detail_miss()
+
+    return Response(ReturnRequestSerializer(return_row).data)
+
+
+def _create_return_request(request):
     """[R-1.16] POST /api/v1/store/orders/returns/ - request a return.
+
+    SPEC-1-B07b moves this off ``return_requests`` (the family root dispatches
+    here on POST) and off its own url pattern; the function body below is
+    otherwise byte-for-byte B07a's, and every contract that shipped with it -
+    the uniform miss, the type gate, the eligibility rule, the atomic
+    duplicate guard - is unchanged by the move. Its docstring travels with the
+    body so the reasoning is not stranded in a wrapper that no longer exists.
 
     Spec 4 line 1083 makes the return request a customer self-service feature
     ("Return/refund request where eligible", under the account's Orders page and
@@ -2729,9 +2918,13 @@ def return_request_create(request):
 
     No throttle scope: the seam is authenticated (``IsAuthenticated``, not
     ``AllowAny``), and conventions.md requires a scope on public MUTATING
-    endpoints. Adding one would mean a new rate in ``config/settings.py``, which
-    is outside this task's scope; the rate policy for this surface belongs to
-    the task that owns the customer returns API.
+    endpoints. SPEC-1-B07b, which owns the rest of this family, considered and
+    declined one here: the rates that would be meaningful (the repo's existing
+    ones run 5-120/min) sit at or below the count of the enumeration probes
+    that prove the eligibility gate answers for EVERY payment x fulfilment pair
+    the machine admits, so any rate low enough to be worth having would 429
+    those probes and the only way to avoid it would be to raise the rate until
+    it stopped meaning anything.
     """
     try:
         body = _return_body(request)

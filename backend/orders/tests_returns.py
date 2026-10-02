@@ -38,13 +38,18 @@ already been bitten by.
   two features, so 100% line coverage could not see it.
 """
 
+from datetime import timedelta
 from decimal import Decimal
+import inspect
 from unittest.mock import patch
 
+from django.conf import settings
 from django.contrib.admin.models import LogEntry
 from django.contrib.auth.models import Group, User
 from django.db import IntegrityError, transaction
 from django.test import tag
+from django.test import override_settings
+from django.utils import timezone
 from rest_framework.test import APIClient
 
 from common.roles import (
@@ -72,6 +77,9 @@ from orders.admin import (
     RETURN_CAPABILITY_MAP,
     ReturnRequestAdminForm,
 )
+from orders import urls as orders_urls
+from config import urls as config_urls
+from orders.serializers import ReturnRequestSerializer
 from orders.state import (
     CAPTURED_MONEY_PAYMENT_STATUSES,
     FULFILMENT_STATUS_CHOICES,
@@ -227,8 +235,25 @@ class RequestShapeTests(ReturnTestCase):
 
         res = self.ask(self.order.order_number)
 
+        # SPEC-1-B07b: the create confirmation and the list/detail bodies are
+        # now ONE representation (``ReturnRequestSerializer``), so this exact-set
+        # assertion is UNCHANGED and now also pins the list/detail key set -
+        # which is the point of the unification. B07a's five keys are a subset
+        # of the serializer's seven; the two additions are ``reason_note`` (the
+        # customer's own words, which they are entitled to read back) and
+        # ``updated_at``. Neither is a leak: no money, no customer record, and
+        # no other customer's anything rides either.
         self.assertEqual(
-            set(res.data), {"id", "order_number", "status", "reason_code", "created_at"}
+            set(res.data),
+            {
+                "id",
+                "order_number",
+                "status",
+                "reason_code",
+                "reason_note",
+                "created_at",
+                "updated_at",
+            },
         )
         # No money, no customer record, and no other customer's anything.
         raw = res.content.decode()
@@ -1668,3 +1693,620 @@ class QuerysetGuardTests(ReturnTestCase):
 
         self.assertEqual(ReturnRequest.objects.filter(order=self.order).count(), 1)
         self.assertEqual(ReturnRequest.objects.count(), 2)
+
+
+# ==================================
+# SPEC-1-B07b: the customer returns API surface
+# ==================================
+#
+# Everything above is SPEC-1-B07a's shipped contract, unchanged except for the
+# one assertion in ``RequestShapeTests`` that now pins the unified serializer
+# key set instead of B07a's interim inline five. What follows is B07b: the
+# serializer, the list, the detail, and the eligibility-window decision.
+
+LIST_URL = "/api/v1/store/orders/returns/"
+
+
+def detail_url(return_request_id):
+    return f"/api/v1/store/orders/returns/{return_request_id}/"
+
+
+@tag("e2e")
+class ReturnSerializerContractTests(ReturnTestCase):
+    """One customer projection, and its omissions are the point.
+
+    The pattern is B06's ``ShipmentTrackingSerializer``: a customer-facing
+    projection in which what is ABSENT is deliberate and load-bearing. Read that
+    class's docstring before changing a field list here.
+    """
+
+    # HAND-WRITTEN, and the oracle has to be: recomputing the expected set from
+    # the serializer's own ``fields`` would agree with a wrong projection from
+    # both sides, which is the defect class B07a's cycle-2 pin was written to
+    # kill.
+    CUSTOMER_FIELDS = {
+        "id",
+        "order_number",
+        "status",
+        "reason_code",
+        "reason_note",
+        "created_at",
+        "updated_at",
+    }
+
+    def setUp(self):
+        super().setUp()
+        self.row = self.file_request(self.delivered, ReturnRequest.Status.REQUESTED)
+
+    def test_the_projection_is_exactly_the_hand_written_field_set(self):
+        serializer = ReturnRequestSerializer(self.row)
+
+        self.assertEqual(set(serializer.fields), self.CUSTOMER_FIELDS)
+
+    def test_no_field_is_writable_so_a_client_can_never_write_a_return(self):
+        # Structural, not a per-view promise: a ModelSerializer is WRITABLE by
+        # default, so this is the assertion that stops a future edit from
+        # dropping ``read_only_fields`` and letting a client post a status.
+        serializer = ReturnRequestSerializer()
+
+        for name in self.CUSTOMER_FIELDS:
+            with self.subTest(field=name):
+                self.assertTrue(serializer.fields[name].read_only, name)
+
+    def test_the_order_foreign_key_is_not_exposed_only_its_number_is(self):
+        # The customer-facing handle is the reference (spec 8.3 /
+        # ``OrderSerializer``'s [R-8.5] identifier-exposure strategy); the pk
+        # stays a server-side routing key and ownership is read off the order.
+        raw = ReturnRequestSerializer(self.row).data
+
+        self.assertEqual(raw["order_number"], self.delivered.order_number)
+        for leak in ("order_id", '"order"', "order__"):
+            with self.subTest(leak=leak):
+                self.assertNotIn(leak, str(raw))
+
+    def test_the_body_carries_no_money_and_no_customer_record(self):
+        # A return row moves no money (B07a's MoneyIsUntouchedTests), so no
+        # money field may appear - and specifically this serializer must not
+        # REACH THROUGH the order to pull one off, which is the way a leak
+        # would get in here.
+        raw = ReturnRequestSerializer(self.row).data
+        body = str(raw)
+
+        for leak in (
+            "total_amount",
+            "payment_status",
+            "refundable_remaining",
+            "currency",
+            "guest_token",
+            "guest_email",
+            "address",
+            "phone",
+        ):
+            with self.subTest(leak=leak):
+                self.assertNotIn(leak, body)
+
+    def test_a_staff_only_annotation_is_absent_from_both_model_and_projection(self):
+        # ``internal_note`` is B06's leak class. This row has no such column
+        # today, and the projection must not grow one: asserted on BOTH sides
+        # so a future migration adding a staff column fails here rather than
+        # reaching a customer by way of an explicit-field-list edit.
+        model_fields = {field.name for field in ReturnRequest._meta.get_fields()}
+        self.assertNotIn("internal_note", model_fields)
+        self.assertNotIn("internal_note", ReturnRequestSerializer().fields)
+
+    def test_the_projection_reveals_nothing_the_allowlist_does_not_name(self):
+        # Completeness, so the hand-written oracle cannot quietly go stale: if
+        # the model grows a customer-visible column, this fails rather than the
+        # column silently riding a ``fields`` list nobody re-read. It asserts
+        # the SUBSET direction (every exposed field is a declared, permitted
+        # one), which is the direction that is a leak - a field absent from the
+        # projection is a documented omission, never a vulnerability.
+        permitted = self.CUSTOMER_FIELDS | {"order_number"}
+        for name in ReturnRequestSerializer().fields:
+            with self.subTest(field=name):
+                self.assertIn(name, permitted)
+
+    def test_no_field_reaches_through_the_order_but_for_its_number(self):
+        # The structural half of "no money", and the probe that answers CLEANLY.
+        #
+        # ``test_the_body_carries_no_money_and_no_customer_record`` asserts on
+        # rendered output, which is the property that matters - but a field that
+        # reaches through the relation makes the CREATE seam itself raise, so a
+        # mutation that adds one is caught as an ERROR cascade across many
+        # tests rather than as one crisp failure. This reads the DECLARED
+        # sources instead: every exposed field must be one of the model's own
+        # columns, except ``order_number``, whose one traversal is the customer
+        # reference. A money field added to the projection fails HERE, by name.
+        model_columns = {field.name for field in ReturnRequest._meta.concrete_fields}
+        serializer = ReturnRequestSerializer()
+
+        for name, field in serializer.fields.items():
+            with self.subTest(field=name):
+                source = getattr(field, "source", None) or name
+                if name == "order_number":
+                    self.assertEqual(source, "order.order_number")
+                    continue
+                self.assertIn(
+                    source,
+                    model_columns,
+                    f"{name} reaches outside the return row (source={source!r}); "
+                    "the customer projection may only read the order for its "
+                    "order_number",
+                )
+
+    def test_create_detail_and_list_agree_byte_for_byte_on_one_row(self):
+        # The anti-drift pin for this task's central decision: ONE
+        # representation for all three surfaces. A future edit that widens the
+        # create body only, or the list only, fails here.
+        self.login_as(self.buyer)
+        # A second order for this customer, so the create below files against an
+        # order that has no open request yet (the partial unique index forbids
+        # two on the same order - which is itself the B07a contract).
+        target = self._order("RET-2026-000007", self.buyer, status="delivered")
+
+        created = self.ask(target.order_number)
+        self.assertEqual(created.status_code, 201, created.data)
+        pk = created.data["id"]
+
+        detail = self.client.get(detail_url(pk))
+        listed = self.client.get(LIST_URL)
+        # Newest first, and the row just created is the newest.
+        row = next(r for r in listed.data["results"] if r["id"] == pk)
+
+        self.assertEqual(created.data, detail.data)
+        self.assertEqual(detail.data, row)
+
+
+@tag("e2e")
+class ReturnListTests(ReturnTestCase):
+    """GET .../returns/ - the customer's own returns, every one of them."""
+
+    def setUp(self):
+        super().setUp()
+        self.login_as(self.buyer)
+        self.mine = [
+            self.file_request(self.delivered, ReturnRequest.Status.REQUESTED),
+            self.file_request(self.order, ReturnRequest.Status.APPROVED),
+        ]
+
+    def test_the_listing_carries_every_return_the_caller_owns(self):
+        # THE ``.first()`` TRAP. A to-many answered with one row would pass a
+        # single-return assertion and silently drop the rest - the exact shape
+        # of B06's split-shipment defect. Two rows, both present.
+        res = self.client.get(LIST_URL)
+
+        self.assertEqual(res.status_code, 200, res.data)
+        self.assertEqual(res.data["count"], 2)
+        self.assertEqual(
+            {row["id"] for row in res.data["results"]}, {r.pk for r in self.mine}
+        )
+
+    def test_the_envelope_is_the_house_page_number_shape(self):
+        res = self.client.get(LIST_URL)
+
+        self.assertEqual(
+            set(res.data),
+            {
+                "count",
+                "total_pages",
+                "current_page",
+                "next_page",
+                "previous_page",
+                "results",
+            },
+        )
+        self.assertEqual(res.data["current_page"], 1)
+        self.assertEqual(res.data["total_pages"], 1)
+        self.assertIs(res.data["next_page"], False)
+        self.assertIs(res.data["previous_page"], False)
+
+    def test_the_listing_is_never_answered_by_a_stranger_s_returns(self):
+        theirs = self.file_request(
+            self._order("RET-2026-000004", self.stranger, status="delivered"),
+            ReturnRequest.Status.REQUESTED,
+        )
+        self.login_as(self.stranger)
+
+        res = self.client.get(LIST_URL)
+
+        self.assertEqual(res.status_code, 200, res.data)
+        self.assertEqual([row["id"] for row in res.data["results"]], [theirs.pk])
+        # ...and the body carries none of mine either.
+        body = str(res.data)
+        self.assertNotIn(self.order.order_number, body)
+        self.assertNotIn(self.delivered.order_number, body)
+
+    def test_a_guest_orders_return_row_is_structurally_unreachable(self):
+        # Guest returns are not offered (SPEC-1-B04 gives the guest browsing and
+        # checkout only). Proven structurally: the row is written directly past
+        # the create seam, and the ``order__user`` filter still cannot match a
+        # NULL-user order for an authenticated caller.
+        guest = self.guest_order()
+        guest_row = self.file_request(guest, ReturnRequest.Status.REQUESTED)
+        self.assertIsNone(guest.user_id)
+
+        res = self.client.get(LIST_URL)
+
+        self.assertEqual(res.status_code, 200, res.data)
+        self.assertEqual(res.data["count"], 2)
+        self.assertNotIn(guest_row.pk, [row["id"] for row in res.data["results"]])
+
+    def test_the_listing_is_newest_first_with_a_total_sort(self):
+        # ``-created_at, -id``: the unique-id tiebreaker makes the sort TOTAL,
+        # which is what stops a paginated partition from repeating or skipping
+        # a row across requests (the reasoning ``order_list`` records).
+        older, newer = self.mine
+        ReturnRequest.objects.filter(pk=older.pk).update(
+            created_at=timezone.now() - timedelta(days=30)
+        )
+
+        res = self.client.get(LIST_URL)
+
+        self.assertEqual(
+            [row["id"] for row in res.data["results"]], [newer.pk, older.pk]
+        )
+
+    def test_the_pages_partition_the_whole_list_with_nothing_lost_or_repeated(self):
+        # Completeness across the partition, which is where an unbounded or
+        # mis-sorted listing loses rows. Five returns over five orders, walked
+        # page by page at page_size=2: every row exactly once.
+        for index in range(5):
+            order = self._order(f"RET-2026-0015{index}", self.buyer, status="delivered")
+            self.file_request(order, ReturnRequest.Status.REQUESTED)
+
+        seen = []
+        page = 1
+        while True:
+            res = self.client.get(LIST_URL, {"page_size": 2, "page": page})
+            self.assertEqual(res.status_code, 200, res.data)
+            seen.extend(row["id"] for row in res.data["results"])
+            if not res.data["next_page"]:
+                break
+            page += 1
+
+        self.assertEqual(len(seen), 7)
+        self.assertEqual(len(set(seen)), 7)
+        self.assertEqual(
+            set(seen), set(ReturnRequest.objects.values_list("id", flat=True))
+        )
+
+    def test_an_empty_listing_is_an_empty_page_not_an_error(self):
+        # A customer with no returns at all, while somebody ELSE's return exists
+        # in the table - so an empty page proves the filter, not an empty DB.
+        nobody = self.make_user("returns-nobody")
+        someone = self.make_user("returns-someone")
+        other = self._order("RET-2026-000005", someone, status="delivered")
+        self.file_request(other, ReturnRequest.Status.REQUESTED)
+        self.login_as(nobody)
+
+        res = self.client.get(LIST_URL)
+
+        self.assertEqual(res.status_code, 200, res.data)
+        self.assertEqual(res.data["count"], 0)
+        self.assertEqual(res.data["results"], [])
+        self.assertEqual(res.data["total_pages"], 1)
+
+    def test_the_page_size_is_configuration_and_not_a_literal_in_the_view(self):
+        # conventions.md: no hardcoded thresholds. The number lives in
+        # settings; override it here and the listing must follow.
+        with override_settings(RETURNS_HISTORY_PAGE_SIZE=1):
+            res = self.client.get(LIST_URL)
+
+        self.assertEqual(res.data["count"], 2)
+        self.assertEqual(len(res.data["results"]), 1)
+        self.assertEqual(res.data["total_pages"], 2)
+        self.assertIs(res.data["next_page"], True)
+
+    def test_a_page_size_caller_is_clamped_and_never_unbounded(self):
+        with override_settings(RETURNS_HISTORY_MAX_PAGE_SIZE=3):
+            res = self.client.get(LIST_URL, {"page_size": 10000})
+
+        self.assertEqual(res.status_code, 200, res.data)
+        self.assertEqual(len(res.data["results"]), 2)
+        # A non-numeric or non-positive value falls back to the configured
+        # default rather than erroring - the order-history resolver's contract,
+        # which this resolver deliberately mirrors.
+        for junk in ("abc", "0", "-3", ""):
+            with self.subTest(page_size=junk):
+                fallback = self.client.get(LIST_URL, {"page_size": junk})
+                self.assertEqual(fallback.status_code, 200, fallback.data)
+                self.assertEqual(fallback.data["current_page"], 1)
+
+    def test_a_page_past_the_end_lands_on_the_last_page_rather_than_404ing(self):
+        res = self.client.get(LIST_URL, {"page": 99})
+
+        self.assertEqual(res.status_code, 200, res.data)
+        self.assertEqual(res.data["current_page"], 1)
+
+    def test_reading_the_listing_moves_no_money(self):
+        before = Order.objects.filter(user=self.buyer).values_list(
+            "payment_status", "total_amount", "refunded_at"
+        )
+        refunds_before = Refund.objects.count()
+
+        self.client.get(LIST_URL)
+        self.client.get(detail_url(self.mine[0].pk))
+
+        after = Order.objects.filter(user=self.buyer).values_list(
+            "payment_status", "total_amount", "refunded_at"
+        )
+        self.assertEqual(list(before), list(after))
+        self.assertEqual(Refund.objects.count(), refunds_before)
+
+
+@tag("e2e")
+class ReturnReadIdorTests(ReturnTestCase):
+    """The detail endpoint is the IDOR surface. Probed, not assumed.
+
+    Spec 17 line 4285 asks for IDOR tests "especially in order, address, return
+    and customer APIs", so the property is asserted on the raw response BYTES -
+    a body that differs is as good an oracle as a status code that differs.
+    """
+
+    def setUp(self):
+        super().setUp()
+        self.mine = self.file_request(self.delivered, ReturnRequest.Status.REQUESTED)
+        # A stranger's real return, on a real delivered order they own.
+        their_order = self._order("RET-2026-000006", self.stranger, status="delivered")
+        self.theirs = self.file_request(their_order, ReturnRequest.Status.REQUESTED)
+
+    def test_the_owner_reads_their_own_return(self):
+        self.login_as(self.buyer)
+
+        res = self.client.get(detail_url(self.mine.pk))
+
+        self.assertEqual(res.status_code, 200, res.data)
+        self.assertEqual(res.data["id"], self.mine.pk)
+        self.assertEqual(res.data["order_number"], self.delivered.order_number)
+
+    def test_a_stranger_probing_another_customers_pk_gets_the_baseline_miss(self):
+        # THE probe. A stranger with a REAL JWT names a pk that exists and
+        # belongs to somebody else. The answer must be byte-identical to the
+        # answer for a pk that does not exist - if it differed, the endpoint
+        # would confirm the pk is real and would be an existence oracle, which
+        # is a P1 in this repo's history.
+        self.login_as(self.stranger)
+        baseline = self.client.get(detail_url(99999999))
+        self.assertEqual(baseline.status_code, 404, baseline.data)
+
+        probe = self.client.get(detail_url(self.mine.pk))
+
+        self.assertEqual(probe.status_code, 404)
+        self.assertEqual(probe.content, baseline.content)
+
+    def test_a_stranger_s_own_return_reads_fine_so_the_refusal_is_about_ownership(self):
+        # The control: the endpoint is not simply refusing everyone. Without
+        # this, "stranger gets 404" could be a broken route rather than a
+        # working guard, and the probe above would pass for the wrong reason.
+        self.login_as(self.stranger)
+
+        res = self.client.get(detail_url(self.theirs.pk))
+
+        self.assertEqual(res.status_code, 200, res.data)
+        self.assertEqual(res.data["id"], self.theirs.pk)
+
+    def test_an_anonymous_caller_is_refused_before_the_row_is_read(self):
+        res = self.anonymous_client().get(detail_url(self.mine.pk))
+
+        self.assertEqual(res.status_code, 401)
+        self.assertNotIn(self.delivered.order_number, res.content.decode())
+
+    def test_a_forged_bearer_is_refused(self):
+        self.client.credentials(HTTP_AUTHORIZATION="Bearer not-a-real-token")
+
+        res = self.client.get(detail_url(self.mine.pk))
+
+        self.assertEqual(res.status_code, 401)
+        self.assertNotIn(self.delivered.order_number, res.content.decode())
+
+    def test_a_guest_token_opens_no_door_on_an_account_return(self):
+        # The B04 credential is accepted by NO surface of this family; here it
+        # rides a valid account bearer and must change nothing.
+        token = self.login_as(self.buyer)
+
+        res = self.client.get(detail_url(self.mine.pk), HTTP_X_GUEST_ORDER_TOKEN=token)
+
+        self.assertEqual(res.status_code, 200, res.data)
+        self.assertEqual(res.data["id"], self.mine.pk)
+
+    def test_a_guest_token_alone_cannot_read_an_account_return(self):
+        res = self.anonymous_client().get(
+            detail_url(self.mine.pk), HTTP_X_GUEST_ORDER_TOKEN="tok-RET-2026-000002"
+        )
+
+        self.assertEqual(res.status_code, 401)
+        self.assertNotIn(self.delivered.order_number, res.content.decode())
+
+    def test_a_non_integer_pk_is_refused_by_the_router_rather_than_crashing(self):
+        # Not the view's miss contract (the URL converter never matches it), so
+        # the status is all that is asserted - what matters is that it is a
+        # refusal and not a 500.
+        res = self.client.get("/api/v1/store/orders/returns/not-an-int/")
+
+        self.assertEqual(res.status_code, 404)
+
+    def test_the_detail_body_carries_no_money_and_no_other_customer(self):
+        self.login_as(self.buyer)
+
+        res = self.client.get(detail_url(self.mine.pk))
+
+        body = res.content.decode()
+        for leak in (
+            "total_amount",
+            "payment_status",
+            "refundable_remaining",
+            "guest_token",
+            "address",
+            self.stranger.username,
+        ):
+            with self.subTest(leak=leak):
+                self.assertNotIn(leak, body)
+
+
+@tag("e2e")
+class ReturnEligibilityWindowTests(ReturnTestCase):
+    """The window decision: NO WINDOW, pinned at its boundary.
+
+    Spec 4 line 1083 ("Return/refund request where eligible") and spec 6.8
+    line 1959 ("Eligibility validation") both describe a window the spec never
+    defines. A whole-file sweep for a day count finds exactly one hit and it is
+    about deployment cadence (line 276), not returns.
+
+    So SPEC-1-B07b chose NO WINDOW over an env-driven ``RETURN_WINDOW_DAYS``:
+    any value for that key would have been invented in this task rather than
+    derived from the spec, which is fabricated policy wearing a configuration
+    setting. The consequence - stated rather than hidden - is that eligibility
+    is a function of the order's two machine dimensions ONLY, and age is not an
+    input to it.
+
+    A "no window" policy has no boundary to pin in the ordinary way, so what
+    follows pins the ABSENCE of the boundary: the same dimension pair answers
+    identically at every age, on both the accepted and the refused side.
+    """
+
+    # Ages wide enough to cross any plausible commercial window, including ones
+    # nobody would argue for. If a window is ever introduced, the eligible row
+    # below is the case that will fail first, and it will fail LOUDLY rather
+    # than quietly expiring a customer's right to ask.
+    AGES = (
+        timedelta(seconds=0),
+        timedelta(days=1),
+        timedelta(days=30),
+        timedelta(days=365),
+        timedelta(days=3650),
+    )
+
+    def _aged(self, order_number, status, age):
+        order = self._order(order_number, self.buyer, status=status)
+        Order.objects.filter(pk=order.pk).update(
+            created_at=timezone.now() - age,
+            delivered_at=timezone.now() - age,
+        )
+        order.refresh_from_db()
+        return order
+
+    def test_an_eligible_order_is_eligible_at_every_age(self):
+        self.login_as(self.buyer)
+
+        for index, age in enumerate(self.AGES):
+            with self.subTest(age=age):
+                order = self._aged(f"RET-2026-0020{index}", "delivered", age)
+
+                res = self.ask(order.order_number)
+
+                self.assertEqual(res.status_code, 201, res.data)
+                self.assertTrue(_return_eligible(order))
+
+    def test_an_ineligible_order_is_ineligible_at_every_age(self):
+        # The other half, and the half that makes the first one mean something:
+        # if age were an input, SOME of these would flip. A pending order from
+        # five years ago is exactly as ineligible as one created this morning.
+        self.login_as(self.buyer)
+
+        for index, age in enumerate(self.AGES):
+            with self.subTest(age=age):
+                order = self._aged(f"RET-2026-0021{index}", "pending", age)
+
+                res = self.ask(order.order_number)
+
+                self.assertEqual(res.status_code, 409, res.data)
+                self.assertFalse(_return_eligible(order))
+
+    def test_the_gate_reads_no_clock_at_all(self):
+        # The structural half of the decision, and the probe that fails the
+        # MOMENT a window clause is added rather than after an auditor notices
+        # it. The predicate is two expressions over the order's two dimensions;
+        # this asserts it stays that way. Deliberately narrow - it would also
+        # reject a comment mentioning the clock, which is the trade this makes:
+        # a false alarm here is a docstring reword, a missed window is a
+        # fabricated policy shipping silently.
+        source = inspect.getsource(_return_eligible)
+
+        for token in ("timezone", "timedelta", "settings", "now("):
+            with self.subTest(token=token):
+                self.assertNotIn(token, source)
+
+    def test_a_request_filed_years_ago_is_still_readable_and_still_its_own(self):
+        # Age must not change what the customer can SEE either: a five-year-old
+        # return is still on their list and still opens by its pk.
+        self.login_as(self.buyer)
+        aged = self._aged("RET-2026-002200", "delivered", timedelta(days=3650))
+        created = self.ask(aged.order_number)
+        self.assertEqual(created.status_code, 201, created.data)
+        pk = created.data["id"]
+        ReturnRequest.objects.filter(pk=pk).update(
+            created_at=timezone.now() - timedelta(days=3650)
+        )
+
+        listed = self.client.get(LIST_URL)
+        opened = self.client.get(detail_url(pk))
+
+        self.assertEqual(listed.status_code, 200, listed.data)
+        self.assertIn(pk, [row["id"] for row in listed.data["results"]])
+        self.assertEqual(opened.status_code, 200, opened.data)
+        self.assertEqual(opened.data["id"], pk)
+
+    def test_no_return_window_setting_is_declared(self):
+        # The config half of the decision: a merchant who wants a window gets
+        # one as an env-driven key added HERE with its own documented default,
+        # never as a number that appears from nowhere in a view.
+        self.assertFalse(
+            [name for name in dir(settings) if "RETURN" in name and "WINDOW" in name],
+            "a return-window setting would mean the policy had acquired a "
+            "number; if one is wanted, add it deliberately and say why",
+        )
+
+
+@tag("e2e")
+class ReturnsSurfaceNotWidenedTests(ReturnTestCase):
+    """This task added no route and no capability the customer seam did not have.
+
+    Spec 6.8 line 1957 ("Return request review") is a STAFF feature and its
+    routes are ``/admin/returns`` and ``/admin/returns/:id`` - Django admin
+    pages, which SPEC-1-B07a already serves behind ``returns.read`` /
+    ``returns.write`` ({support, admin}). The spec names no staff JSON API for
+    returns anywhere, so none was invented: adding one would have widened the
+    API surface past what the spec asks for.
+
+    Asserted rather than asserted-in-prose, because "we did not widen anything"
+    is exactly the claim that quietly stops being true.
+    """
+
+    def test_the_returns_family_is_exactly_the_two_customer_routes(self):
+        routes = [
+            str(pattern.pattern)
+            for pattern in orders_urls.urlpatterns
+            if "returns" in str(pattern.pattern)
+        ]
+
+        self.assertEqual(
+            sorted(routes),
+            sorted(["returns/", "returns/<int:return_request_id>/"]),
+        )
+
+    def test_no_returns_route_is_mounted_in_an_admin_family(self):
+        # The staff surface stays the admin, behind the existing capabilities.
+        admin_routes = [
+            str(pattern.pattern)
+            for pattern in config_urls.urlpatterns
+            if "return" in str(pattern.pattern)
+        ]
+
+        self.assertEqual(admin_routes, [])
+
+    def test_the_capability_map_is_unchanged_by_this_task(self):
+        # No capability was added, widened or reassigned. Asserted against the
+        # ROLES map - the source of truth - rather than restating the set here,
+        # which would agree with a widened map from both sides. The
+        # packing-operator question remains SPEC-1-B07c's, exactly as B07a
+        # recorded it (B07a pins that role's exact set separately).
+        from common.roles import CAPABILITY_ROLES
+
+        self.assertEqual(RETURNS_READ, "returns.read")
+        self.assertEqual(RETURNS_WRITE, "returns.write")
+        self.assertEqual(
+            CAPABILITY_ROLES[RETURNS_READ], frozenset({ROLE_SUPPORT, ROLE_ADMIN})
+        )
+        self.assertEqual(
+            CAPABILITY_ROLES[RETURNS_WRITE], frozenset({ROLE_SUPPORT, ROLE_ADMIN})
+        )
