@@ -16,23 +16,24 @@ are hard failures:
     the end of the file
 
 One of those three cannot tell a CLAIM from a COUNTER-EXAMPLE. Prose that
-quotes a retired test name, or a misspelling, in order to REPORT that it does
-not exist is the same sentence shape as prose that asserts it does, and this
-changelog is full of the former. A gate that is red on correct prose gets
-deleted or made ``continue-on-error``, which is worse than having no gate, so
-the author states the counter-example explicitly and this script reads the
-statement rather than guessing at the sentence::
+quotes a retired test name, or a misspelling, or a path that a byte-eaten
+write left as a fragment, in order to REPORT that it does not exist, is the
+same sentence shape as prose that asserts it does -- and this repository is
+full of the former, in its own ledger. A gate that is red on correct prose
+gets deleted or made ``continue-on-error``, which is worse than having no
+gate, so the author states the counter-example explicitly and this script
+reads the statement rather than guessing at the sentence::
 
-    The row quoted `test_the_gate_reads_x`
-    <!-- doc-claims:absent test_the_gate_reads_x (renamed-to test_the_gate_reads_y)
-         ; reason: renamed in B07d, cited here to report the old name -->
+    the file now reads `ests_returns.py`
+    <!-- doc-claims:absent ests_returns.py (corrupted-fragment-of
+         tests_returns.py) ; reason: c873b27 ate the leading byte -->
 
-That directive suppresses exactly one name, on exactly one line, and when it
-cites a successor (``renamed-to`` / ``misspelling-of``) that successor must
-really exist. It is not a suppression list, not a file exemption, and not a
-regex escape hatch, and it cannot be produced by editing the sentence --
-"there is not a test named ``test_x``" is still an error. The full grammar and
-its narrowness rules are on ``parse_counter_examples``.
+That directive silences at most ONE claim, on at most ONE line, and its
+witness has to be real -- a tracked file for a path, a real ``def`` for a test
+name. It is not a suppression list, not a file exemption, and not a regex
+escape hatch, and it cannot be produced by editing the sentence: "there is
+not a test named ``test_x``" is still an error. The full grammar, and the
+three rules that keep it narrow, are on ``parse_counter_examples``.
 
 Everything else is reported, never failed, because a machine cannot decide
 whether "kills 7 tests" was true. Those become the auditor's checklist:
@@ -165,26 +166,48 @@ RE_SELF_REF = re.compile(
 )
 
 # --------------------------------------------------------------------------
-# The counter-example directive (BUG-4, TOOL-01).
+# The counter-example directive (BUG-4, then BUG-A/B/C, TOOL-01 c1 and c2).
 #
 # Grammar, all on ONE source line, inside an HTML comment so it never becomes
 # part of the document's voice:
 #
-#   <!-- doc-claims:absent <name> (renamed-to <witness>
-#                                | misspelling-of <witness>
-#                                | retired) ; reason: <text> -->
+#   <!-- doc-claims:absent <test> (renamed-to <test>
+#                              | misspelling-of <test>
+#                              | retired) ; reason: <text> -->
+#   <!-- doc-claims:absent <path> (corrupted-fragment-of <path>)
+#                              ; reason: <text> -->
 #
-# Narrowness, which is the whole point:
+# Narrowness, which is the whole point. Each bullet is what the CODE does:
 #
-#   * it names ONE test, and only that test, and only on its own line, so a
-#     sibling claim on the same sentence is still checked;
+#   * AT MOST ONE directive is accepted per line, so at most ONE claim on a
+#     line can be silenced by this mechanism. Two or more well-formed
+#     directives on one line means NONE is accepted: the script will not pick
+#     one, because picking one is a guess, and a guess is what this file
+#     refuses to do everywhere else (BUG-A). One line rather than one per
+#     document, because a per-document cap would depend on which lines the
+#     diff happened to touch -- a cap that changes with the base ref is not a
+#     cap, it is a lottery.
+#   * it names ONE target, and only that target, so a sibling claim on the same
+#     sentence is still checked.
 #   * `renamed-to` and `misspelling-of` MUST name a witness, and the witness
-#     must have a real `def` in the tree -- a directive cannot invent a second
-#     name that does not exist either;
-#   * a reason is mandatory and must clear MIN_REASON_CHARS, so the directive
-#     is a statement a reviewer can audit rather than a bare token;
-#   * a MALFORMED directive honours nothing. Failing closed is the only safe
-#     direction: a typo leaves the gate red and the author finds out.
+#     must have a real `def` in the tree; `corrupted-fragment-of` MUST name a
+#     witness that resolves to a tracked file. A directive cannot swap one
+#     absent name for another absent one.
+#   * a kind is only accepted on a target it can mean: a path target takes
+#     `corrupted-fragment-of` and nothing else, so `retired` -- the one kind
+#     with no witness to check -- cannot be spent on a path.
+#   * the reason must clear MIN_REASON_CHARS, which is a LENGTH FLOOR and buys
+#     exactly one thing: that the reason is a fragment rather than a bare
+#     token. It is not evidence of anything. What makes a reason auditable is
+#     RE_REASON_REFERENCE: it must name a commit sha or a task id, so the
+#     statement points at a ledger row a reviewer can open (BUG-B).
+#   * a directive NEVER excuses a line past the end of a file that resolved.
+#     The file existing is proof that the citation is not a counter-example,
+#     so only the missing-file half of a `file.py:123` claim is reachable
+#     here at all.
+#   * a MALFORMED or over-quota directive honours nothing, and says so in the
+#     error it leaves behind. Failing closed is the only safe direction: a
+#     typo leaves the gate red, with the reason, and the author finds out.
 #
 # It is deliberately not satisfiable by rewriting the sentence. "there is not a
 # test named test_x" contains no directive and is still a hard error, which is
@@ -192,15 +215,32 @@ RE_SELF_REF = re.compile(
 # --------------------------------------------------------------------------
 MIN_REASON_CHARS = 24
 
-# `retired` is the one kind with no witness to point at, which makes it the
-# weakest form on purpose: the review is the control there, and the directive is
-# still bound to one name on one line.
+# The checkable half of a reason: a commit sha, or a hyphenated task id
+# (SPEC-1-B07d, TOOL-01, BUG-3). A sha is 7+ hex, so a rare English word made
+# only of a-f can pass this; the review is still the control, and this is a
+# floor on traceability, not a proof of it.
+RE_REASON_REFERENCE = re.compile(
+    r"(?:\b[0-9a-f]{7,40}\b|\b[A-Za-z][A-Za-z0-9]*(?:-[A-Za-z0-9]+)+\b)"
+)
 RE_COUNTER_EXAMPLE = re.compile(
-    r"<!--\s*doc-claims:absent\s+(?P<name>test_[A-Za-z0-9_]+)\s+"
+    r"<!--\s*doc-claims:absent\s+"
+    r"(?P<target>test_[A-Za-z0-9_]+|[A-Za-z0-9_][A-Za-z0-9_./-]*\.py)\s+"
     r"\((?:renamed-to\s+(?P<renamed_to>test_[A-Za-z0-9_]+)"
     r"|misspelling-of\s+(?P<misspelling_of>test_[A-Za-z0-9_]+)"
+    r"|corrupted-fragment-of\s+(?P<fragment_of>[A-Za-z0-9_][A-Za-z0-9_./-]*\.py)"
     r"|retired)\)"
     r"\s*;\s*reason:\s*(?P<reason>[^\n]+?)\s*-->"
+)
+# Which kinds each kind of target can carry. A path target gets ONLY the kind
+# with a checkable witness, so extending the directive to paths (BUG-C) added
+# no new unwitnessed escape.
+COUNTER_EXAMPLE_KINDS = {
+    "test": frozenset({"renamed-to", "misspelling-of", "retired"}),
+    "path": frozenset({"corrupted-fragment-of"}),
+}
+OVER_QUOTA = (
+    "more than one directive on this line; at most one is accepted, so this "
+    "line is read as carrying none"
 )
 RE_HTML_COMMENT = re.compile(r"<!--.*?-->", re.DOTALL)
 
@@ -227,64 +267,108 @@ ERROR_KINDS = frozenset({"test_name", "module_path", "path_line", "byte_integrit
 
 @dataclass(frozen=True)
 class CounterExample:
-    """One author's explicit statement that a quoted name is being reported ABSENT.
+    """One author's explicit statement that a quoted target is reported ABSENT.
 
-    ``witness`` is the surviving name for ``renamed-to`` / ``misspelling-of``
-    and empty for ``retired``; ``verify_claims`` refuses the directive when a
-    named witness has no ``def`` either.
+    ``target_kind`` is ``test`` or ``path`` and decides which kinds may appear
+    here at all. ``witness`` is the surviving name (tests) or the intact file
+    (paths); it is empty only for ``retired``, the one kind with nothing to
+    check against. ``verify_claims`` refuses a directive whose witness does not
+    exist, so a directive can never swap one absent target for another.
     """
 
-    name: str
+    target: str
+    target_kind: str
     kind: str
     witness: str
     reason: str
 
 
-def parse_counter_examples(line: str) -> dict[str, CounterExample]:
+def _directive_kind(match: re.Match) -> tuple[str, str, str]:
+    """``(kind, witness)`` for one grammar match, or ``("", "")`` if unknown."""
+    if match.group("renamed_to"):
+        return "renamed-to", match.group("renamed_to")
+    if match.group("misspelling_of"):
+        return "misspelling-of", match.group("misspelling_of")
+    if match.group("fragment_of"):
+        return "corrupted-fragment-of", match.group("fragment_of")
+    return "retired", ""
+
+
+def parse_counter_examples(
+    line: str,
+) -> tuple[dict[str, CounterExample], dict[str, str]]:
     """Read the counter-example directives out of ONE source line.
 
-    Returns a mapping of test name to directive. Narrow by construction: a
-    directive is scoped to its own line and to the one name it spells out, and
-    anything malformed -- a missing kind, a missing witness, a reason under
-    ``MIN_REASON_CHARS``, or two directives for the same name that disagree --
-    is dropped rather than honoured. Failing closed is deliberate: a malformed
-    directive leaves the claim an error, so the author finds out.
+    Returns ``(accepted, refused)``, both keyed by target. Narrow by
+    construction, and every refusal carries its reason so the error the
+    directive failed to prevent says WHY it was not honoured -- a gate that
+    goes red without saying why is a gate the author cannot act on.
+
+    Refused: an over-quota line, a malformed target/kind pairing, a reason
+    under the length floor, and a reason that names no ledger reference. A
+    target is only ever in one of the two mappings.
     """
-    found: dict[str, CounterExample] = {}
-    conflicting: set[str] = set()
+    accepted: dict[str, CounterExample] = {}
+    refused: dict[str, str] = {}
+    candidates: list[CounterExample] = []
     for match in RE_COUNTER_EXAMPLE.finditer(line):
+        target = match.group("target")
+        kind, witness = _directive_kind(match)
         reason = match.group("reason").strip()
+        target_kind = "path" if target.endswith(".py") else "test"
         if len(reason) < MIN_REASON_CHARS:
+            refused[target] = f"reason is under {MIN_REASON_CHARS} characters"
             continue
-        witness = match.group("renamed_to") or match.group("misspelling_of") or ""
-        kind = (
-            "retired"
-            if not witness
-            else ("renamed-to" if match.group("renamed_to") else "misspelling-of")
+        if not RE_REASON_REFERENCE.search(reason):
+            refused[target] = "reason names no commit sha or task id"
+            continue
+        if kind not in COUNTER_EXAMPLE_KINDS[target_kind]:
+            refused[target] = (
+                f"kind {kind!r} is not accepted on a {target_kind} target "
+                f"(accepted: {', '.join(sorted(COUNTER_EXAMPLE_KINDS[target_kind]))})"
+            )
+            continue
+        candidates.append(
+            CounterExample(
+                target=target,
+                target_kind=target_kind,
+                kind=kind,
+                witness=witness,
+                reason=reason,
+            )
         )
-        name = match.group("name")
-        parsed = CounterExample(name=name, kind=kind, witness=witness, reason=reason)
-        previous = found.get(name)
-        if previous is not None and previous != parsed:
-            # Two directives for one name that disagree: at most one can be
-            # true, and picking either would be the script guessing.
-            conflicting.add(name)
-        found[name] = parsed
-    for name in conflicting:
-        found.pop(name, None)
-    return found
+
+    if len(candidates) > 1:
+        # The cap. Refusing ALL of them rather than keeping the first is
+        # deliberate: the script does not get to decide which of two
+        # statements on one line the author meant.
+        for candidate in candidates:
+            refused[candidate.target] = OVER_QUOTA
+        return {}, refused
+
+    for candidate in candidates:
+        accepted[candidate.target] = candidate
+    return accepted, refused
 
 
 @dataclass(frozen=True)
 class Claim:
-    """One extracted claim. ``value`` is the matched text a human checks."""
+    """One extracted claim. ``value`` is the matched text a human checks.
+
+    ``detail`` is the machine half (a ``path_line`` claim parses its own cited
+    path out of it), ``note`` is the human half (why a counter-example
+    directive was accepted, for the run log). Keeping them apart is what stops
+    an annotation from being parsed back as part of a citation.
+    """
 
     kind: str
     value: str
     path: str
     line: int
     detail: str = ""
+    note: str = ""
     directive: CounterExample | None = None
+    refusal: str = ""
 
     @property
     def severity(self) -> str:
@@ -323,6 +407,17 @@ class Report:
 # --------------------------------------------------------------------------
 
 
+def _directive_note(directive: CounterExample | None) -> str:
+    """The one-line human note for an accepted directive, or ``""``.
+
+    Written for all three kinds by one function so the log cannot show a
+    counter-example for a path and stay mute for a test.
+    """
+    if directive is None:
+        return ""
+    return f"cited as a counter-example ({directive.kind}): {directive.reason}"
+
+
 def extract_claims(text: str, path: str, first_line: int = 1) -> list[Claim]:
     """Pull every claim out of one blob of added documentation text.
 
@@ -335,7 +430,7 @@ def extract_claims(text: str, path: str, first_line: int = 1) -> list[Claim]:
         line = raw.strip()
         if not line:
             continue
-        directives = parse_counter_examples(line)
+        accepted, refused = parse_counter_examples(line)
         # Directives are metadata; claims are read from the prose around them.
         prose = _strip_directive_comments(line)
 
@@ -343,7 +438,8 @@ def extract_claims(text: str, path: str, first_line: int = 1) -> list[Claim]:
         # names were consumed as path:line so the bare-module pass skips them.
         cited_with_line: set[str] = set()
         for match in RE_PATH_LINE.finditer(prose):
-            cited_with_line.add(match.group(1))
+            cited = match.group(1)
+            cited_with_line.add(cited)
             claims.append(
                 Claim(
                     kind="path_line",
@@ -351,34 +447,43 @@ def extract_claims(text: str, path: str, first_line: int = 1) -> list[Claim]:
                     path=path,
                     line=line_no,
                     detail=f"path={match.group(1)} line={match.group(2)}",
+                    note=_directive_note(accepted.get(cited)),
+                    directive=accepted.get(cited),
+                    refusal=refused.get(cited, ""),
                 )
             )
 
         for match in RE_MODULE_PATH.finditer(prose):
             if match.group(1) in cited_with_line:
                 continue
-            claims.append(Claim("module_path", match.group(1), path, line_no))
+            cited = match.group(1)
+            claims.append(
+                Claim(
+                    "module_path",
+                    cited,
+                    path,
+                    line_no,
+                    note=_directive_note(accepted.get(cited)),
+                    directive=accepted.get(cited),
+                    refusal=refused.get(cited, ""),
+                )
+            )
 
         for match in RE_TEST_NAME.finditer(prose):
-
             name = match.group(1)
             # A quoted name is one claim whether it is asserted or reported
             # absent; only an explicit directive on THIS line tells the two
-            # apart, and only for the one name the directive spells out.
-            directive = directives.get(name)
+            # apart, and only for the one target the directive spells out.
+            directive = accepted.get(name)
             claims.append(
                 Claim(
                     "test_name",
                     name,
                     path,
                     line_no,
-                    detail=(
-                        f"cited as a counter-example ({directive.kind}): "
-                        f"{directive.reason}"
-                        if directive
-                        else ""
-                    ),
+                    note=_directive_note(directive),
                     directive=directive,
+                    refusal=refused.get(name, ""),
                 )
             )
 
@@ -446,9 +551,7 @@ def verify_claims(
         if claim.kind == "test_name":
             if claim.value in known_tests:
                 warnings.append(claim)
-            elif claim.directive is not None and _directive_holds(
-                claim.directive, known_tests
-            ):
+            elif _honoured(claim, known_tests, known_paths):
                 # The author stated this name is being reported ABSENT and the
                 # statement survives the one check a machine can make on it.
                 warnings.append(claim)
@@ -459,37 +562,49 @@ def verify_claims(
                         claim.value,
                         claim.path,
                         claim.line,
-                        _missing_test_detail(claim),
+                        _absent_detail(
+                            claim, "no `def` for this name anywhere in the tree"
+                        ),
                     )
                 )
         elif claim.kind == "module_path":
-            if not _path_exists(claim.value, known_paths):
+            if _path_exists(claim.value, known_paths):
+                warnings.append(claim)
+            elif _honoured(claim, known_tests, known_paths):
+                warnings.append(claim)
+            else:
                 errors.append(
                     Claim(
                         claim.kind,
                         claim.value,
                         claim.path,
                         claim.line,
-                        "no such file in the tree",
+                        _absent_detail(claim, "no such file in the tree"),
                     )
                 )
-            else:
-                warnings.append(claim)
         elif claim.kind == "path_line":
             _, _, rest = claim.detail.partition("path=")
             cited, _, tail = rest.partition(" line=")
             resolved = _resolve_path(cited, known_paths)
             if resolved is None:
-                errors.append(
-                    Claim(
-                        claim.kind,
-                        claim.value,
-                        claim.path,
-                        claim.line,
-                        f"no such file: {cited}",
+                if _honoured(claim, known_tests, known_paths):
+                    warnings.append(claim)
+                else:
+                    errors.append(
+                        Claim(
+                            claim.kind,
+                            claim.value,
+                            claim.path,
+                            claim.line,
+                            _absent_detail(claim, f"no such file: {cited}"),
+                        )
                     )
-                )
             elif int(tail) > known_paths[resolved]:
+                # No directive reaches this branch, deliberately. The file
+                # resolved, which is proof the citation is not a
+                # counter-example: a wrong line number is a wrong number, and
+                # letting prose declare it absent is how a stale reference gets
+                # to live forever.
                 errors.append(
                     Claim(
                         claim.kind,
@@ -507,30 +622,57 @@ def verify_claims(
     return errors, warnings
 
 
-def _directive_holds(directive: CounterExample, known_tests: set[str]) -> bool:
+def _honoured(claim: Claim, known_tests: set[str], known_paths: dict[str, int]) -> bool:
+    """Whether a claim's attached counter-example directive is acceptable.
+
+    A claim only KEEPS its directive when parsing accepted it, so this is the
+    single place where a named witness is checked against the tree.
+    """
+    if claim.directive is None:
+        return False
+    return _directive_holds(claim.directive, known_tests, known_paths)
+
+
+def _directive_holds(
+    directive: CounterExample, known_tests: set[str], known_paths: dict[str, int]
+) -> bool:
     """Whether a counter-example directive is a statement a machine can accept.
 
-    A named witness must be a real ``def``: a directive that swaps one missing
-    name for another missing name has asserted nothing, and honouring it would
-    turn the one-line directive into a general escape hatch for absent names.
+    A named witness must be REAL: a test witness must have a ``def``, and a
+    path witness must resolve to a tracked file. A directive that swaps one
+    absent target for another absent one has asserted nothing, and honouring it
+    would turn a one-line directive into a general escape hatch.
+
+    ``retired`` has no witness to check and is the weakest kind by
+    construction; the review is the control there.
     """
     if directive.kind == "retired":
         return True
-    return directive.witness in known_tests
+    if directive.target_kind == "test":
+        return directive.witness in known_tests
+    return _resolve_path(directive.witness, known_paths) is not None
 
 
-def _missing_test_detail(claim: Claim) -> str:
-    """Why a test_name claim is an error, including a failed directive."""
-    base = "no `def` for this name anywhere in the tree"
-    if claim.directive is None:
-        return base
-    if claim.directive.kind == "retired":
-        return f"{base}, and the counter-example directive does not claim one"
-    return (
-        f"{base}, and the counter-example directive names "
-        f"{claim.directive.witness} as the surviving name, which does not "
-        f"exist either"
-    )
+def _absent_detail(claim: Claim, base: str) -> str:
+    """Why an absent-target claim is an error, including any failed directive."""
+    directive = claim.directive
+    if directive is not None:
+        if directive.kind == "retired":
+            return f"{base}, and the counter-example directive does not claim one"
+        if directive.target_kind == "test":
+            return (
+                f"{base}, and the counter-example directive names "
+                f"{directive.witness} as the surviving name, which does not "
+                f"exist either"
+            )
+        return (
+            f"{base}, and the counter-example directive names "
+            f"{directive.witness} as the intact file, which is not in the tree "
+            f"either"
+        )
+    if claim.refusal:
+        return f"{base} (a counter-example directive was present and refused: {claim.refusal})"
+    return base
 
 
 def _resolve_path(candidate: str, known_paths: dict[str, int]) -> str | None:
@@ -928,7 +1070,7 @@ def main(argv: list[str] | None = None) -> int:
             if claim.directive is not None:
                 print(
                     f"  ABSENT {claim.path}:{claim.line} [{claim.kind}] "
-                    f"{claim.value} — {claim.detail}"
+                    f"{claim.value} — {claim.note}"
                 )
         if report.warnings:
             print(f"  {len(report.warnings)} claim(s) need a human or an auditor.")

@@ -31,12 +31,38 @@ from doc_claims import FALLBACK_BASE, MIN_REASON_CHARS  # noqa: E402
 
 DOC = "backend/docs/changes.md"
 
-# A well-formed counter-example directive. The reason clears
-# MIN_REASON_CHARS on purpose: a bare token is not a statement.
+# A well-formed counter-example directive. The reason clears MIN_REASON_CHARS
+# and names a task id, because both are required: the floor keeps it a fragment
+# and the id keeps it traceable (BUG-B).
 DIRECTIVE = (
     "<!-- doc-claims:absent test_retired_name (renamed-to test_real_one)"
-    " ; reason: renamed in B07d, cited to report the old name -->"
+    " ; reason: renamed in SPEC-1-B07d, cited to report the old name -->"
 )
+# A second well-formed directive for a DIFFERENT absent name. Two of these on
+# one line is over quota (BUG-A).
+OTHER_DIRECTIVE = (
+    "<!-- doc-claims:absent test_second_absent (misspelling-of test_real_one)"
+    " ; reason: SPEC-1-B07d misspelled it, quoted here to report the wrong"
+    " spelling -->"
+)
+# The shape the ledger actually uses for byte-eaten path fragments (BUG-C).
+PATH_DIRECTIVE = (
+    "<!-- doc-claims:absent ests_returns.py (corrupted-fragment-of"
+    " tests_returns.py) ; reason: c873b27 ate the leading byte, reported here"
+    " as the corruption it is -->"
+)
+
+
+def retired_directive(name="test_retired_name", task="SPEC-1-B07d"):
+    return (
+        f"<!-- doc-claims:absent {name} (retired) ; reason: the pin was retired"
+        f" in {task} and is quoted here to report that -->"
+    )
+
+
+def parse(line):
+    """The accepted half of a parse, for the many malformed cases."""
+    return parse_counter_examples(line)[0]
 
 
 def kinds(claims, kind):
@@ -383,7 +409,7 @@ class CounterExampleDirectiveTests(unittest.TestCase):
         )
         self.assertEqual(errors, [])
         self.assertEqual(len(warnings), 1)
-        self.assertIn("counter-example", warnings[0].detail)
+        self.assertIn("counter-example", warnings[0].note)
 
     def test_a_real_missing_name_still_fails(self):
         errors, _ = self.verify("fixed `test_does_not_exist`")
@@ -416,40 +442,36 @@ class CounterExampleDirectiveTests(unittest.TestCase):
         self.assertIn("does not exist either", errors[0].detail)
 
     def test_retired_needs_no_witness(self):
-        directive = (
-            "<!-- doc-claims:absent test_retired_name (retired)"
-            " ; reason: the pin was retired in B07d and is quoted as absent -->"
-        )
-        errors, _ = self.verify(f"`test_retired_name` {directive}")
+        errors, _ = self.verify(f"`test_retired_name` {retired_directive()}")
         self.assertEqual(errors, [])
 
     def test_a_reason_under_the_floor_is_not_a_directive(self):
         terse = (
             "<!-- doc-claims:absent test_retired_name (renamed-to test_real_one)"
-            " ; reason: renamed -->"
+            " ; reason: SPEC-1-B07d -->"
         )
-        self.assertEqual(parse_counter_examples(terse), {})
+        self.assertEqual(parse(terse), {})
         errors, _ = self.verify(f"`test_retired_name` {terse}")
         self.assertEqual([c.kind for c in errors], ["test_name"])
 
     def test_a_renamed_to_without_a_witness_is_not_a_directive(self):
         malformed = (
             "<!-- doc-claims:absent test_retired_name (renamed-to)"
-            " ; reason: renamed in B07d and cited here -->"
+            " ; reason: renamed in SPEC-1-B07d and cited here -->"
         )
-        self.assertEqual(parse_counter_examples(malformed), {})
+        self.assertEqual(parse(malformed), {})
         errors, _ = self.verify(f"`test_retired_name` {malformed}")
         self.assertEqual([c.kind for c in errors], ["test_name"])
 
     def test_an_unknown_kind_is_not_a_directive(self):
         malformed = DIRECTIVE.replace("(renamed-to", "(was-renamed-to")
-        self.assertEqual(parse_counter_examples(malformed), {})
+        self.assertEqual(parse(malformed), {})
         errors, _ = self.verify(f"`test_retired_name` {malformed}")
         self.assertEqual([c.kind for c in errors], ["test_name"])
 
     def test_a_plain_mention_of_the_keyword_is_not_a_directive(self):
-        self.assertEqual(parse_counter_examples("doc-claims:absent test_x"), {})
-        self.assertEqual(parse_counter_examples("<!-- doc-claims:absent -->"), {})
+        self.assertEqual(parse("doc-claims:absent test_x"), {})
+        self.assertEqual(parse("<!-- doc-claims:absent -->"), {})
 
     def test_a_directive_is_bound_to_its_own_line(self):
         text = (
@@ -461,11 +483,10 @@ class CounterExampleDirectiveTests(unittest.TestCase):
         )
         self.assertEqual([c.line for c in errors], [2])
 
-    def test_two_directives_for_one_name_that_disagree_honour_nothing(self):
-        other = (
-            "<!-- doc-claims:absent test_retired_name (misspelling-of"
-            " test_also_missing) ; reason: a different story entirely -->"
-        )
+    def test_two_directives_for_one_name_honour_nothing(self):
+        # Refused by the per-line cap, not by comparing the two: the script
+        # does not pick one of two statements the author put on one line.
+        other = OTHER_DIRECTIVE.replace("test_second_absent", "test_retired_name")
         errors, _ = self.verify(f"`test_retired_name` {DIRECTIVE} {other}")
         self.assertEqual([c.kind for c in errors], ["test_name"])
 
@@ -473,20 +494,254 @@ class CounterExampleDirectiveTests(unittest.TestCase):
         claims = kinds(
             extract_claims(f"`test_retired_name` {DIRECTIVE}", DOC), "test_name"
         )
-        self.assertIn("renamed-to", claims[0].detail)
-        self.assertIn("B07d", claims[0].detail)
+        self.assertIn("renamed-to", claims[0].note)
+        self.assertIn("B07d", claims[0].note)
 
     def test_an_honoured_claim_is_not_an_error(self):
         _, warnings = self.verify(f"`test_retired_name` {DIRECTIVE}")
         self.assertEqual(warnings[0].severity, "warn")
 
     def test_parse_returns_the_witness(self):
-        parsed = parse_counter_examples(DIRECTIVE)
-        self.assertEqual(parsed["test_retired_name"].witness, "test_real_one")
-        self.assertEqual(parsed["test_retired_name"].kind, "renamed-to")
-        self.assertGreaterEqual(
-            len(parsed["test_retired_name"].reason), MIN_REASON_CHARS
+        parsed = parse(DIRECTIVE)["test_retired_name"]
+        self.assertEqual(parsed.witness, "test_real_one")
+        self.assertEqual(parsed.kind, "renamed-to")
+        self.assertEqual(parsed.target_kind, "test")
+        self.assertGreaterEqual(len(parsed.reason), MIN_REASON_CHARS)
+
+
+class DirectiveQuotaTests(unittest.TestCase):
+    """BUG-A [P2]: the documented invariant was false and is now enforced.
+
+    Cycle 1 claimed a directive "names ONE test, and only that test, and only
+    on its own line, so a sibling claim on the same sentence is still checked".
+    Two well-formed directives on one line silenced both. The cap is one
+    ACCEPTED directive per line: over quota, the line is read as carrying none.
+    """
+
+    KNOWN = {"test_real_one"}
+    PATHS = {"backend/orders/tests_returns.py": 2600}
+
+    def verify(self, line):
+        return verify_claims(extract_claims(line, DOC), self.KNOWN, self.PATHS)
+
+    def test_two_directives_on_one_line_silence_nothing(self):
+        errors, _ = self.verify(
+            f"`test_retired_name` {DIRECTIVE} and `test_second_absent`"
+            f" {OTHER_DIRECTIVE}"
         )
+        self.assertEqual(
+            sorted(c.value for c in errors),
+            ["test_retired_name", "test_second_absent"],
+        )
+
+    def test_neither_of_two_is_arbitrarily_chosen(self):
+        # The first one is not privileged, because "first match wins" is a
+        # guess, and a guess is what this script refuses everywhere else.
+        errors, _ = self.verify(
+            f"`test_retired_name` {DIRECTIVE} `test_second_absent`"
+            f" {OTHER_DIRECTIVE}"
+        )
+        self.assertEqual(len(errors), 2)
+        self.assertTrue(all(c.kind == "test_name" for c in errors))
+
+    def test_the_refusal_is_visible_in_the_error(self):
+        # A gate that goes red without saying why is a gate the author cannot
+        # act on, and the quota is the least guessable of the refusals.
+        errors, _ = self.verify(
+            f"`test_retired_name` {DIRECTIVE} `test_second_absent`"
+            f" {OTHER_DIRECTIVE}"
+        )
+        self.assertTrue(all("refused" in c.detail for c in errors))
+        self.assertTrue(all("more than one directive" in c.detail for c in errors))
+
+    def test_one_directive_still_works(self):
+        # The cap must not cost the mechanism its one legitimate use.
+        errors, warnings = self.verify(f"`test_retired_name` {DIRECTIVE}")
+        self.assertEqual(errors, [])
+        self.assertEqual(len(warnings), 1)
+
+    def test_one_directive_and_one_uncited_absent_name_still_separates(self):
+        # The cycle-1 narrowness case, re-pinned under the cap: the single
+        # directive is honoured and its neighbour is still an error.
+        errors, _ = self.verify(
+            f"`test_retired_name` {DIRECTIVE} and `test_also_missing`"
+        )
+        self.assertEqual([c.value for c in errors], ["test_also_missing"])
+
+
+class DirectiveReasonTests(unittest.TestCase):
+    """BUG-B [P3]: a length floor is a length floor, and now says so.
+
+    `reason: the the the ...` cleared MIN_REASON_CHARS and silenced an absent
+    name with zero machine verification. The floor stays and is restated for
+    what it buys; the reason must ALSO name a commit sha or a task id, which is
+    what makes it traceable to a ledger row.
+    """
+
+    KNOWN = {"test_real_one"}
+    PATHS = {}
+
+    def verify(self, line):
+        return verify_claims(extract_claims(line, DOC), self.KNOWN, self.PATHS)
+
+    def filler(self, reason):
+        return (
+            "<!-- doc-claims:absent test_absent_x (renamed-to test_real_one)"
+            f" ; reason: {reason} -->"
+        )
+
+    def test_long_filler_with_no_reference_is_refused(self):
+        # 39 characters, comfortably over the floor, and says nothing.
+        reason = "the the the the the the the the the the"
+        self.assertGreater(len(reason), MIN_REASON_CHARS)
+        self.assertEqual(parse(self.filler(reason)), {})
+        errors, _ = self.verify(f"`test_absent_x` {self.filler(reason)}")
+        self.assertEqual([c.kind for c in errors], ["test_name"])
+
+    def test_a_task_id_is_enough(self):
+        errors, _ = self.verify(
+            f"`test_absent_x` {self.filler('renamed under SPEC-1-B07d')}"
+        )
+        self.assertEqual(errors, [])
+
+    def test_a_commit_sha_is_enough(self):
+        errors, _ = self.verify(
+            f"`test_absent_x` {self.filler('the leading byte was eaten at c873b27')}"
+        )
+        self.assertEqual(errors, [])
+
+    def test_the_floor_still_applies_to_a_reason_that_has_a_reference(self):
+        # Both rules, not either: a bare id is not a statement either.
+        self.assertEqual(parse(self.filler("SPEC-1-B07d")), {})
+
+    def test_a_refused_reason_is_reported(self):
+        errors, _ = self.verify(
+            f"`test_absent_x` {self.filler('the the the the the the the the')}"
+        )
+        self.assertIn("names no commit sha or task id", errors[0].detail)
+
+    def test_retired_cannot_be_fillered_past_the_reference_rule(self):
+        # The auditor's exact attack: retired + long filler, no ledger row.
+        directive = (
+            "<!-- doc-claims:absent test_absent_x (retired) ; reason: the the"
+            " the the the the the the the the the -->"
+        )
+        self.assertEqual(parse(directive), {})
+        errors, _ = self.verify(f"`test_absent_x` {directive}")
+        self.assertEqual([c.kind for c in errors], ["test_name"])
+
+
+class PathCounterExampleTests(unittest.TestCase):
+    """BUG-C [P3]: the corruption evidence in the ledger is a COUNTER-EXAMPLE.
+
+    backend/docs/spec-run-state.md quotes what a byte-eaten write left behind
+    -- "the file now reads `ests_returns.py`, `iews.py`" -- in order to REPORT
+    that those paths do not exist. Cycle 1 called them prose typos and covered
+    only test_name, so the motive for the directive was half-closed.
+    """
+
+    KNOWN = {"test_real_one"}
+    PATHS = {
+        "backend/orders/tests_returns.py": 2600,
+        "backend/orders/views.py": 900,
+        "backend/ops/views.py": 400,
+    }
+
+    def verify(self, line):
+        return verify_claims(extract_claims(line, DOC), self.KNOWN, self.PATHS)
+
+    def test_a_corrupted_path_fragment_stops_failing(self):
+        errors, warnings = self.verify(
+            f"the file now reads `ests_returns.py` {PATH_DIRECTIVE}"
+        )
+        self.assertEqual(errors, [])
+        self.assertEqual(len(warnings), 1)
+        self.assertIn("corrupted-fragment-of", warnings[0].note)
+
+    def test_the_intact_file_witness_must_resolve(self):
+        # `views.py` is ambiguous across the apps, so it is NOT a witness. The
+        # author has to name the file they mean, which is the point.
+        directive = (
+            "<!-- doc-claims:absent iews.py (corrupted-fragment-of views.py)"
+            " ; reason: c873b27 ate the leading byte, reported as corruption -->"
+        )
+        errors, _ = self.verify(f"the file now reads `iews.py` {directive}")
+        self.assertEqual([c.kind for c in errors], ["module_path"])
+        self.assertIn("not in the tree", errors[0].detail)
+
+    def test_an_app_relative_witness_resolves(self):
+        directive = (
+            "<!-- doc-claims:absent iews.py (corrupted-fragment-of"
+            " orders/views.py) ; reason: c873b27 ate the leading byte, reported"
+            " as the corruption it is -->"
+        )
+        errors, _ = self.verify(f"the file now reads `iews.py` {directive}")
+        self.assertEqual(errors, [])
+
+    def test_a_path_directive_cannot_excuse_a_line_past_the_end_of_a_file(self):
+        # The narrowing that keeps this from becoming a stale-reference pass:
+        # the file RESOLVED, so nothing about the citation is a counter-example
+        # and a wrong line number stays a wrong line number.
+        directive = (
+            "<!-- doc-claims:absent orders/views.py (corrupted-fragment-of"
+            " orders/views.py) ; reason: SPEC-1-B07d reported the fragment -->"
+        )
+        errors, _ = self.verify(f"see `orders/views.py:4000` {directive}")
+        self.assertEqual([c.kind for c in errors], ["path_line"])
+        self.assertIn("past the end", errors[0].detail)
+
+    def test_a_path_directive_honours_a_missing_path_line(self):
+        directive = (
+            "<!-- doc-claims:absent ests_returns.py (corrupted-fragment-of"
+            " tests_returns.py) ; reason: c873b27 ate the leading byte, quoted"
+            " here to report the corruption -->"
+        )
+        errors, warnings = self.verify(f"was `ests_returns.py:2551` {directive}")
+        self.assertEqual(errors, [])
+        self.assertEqual(len(warnings), 1)
+
+    def test_retired_is_not_accepted_on_a_path(self):
+        # The one unwitnessed kind must not be spendable on a path, or
+        # extending to paths would have added a fresh escape hatch.
+        directive = (
+            "<!-- doc-claims:absent iews.py (retired) ; reason: the module was"
+            " deleted in SPEC-1-B07d and is reported as absent -->"
+        )
+        self.assertEqual(parse(directive), {})
+        errors, _ = self.verify(f"the file now reads `iews.py` {directive}")
+        self.assertEqual([c.kind for c in errors], ["module_path"])
+
+    def test_a_test_kind_on_a_path_target_is_refused(self):
+        directive = (
+            "<!-- doc-claims:absent iews.py (renamed-to test_real_one)"
+            " ; reason: renamed under SPEC-1-B07d and reported as absent -->"
+        )
+        self.assertEqual(parse(directive), {})
+        errors, _ = self.verify(f"the file now reads `iews.py` {directive}")
+        self.assertEqual([c.kind for c in errors], ["module_path"])
+
+    def test_a_path_directive_does_not_excuse_a_test_name(self):
+        errors, _ = self.verify(
+            f"the file now reads `ests_returns.py` {PATH_DIRECTIVE} and"
+            f" `test_absent_x`"
+        )
+        self.assertEqual([c.kind for c in errors], ["test_name"])
+
+    def test_two_path_directives_on_one_line_are_over_quota(self):
+        # The consequence to hand to the ledger owner, pinned as a test: the
+        # corruption sentence names two fragments on ONE source line, so the
+        # cap means it cannot be cleared by a single edit there.
+        second = (
+            "<!-- doc-claims:absent iews.py (corrupted-fragment-of"
+            " orders/views.py) ; reason: c873b27 ate the leading byte, reported"
+            " as the corruption it is -->"
+        )
+        errors, _ = self.verify(
+            f"the file now reads `ests_returns.py` {PATH_DIRECTIVE} and"
+            f" `iews.py` {second}"
+        )
+        self.assertEqual([c.kind for c in errors], ["module_path", "module_path"])
+        self.assertTrue(all("more than one directive" in c.detail for c in errors))
 
 
 class BaseResolutionTests(unittest.TestCase):
