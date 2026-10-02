@@ -13,15 +13,18 @@ on:
     # The deployment wiring (SPEC-2-10b/22-07) is part of the backend's
     # production path, so a push that only touches it still runs this gate --
     # deploy.yml is triggered by THIS workflow's completion, and a commit with
-    # no run here could never be released. scripts/backup.sh is here for the
-    # same reason: the backup cadence (R-22.9) is the deploy host's scheduled
-    # entry point, so a commit that only changes it still runs the gate.
+    # no run here could never be released. scripts/ is here for the same
+    # reason plus one more: backup.sh and release.sh are the deploy host's
+    # scheduled entry points (R-22.9), and the whole of scripts/ is now gated
+    # because scripts/doc_claims.py is a BUILD GATE -- the "Documentation claim
+    # scan" step below runs it, so a commit that only touches the tooling must
+    # still run the gate that executes the tooling. `scripts/**` (not two named
+    # .sh files) is what keeps that true for a file added tomorrow.
     paths:
       - "backend/**"
       - "docker-compose.yml"
       - "Procfile"
-      - "scripts/release.sh"
-      - "scripts/backup.sh"
+      - "scripts/**"
       - ".github/workflows/backend-tests.yml"
       - ".github/workflows/deploy.yml"
   pull_request:
@@ -30,8 +33,7 @@ on:
       - "backend/**"
       - "docker-compose.yml"
       - "Procfile"
-      - "scripts/release.sh"
-      - "scripts/backup.sh"
+      - "scripts/**"
       - ".github/workflows/backend-tests.yml"
       - ".github/workflows/deploy.yml"
 
@@ -58,6 +60,17 @@ jobs:
       RAZORPAY_KEY_SECRET: ci-dummy-secret
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          # Full history, and the remote-tracking refs, because the claim scan
+          # below is DIFF-SCOPED: it runs
+          # `git diff --unified=0 origin/spec-comp...HEAD`. The default
+          # fetch-depth: 1 checkout fetches neither -- `origin/spec-comp` does
+          # not exist as a ref, so the diff would abort with a git error and
+          # the step would exit 2, turning the gate red on a green tree. A
+          # 3-dot diff also needs a merge base, which a shallow clone cannot
+          # compute. The byte-integrity half needs no history, but it is the
+          # same command, so the whole step pays this once.
+          fetch-depth: 0
 
       - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
         with:
@@ -78,6 +91,32 @@ jobs:
         run: |
           python -m coverage run manage.py test
           python -m coverage report
+
+      # Prose had no oracle until SPEC-1-B07d (scripts/doc_claims.py). This is
+      # a SIBLING step, not a wrapper around the runner, on purpose: the gate
+      # above is coverage-gated and a wrapper that shells out to the runner
+      # risks perturbing the measurement coverage report is about to gate on.
+      #
+      # Exit 1 on the mechanically decidable classes only -- a quoted `test_*`
+      # name with no `def`, a cited `.py` that does not exist, a `file.py:123`
+      # past EOF, or a byte-integrity regression on a tracked doc blob (this
+      # repo's changes.md has been silently corrupted three times by shell
+      # writes). Undecidable claims (a count, a universal) are printed as
+      # warnings and never fail: the script does not judge prose, and a gate
+      # that guessed at prose would be a gate that got loosened to pass.
+      #
+      # The byte baseline (scripts/doc_claims_baseline.json) holds byte FACTS
+      # only and is never self-updating -- a self-updating baseline records
+      # whatever the prose claimed, which is the defect this exists to catch.
+      # If this step ever goes red on PRE-EXISTING claims, that is a finding to
+      # report, not a reason to baseline it away.
+      #
+      # scripts/mutation_evidence.py is deliberately NOT wired here: it is
+      # opt-in and slow (it replays six full-suite runs), and it is a
+      # pre-publication check for a mutation claim, not a build gate.
+      - name: Documentation claim scan (doc_claims)
+        working-directory: ${{ github.workspace }}
+        run: python scripts/doc_claims.py --base origin/spec-comp --head HEAD
 
       # `coverage report` is the gate (fail_under=90 in .coveragerc); the HTML
       # report is a separate step so the upload below always has an artifact to
