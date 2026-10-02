@@ -562,19 +562,19 @@ ORDER_HISTORY_MAX_PAGE_SIZE = _env_int('ORDER_HISTORY_MAX_PAGE_SIZE', 100)
 # (conventions.md: no hardcoded thresholds); non-integer values are ignored and
 # the defaults are used instead. The spec pins no number for either.
 #
-# NOTE: there is deliberately NO return-window key here, and that is a build-
-# order state rather than a settled policy. Spec 4 line 1083 ("Return/refund
-# request where eligible") and spec 6.8 line 1959 ("Eligibility validation")
-# describe a window the spec never numbers anywhere - a whole-file sweep for a
-# day count finds exactly one hit, and it is about deployment cadence, not
-# returns - so this task invented no number. THE PRODUCT OWNER HAS SINCE
-# REQUIRED a configurable site-wide return window, and it overrides that
-# outcome; SPEC-1-B07d owns it. It will NOT arrive as a key here: a return
-# window is merchant-facing policy that each store sets for itself, so it is
-# an ops.SiteSettings row, not deployment config. The two keys below stay
-# env-driven precisely because they are the OTHER kind - a page density is a
-# property of the deployment and does not vary per store. Until B07d lands an
-# order's AGE IS NOT AN INPUT to eligibility (orders.views._return_eligible).
+# NOTE: there is deliberately NO return-window key here, and SPEC-1-B07d is
+# why rather than a gap left open. Spec 4 line 1083 ("Return/refund request
+# where eligible") and spec 6.8 line 1959 ("Eligibility validation")
+# describe a window the spec never numbers anywhere, so SPEC-1-B07b invented
+# no number; THE PRODUCT OWNER HAS SINCE REQUIRED a configurable site-wide
+# return window, which overrides that outcome and is landed as
+# ops.SiteSettings.return_window_days (default ops.models.
+# DEFAULT_RETURN_WINDOW_DAYS). It did NOT arrive as a key here, on purpose: a
+# return window is merchant-facing policy that each store sets for itself, so
+# a merchant choosing 45 days must not need a redeploy. The two keys below
+# stay env-driven precisely because they are the OTHER kind - a page density
+# is a property of the deployment and does not vary per store. An order's age
+# IS an input to eligibility as of B07d; see orders.views._return_eligible.
 RETURNS_HISTORY_PAGE_SIZE = _env_int('RETURNS_HISTORY_PAGE_SIZE', 10)
 RETURNS_HISTORY_MAX_PAGE_SIZE = _env_int('RETURNS_HISTORY_MAX_PAGE_SIZE', 100)
 

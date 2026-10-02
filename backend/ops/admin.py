@@ -27,6 +27,7 @@ class SiteSettingsAdmin(RoleAwareModelAdmin):
         "support_phone",
         "whatsapp_number",
         "instagram_url",
+        "return_window_days",
         "updated_at",
     )
     fieldsets = (
@@ -41,6 +42,16 @@ class SiteSettingsAdmin(RoleAwareModelAdmin):
                     "instagram_url",
                 )
             },
+        ),
+        (
+            # SPEC-1-B07d. Its own fieldset rather than a sixth field on the
+            # contact row: this is store POLICY and the gate reads it, while
+            # every field above is a channel the storefront merely displays.
+            # ``fieldsets`` is explicit here, so without this entry the column
+            # would exist, be writable through the ORM, and be UNREACHABLE in
+            # the one surface the merchant has for editing settings.
+            "Store policy (read by the returns gate; blank = store default)",
+            {"fields": ("return_window_days",)},
         ),
     )
 

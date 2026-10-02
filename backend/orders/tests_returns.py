@@ -35,11 +35,18 @@ already been bitten by.
   (``EligibilityDerivationTests``), and a REAL partial refund is driven through
   the SPEC-1-05 refund seam before the return seam is asked its opinion
   (``RefundSeamIntegrationTests``) - cycle 3's bug was that nothing joined the
-  two features, so 100% line coverage could not see it.
+  two features, so 100% line coverage could not see it;
+* the merchant-configurable return window is pinned at its boundary with
+  HAND-WRITTEN day counts against a fixed aware clock, the anchor fork is
+  pinned by executing the divergence between the two readings, and the retired
+  "the gate reads no clock" invariant is INVERTED rather than deleted
+  (``ReturnEligibilityWindowTests``) - SPEC-1-B07d, which overrules B07b's
+  no-window outcome at the product owner's direction.
 """
 
 import ast
-from datetime import timedelta
+from contextlib import contextmanager
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 import inspect
 import textwrap
@@ -48,6 +55,8 @@ from unittest.mock import patch
 from django.conf import settings
 from django.contrib.admin.models import LogEntry
 from django.contrib.auth.models import Group, User
+from django import forms
+from django.forms import modelform_factory
 from django.db import IntegrityError, transaction
 from django.test import tag
 from django.test import override_settings
@@ -81,6 +90,11 @@ from orders.admin import (
 )
 from orders import urls as orders_urls
 from config import urls as config_urls
+from ops.models import (
+    DEFAULT_RETURN_WINDOW_DAYS,
+    MAX_RETURN_WINDOW_DAYS,
+    SiteSettings,
+)
 from orders.serializers import ReturnRequestSerializer
 from orders.state import (
     CAPTURED_MONEY_PAYMENT_STATUSES,
@@ -98,6 +112,8 @@ from orders.views import (
     _return_body,
     _return_eligible,
     _return_request_miss,
+    _return_window_anchor,
+    _return_window_days,
 )
 
 CREATE_URL = "/api/v1/store/orders/returns/"
@@ -2231,94 +2247,322 @@ def _executable_source(function):
 
 @tag("e2e")
 class ReturnEligibilityWindowTests(ReturnTestCase):
-    """The window decision as it ships, pinned at the boundary it currently has.
+    """[R-1.16] SPEC-1-B07d: the merchant-configurable return window.
 
     Spec 4 line 1083 ("Return/refund request where eligible") and spec 6.8
-    line 1959 ("Eligibility validation") both describe a window the spec never
-    defines. A whole-file sweep for a day count finds exactly one hit and it is
-    about deployment cadence (line 276), not returns.
+    line 1959 ("Eligibility validation") describe a window the spec never
+    numbers, so SPEC-1-B07b shipped without one rather than fabricate policy
+    wearing a configuration setting. **That was a build-order state, not a
+    settled policy**: THE PRODUCT OWNER HAS SINCE REQUIRED a configurable
+    site-wide return window, which overrides that outcome rather than
+    complementing it. SPEC-1-B07d owns it, and its number lives in
+    ``ops.SiteSettings`` because a window is merchant-facing policy each store
+    sets for itself, not a deployment concern.
 
-    So SPEC-1-B07b shipped no window rather than invent one: any value for an
-    env-driven ``RETURN_WINDOW_DAYS`` would have been fabricated in this task
-    rather than derived from the spec, which is fabricated policy wearing a
-    configuration setting. **That is a build-order state, not a settled
-    policy.** THE PRODUCT OWNER HAS SINCE REQUIRED a configurable site-wide
-    return window, which overrides this outcome rather than complementing it;
-    SPEC-1-B07d owns it, and its number belongs in ``ops.SiteSettings`` rather
-    than in env, because a window is merchant-facing policy that each store
-    sets for itself. The consequence - stated rather than hidden - is that UNTIL
-    B07d LANDS eligibility is a function of the order's two machine dimensions
-    ONLY, and age is not an input to it.
+    So this class used to pin the ABSENCE of a window and now pins its
+    boundary. That is a genuine change of invariant, not a test rewritten to
+    keep passing, and the pins below were chosen so that the thing they replace
+    could not have asserted anything useful anyway: ``test_an_eligible_order_
+    is_eligible_at_every_age`` became meaningless the moment a window exists
+    (a five-year-old order is simply refused now, which is the FEATURE), and
+    ``test_the_gate_reads_no_clock_at_all`` asserted the opposite of the
+    required behaviour. Each retirement is stated at the pin that replaces it.
 
-    There is no boundary to pin in the ordinary way, so what follows pins the
-    ABSENCE of one: the same dimension pair answers identically at every age, on
-    both the accepted and the refused side. Read the pins below as what this
-    task's predicate does today, which is B07d's starting point rather than an
-    argument against it.
+    TWO DECISIONS ARE PINNED HERE, not left to the code:
+
+    * the DEFAULT, ``DEFAULT_RETURN_WINDOW_DAYS = 30`` - the ecommerce
+      convention (the published general-retail window the FTC's three-day
+      online cooling-off rule sits under as a statutory floor), and the order
+      lifecycle's own demand that the window outlive packing-plus-courier
+      latency, because the gate admits a PAID order the merchant has not yet
+      dispatched and a shorter window would expire a paying customer's right
+      before their parcel existed;
+    * the ANCHOR - delivery where the goods have arrived, the order's own date
+      otherwise. The fallback is the production case, not an edge case:
+      ``orders.models`` records that ``delivered_at``/``shipped_at``/
+      ``fulfilled_at`` have no writer yet, so every real row is NULL on them.
+
+    Every boundary below is written against HAND-WRITTEN day counts
+    (``timedelta(days=30)``, spelled out) and against a FIXED aware clock.
+    Neither is negotiable: a boundary recomputed from the configured number
+    agrees with a wrong default from both sides (B07a cycle 2's defect), and a
+    boundary sampled from a moving clock tests scheduling luck rather than
+    the predicate.
     """
 
-    # Ages wide enough to cross any plausible commercial window, including ones
-    # nobody would argue for. When SPEC-1-B07d introduces one, the eligible row
-    # below is the case that will fail first, and it will fail LOUDLY rather
-    # than quietly expiring a customer's right to ask.
-    AGES = (
-        timedelta(seconds=0),
-        timedelta(days=1),
-        timedelta(days=30),
-        timedelta(days=365),
-        timedelta(days=3650),
-    )
+    # An AWARE, fixed instant with zero microseconds, so
+    # ``anchor + timedelta(days=N)`` lands on an exactly representable moment
+    # and "exactly N days admitted, N+1 refused" is a fact rather than a race.
+    NOW = datetime(2026, 10, 2, 12, 0, 0, tzinfo=UTC)
 
-    def _aged(self, order_number, status, age):
+    @contextmanager
+    def clock_frozen_at(self, moment=None):
+        """The seam's clock pinned to ``moment`` (this class's NOW by default).
+
+        ``orders.views`` is patched at its OWN attribute, which is the whole
+        reason the probes call the private module helper rather than importing
+        the gate with an injected clock: the production call path - one
+        ``timezone.now()`` read inside ``_return_eligible`` - is what runs
+        here, not a test-only variant of it. The freeze lasts only the block,
+        so no other probe inherits a stale ``now``.
+        """
+        target = self.NOW if moment is None else moment
+        with patch("orders.views.timezone.now", return_value=target):
+            yield target
+
+    def _placed(self, order_number, status, created_age, delivered_age=None):
+        """An order whose own timestamps sit at hand-written ages.
+
+        Ages are subtracted from the class's fixed ``NOW`` and NOT from
+        ``timezone.now()``, so a probe's arithmetic does not depend on where in
+        the suite it happens to run. ``delivered_age=None`` leaves
+        ``delivered_at`` NULL - not a contrived row: no writer in this repo
+        touches that column yet, so it is the shape every real order has.
+        """
         order = self._order(order_number, self.buyer, status=status)
-        Order.objects.filter(pk=order.pk).update(
-            created_at=timezone.now() - age,
-            delivered_at=timezone.now() - age,
-        )
+        stamps = {"created_at": self.NOW - created_age}
+        if delivered_age is not None:
+            stamps["delivered_at"] = self.NOW - delivered_age
+        Order.objects.filter(pk=order.pk).update(**stamps)
         order.refresh_from_db()
         return order
 
-    def test_an_eligible_order_is_eligible_at_every_age(self):
+    def test_an_eligible_order_inside_the_window_is_accepted(self):
+        # The old pin here was "an eligible order is eligible at EVERY age",
+        # up to ten years. A window makes that false by design, so it is
+        # retired rather than weakened; what replaces it pins the ages that
+        # must still work - including the very first second, because a gate
+        # that read the clock before the order was stamped would refuse an
+        # order the customer has only just placed.
         self.login_as(self.buyer)
 
-        for index, age in enumerate(self.AGES):
-            with self.subTest(age=age):
-                order = self._aged(f"RET-2026-0020{index}", "delivered", age)
+        with self.clock_frozen_at():
+            for index, age in enumerate((timedelta(seconds=0), timedelta(days=29))):
+                with self.subTest(age=age):
+                    order = self._placed(f"RET-2026-0020{index}", "delivered", age)
 
-                res = self.ask(order.order_number)
+                    res = self.ask(order.order_number)
 
-                self.assertEqual(res.status_code, 201, res.data)
-                self.assertTrue(_return_eligible(order))
+                    self.assertEqual(res.status_code, 201, res.data)
+                    self.assertTrue(_return_eligible(order))
 
     def test_an_ineligible_order_is_ineligible_at_every_age(self):
-        # The other half, and the half that makes the first one mean something:
-        # if age were an input, SOME of these would flip. A pending order from
-        # five years ago is exactly as ineligible as one created this morning.
+        # Unchanged by the window, and unchanged is the point: it is the half
+        # that makes the accepted-side pins mean something. A window must never
+        # RESCUE an order the machine refuses, so if age were an input to the
+        # only predicate, SOME of these would flip. A pending order from five
+        # years ago is exactly as ineligible as one created this morning - the
+        # window can only ever add a refusal, never remove one.
         self.login_as(self.buyer)
 
-        for index, age in enumerate(self.AGES):
-            with self.subTest(age=age):
-                order = self._aged(f"RET-2026-0021{index}", "pending", age)
+        with self.clock_frozen_at():
+            for index, age in enumerate(
+                (timedelta(seconds=0), timedelta(days=30), timedelta(days=3650))
+            ):
+                with self.subTest(age=age):
+                    order = self._placed(f"RET-2026-0021{index}", "pending", age)
 
-                res = self.ask(order.order_number)
+                    res = self.ask(order.order_number)
 
-                self.assertEqual(res.status_code, 409, res.data)
+                    self.assertEqual(res.status_code, 409, res.data)
+                    self.assertFalse(_return_eligible(order))
+
+    def test_the_window_admits_exactly_thirty_days_and_refuses_the_next(self):
+        # HAND-WRITTEN literals on both sides, deliberately NOT
+        # ``timedelta(days=configured_window)``: a boundary whose expected
+        # value is recomputed from the number under test agrees with a WRONG
+        # default from both sides, which is the defect the auditor caught in
+        # B07a cycle 2. ``test_the_default_is_thirty_days`` pins the constant
+        # to the same literal, so the constant and the behaviour are checked
+        # from two independent directions.
+        self.login_as(self.buyer)
+
+        with self.clock_frozen_at():
+            on_the_last_day = self._placed(
+                "RET-2026-0040", "delivered", timedelta(days=30)
+            )
+            one_day_late = self._placed(
+                "RET-2026-0041", "delivered", timedelta(days=31)
+            )
+
+            admitted = self.ask(on_the_last_day.order_number)
+            refused = self.ask(one_day_late.order_number)
+
+            self.assertEqual(admitted.status_code, 201, admitted.data)
+            self.assertEqual(refused.status_code, 409, refused.data)
+            self.assertTrue(_return_eligible(on_the_last_day))
+            self.assertFalse(_return_eligible(one_day_late))
+
+    def test_the_default_is_thirty_days(self):
+        # Decision (a), pinned twice: the CONSTANT against a hand-written 30,
+        # and the resolved value against the same literal. Two sides, so
+        # changing the default to 14 cannot leave the behaviour pin agreeing
+        # with it.
+        self.assertEqual(DEFAULT_RETURN_WINDOW_DAYS, 30)
+
+        row = SiteSettings.load()
+
+        self.assertIsNone(row.return_window_days, "the window starts out unset")
+        self.assertEqual(row.resolved_return_window_days(), 30)
+        self.assertEqual(_return_window_days(), 30)
+
+    def test_an_unset_window_admits_thirty_days_and_refuses_thirty_one(self):
+        # The blank-means-default path end to end, over the seam rather than
+        # the model: a store that has never touched the field still gets a
+        # decidable window, and the seam says so with its own bytes.
+        self.login_as(self.buyer)
+
+        with self.clock_frozen_at():
+            admitted = self.ask(
+                self._placed(
+                    "RET-2026-0044", "delivered", timedelta(days=30)
+                ).order_number
+            )
+            refused = self.ask(
+                self._placed(
+                    "RET-2026-0045", "delivered", timedelta(days=31)
+                ).order_number
+            )
+
+            self.assertEqual(admitted.status_code, 201, admitted.data)
+            self.assertEqual(refused.status_code, 409, refused.data)
+
+    def test_a_configured_window_is_the_one_that_is_enforced(self):
+        # The store's SETTING drives the gate, not the constant read directly.
+        # Thirty is out of the question here, so a build that ignored the
+        # column and used DEFAULT_RETURN_WINDOW_DAYS would admit the
+        # eleven-day-old order below and fail this pin.
+        row = SiteSettings.load()
+        row.return_window_days = 7
+        row.save()
+        self.login_as(self.buyer)
+
+        with self.clock_frozen_at():
+            seventh_day = self._placed("RET-2026-0046", "delivered", timedelta(days=7))
+            eighth_day = self._placed("RET-2026-0047", "delivered", timedelta(days=8))
+            past_the_default = self._placed(
+                "RET-2026-0048", "delivered", timedelta(days=11)
+            )
+
+            self.assertEqual(_return_window_days(), 7)
+            self.assertEqual(self.ask(seventh_day.order_number).status_code, 201)
+            self.assertEqual(self.ask(eighth_day.order_number).status_code, 409)
+            self.assertEqual(self.ask(past_the_default.order_number).status_code, 409)
+
+    def test_the_window_runs_from_delivery_when_the_goods_arrived(self):
+        # THE DIVERGENCE, made executable. An order placed 50 days ago and
+        # delivered 20 days ago: a window measured from ``created_at`` refused
+        # it a full 20 days ago, and one measured from ``delivered_at`` admits
+        # it today, on the last day of its window. Both readings are asserted
+        # here - the chosen one by the seam's own answer, the rejected one by
+        # a hand-written inequality - because the divergence is the entire
+        # argument for the anchor, and an argument nobody can execute is not an
+        # argument.
+        self.login_as(self.buyer)
+
+        with self.clock_frozen_at():
+            slow = self._placed(
+                "RET-2026-0049",
+                "delivered",
+                created_age=timedelta(days=50),
+                delivered_age=timedelta(days=20),
+            )
+
+            self.assertEqual(_return_window_anchor(slow), slow.delivered_at)
+            # What a created_at reading would have said, spelled out:
+            self.assertLess(slow.created_at + timedelta(days=30), self.NOW)
+            self.assertTrue(_return_eligible(slow))
+
+            res = self.ask(slow.order_number)
+
+            self.assertEqual(res.status_code, 201, res.data)
+
+    def test_an_order_that_never_arrived_is_measured_from_its_own_date(self):
+        # The unshipped-but-admitted case, and the reason the fallback exists:
+        # ``confirmed`` is ``captured / unfulfilled``, so the gate admits this
+        # row on the MONEY half alone while the merchant has not dispatched
+        # it and there is no delivery to anchor to. Both readings of the fork
+        # would use the order date here, which is why a window shorter than the
+        # store's own packing latency would expire a paying customer's right
+        # before their parcel existed.
+        self.login_as(self.buyer)
+
+        with self.clock_frozen_at():
+            paid_unshipped = self._placed(
+                "RET-2026-0050", "confirmed", timedelta(days=10)
+            )
+            stale_unshipped = self._placed(
+                "RET-2026-0051", "confirmed", timedelta(days=31)
+            )
+
+            self.assertIsNone(paid_unshipped.delivered_at)
+            self.assertEqual(
+                _return_window_anchor(paid_unshipped), paid_unshipped.created_at
+            )
+            self.assertTrue(_return_eligible(paid_unshipped))
+            self.assertFalse(_return_eligible(stale_unshipped))
+            self.assertEqual(self.ask(paid_unshipped.order_number).status_code, 201)
+            self.assertEqual(self.ask(stale_unshipped.order_number).status_code, 409)
+
+    def test_the_retired_no_clock_invariant_now_names_what_the_gate_reads(self):
+        # REPLACES ``test_the_gate_reads_no_clock_at_all``, and the replacement
+        # is deliberately not a weaker version of it. That pin walked this
+        # function's executable body and asserted it contained no ``timezone``
+        # / ``timedelta`` / ``settings`` / ``now(`` - a correct description of
+        # the world B07b shipped, and the exact opposite of the world the
+        # product owner then required. A window NEEDS a clock read; deleting
+        # the pin without replacing it would have left "the gate ignores
+        # elapsed time" as an untested claim, and rewriting it to assert the
+        # tokens are ABSENT-by-name-substitution would have bought nothing.
+        #
+        # So the scan is INVERTED rather than removed, and it says what is now
+        # required instead: the gate reads the clock, the number it compares
+        # against comes from the store's own settings row, and neither read
+        # comes from deployment config. The scan stays behavioural (docstrings
+        # and comments stripped by ``_executable_source``) because SPEC-1-B07d
+        # REQUIRES prose that names both - a text scan would fire on the
+        # documentation of the thing it exists to precede.
+        #
+        # This is the structural half only, and it is the smaller half: the
+        # boundary, fork and per-call pins below are what prove the window is
+        # honoured, because they would fail if the tokens were present and the
+        # window were not read.
+        gate = _executable_source(_return_eligible)
+
+        self.assertIn(
+            "timezone",
+            gate,
+            "the gate must read the clock now that a window exists",
+        )
+
+        window = _executable_source(_return_window_days)
+
+        self.assertIn(
+            "SiteSettings",
+            window,
+            "the number must come from the store's own settings row",
+        )
+        self.assertNotIn(
+            "django.conf",
+            window,
+            "a merchant-set window must never be deployment configuration",
+        )
+
+    def test_the_gate_reads_the_window_on_every_call_and_not_from_a_cache(self):
+        # The behavioural replacement for the structural pin above, and the one
+        # that cannot be satisfied by tokens in the source. A gate that read the
+        # window at import time, or memoised it, would keep answering with the
+        # number it first saw; this walks the SAME order through the seam twice
+        # and watches the answer change under it.
+        self.login_as(self.buyer)
+        order = self._placed("RET-2026-0052", "delivered", timedelta(days=5))
+
+        with self.clock_frozen_at():
+            with patch("orders.views._return_window_days", return_value=0):
                 self.assertFalse(_return_eligible(order))
-
-    def test_the_gate_reads_no_clock_at_all(self):
-        # The structural half of the decision, and the probe that fails the
-        # MOMENT a window clause is added rather than after an auditor notices
-        # it. It scans BEHAVIOUR: the function's AST is walked with the
-        # docstring excluded, so a mention of the clock in prose is neither a
-        # failure nor something to word around. That matters because B07d's own
-        # required documentation must name this setting - a text scan would
-        # fire on the documentation of the thing it is meant to precede, and
-        # would reward writing `ops.SiteSettings` with a capital S.
-        executable = _executable_source(_return_eligible)
-
-        for token in CLOCK_TOKENS:
-            with self.subTest(token=token):
-                self.assertNotIn(token, executable)
+                self.assertEqual(self.ask(order.order_number).status_code, 409)
+            self.assertTrue(_return_eligible(order))
+            self.assertEqual(self.ask(order.order_number).status_code, 201)
 
     def test_the_clock_scan_reads_the_body_and_not_the_prose(self):
         # The scan's own contract, so it cannot quietly regress into the text
@@ -2401,11 +2645,15 @@ class ReturnEligibilityWindowTests(ReturnTestCase):
                     self.assertTrue(found, "a clock read in the body must trip it")
 
     def test_a_request_filed_years_ago_is_still_readable_and_still_its_own(self):
-        # Age must not change what the customer can SEE either: a five-year-old
-        # return is still on their list and still opens by its pk.
+        # Age must not change what the customer can SEE, only what they may
+        # ASK for. The window retired the other half of this probe - a
+        # ten-year-old order can no longer be filed against - so the request
+        # is filed while it is in date and aged afterwards, which keeps the
+        # claim it was written to make and stops it quietly re-testing the
+        # window instead.
         self.login_as(self.buyer)
-        aged = self._aged("RET-2026-002200", "delivered", timedelta(days=3650))
-        created = self.ask(aged.order_number)
+        fresh = self._placed("RET-2026-002200", "delivered", timedelta(days=1))
+        created = self.ask(fresh.order_number)
         self.assertEqual(created.status_code, 201, created.data)
         pk = created.data["id"]
         ReturnRequest.objects.filter(pk=pk).update(
@@ -2421,18 +2669,195 @@ class ReturnEligibilityWindowTests(ReturnTestCase):
         self.assertEqual(opened.data["id"], pk)
 
     def test_no_return_window_setting_is_declared(self):
-        # The config half: an order-window NUMBER must not appear in deployment
-        # config. This stays true under SPEC-1-B07d, which is where the window
-        # is being added - as an ``ops.SiteSettings`` row, because a window is
-        # merchant-facing policy each store sets for itself, and not as an env
-        # key the way the two page-density keys above are. If a number is ever
-        # wanted, add it deliberately in the right home and say why.
+        # The config half, and it SURVIVES this task: a return-window NUMBER
+        # must not appear in deployment config. SPEC-1-B07d puts it in an
+        # ``ops.SiteSettings`` row, because a window is merchant-facing policy
+        # each store sets for itself, and not as an env key the way the two
+        # page-density keys above are. If a number is ever wanted here, add it
+        # deliberately in the right home and say why.
         self.assertFalse(
             [name for name in dir(settings) if "RETURN" in name and "WINDOW" in name],
             "a return-window deployment key would put the policy in the wrong "
             "place; a window belongs in ops.SiteSettings, and if one is wanted "
             "here, add it deliberately and say why",
         )
+
+    def test_a_client_cannot_steer_the_window_through_the_create_body(self):
+        # CHECK 1, the security surface this task adds: a site-wide setting is
+        # merchant-controlled, so the probe is that a CUSTOMER cannot move it -
+        # and cannot widen their own eligibility by trying. Six spellings of
+        # the same attempt, every one ignored, because the create body reads
+        # exactly three fields (``_RETURN_BODY_FIELDS``) and stores what it
+        # read. The store's window is 1 day and the order is 10 days old, so
+        # the baseline answer is a refusal and any spelling that worked would
+        # have to change these bytes.
+        row = SiteSettings.load()
+        row.return_window_days = 1
+        row.save()
+        self.login_as(self.buyer)
+        order = self._placed("RET-2026-0053", "delivered", timedelta(days=10))
+        attempts = (
+            {},
+            {"return_window_days": 3650},
+            {"return_window": 3650},
+            {"window_days": 3650},
+            {"days": 3650},
+            {"site_settings": {"return_window_days": 3650}},
+        )
+
+        baseline = None
+        for extra in attempts:
+            with self.subTest(field=sorted(extra) or "none"):
+                res = self.ask(order.order_number, **extra)
+
+                self.assertEqual(res.status_code, 409, res.data)
+                if baseline is None:
+                    baseline = res.content
+                # Byte-identical to the attempt with no steering parameter: a
+                # different body would confirm that the parameter was read.
+                self.assertEqual(res.content, baseline)
+
+        self.assertEqual(SiteSettings.load().return_window_days, 1)
+
+    def test_the_window_comes_from_the_singleton_and_from_no_other_row(self):
+        # CHECK 2, the false-universal probe. ``load()`` is a ``get_or_create``
+        # on pk=1, so repeated reads cannot fork the row: two callers racing
+        # into the same INSERT get one row and one IntegrityError the ORM
+        # retries, and the primary key is what forbids a second row at all.
+        # The singleton's ``save()`` pk=1 guard, though, does NOT cover
+        # queryset paths - so the second half of this probe creates exactly
+        # the row that guard was supposed to prevent, by the one route that
+        # skips ``save()``, and pins that the window is NOT steered by it.
+        row = SiteSettings.load()
+        row.return_window_days = 45
+        row.save()
+
+        for _ in range(3):
+            SiteSettings.load()
+        self.assertEqual(SiteSettings.objects.count(), 1)
+        self.assertEqual(_return_window_days(), 45)
+
+        SiteSettings.objects.bulk_create([SiteSettings(pk=2, return_window_days=999)])
+
+        self.assertEqual(SiteSettings.objects.count(), 2)
+        self.assertEqual(_return_window_days(), 45)
+
+    def test_the_window_is_published_to_the_storefront(self):
+        # Decision (b)-adjacent disclosure: the window is STORE POLICY, so it
+        # is published on the one public settings surface the spec already has.
+        # Asserted on the raw bytes, including anonymously, and pinned to the
+        # RESOLVED value - a storefront that had to implement its own copy of
+        # the default is a storefront that will show the wrong number.
+        self.login_as(self.buyer)
+
+        res = self.client.get("/api/settings/")
+        body = res.content.decode()
+
+        self.assertEqual(res.status_code, 200)
+        self.assertIn('"return_window_days": 30', body)
+
+        row = SiteSettings.load()
+        row.return_window_days = 45
+        row.save()
+
+        res = self.client.get("/api/settings/")
+
+        self.assertEqual(res.status_code, 200)
+        self.assertIn('"return_window_days": 45', res.content.decode())
+
+    def test_only_settings_manage_roles_may_read_or_write_the_window(self):
+        # No capability was widened: the field landed on an existing admin
+        # whose ``capability_map`` already gates every verb on
+        # ``settings.manage`` ({admin, superadmin}). A support operator -
+        # who DOES hold ``returns.read``/``returns.write`` - must not be able
+        # to set the window, or the packing desk could widen the policy it is
+        # judged by.
+        SiteSettings.load()
+        url = "/admin/ops/sitesettings/1/change/"
+        payload = {
+            "support_email": "",
+            "support_phone": "",
+            "whatsapp_number": "",
+            "whatsapp_message": "",
+            "instagram_url": "",
+            "return_window_days": 45,
+            "_save": "Save",
+        }
+
+        self.client.force_login(role_user(ROLE_SUPPORT, "window-support"))
+        refused = self.client.post(url, payload)
+        self.assertEqual(refused.status_code, 403)
+        self.assertIsNone(SiteSettings.load().return_window_days)
+
+        self.client.force_login(role_user(ROLE_ADMIN, "window-admin"))
+        allowed = self.client.post(url, payload)
+
+        self.assertEqual(allowed.status_code, 302)
+        self.assertEqual(SiteSettings.load().return_window_days, 45)
+
+    def test_the_window_field_is_reachable_on_the_admin_form(self):
+        # ``fieldsets`` on that admin is EXPLICIT, so without a field entry the
+        # column would exist, be writable through the ORM, and be unreachable
+        # in the only surface the merchant has for editing settings - a policy
+        # no one could change. Asserted on the rendered bytes, which is where
+        # "reachable" actually means something.
+        SiteSettings.load()
+        self.client.force_login(role_user(ROLE_ADMIN, "window-form-admin"))
+
+        res = self.client.get("/admin/ops/sitesettings/1/change/")
+
+        self.assertEqual(res.status_code, 200)
+        self.assertContains(res, "return_window_days")
+
+    def test_the_window_column_is_bounded_on_both_database_backends(self):
+        # CHECK 5, the SQLite/Postgres split. SQLite has no integer width and
+        # would store a value no Postgres integer could hold, so a bound that
+        # lives only in the column type is enforced by one backend and not the
+        # other - and Postgres answers the overflow with a DataError that
+        # surfaces as a 500 on the merchant's save, not as a form error.
+        # The bound is therefore asserted at the FORM - where both backends
+        # meet it - and not at the database, so this probe fails on SQLite too
+        # rather than passing here and 500-ing in production. A negative window
+        # is definitional nonsense; the ceiling is a representability bound no
+        # return policy needs to exceed.
+        form_class = modelform_factory(
+            SiteSettings,
+            fields=["return_window_days"],
+            widgets={"return_window_days": forms.NumberInput},
+        )
+
+        accepted = form_class(data={"return_window_days": MAX_RETURN_WINDOW_DAYS})
+
+        self.assertTrue(accepted.is_valid(), accepted.errors)
+
+        for rejected in (-1, MAX_RETURN_WINDOW_DAYS + 1, 10**12):
+            with self.subTest(value=rejected):
+                refused = form_class(data={"return_window_days": rejected})
+
+                self.assertFalse(refused.is_valid())
+                self.assertIn("return_window_days", refused.errors)
+
+    def test_a_negative_window_is_refused_by_the_admin_form(self):
+        # The end-to-end half of the probe above: the merchant's save attempt,
+        # not the form field in isolation, leaves the stored policy untouched.
+        SiteSettings.load()
+        self.client.force_login(role_user(ROLE_ADMIN, "window-bound-admin"))
+
+        res = self.client.post(
+            "/admin/ops/sitesettings/1/change/",
+            {
+                "support_email": "",
+                "support_phone": "",
+                "whatsapp_number": "",
+                "whatsapp_message": "",
+                "instagram_url": "",
+                "return_window_days": -1,
+                "_save": "Save",
+            },
+        )
+
+        self.assertEqual(res.status_code, 200)
+        self.assertIsNone(SiteSettings.load().return_window_days)
 
 
 @tag("e2e")

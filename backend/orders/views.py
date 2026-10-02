@@ -77,6 +77,11 @@ from products.models import StockMovement, StockReservation, products
 # delivery OPTION here and nothing else - never an amount - which is what keeps
 # the shipping cost out of the client's hands.
 from shipping.pricing import ShippingUnavailable, quote_shipping
+# [R-1.16] SPEC-1-B07d: the merchant-configurable return window the
+# eligibility gate honours. ops.models imports nothing from orders, so this is
+# a leaf import and cannot cycle; it is named in full rather than aliased so
+# the reader of ``_return_window_days`` can see where the policy comes from.
+from ops.models import SiteSettings
 
 import logging
 import razorpay
@@ -2635,36 +2640,103 @@ def _return_eligible(order):
       so a COD order that has SHIPPED must stay returnable while its money is
       still ``pending``.
 
-    NO WINDOW TODAY - WHICH IS A BUILD-ORDER STATE, NOT A SETTLED POLICY.
-    SPEC-1-B07b found the spec silent on the NUMBER: line 1083's "Return/
-    refund request where eligible" and line 1959's "Eligibility validation"
-    both describe a window that a whole-file sweep for a day count cannot find
-    (the single hit is about deployment cadence, not returns). Inventing one
-    would have been fabricated policy wearing a configuration key, so B07b
-    shipped without one - which left the age of an order out of this
-    predicate: a delivered order from five years ago is exactly as returnable
-    as one delivered this morning, and a pending one exactly as ineligible.
+    NO WINDOW IS A BUILD-ORDER STATE AND IS NOW OVERRULED. SPEC-1-B07b found
+    the spec silent on the NUMBER - line 1083's "Return/refund request where
+    eligible" and line 1959's "Eligibility validation" both describe a window a
+    whole-file sweep for a day count cannot find (the single hit is about
+    deployment cadence, not returns) - so B07b shipped without one rather than
+    fabricate policy wearing a configuration key. The product owner has since
+    REQUIRED a configurable site-wide return window, which overrides that
+    outcome rather than complementing it, and SPEC-1-B07d owns it. The rule
+    below is B07a's derivation with B07d's window clause bolted onto it; the
+    derivation above is untouched, and the window is a SECOND, independent
+    refusal rather than a rewrite of the first.
 
-    THE PRODUCT OWNER HAS SINCE REQUIRED A CONFIGURABLE SITE-WIDE RETURN
-    WINDOW, and that overrides B07b's no-window outcome rather than
-    complementing it. It is ledgered as SPEC-1-B07d, which owns it. Nothing
-    about this seam resists it: the seam is already this function and a time
-    clause needs no migration. Two things B07d inherits from here, so they are
-    recorded where the seam can be read:
-
-    * the window is a MERCHANT-FACING SETTING, not deployment config - each
-      store sets its own - so its number belongs in ``ops.SiteSettings``, NOT
-      in env and NOT here. (The page-size keys B07b DID add beside the
-      deployment config stay env-driven, because a page density is a property
-      of the deployment and does not vary per store. The two differ in kind,
-      and that difference is why they do not share a home.)
-    * until B07d lands, this predicate still asks a question the machine can
-      answer ("has anything happened yet") and never one only the calendar
-      can. That is what ships now; it is not the answer to the question.
+    * the number is MERCHANT-FACING SETTING, not deployment config - each store
+      sets its own - so it lives in ``ops.SiteSettings``, NOT in env and NOT
+      here (the page-size keys B07b DID add beside the deployment config stay
+      env-driven, because a page density is a property of the deployment and
+      does not vary per store; the two differ in kind, and that difference is
+      why they do not share a home).
+    * age is now an input, read through ``_within_return_window`` below, and
+      the seam no longer answers "has anything happened yet" alone.
     """
     money_moved = order.payment_status in CAPTURED_MONEY_PAYMENT_STATUSES
     goods_moved = order.fulfilment_status != "unfulfilled"
-    return money_moved or goods_moved
+    if not (money_moved or goods_moved):
+        return False
+    return _within_return_window(order, timezone.now())
+
+
+def _return_window_days():
+    """The return window this store publishes, in days (SPEC-1-B07d).
+
+    Read from ``ops.SiteSettings`` - the admin surface the merchant already
+    has - and never from ``django.conf.settings``, because a window is store
+    POLICY (each merchant sets its own) while this module's other settings
+    reads are deployment shape. An unset column resolves to the documented
+    default in the model's own method, so the number the gate enforces and the
+    number ``/api/settings/`` publishes are one value by construction rather
+    than two copies that could drift.
+
+    ``load()`` is a ``get_or_create`` on the singleton's pk, so the very first
+    call on a store that has never saved the row INSERTS it. That happens
+    inside the create seam's ``transaction.atomic`` below and is safe: the row
+    is the pk-1 singleton, so the insert is idempotent and commits or rolls
+    back with the surrounding attempt without leaving a second row.
+    """
+    return SiteSettings.load().resolved_return_window_days()
+
+
+def _return_window_anchor(order):
+    """The instant the window is measured FROM (SPEC-1-B07d).
+
+    DELIVERY WHERE THE GOODS HAVE ARRIVED, THE ORDER'S OWN DATE OTHERWISE -
+    and the fallback is not an edge case, it is the production case. As of
+    this task ``orders.models`` says of ``delivered_at``, ``shipped_at`` and
+    ``fulfilled_at``: "no writer touches them yet". The admin surface's
+    mark_delivered does not stamp them, and ``admin_order_fulfill`` declines
+    to invent a richer record than the admin surface for the same transition.
+    So every real delivered row in this repo has ``delivered_at IS NULL``, and
+    a window anchored on delivery alone would either refuse every order that
+    has actually been delivered or measure from nothing at all.
+
+    The two readings DIVERGE, and the divergence is the argument for this
+    form. Take an order paid on day 0, dispatched on day 3 and delivered on
+    day 20:
+
+    * measured from ``created_at``: on day 50 it is 50 days old and refused,
+      even though the customer has had the goods for 30 days;
+    * measured from ``delivered_at``, with this fallback: on day 50 it is 30
+      days past arrival and admitted, on the last day of its window.
+
+    The chosen form is the GENEROUS of the two wherever they disagree, because
+    ``delivered_at`` is never earlier than ``created_at``: where a delivery
+    stamp exists it is the later anchor and buys the customer more time, and
+    where it does not exist the order date is the only anchor there is. Its
+    one asymmetry is the unshipped-but-admitted row - an order admitted on
+    the money half alone (``captured / unfulfilled``), which has no delivery to
+    anchor to - and there both readings would use the order date anyway, which
+    is why a window shorter than the store's own packing latency would expire
+    a paying customer's right before their parcel exists.
+    """
+    return order.delivered_at or order.created_at
+
+
+def _within_return_window(order, now):
+    """Whether ``now`` is still inside ``order``'s return window.
+
+    INCLUSIVE at the boundary: the window admits the anchor instant plus N
+    whole days, so a customer who asks on the last day of their N has asked in
+    time. ``<=`` rather than ``<`` is that decision, stated once here so the
+    boundary probes and this line cannot drift apart.
+
+    ``now`` is passed in rather than read here so the CALLER owns the single
+    clock read of the whole predicate: one read means a request cannot be
+    accepted by a gate that consulted one clock and refused by a gate that
+    consulted a later one.
+    """
+    return now <= _return_window_anchor(order) + timedelta(days=_return_window_days())
 
 
 def _return_request_miss():
@@ -2984,11 +3056,16 @@ def _create_return_request(request):
             return _return_request_miss()
 
         if not _return_eligible(order):
-            # Reads the two dimensions spec 10.2 declares, off the order machine
-            # (see _return_eligible). A pending and a cancelled order are
-            # refused for the same reason because the machine maps them onto the
-            # same dimension pair; a never-paid one is refused on the capture
-            # half of that same test, whichever status it happens to wear.
+            # Two INDEPENDENT refusals answer 409 with the same body: the
+            # machine's dimensions (see _return_eligible - a pending and a
+            # cancelled order are refused for the same reason because the
+            # machine maps them onto the same dimension pair) and the store's
+            # return window. One body for both is deliberate - the caller owns
+            # the order either way, so naming which of the two fired would
+            # disclose nothing but would fork a contract the tests pin as one,
+            # and "not eligible" is the honest sentence for an order past its
+            # deadline. A never-paid one is refused on the capture half of the
+            # machine test, whichever status it happens to wear.
             return Response(
                 {"error": "This order is not eligible for a return"},
                 status=status.HTTP_409_CONFLICT,
