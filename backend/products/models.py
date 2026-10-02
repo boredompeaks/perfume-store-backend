@@ -416,10 +416,18 @@ class StockReservation(models.Model):
         on_delete=models.CASCADE,
         related_name="stock_reservations",
     )
+    # [R-1.13] SPEC-1-B04: nullable because a guest checks out without an
+    # account, and this hold is minted at checkout - so a guest order would
+    # otherwise have no value to put here and its units would never be
+    # reserved (the oversell guarantee is the point of the row). NULL means
+    # "the checkout that minted this hold belonged to a guest"; the order FK
+    # beside it is always present, so the hold still has its reference.
     owner = models.ForeignKey(
         "auth.User",
         on_delete=models.CASCADE,
         related_name="stock_reservations",
+        null=True,
+        blank=True,
     )
     quantity = models.PositiveBigIntegerField()
     status = models.CharField(

@@ -49,6 +49,9 @@ v1_store_patterns = [
     path("products/", include("products.urls")),
     path("cart/", include("cart.urls")),
     path("orders/", include("orders.urls")),
+    # [R-1.07] SPEC-1-B05: spec 9.1 line 2703 `/store/shipping/estimate`,
+    # mounted under the same store family as the cart and checkout it prices.
+    path("shipping/", include("shipping.urls")),
     # §9.1 route /store/config: the public settings reader the legacy
     # config mounts at /api/settings/.
     path("config/", api_settings, name="config"),
@@ -163,6 +166,10 @@ urlpatterns = [
     path("api/cart/", include("cart.urls")),
 
     path("api/orders/", include("orders.urls")),
+
+    # [R-1.07] SPEC-1-B05: the legacy alias of the v1:store shipping mount
+    # above (same urlconf object, no duplication).
+    path("api/shipping/", include("shipping.urls")),
 
     path("api/accounts/", include("accounts.urls")),
 

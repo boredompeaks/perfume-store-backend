@@ -73,7 +73,12 @@ def _notify_order_paid(context):
             "frontend_url": settings.FRONTEND_URL,
         },
         f"Your Perfume Store order #{order.id} is confirmed",
-        order.user.email,
+        # [R-1.13] `recipient` is the account's email or, for a guest order
+        # (SPEC-1-B04, no account), the guest address captured at checkout.
+        # Reading ``order.user.email`` directly would raise on the guest rows
+        # this store can now hold, and dispatch would swallow it into the log
+        # while the customer got no confirmation at all.
+        order.recipient,
     )
 
 

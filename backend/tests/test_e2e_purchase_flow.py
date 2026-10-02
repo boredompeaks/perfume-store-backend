@@ -153,12 +153,30 @@ class UnverifiedUserChainTests(ApiTestCase):
         self.assertEqual(res.status_code, 401, res.data)
         self.assertIsNone(token)
 
-        # without a JWT the order endpoints refuse the request outright
+        # [R-1.13] SPEC-1-B04 moved this wall: an anonymous checkout POST is
+        # now a GUEST submission, so the 401 is no longer what answers one.
+        # What must still hold is that nothing this caller does can produce an
+        # order attributable to the unverified account -- so the submission is
+        # refused for the thing a guest cannot omit (its email), and a guest
+        # submission that does name one lands with NO user, never as
+        # ghostbuyer's order.
         res = self.client.post("/api/orders/checkout/", self.checkout_payload(), format="json")
-        self.assertEqual(res.status_code, 401, res.data)
+        self.assertEqual(res.status_code, 400, res.data)
+        self.assertEqual(res.data["error"], "guest_email is required")
+
+        res = self.client.post(
+            "/api/orders/checkout/",
+            self.checkout_payload(guest_email="ghost@example.com"),
+            format="json",
+        )
+        self.assertEqual(res.status_code, 404, res.data)
+        self.assertEqual(res.data["error"], "Cart not found")
+
+        # The account's own reads are unchanged: still refused without a JWT.
         res = self.client.get("/api/orders/")
         self.assertEqual(res.status_code, 401, res.data)
         self.assertEqual(Order.objects.count(), 0)
+        self.assertFalse(Order.objects.filter(user__username="ghostbuyer").exists())
 
 
 @tag("e2e")

@@ -13,11 +13,19 @@ https://docs.djangoproject.com/en/6.1/ref/settings/
 import logging
 import re
 from datetime import timedelta
+from decimal import Decimal
 from pathlib import Path
 from urllib.parse import unquote, urlparse
 import os
 from django.core.exceptions import ImproperlyConfigured
 from dotenv import load_dotenv
+
+# The one money-rounding rule in this repo, imported here rather than
+# re-implemented: `common.money` is pure `decimal` (no models, no app-registry
+# access), so reading it while the settings module is still being imported
+# cannot touch a model before the apps are ready - and duplicating the
+# rounding here would leave two definitions of what a money value IS.
+from common.money import quantize_money
 
 load_dotenv()
 RAZORPAY_KEY_ID = os.getenv('RAZORPAY_KEY_ID')
@@ -156,6 +164,9 @@ INSTALLED_APPS = [
     'cart',
     'orders',
     'accounts',
+    # SPEC-1-B05 [R-1.07]: shipping methods/rates (spec 6.9 zones + rates)
+    # and the server-side pricing both the estimate and checkout read.
+    'shipping',
     'ops',
     'common',
     'corsheaders',
@@ -551,6 +562,88 @@ ORDER_HISTORY_MAX_PAGE_SIZE = _env_int('ORDER_HISTORY_MAX_PAGE_SIZE', 100)
 # Tunable per deployment without a code change; non-integer values are
 # ignored and the default is used instead.
 RESERVATION_TTL = _env_int('RESERVATION_TTL', 900)
+
+
+# The largest amount any money column in this repo can hold:
+# DecimalField(max_digits=10, decimal_places=2) (conventions.md:15) leaves
+# eight integer digits. A threshold beyond it is not a threshold any order
+# could ever reach, so it is a typo rather than a policy - and the safe
+# reading of a typo is the one that keeps charging.
+_MONEY_MAX = Decimal("99999999.99")
+
+
+def _env_money(name, default=None):
+    """Resolve an env-driven money threshold, never crashing startup.
+
+    Money is Decimal everywhere (conventions.md:15), so a threshold is read
+    as a string and quantized with the same helper the amounts use, rather
+    than through ``float()`` - a threshold that only agrees with the amounts
+    to within a float's precision is a rule that misfires on round totals.
+    A value that is not a usable non-negative money amount falls back to the
+    documented default (None = the rule is off) with a warning, the same
+    fail-safe pattern as ``_env_int``, so a typo in an env file cannot take
+    the app down or make every shipment free. Every refusal resolves to the
+    same direction on purpose: with the rule off, every shipment is charged.
+
+    "Usable" is checked rather than assumed, because ``Decimal`` accepts
+    values this function must not hand back as a threshold:
+
+    * ``NaN`` quantizes to a QUIET NaN WITHOUT raising, and only the
+      comparison then raises InvalidOperation - so a NaN threshold used to
+      crash the process at import. Every comparison below is therefore
+      guarded by an explicit finiteness test, not by the arithmetic being
+      expected to fail.
+    * ``Infinity``/``-Infinity`` and ``sNaN`` raise inside ``quantize``, and
+      over-long values raise there too (the result exceeds the default
+      context's precision), but they are refused by the same guards rather
+      than by that one implementation detail.
+    * A negative amount is a sign error, and one past ``_MONEY_MAX`` cannot
+      be stored in any money column this repo has.
+
+    No value outside that set is returned, so nothing that reaches the
+    threshold can be unorderable, unstorable, or free by accident.
+    """
+    raw = (os.getenv(name) or "").strip()
+    if not raw:
+        return default
+    try:
+        value = quantize_money(Decimal(raw))
+        usable = value.is_finite()
+    except (ArithmeticError, ValueError):
+        usable = False
+        value = None
+
+    if not usable:
+        logging.getLogger(__name__).warning(
+            "Ignoring unparseable or non-finite %s value %r; the rule stays off",
+            name,
+            raw,
+        )
+        return default
+    if value < Decimal("0.00"):
+        logging.getLogger(__name__).warning(
+            "Ignoring negative %s value %r; the rule stays off", name, raw
+        )
+        return default
+    if value > _MONEY_MAX:
+        logging.getLogger(__name__).warning(
+            "Ignoring %s value %r: above %s, the largest amount this store can "
+            "hold, so no order could ever reach it; the rule stays off",
+            name,
+            raw,
+            _MONEY_MAX,
+        )
+        return default
+    return value
+
+
+# SPEC-1-B05 [R-1.07] the free-shipping rule (spec 6.9 line 2005): an order
+# whose MERCHANDISE total (subtotal after discount, before shipping) reaches
+# this amount is charged nothing for delivery. Unset - the default - means the
+# rule is off and rates are charged as configured. Rates themselves are NOT
+# config: they are staff-managed rows (shipping.models), because they change
+# per geography far more often than a deployment changes its env.
+SHIPPING_FREE_THRESHOLD = _env_money("SHIPPING_FREE_THRESHOLD")
 
 
 # ISO 4217 currency codes are exactly three uppercase letters.

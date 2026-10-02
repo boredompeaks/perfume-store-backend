@@ -225,7 +225,19 @@ class OrderAdmin(SavedFilterMixin, RoleAwareModelAdmin):
     )
     list_editable = ("status",)
     list_filter = ("status", "created_at")
-    search_fields = ("id", "user__username", "user__email", "full_name", "phone")
+    # [R-1.13] guest_email joins the customer search terms so a guest order is
+    # findable by the same handle a customer order is (guest_email is the
+    # only identity a guest row has). It is deliberately NOT in
+    # scoped_search_fields: the packing operator may find an order to pack by
+    # its reference, not by probing customer records (see B03 above).
+    search_fields = (
+        "id",
+        "user__username",
+        "user__email",
+        "guest_email",
+        "full_name",
+        "phone",
+    )
     date_hierarchy = "created_at"
     ordering = ("-created_at",)
     list_per_page = 25
@@ -250,7 +262,13 @@ class OrderAdmin(SavedFilterMixin, RoleAwareModelAdmin):
         "razorpay_payment_id",
     )
     fieldsets = (
-        ("Customer", {"fields": ("user", "full_name", "phone")}),
+        (
+            "Customer",
+            # [R-1.13] guest_email rides the Customer group so staff read the
+            # same field that identifies a guest order, next to the account it
+            # replaces (empty on a customer order, the address on a guest's).
+            {"fields": ("user", "guest_email", "full_name", "phone")},
+        ),
         ("Delivery address", {"fields": ("address", "city", "state", "pincode")}),
         (
             "Payment (server-computed — read only)",
@@ -695,7 +713,10 @@ class OrderAdmin(SavedFilterMixin, RoleAwareModelAdmin):
             writer.writerow(
                 [
                     order.id,
-                    order.user.username,
+                    # [R-1.13] `customer_name` resolves the guest's email when
+                    # the row has no account, so an export of a mixed queue
+                    # cannot raise on the guest orders in it.
+                    order.customer_name,
                     order.status,
                     order.total_amount,
                     order.discount_amount,

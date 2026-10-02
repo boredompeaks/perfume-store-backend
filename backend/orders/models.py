@@ -2,7 +2,7 @@ from decimal import Decimal
 
 from django.conf import settings
 from django.db import models
-from django.db.models import Sum
+from django.db.models import Q, Sum
 from django.contrib.auth.models import User
 
 from common.money import quantize_money
@@ -103,8 +103,18 @@ class Order(models.Model):
     [R-8.4]/[R-8.5] Identifier-exposure strategy: the sequential ``id`` stays
     the internal key (URL/admin primary key, no URL changes); ``order_number``
     (ORD-YYYY-NNNNNN, per-year sequence) is the customer-facing reference the
-    serializer exposes read-only. Guest checkout (SPEC-3-02) will key on
-    ``order_number`` -- the pk never leaves server-side routing.
+    serializer exposes read-only. Guest checkout (SPEC-1-B04) keys on
+    ``order_number`` plus the ``guest_token`` below -- the pk never leaves
+    server-side routing.
+
+    Two owners, never a hybrid (spec line 74: the guest's role is to "browse
+    products and optionally check out without an account"; spec 9.3 binds a
+    checkout session "to the correct customer or guest session"). A row is
+    EITHER an account order (``user`` set, both guest columns empty) OR a
+    guest order (``user`` NULL, ``guest_email`` + ``guest_token`` set), and
+    the Meta constraints below are what make that a database fact rather than
+    a convention: an order nobody can reach is unrecoverable for the store
+    and unreachable for the customer who placed it.
     """
 
     # [R-10.1] Single-sourced in orders.state; the class attribute stays so
@@ -125,10 +135,50 @@ class Order(models.Model):
         unique=True,
     )
 
+    # [R-1.13] SPEC-1-B04: nullable because a guest checks out without an
+    # account (spec line 74). CASCADE is unchanged and still right: it is the
+    # policy for the rows it applies to (an account's orders die with the
+    # account), and a guest row simply has no account to cascade from - the
+    # store keeps the sale and the fulfilment queue keeps seeing it.
     user = models.ForeignKey(
         User,
         on_delete=models.CASCADE,
-        related_name='orders'
+        related_name="orders",
+        null=True,
+        blank=True,
+    )
+
+    # [R-1.13] The guest's own identity, and the address the store
+    # acknowledges the sale to. Required input on the anonymous checkout path
+    # (the view refuses an anonymous submission without one) and validated
+    # there through django.core.validators, so the column holds a real address
+    # rather than whatever the client typed. blank/default '' keeps the
+    # account-order case at a single, unambiguous value (no null-vs-empty
+    # drift); EmailField's 254 is the RFC 5321 maximum, so the width is the
+    # same one on SQLite and Postgres.
+    guest_email = models.EmailField(
+        max_length=254,
+        blank=True,
+        default="",
+    )
+
+    # [R-1.13] The guest's retrieval credential: possession of this value is
+    # the ONLY authorization to read a guest order (there is no session to
+    # check), so it must be unguessable - minted with `secrets`, never
+    # `random`, and never sequential. 32 bytes of ``secrets.token_urlsafe``
+    # entropy render as 43 URL-safe characters; the 64-char column leaves
+    # headroom for a future format change without another migration.
+    #
+    # Unique, and unique GLOBALLY rather than per user: the lookup is "the
+    # order whose token is this", so two orders sharing a token would make
+    # that lookup ambiguous. NULL for account orders - which is why the
+    # uniqueness is safe at all (NULLs stay distinct in a unique index on
+    # both engines), the same shape ``razorpay_order_id`` above already uses.
+    guest_token = models.CharField(
+        max_length=64,
+        null=True,
+        blank=True,
+        unique=True,
     )
 
     full_name = models.CharField(
@@ -213,6 +263,60 @@ class Order(models.Model):
     total_amount = models.DecimalField(
         max_digits=10,
         decimal_places=2
+    )
+
+    # [R-1.07] SPEC-1-B05: what the order was actually charged to deliver it.
+    # Two columns because the amount is the money record and the method is a
+    # label for it: the amount is what an invoice, a refund ceiling and a
+    # reconciliation read, and it stays exactly as priced even if the method
+    # row is later renamed or retired.
+    #
+    # SET_NULL, not PROTECT: retiring a delivery option must never block on
+    # the orders that used it, and a nulled label loses nothing that the
+    # amount does not already say. PROTECT would also make the admin's delete
+    # view raise on referenced rows, i.e. a 500 on a legitimate action.
+    shipping_method = models.ForeignKey(
+        'shipping.ShippingMethod',
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='orders',
+    )
+
+    # [R-8.13] The frozen delivery-option label (spec 8.3 "Historical
+    # snapshots", line 2497: "Orders must retain what was actually
+    # purchased"). Exactly the shape and the reason of OrderItem.product_name
+    # beside its own SET_NULL product FK: the FK is the LIVE link to a
+    # staff-managed row, and this is the record of what the customer actually
+    # bought. Hard-deleting a ShippingMethod cascades its rates and SET_NULLs
+    # the FK, so without this column the order body reads
+    # `shipping_method: null` - indistinguishable from an order priced while
+    # the store had no shipping configured at all, which is how a historical
+    # delivery option gets silently erased. That is why the column exists
+    # even while the row it names is alive and the two always agree.
+    #
+    # The deletion policy spec 8.3 line 2485 asks for, stated explicitly:
+    # DEACTIVATION is how a delivery option is retired (it stops being
+    # offered and leaves every order that used it intact), and this snapshot
+    # is what outlives the row if it is ever hard-deleted. The FK keeps
+    # SET_NULL rather than PROTECT on purpose - the shipped semantics stand,
+    # and blocking the delete would make a legitimate admin action a 500
+    # without adding anything this snapshot does not already preserve.
+    # Set once at checkout from the quoted method's code; no save path
+    # mutates it. Empty on an order priced with no shipping configured.
+    shipping_method_code = models.CharField(
+        max_length=40,  # ShippingMethod.code width, so the label always fits
+        blank=True,
+        default="",
+    )
+
+    # Zero on an order priced before shipping was configured, and zero on a
+    # free-shipping order: both are real zero charges, distinguished by
+    # whether shipping_method is set, never by a sentinel amount.
+    shipping_amount = models.DecimalField(
+        max_digits=10,
+        decimal_places=2,
+        default=Decimal("0.00"),
     )
 
     # [R-8.11] Currency rides every money column (spec 8.3: "Store the
@@ -303,10 +407,62 @@ class Order(models.Model):
                 fields=['user', 'idempotency_key'],
                 name='orders_user_idem_key_uidx',
             ),
+            # [R-1.13] The guest twin of the constraint above. A guest row's
+            # `user` is NULL, and NULLs stay distinct in the constraint
+            # above - so without this one, a keyed guest replay would have
+            # NO database authority at all and two guest orders could answer
+            # one key (two payable orders for one submission). Scoped to the
+            # guest rows by the condition, so the account pair above keeps
+            # answering for them and keyless rows (NULL key) never collide.
+            models.UniqueConstraint(
+                fields=["guest_email", "idempotency_key"],
+                condition=Q(user__isnull=True),
+                name="orders_guest_idem_key_uidx",
+            ),
+            # [R-1.13] The two-owner invariant, as a database fact: a row is
+            # an account order (both guest columns empty) or a guest order
+            # (both set), never neither and never both. "Neither" would be an
+            # order no customer and no staff lookup could ever reach, and
+            # "both" would put two competing owners on one sale.
+            models.CheckConstraint(
+                condition=(
+                    Q(user__isnull=True, guest_email__gt="", guest_token__isnull=False)
+                    | Q(user__isnull=False, guest_email="", guest_token__isnull=True)
+                ),
+                name="orders_account_xor_guest_ck",
+            ),
         ]
 
     def __str__(self):
-        return f"Order #{self.id} - {self.user.username}"
+        # [R-1.13] `user` is nullable now, so the label must be - not crash -
+        # for a guest row: this string is what the admin change list, the
+        # admin CSV export and LogEntry render for every order.
+        return f"Order #{self.id} - {self.customer_name}"
+
+    @property
+    def customer_name(self):
+        """Who placed the order, for a surface that labels a row.
+
+        The account's username, else the guest's email (the only identity a
+        guest checkout carries). One place, so the admin grid, the CSV export
+        and ``__str__`` can never disagree about what a guest row is.
+        """
+        if self.user_id is None:
+            return self.guest_email
+        return self.user.username
+
+    @property
+    def recipient(self):
+        """Where order mail for this row goes.
+
+        The account's email, else the guest email captured at checkout. Read
+        by the order.paid notification (common.notifications) so the guest
+        confirmation reaches the guest instead of raising on ``user`` being
+        NULL, and so the store never invents an address of its own.
+        """
+        if self.user_id is None:
+            return self.guest_email
+        return self.user.email
 
     @property
     def refundable_remaining(self):
