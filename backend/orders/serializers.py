@@ -1,6 +1,6 @@
 from rest_framework import serializers
 
-from .models import Order, OrderItem, Coupon
+from .models import Order, OrderItem, Coupon, ReturnRequest
 
 
 # ==================================
@@ -169,6 +169,64 @@ class OrderSerializer(serializers.ModelSerializer):
             'cancelled_at',
             'refunded_at',
         ]
+
+
+# ==================================
+# Return Request Serializer
+# ==================================
+
+class ReturnRequestSerializer(serializers.ModelSerializer):
+    """[R-1.16] SPEC-1-B07b: ONE customer-facing projection of a return request.
+
+    This is the single representation every customer-facing returns read
+    carries (list, detail, and the create confirmation SPEC-1-B07a already
+    returns). SPEC-1-B07a built its confirmation body inline as a deliberate
+    interim shape and left ownership of the real serializer to this task; the
+    create view now drives it through this class, so there is ONE customer
+    body to keep in step rather than two.
+
+    THE OMISSIONS ARE THE CONTRACT, and they mirror B06's
+    ``ShipmentTrackingSerializer`` (read that class's docstring for the same
+    reasoning):
+
+    * the ``order`` FOREIGN KEY is not exposed. Ownership is read off the order
+      (``order__user``), so the pk is a server-side routing key only. The
+      customer-facing handle is ``order_number``, the read-only reference
+      ``OrderSerializer`` already treats as the customer-facing identifier
+      ([R-8.5]).
+    * no money rides this projection: no ``total_amount``, no
+      ``payment_status``, no ``refundable_remaining``, no ``currency``.
+      SPEC-1-B07a's guarantee - a return request moves no money and the money
+      fields belong to the refund seam (SPEC-1-05) - is exactly why none of
+      them is here. A return row carries none of them to begin with, and this
+      serializer deliberately does NOT reach through the relation to pull them
+      off the order.
+    * ``internal_note`` and anything else staff-only is not a field on this
+      serializer. ``ReturnRequest`` has no such column today, and the customer
+      reason the customer IS entitled to see is ``reason_code`` +
+      ``reason_note`` (the reason they typed). There is no staff annotation
+      surface on this row to leak.
+
+    Every field is ``read_only``: a ``ModelSerializer`` is writable by default,
+    so this says so explicitly rather than trusting the view to be GET-only.
+    That makes "a client can never write a status or a reason" a structural
+    property of the projection, not a per-view promise.
+    """
+
+    order_number = serializers.CharField(source="order.order_number", read_only=True)
+
+    class Meta:
+        model = ReturnRequest
+        fields = [
+            "id",
+            "order_number",
+            "status",
+            "reason_code",
+            "reason_note",
+            "created_at",
+            "updated_at",
+        ]
+        read_only_fields = fields
 
 
 # ==================================

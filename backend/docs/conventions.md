@@ -38,6 +38,52 @@ Rules for all future changes to this repo. Existing code predates some of these;
 - `master` stays deployable; feature work on branches.
 - Never commit: `.env`, `db.sqlite3`, `media/`, `venv/` (all git-ignored).
 
+## Evidence claims
+
+This repo has an oracle for code (the suite) and, until recently, none at all
+for prose. Every drift finding in the SPEC-1 run was a claim that no machine
+could check: an unmeasured mutation count, a quoted test name that does not
+exist, a byte count that moved because a shell write ate characters. Prose is
+therefore held to the same standard as code.
+
+- **A number is a claim until a command produced it.** If you write a figure
+  into a report or into `docs/changes.md`, that figure came from a command you
+  ran in this session. If you did not run it, do not write it. "Measured 11"
+  with no command behind it is a fabrication, not a measurement.
+- **Never transcribe a number you were given.** When a review hands you the
+  correct value, that value is a *hypothesis*, not the answer. Reproduce it or
+  contradict it; either outcome is a fine report. This is not a formality — in
+  SPEC-1-B07d cycle 2 a builder was handed a table of correct mutation counts
+  and restated four of six without re-deriving them, and two of the five the
+  brief supplied were themselves wrong.
+- **A recomputed oracle is not an oracle.** A pin whose expected value is
+  derived from the constant under test agrees with a wrong constant from both
+  sides. Use hand-written literals.
+- **Coverage measures lines executed, not states reasoned about.** A gate at
+  100% can still be wrong about a value nothing drives it with. Enumerate every
+  value a table admits and drive each one.
+- **Count failures from the `FAILED (failures=N)` line**, never from a run
+  summary: on a green run the summary reports nothing, and nothing is not zero.
+- **Measure the instrument, not just the reading.** `black --quiet` prints no
+  summary while still exiting 1, which is how "0 dirty everywhere" gets
+  believed. Cross-check the exit code. Black's changed lines must be
+  intersected with the diff's *added* lines — hunk granularity over-counts.
+- **A file cannot count its own occurrences.** Any claim a document makes about
+  its own contents is false the moment it writes the citation. Describe rather
+  than count.
+- **Docs are edited with the editor, never through a shell.** PowerShell
+  `ReadAllText`/`WriteAllText`/`Set-Content`/`Out-File` and shell redirects
+  have corrupted `docs/changes.md` by eating bytes invisibly. Measure bytes on
+  the committed blob (`git cat-file blob`), never the worktree: `core.autocrlf`
+  is on with no `.gitattributes`, so the checkout is CRLF and the commit is
+  LF-only.
+
+`scripts/doc_claims.py` enforces the mechanically decidable half of this in CI
+(missing test names, missing paths, out-of-range line refs, byte integrity).
+`scripts/mutation_evidence.py` replays recorded mutations so an inflated
+figure cannot be published. Neither judges prose; both refuse to let a checkable
+claim pass unlisted.
+
 ## Style
 
 - Black-compatible formatting (88 cols), no tabs.

@@ -554,6 +554,30 @@ CHECKOUT_DEDUP_WINDOW_SECONDS = _env_int('CHECKOUT_DEDUP_WINDOW_SECONDS', 300)
 ORDER_HISTORY_PAGE_SIZE = _env_int('ORDER_HISTORY_PAGE_SIZE', 10)
 ORDER_HISTORY_MAX_PAGE_SIZE = _env_int('ORDER_HISTORY_MAX_PAGE_SIZE', 100)
 
+# SPEC-1-B07b [R-1.16] Customer returns listing (GET /api/orders/returns/):
+# rows per page, and the ceiling a ?page_size caller may request. Declared as
+# its OWN pair rather than reusing ORDER_HISTORY_* because the store may want a
+# different density for a short returns list than for a long order history, and
+# one page size for both would force that choice. Both are deployment config
+# (conventions.md: no hardcoded thresholds); non-integer values are ignored and
+# the defaults are used instead. The spec pins no number for either.
+#
+# NOTE: there is deliberately NO return-window key here, and SPEC-1-B07d is
+# why rather than a gap left open. Spec 4 line 1083 ("Return/refund request
+# where eligible") and spec 6.8 line 1959 ("Eligibility validation")
+# describe a window the spec never numbers anywhere, so SPEC-1-B07b invented
+# no number; THE PRODUCT OWNER HAS SINCE REQUIRED a configurable site-wide
+# return window, which overrides that outcome and is landed as
+# ops.SiteSettings.return_window_days (default ops.models.
+# DEFAULT_RETURN_WINDOW_DAYS). It did NOT arrive as a key here, on purpose: a
+# return window is merchant-facing policy that each store sets for itself, so
+# a merchant choosing 45 days must not need a redeploy. The two keys below
+# stay env-driven precisely because they are the OTHER kind - a page density
+# is a property of the deployment and does not vary per store. An order's age
+# IS an input to eligibility as of B07d; see orders.views._return_eligible.
+RETURNS_HISTORY_PAGE_SIZE = _env_int('RETURNS_HISTORY_PAGE_SIZE', 10)
+RETURNS_HISTORY_MAX_PAGE_SIZE = _env_int('RETURNS_HISTORY_MAX_PAGE_SIZE', 100)
+
 # SPEC-12-01 [R-12.2] Inventory reservation: seconds a checkout's stock
 # reservation holds units before it goes stale and becomes releasable by
 # the reconciler (SPEC-12-03). Coordinate with the payment-provider session

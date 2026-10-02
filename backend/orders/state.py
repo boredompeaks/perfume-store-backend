@@ -196,6 +196,52 @@ def fulfilment_for_status(status: str) -> str:
 # ask this module whether the row may reach it, so neither restates it.
 PAYMENT_CAPTURED = "captured"
 
+
+def _reachable_payment_values(root: str) -> set:
+    """Every payment value reachable from ``root`` along declared edges.
+
+    Follows ``PAYMENT_ALLOWED_TRANSITIONS`` breadth-first, so the answer is
+    whatever the machine says rather than whatever a caller listed. Used by
+    :data:`CAPTURED_MONEY_PAYMENT_STATUSES`, which is why it is private.
+    """
+    seen, frontier = {root}, [root]
+    while frontier:
+        for target in PAYMENT_ALLOWED_TRANSITIONS.get(frontier.pop(), set()):
+            if target not in seen:
+                seen.add(target)
+                frontier.append(target)
+    return seen
+
+
+# [R-1.14] SPEC-1-05: the payment values that mean THE CUSTOMER HAS PAID and
+# the store still holds some of that money - the capture point itself plus
+# everything the machine places downstream of it that it can still move a
+# refund out of.
+#
+# DERIVED, NEVER LISTED, and the derivation is the whole point. It is the
+# closure of ``PAYMENT_ALLOWED_TRANSITIONS`` from ``PAYMENT_CAPTURED``, less the
+# values with no declared outgoing edge. Each half is the machine's own
+# evidence rather than a judgment:
+#
+# * the closure is what admits ``partially_refunded``. The table places it
+#   STRICTLY AFTER ``captured``, orders/models.py's shipped-edge precondition
+#   admits it ALONGSIDE ``captured`` as "real money too - a capture minus a
+#   recorded refund", and the SPEC-1-05 refund seam is the writer that puts an
+#   order there. A customer who has had part of their money back still has
+#   money in the transaction, so they still have something to be RETURNING.
+# * the no-outgoing-edge filter is what excludes ``refunded``: a value the
+#   machine declares no edge out of is a value whose money has all gone back,
+#   and an order in that state has nothing left to send anything against.
+#
+# Restating either half as a literal here is what let the cycle-3 audit find
+# the returns gate tracking only ``captured`` while the machine tracked two
+# values; a reader that walks the table instead cannot fall behind it.
+CAPTURED_MONEY_PAYMENT_STATUSES = frozenset(
+    value
+    for value in _reachable_payment_values(PAYMENT_CAPTURED)
+    if PAYMENT_ALLOWED_TRANSITIONS.get(value)
+)
+
 # The lifecycle order the dimension mapping above is read in. status_for_payment
 # needs a progression, not a set: one payment value spans several statuses
 # (captured covers confirmed/shipped/delivered) and the answer to "which status

@@ -54,6 +54,16 @@ def api_settings(request):
             "whatsapp_number": row.whatsapp_number,
             "whatsapp_message": row.whatsapp_message,
             "instagram_url": row.instagram_url,
+            # SPEC-1-B07d: the RESOLVED window, not the raw column. Publishing
+            # it is a policy disclosure, and a customer who cannot see the
+            # deadline cannot meet it - this is the same class of data as the
+            # contact channels above (a published store rule: no PII, no money,
+            # no capability or order information), so it belongs on the one
+            # public settings surface the spec already has. It is read-only
+            # here, so disclosing it hands a caller nothing they could not get
+            # by asking a shop assistant, and the resolve means the storefront
+            # never keeps its own copy of the default.
+            "return_window_days": row.resolved_return_window_days(),
         }
     )
 
