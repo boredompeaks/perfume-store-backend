@@ -38,9 +38,11 @@ already been bitten by.
   two features, so 100% line coverage could not see it.
 """
 
+import ast
 from datetime import timedelta
 from decimal import Decimal
 import inspect
+import textwrap
 from unittest.mock import patch
 
 from django.conf import settings
@@ -2180,29 +2182,83 @@ class ReturnReadIdorTests(ReturnTestCase):
                 self.assertNotIn(leak, body)
 
 
+CLOCK_TOKENS = ("timezone", "timedelta", "settings", "now(")
+
+
+def _is_docstring(statement):
+    """Whether `statement` is a docstring - a bare string FIRST in a body."""
+    return (
+        isinstance(statement, ast.Expr)
+        and isinstance(statement.value, ast.Constant)
+        and isinstance(statement.value.value, str)
+    )
+
+
+def _without_docstrings(node):
+    """Strip every docstring under `node`, at every nesting level.
+
+    A docstring is only the first statement of a def, class or module, so this
+    tests the SHAPE before it drops anything. Slicing the first statement off
+    instead would quietly blind the scan in the two cases that matter most: a
+    function with no docstring at all would lose its only real statement, and a
+    nested helper would lose its whole body - so a window clause hidden in
+    either would pass a scan that is supposed to be about behaviour.
+    """
+    for child in ast.walk(node):
+        for field in ("body", "orelse", "finalbody"):
+            statements = getattr(child, field, None)
+            if (
+                isinstance(statements, list)
+                and statements
+                and _is_docstring(statements[0])
+            ):
+                setattr(child, field, statements[1:])
+
+
+def _executable_source(function):
+    """`function`'s EXECUTABLE body as source, with every docstring removed.
+
+    This is the whole point of the clock scan: prose may name the calendar -
+    SPEC-1-B07d's documentation is required to - while behaviour may not read
+    it. Comments go too, since they are prose, and a nested def's docstring
+    goes with its parent's so the two are not confused for each other.
+    """
+    tree = ast.parse(textwrap.dedent(inspect.getsource(function)))
+    _without_docstrings(tree)
+
+    return ast.unparse(ast.Module(body=tree.body[0].body, type_ignores=[]))
+
+
 @tag("e2e")
 class ReturnEligibilityWindowTests(ReturnTestCase):
-    """The window decision: NO WINDOW, pinned at its boundary.
+    """The window decision as it ships, pinned at the boundary it currently has.
 
     Spec 4 line 1083 ("Return/refund request where eligible") and spec 6.8
     line 1959 ("Eligibility validation") both describe a window the spec never
     defines. A whole-file sweep for a day count finds exactly one hit and it is
     about deployment cadence (line 276), not returns.
 
-    So SPEC-1-B07b chose NO WINDOW over an env-driven ``RETURN_WINDOW_DAYS``:
-    any value for that key would have been invented in this task rather than
-    derived from the spec, which is fabricated policy wearing a configuration
-    setting. The consequence - stated rather than hidden - is that eligibility
-    is a function of the order's two machine dimensions ONLY, and age is not an
-    input to it.
+    So SPEC-1-B07b shipped no window rather than invent one: any value for an
+    env-driven ``RETURN_WINDOW_DAYS`` would have been fabricated in this task
+    rather than derived from the spec, which is fabricated policy wearing a
+    configuration setting. **That is a build-order state, not a settled
+    policy.** THE PRODUCT OWNER HAS SINCE REQUIRED a configurable site-wide
+    return window, which overrides this outcome rather than complementing it;
+    SPEC-1-B07d owns it, and its number belongs in ``ops.SiteSettings`` rather
+    than in env, because a window is merchant-facing policy that each store
+    sets for itself. The consequence - stated rather than hidden - is that UNTIL
+    B07d LANDS eligibility is a function of the order's two machine dimensions
+    ONLY, and age is not an input to it.
 
-    A "no window" policy has no boundary to pin in the ordinary way, so what
-    follows pins the ABSENCE of the boundary: the same dimension pair answers
-    identically at every age, on both the accepted and the refused side.
+    There is no boundary to pin in the ordinary way, so what follows pins the
+    ABSENCE of one: the same dimension pair answers identically at every age, on
+    both the accepted and the refused side. Read the pins below as what this
+    task's predicate does today, which is B07d's starting point rather than an
+    argument against it.
     """
 
     # Ages wide enough to cross any plausible commercial window, including ones
-    # nobody would argue for. If a window is ever introduced, the eligible row
+    # nobody would argue for. When SPEC-1-B07d introduces one, the eligible row
     # below is the case that will fail first, and it will fail LOUDLY rather
     # than quietly expiring a customer's right to ask.
     AGES = (
@@ -2252,16 +2308,97 @@ class ReturnEligibilityWindowTests(ReturnTestCase):
     def test_the_gate_reads_no_clock_at_all(self):
         # The structural half of the decision, and the probe that fails the
         # MOMENT a window clause is added rather than after an auditor notices
-        # it. The predicate is two expressions over the order's two dimensions;
-        # this asserts it stays that way. Deliberately narrow - it would also
-        # reject a comment mentioning the clock, which is the trade this makes:
-        # a false alarm here is a docstring reword, a missed window is a
-        # fabricated policy shipping silently.
-        source = inspect.getsource(_return_eligible)
+        # it. It scans BEHAVIOUR: the function's AST is walked with the
+        # docstring excluded, so a mention of the clock in prose is neither a
+        # failure nor something to word around. That matters because B07d's own
+        # required documentation must name this setting - a text scan would
+        # fire on the documentation of the thing it is meant to precede, and
+        # would reward writing `ops.SiteSettings` with a capital S.
+        executable = _executable_source(_return_eligible)
 
-        for token in ("timezone", "timedelta", "settings", "now("):
+        for token in CLOCK_TOKENS:
             with self.subTest(token=token):
-                self.assertNotIn(token, source)
+                self.assertNotIn(token, executable)
+
+    def test_the_clock_scan_reads_the_body_and_not_the_prose(self):
+        # The scan's own contract, so it cannot quietly regress into the text
+        # scan it replaced. Every fixture is scanned through the SAME helper the
+        # gate test uses, so this pins the scan that actually runs rather than a
+        # copy of it, and the two directions are asserted together because a
+        # scanner that only ever passes proves nothing.
+        #
+        # The NO-DOCSTRING and NESTED rows are the ones a shortcut gets wrong.
+        # Slicing the first statement off the body - which is what this helper
+        # did before it was measured - makes a docstring-less function's only
+        # statement disappear and a nested def's whole body with it, so both of
+        # those clock reads passed a scan whose entire job is to catch them.
+        def prose_only():
+            """The clock is named here only - settings, now(, timezone."""
+            return "return order"
+
+        def multiline_prose():
+            """First line.
+
+            settings, now(, timezone, timedelta - across a multi-line docstring.
+            """
+            return "return order"
+
+        def prose_beside_a_comment():
+            """> settings now( timezone timedelta"""
+            # The same four words again, in a comment.
+            return "return order"
+
+        def nested_prose():
+            def inner():
+                """settings, now(, timezone - the inner function's prose."""
+
+            return inner
+
+        def with_a_clock_read():
+            """> Settings ignored; this body reads the calendar."""
+            return timezone.now()
+
+        def with_a_clock_read_and_no_docstring():
+            return timezone.now()
+
+        def nested_clock_read():
+            def inner():
+                return timezone.now()
+
+            # Called, not merely returned: a nested body that never runs is
+            # not behaviour, and an unexecuted line is an uncovered one.
+            return inner()
+
+        # Every fixture is CALLED as well as parsed. A body that never runs is a
+        # shape rather than a function, and the whole point of the rewrite is
+        # that the scan describes behaviour - so the behaviour is exercised.
+        for prose_fixture in (prose_only, multiline_prose, prose_beside_a_comment):
+            with self.subTest(function=prose_fixture.__name__):
+                self.assertEqual(prose_fixture(), "return order")
+        self.assertIsNone(nested_prose()())
+        for clock_fixture in (
+            with_a_clock_read,
+            with_a_clock_read_and_no_docstring,
+            nested_clock_read,
+        ):
+            with self.subTest(function=clock_fixture.__name__):
+                self.assertIsNotNone(clock_fixture())
+
+        for function, should_pass in (
+            (prose_only, True),
+            (multiline_prose, True),
+            (prose_beside_a_comment, True),
+            (nested_prose, True),
+            (with_a_clock_read, False),
+            (with_a_clock_read_and_no_docstring, False),
+            (nested_clock_read, False),
+        ):
+            with self.subTest(function=function.__name__, should_pass=should_pass):
+                found = [t for t in CLOCK_TOKENS if t in _executable_source(function)]
+                if should_pass:
+                    self.assertEqual(found, [], "prose must not trip the scan")
+                else:
+                    self.assertTrue(found, "a clock read in the body must trip it")
 
     def test_a_request_filed_years_ago_is_still_readable_and_still_its_own(self):
         # Age must not change what the customer can SEE either: a five-year-old
@@ -2284,13 +2421,17 @@ class ReturnEligibilityWindowTests(ReturnTestCase):
         self.assertEqual(opened.data["id"], pk)
 
     def test_no_return_window_setting_is_declared(self):
-        # The config half of the decision: a merchant who wants a window gets
-        # one as an env-driven key added HERE with its own documented default,
-        # never as a number that appears from nowhere in a view.
+        # The config half: an order-window NUMBER must not appear in deployment
+        # config. This stays true under SPEC-1-B07d, which is where the window
+        # is being added - as an ``ops.SiteSettings`` row, because a window is
+        # merchant-facing policy each store sets for itself, and not as an env
+        # key the way the two page-density keys above are. If a number is ever
+        # wanted, add it deliberately in the right home and say why.
         self.assertFalse(
             [name for name in dir(settings) if "RETURN" in name and "WINDOW" in name],
-            "a return-window setting would mean the policy had acquired a "
-            "number; if one is wanted, add it deliberately and say why",
+            "a return-window deployment key would put the policy in the wrong "
+            "place; a window belongs in ops.SiteSettings, and if one is wanted "
+            "here, add it deliberately and say why",
         )
 
 
