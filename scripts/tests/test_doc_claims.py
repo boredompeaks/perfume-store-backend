@@ -28,6 +28,7 @@ from doc_claims import (  # noqa: E402
     verify_claims,
 )
 from doc_claims import FALLBACK_BASE, MIN_REASON_CHARS  # noqa: E402
+from doc_claims import RE_REASON_REFERENCE  # noqa: E402
 
 DOC = "backend/docs/changes.md"
 
@@ -604,6 +605,68 @@ class DirectiveReasonTests(unittest.TestCase):
         )
         self.assertEqual(errors, [])
 
+    def test_every_id_form_this_repository_uses_is_enough(self):
+        # The fix must not cost a real reference its force, so the accepted set
+        # is pinned explicitly rather than by one lucky example.
+        for reference in (
+            "renamed under SPEC-1-B07d and reported as absent",
+            "reported as absent, see BUG-3 for the shape",
+            "reported as absent, see TOOL-01 for the shape",
+            "reported absent, see R-9.2.14 and S22-04 both",
+            "the leading byte was eaten at c873b27 in that write",
+            "eaten at 46a5eee1cc in the byte-eaten write",
+        ):
+            with self.subTest(reference=reference):
+                errors, _ = self.verify(f"`test_absent_x` {self.filler(reference)}")
+                self.assertEqual(errors, [])
+
+    def test_hyphenated_english_filler_is_refused(self):
+        # BUG-B: the old second branch was any hyphenated word, and this prose
+        # is full of them. Each of these was ACCEPTED before the digit rule.
+        for filler in (
+            "the the the the the the the the the the well-known",
+            "the the the the the the the the the the counter-example",
+            "the the the the the the the the the the read-only",
+            "the the the the the the the the the the up-to-date",
+            "the the the the the the the the the the e-mail",
+            "the the the the the the the the the the so-so",
+        ):
+            with self.subTest(filler=filler):
+                self.assertEqual(parse(self.filler(filler)), {})
+                errors, _ = self.verify(f"`test_absent_x` {self.filler(filler)}")
+                self.assertEqual([c.kind for c in errors], ["test_name"])
+
+    def test_an_a_f_word_is_not_a_sha(self):
+        # The old sha branch was [0-9a-f]{7,40}, so these all matched.
+        for word in ("defaced", "effaced", "aaaaaaaaaaaaaaaaaaaa"):
+            with self.subTest(word=word):
+                reason = "the the the the the the the the the the " + word
+                self.assertEqual(parse(self.filler(reason)), {})
+                errors, _ = self.verify(f"`test_absent_x` {self.filler(reason)}")
+                self.assertEqual([c.kind for c in errors], ["test_name"])
+
+    def test_a_reason_with_no_token_at_all_is_refused(self):
+        # The purest filler there is: 36 a's matched the old sha branch whole.
+        reason = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        self.assertGreaterEqual(len(reason), MIN_REASON_CHARS)
+        self.assertEqual(parse(self.filler(reason)), {})
+        errors, _ = self.verify(f"`test_absent_x` {self.filler(reason)}")
+        self.assertEqual([c.kind for c in errors], ["test_name"])
+
+    def test_the_shipped_rule_is_a_shape_test_not_proof(self):
+        # Recorded deliberately, so the residual cannot be forgotten: a
+        # hyphenated token containing a digit still satisfies the rule. It is
+        # pinned as the KNOWN boundary of what ships, not as an endorsement --
+        # an uppercase-led token would close it, and that is a decision for a
+        # later cycle rather than a quiet change here.
+        for filler in (
+            "aaaaaaaaaaaaaaaaaaaa a-1",
+            "aaaaaaaaaaaaaaaaaaaa utf-8",
+            "aaaaaaaaaaaaaaaaaaaa sha-1",
+        ):
+            with self.subTest(filler=filler):
+                self.assertTrue(RE_REASON_REFERENCE.search(filler))
+
     def test_a_commit_sha_is_enough(self):
         errors, _ = self.verify(
             f"`test_absent_x` {self.filler('the leading byte was eaten at c873b27')}"
@@ -677,6 +740,49 @@ class PathCounterExampleTests(unittest.TestCase):
         )
         errors, _ = self.verify(f"the file now reads `iews.py` {directive}")
         self.assertEqual(errors, [])
+
+    def test_a_witness_that_is_merely_a_real_file_is_refused(self):
+        # The narrowing. `orders/views.py` resolves, so before this rule it
+        # silenced ANY absent path -- including a fragment of a different file
+        # entirely. The witness has to be this fragment's intact form.
+        directive = (
+            "<!-- doc-claims:absent accounts/whatever.py"
+            " (corrupted-fragment-of orders/views.py) ; reason: c873b27 ate the"
+            " leading byte, reported here as the corruption -->"
+        )
+        errors, _ = self.verify(
+            f"the file now reads `accounts/whatever.py` {directive}"
+        )
+        self.assertEqual([c.kind for c in errors], ["module_path"])
+        # The witness DID resolve, so the error must not claim it is missing.
+        self.assertIn("does not end with", errors[0].detail)
+        self.assertNotIn("not in the tree", errors[0].detail)
+
+    def test_a_witness_whose_path_does_not_end_with_the_fragment_is_refused(self):
+        # Same resolved file, a fragment it has nothing to do with. A suffix
+        # rule still refuses it: views.py does not end with whatever.py.
+        directive = (
+            "<!-- doc-claims:absent whatever.py (corrupted-fragment-of"
+            " orders/views.py) ; reason: c873b27 ate the leading byte, reported"
+            " here as the corruption -->"
+        )
+        errors, _ = self.verify(f"the file now reads `whatever.py` {directive}")
+        self.assertEqual([c.kind for c in errors], ["module_path"])
+
+    def test_the_witness_still_works_when_it_really_is_the_intact_form(self):
+        # The rule must not cost the mechanism its one real use.
+        for target, witness in (
+            ("ests_returns.py", "tests_returns.py"),
+            ("iews.py", "orders/views.py"),
+        ):
+            with self.subTest(target=target):
+                directive = (
+                    f"<!-- doc-claims:absent {target} (corrupted-fragment-of"
+                    f" {witness}) ; reason: c873b27 ate the leading byte,"
+                    f" reported here as the corruption -->"
+                )
+                errors, _ = self.verify(f"the file now reads `{target}` {directive}")
+                self.assertEqual(errors, [])
 
     def test_a_path_directive_cannot_excuse_a_line_past_the_end_of_a_file(self):
         # The narrowing that keeps this from becoming a stale-reference pass:

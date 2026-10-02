@@ -28,12 +28,19 @@ reads the statement rather than guessing at the sentence::
     <!-- doc-claims:absent ests_returns.py (corrupted-fragment-of
          tests_returns.py) ; reason: c873b27 ate the leading byte -->
 
-That directive silences at most ONE claim, on at most ONE line, and its
-witness has to be real -- a tracked file for a path, a real ``def`` for a test
-name. It is not a suppression list, not a file exemption, and not a regex
-escape hatch, and it cannot be produced by editing the sentence: "there is
-not a test named ``test_x``" is still an error. The full grammar, and the
-three rules that keep it narrow, are on ``parse_counter_examples``.
+That directive silences at most ONE claim, on at most ONE line: two or more
+directives on a line and the line is read as carrying none. A named witness
+has to be real -- a ``def`` for a test name, or for a path a tracked file
+whose own path ends with the cited fragment, since that fragment is the
+intact name with its front truncated. ``retired`` names no witness at all and
+is therefore the weakest kind, held only by the review. The reason has to
+clear a length floor AND contain a token that looks like a ledger reference;
+that second rule is a shape test that raises the cost of filler, not a proof
+that anyone can follow the trail, and the review is the control there too. It
+is not a suppression list, not a file exemption, and not a regex escape
+hatch, and it cannot be produced by editing the sentence: "there is not a
+test named ``test_x``" is still an error. The full grammar, and every rule
+that keeps it narrow, are on ``parse_counter_examples``.
 
 Everything else is reported, never failed, because a machine cannot decide
 whether "kills 7 tests" was true. Those become the auditor's checklist:
@@ -191,8 +198,9 @@ RE_SELF_REF = re.compile(
 #     sentence is still checked.
 #   * `renamed-to` and `misspelling-of` MUST name a witness, and the witness
 #     must have a real `def` in the tree; `corrupted-fragment-of` MUST name a
-#     witness that resolves to a tracked file. A directive cannot swap one
-#     absent name for another absent one.
+#     witness that resolves to a tracked file whose path ENDS WITH the cited
+#     fragment -- resolving alone would prove only that SOME file exists, and
+#     would silence any absent path at all.
 #   * a kind is only accepted on a target it can mean: a path target takes
 #     `corrupted-fragment-of` and nothing else, so `retired` -- the one kind
 #     with no witness to check -- cannot be spent on a path.
@@ -215,12 +223,23 @@ RE_SELF_REF = re.compile(
 # --------------------------------------------------------------------------
 MIN_REASON_CHARS = 24
 
-# The checkable half of a reason: a commit sha, or a hyphenated task id
-# (SPEC-1-B07d, TOOL-01, BUG-3). A sha is 7+ hex, so a rare English word made
-# only of a-f can pass this; the review is still the control, and this is a
-# floor on traceability, not a proof of it.
+# The checkable half of a reason: a token that LOOKS like a ledger reference.
+# Both branches require a DIGIT inside the token, which is the whole fix
+# (BUG-B): without it any hyphenated English word passes, and this repository's
+# prose is saturated with them, so the rule accepted `well-known`,
+# `counter-example`, `e-mail`, `read-only`, `up-to-date` and `so-so`. The sha
+# branch needs it for the same reason -- `defaced`, `effaced`, and a bare run of
+# a-f letters all matched `[0-9a-f]{7,40}` and named nothing at all.
+#
+# What this is NOT: proof that the reason is traceable. It is a SHAPE test that
+# raises the cost of filler, and the review remains the control. Filler that
+# still survives it is any hyphenated token containing a digit -- `a-1`,
+# `utf-8`, `sha-1` -- which is recorded as a known residual rather than papered
+# over, because the alternative (an uppercase-led token) would reject id forms
+# this repository has not written yet and is a decision for the next cycle.
 RE_REASON_REFERENCE = re.compile(
-    r"(?:\b[0-9a-f]{7,40}\b|\b[A-Za-z][A-Za-z0-9]*(?:-[A-Za-z0-9]+)+\b)"
+    r"(?:\b(?=[0-9a-f]*[0-9])[0-9a-f]{7,40}\b"
+    r"|\b(?=[A-Za-z0-9-]*[0-9])[A-Za-z][A-Za-z0-9]*(?:-[A-Za-z0-9]+)+\b)"
 )
 RE_COUNTER_EXAMPLE = re.compile(
     r"<!--\s*doc-claims:absent\s+"
@@ -548,10 +567,17 @@ def verify_claims(
     errors: list[Claim] = []
     warnings: list[Claim] = []
     for claim in claims:
+        # Computed once, and handed to the error text, so the message cannot
+        # describe a different failure from the one that actually happened.
+        failure = (
+            _directive_failure(claim.directive, known_tests, known_paths)
+            if claim.directive is not None
+            else ""
+        )
         if claim.kind == "test_name":
             if claim.value in known_tests:
                 warnings.append(claim)
-            elif _honoured(claim, known_tests, known_paths):
+            elif claim.directive is not None and not failure:
                 # The author stated this name is being reported ABSENT and the
                 # statement survives the one check a machine can make on it.
                 warnings.append(claim)
@@ -563,14 +589,16 @@ def verify_claims(
                         claim.path,
                         claim.line,
                         _absent_detail(
-                            claim, "no `def` for this name anywhere in the tree"
+                            claim,
+                            "no `def` for this name anywhere in the tree",
+                            failure,
                         ),
                     )
                 )
         elif claim.kind == "module_path":
             if _path_exists(claim.value, known_paths):
                 warnings.append(claim)
-            elif _honoured(claim, known_tests, known_paths):
+            elif claim.directive is not None and not failure:
                 warnings.append(claim)
             else:
                 errors.append(
@@ -579,7 +607,7 @@ def verify_claims(
                         claim.value,
                         claim.path,
                         claim.line,
-                        _absent_detail(claim, "no such file in the tree"),
+                        _absent_detail(claim, "no such file in the tree", failure),
                     )
                 )
         elif claim.kind == "path_line":
@@ -587,7 +615,7 @@ def verify_claims(
             cited, _, tail = rest.partition(" line=")
             resolved = _resolve_path(cited, known_paths)
             if resolved is None:
-                if _honoured(claim, known_tests, known_paths):
+                if claim.directive is not None and not failure:
                     warnings.append(claim)
                 else:
                     errors.append(
@@ -596,7 +624,7 @@ def verify_claims(
                             claim.value,
                             claim.path,
                             claim.line,
-                            _absent_detail(claim, f"no such file: {cited}"),
+                            _absent_detail(claim, f"no such file: {cited}", failure),
                         )
                     )
             elif int(tail) > known_paths[resolved]:
@@ -622,56 +650,65 @@ def verify_claims(
     return errors, warnings
 
 
-def _honoured(claim: Claim, known_tests: set[str], known_paths: dict[str, int]) -> bool:
-    """Whether a claim's attached counter-example directive is acceptable.
-
-    A claim only KEEPS its directive when parsing accepted it, so this is the
-    single place where a named witness is checked against the tree.
-    """
-    if claim.directive is None:
-        return False
-    return _directive_holds(claim.directive, known_tests, known_paths)
-
-
-def _directive_holds(
+def _directive_failure(
     directive: CounterExample, known_tests: set[str], known_paths: dict[str, int]
-) -> bool:
-    """Whether a counter-example directive is a statement a machine can accept.
+) -> str:
+    """Why this directive is NOT acceptable, or ``""`` when it is.
 
-    A named witness must be REAL: a test witness must have a ``def``, and a
-    path witness must resolve to a tracked file. A directive that swaps one
-    absent target for another absent one has asserted nothing, and honouring it
-    would turn a one-line directive into a general escape hatch.
+    Returning the reason rather than a bool is what keeps the error honest: a
+    single "not in the tree either" for every path failure would be a lie the
+    moment the witness resolves and merely is not this fragment's intact form.
 
-    ``retired`` has no witness to check and is the weakest kind by
-    construction; the review is the control there.
+    A named witness must be REAL, and it must be the intact form of THIS
+    target. A test witness must have a ``def``; a path witness must resolve to
+    a tracked file whose own path ENDS WITH the cited fragment. Resolving alone
+    would prove only that SOME file exists, so `corrupted-fragment-of
+    orders/views.py` would otherwise silence any absent path at all, and a
+    directive could swap one absent target for another absent one.
+
+    SUFFIX, not "ends with /<fragment>". A byte-eaten write truncates the
+    FRONT of a name, so the intact form is the fragment with something
+    prepended: `ests_returns.py` is the intact `tests_returns.py`, and
+    requiring a slash before the fragment would reject the very corruption
+    case this whole kind exists for. A suffix match still cannot cut into an
+    unrelated file, because `orders/views.py` does not end with
+    `accounts/whatever.py` or with `whatever.py`.
+
+    ``retired`` names no witness, has nothing to fail, and is the weakest kind
+    by construction; the review is the control there.
     """
     if directive.kind == "retired":
-        return True
+        return ""
     if directive.target_kind == "test":
-        return directive.witness in known_tests
-    return _resolve_path(directive.witness, known_paths) is not None
-
-
-def _absent_detail(claim: Claim, base: str) -> str:
-    """Why an absent-target claim is an error, including any failed directive."""
-    directive = claim.directive
-    if directive is not None:
-        if directive.kind == "retired":
-            return f"{base}, and the counter-example directive does not claim one"
-        if directive.target_kind == "test":
-            return (
-                f"{base}, and the counter-example directive names "
-                f"{directive.witness} as the surviving name, which does not "
-                f"exist either"
-            )
+        if directive.witness in known_tests:
+            return ""
         return (
-            f"{base}, and the counter-example directive names "
-            f"{directive.witness} as the intact file, which is not in the tree "
-            f"either"
+            f"the directive names {directive.witness} as the surviving name, "
+            f"which does not exist either"
         )
+    resolved = _resolve_path(directive.witness, known_paths)
+    if resolved is None:
+        return (
+            f"the directive names {directive.witness} as the intact file, "
+            f"which is not in the tree either"
+        )
+    if not resolved.endswith(directive.target):
+        return (
+            f"the directive names {directive.witness}, which resolves to "
+            f"{resolved} and does not end with {directive.target}"
+        )
+    return ""
+
+
+def _absent_detail(claim: Claim, base: str, failure: str = "") -> str:
+    """Why an absent-target claim is an error, including any failed directive."""
+    if failure:
+        return f"{base}, and {failure}"
     if claim.refusal:
-        return f"{base} (a counter-example directive was present and refused: {claim.refusal})"
+        return (
+            f"{base} (a counter-example directive was present and refused: "
+            f"{claim.refusal})"
+        )
     return base
 
 
