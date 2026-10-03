@@ -19,7 +19,46 @@ orchestrator runs `UI-UX-SPEC.md` §14 and records the promotion there.
 | C1 | Commit verified design docs | — | **DONE** | — | `9e6561a`. Tree clean at commit time. |
 | R4 | **Reconcile spec against the 17 selected Stitch refs** + harmonise cross-page drift | §0b, §2, §3, §4, §7, §10, §12, §13 | **DONE** | 2 | Commit `ca54e90`. Attempt 1 blocked by `free-models-per-day-stealth`; attempt 2 succeeded. Followed by a currency correction round (below). §14 byte-identical, zero `TODO`. |
 | R4c | Currency correction after orchestrator-caught error | §0b, §12.D | **DONE** | 1 | R4 wrote 16 yen (U+00A5) signs into the spec; refs contain 0 yen / 53 rupee (U+20B9). Corrected to INR; 3 further transcription fabrications removed. Verified: yen=0, rupee=33. Commit folded into the R4 lineage. |
-| B1 | Phase 3 build | — | **READY TO START** | — | Sequenced behind R4, now cleared. Build one task at a time, each ≤5 files / ≤1 new shared component. |
+| B1 | Token layer: canonical palette, motion/spacing tokens, Playfair+Jakarta swap, focus ring | §2.1, §2.2, §2.3, §2.4, §7.3, §10.4 | **SHIPPED** | 1 | `e786039`. Audited in batch A/B. Token layer costs 0 B: stylesheet 41,784 B raw / 8,867 B gz, unchanged vs pre-change build. |
+| B2 | Migrate 105 removed-token refs across 33 files; fix false-pass test; add token-existence guard | §2.1 | **SHIPPED** | 1 | `6109b94`. 36 files, +314/−179. 32/36 provably mechanical (7-token rename map applied to HEAD blobs, diffed). Zero residue: `ink-muted`/`line-strong`/`bronze-soft`/`divide-line` all 0 hits. |
+| B3 | Fix audit findings BUG-1/2/5/6/7/8/9 | §2.4, §3, §7.3 | **SHIPPED** | 1 | `8088ea9`. All 7 cycle-1 bugs closed at cycle 2 re-audit. |
+| AUDIT-A | Batch A/B audit, cycle 1 | — | **FIX** | 1 | 9 bugs (3×P2, 6×P3). Verdict withheld. Substance confirmed: focus ratios reproduced to 2dp, palette 13/13 exact, void migration complete, token guard proven non-vacuous by deliberate breakage. |
+| AUDIT-A2 | Batch A/B re-audit, cycle 2 | — | **SHIP** | 2 | All 7 fixable bugs CLOSED. Floor: **61 tests / 8 files, build exit 0, 23 routes**. §14 byte-identical (`fc /b`: no differences). Not pushed. |
+
+### Batch A/B — audit findings still open
+
+| # | Sev | Finding | State |
+|---|---|---|---|
+| BUG-3 | P2 | No ledger row existed for the batch when first audited | **CLOSED** — rows added above |
+| BUG-4 | P2 | **e2e UNPROVEN, not passing.** `ECONNREFUSED ::1:8000`, `localhost:3000`. Zero assertion failures; servers down, so this is environmental — but the batch repaints every route and e2e is the only gate that would catch a visual regression. 3 failed / 2 did not run. | **OPEN — must run with the backend up before §14.** Do not waive. |
+| BUG-10 | P3 | Tailwind v4 auto source-detection scans `frontend/docs/design/*.md`, injecting **56 dead app rules = 5,818 B ≈ 13.1%** of the 44,564 B production stylesheet — including `z-50`, `z-[55]`, `duration-500`, `scale-[1.04]`. Design prose is becoming shipped CSS. | **OPEN** — fix with an explicit `@source` allowlist. Not fixed in this batch: it predates it. |
+
+### Process rules established by this batch
+
+1. **A number in a comment is a claim and is audited like code.** Three false
+   numbers shipped as justification (a z-index count, a preload byte total, a
+   contrast ratio computed against a retired token). Recompute; cite a token that
+   exists.
+2. **A guard must be proven non-vacuous by breaking it.** The token-existence
+   test now fails on a typo'd token and returns clean on 19 layout utilities.
+3. **Every measured figure comes from a command in that session.** Third
+   occurrence of a fabricated number after the yen glyph and the phantom product
+   strings — root cause identical: asserted instead of measured. A-40.
+
+### Confirmed by audit, not accepted on report
+
+- Focus `#9c6a2e`: **4.426 / 4.652 / 3.682** on paper / white / ink-deep — ≥3:1.
+- `#8a5a24` on ink-deep is **2.911**, on ink **2.904**, on retired ink **2.972**
+  — the pre-existing 1.4.11 failure, recomputed from literals.
+- `prefers-reduced-motion` appears in **1 file** (`globals.css`), 0 in components.
+- Raw `z-50` / `z-[n]` in `src/**`: **0**. Shipped z-index resolves by token
+  value 40/50/60/70, no longer by DOM accident.
+- Fonts: 12 woff2 = **243,728 B**; latin three = 104,620 B; exactly **2** preloads
+  = 77,348 B. §10.4's ~110 KB lever keys off the **total**, so the rewritten
+  justification is correct and `preload: false` stands.
+- Dead `z-[77]` quoted in a `globals.css` comment emits **0** rules — Tailwind
+  does not scan CSS files. 21 utility-shaped tokens occur only there; 20 absent
+  from the stylesheet.
 
 ---
 
