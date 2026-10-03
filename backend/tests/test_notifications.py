@@ -292,9 +292,12 @@ class PostCommitDispatchTests(ApiTestCase):
 
     def test_plain_dispatch_still_sends_synchronously(self):
         # dispatch_on_commit is opt-in: the registry itself was NOT made
-        # to defer, so the ASYNC-2b2/2b3 hook sites (back-in-stock,
-        # shipped/delivered, webhooks) keep sending inside their own
-        # transaction and a caller can still ask for a synchronous send.
+        # to defer, so the ASYNC-2b2/2b3 registry hook sites
+        # (shipped/delivered in orders/events.py, the orders/webhooks.py
+        # callback) keep sending inside their own transaction and a caller
+        # can still ask for a synchronous send. Back-in-stock is not a
+        # registry site at all - products/models.py calls send_email
+        # directly - so no change to dispatch could have moved it.
         order = _make_order(self.make_user("syncreg"))
         with self.captureOnCommitCallbacks(execute=True):
             notifications.dispatch(AuditEvent.EventType.ORDER_PAID, {"order": order})

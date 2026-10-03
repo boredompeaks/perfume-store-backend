@@ -149,9 +149,13 @@ def dispatch_on_commit(event_type, context=None):
     returned, so the SMTP latency is unchanged. Only the lock hold is gone.
 
     Deliberately opt-in rather than folded into ``dispatch``: making the
-    registry itself defer would silently convert every other hook site
-    (back-in-stock, shipped/delivered, webhooks) and remove any caller's
-    ability to send inside its own transaction. Those sites are converted
-    one at a time in ASYNC-2b2/2b3.
+    registry itself defer would silently convert the other registry hook
+    sites - shipped/delivered (``orders/events.py``) and the webhook
+    callback (``orders/webhooks.py``) - and remove any caller's ability to
+    send inside its own transaction. The back-in-stock notice is NOT one of
+    them: ``products/models.py`` calls ``send_email`` directly and never
+    reaches this registry, so no change here could convert it and ASYNC-2b2
+    has to move it explicitly. All three are converted one at a time in
+    ASYNC-2b2/2b3.
     """
     transaction.on_commit(lambda: dispatch(event_type, context))
