@@ -91,6 +91,7 @@ from orders.admin import (
 from orders import urls as orders_urls
 from config import urls as config_urls
 from ops.models import (
+    CLOSED_RETURN_WINDOW_DAYS,
     DEFAULT_RETURN_WINDOW_DAYS,
     MAX_RETURN_WINDOW_DAYS,
     SiteSettings,
@@ -108,12 +109,17 @@ from orders.state import (
     payment_for_status,
 )
 from orders.views import (
+    RETURN_REFUSAL_BODY_KEY,
+    RETURN_REFUSAL_ERRORS,
+    RETURN_REFUSAL_WINDOW_CLOSED,
     MalformedReturnRequestBody,
     _return_body,
     _return_eligible,
     _return_request_miss,
     _return_window_anchor,
     _return_window_days,
+    _return_window_refusal,
+    _returns_closed,
 )
 
 CREATE_URL = "/api/v1/store/orders/returns/"
@@ -2891,6 +2897,478 @@ class ReturnEligibilityWindowTests(ReturnTestCase):
         # ``PositiveIntegerField`` is an int4 on Postgres, which holds
         # 2,147,483,647, so nothing is refused here for being unrepresentable.)
         self.assertEqual(MAX_RETURN_WINDOW_DAYS, 3650)
+
+    # ------------------------------------------------------------------
+    # SPEC-1-B07f-a: 0 CLOSES RETURNS.
+    #
+    # The owner's ruling of 2026-10-02 gave the column three states where it
+    # previously had two that behaved like one: NULL (no policy, resolves to
+    # 30), 0 (RETURNS ARE CLOSED) and N > 0 (returns allowed within N days of
+    # the anchor). The shipped code branched on ``is None``, so a published 0
+    # fell into the date arithmetic and was read as a window one instant long:
+    # an order was admitted AT THE EXACT ANCHOR INSTANT and refused a second
+    # later. That was an accident of the arithmetic rather than a decision, and
+    # the probes below are the replacement for it.
+    #
+    # EVERY expectation in this section is a HAND-WRITTEN LITERAL - 30, 0, 1,
+    # 14, 3650, "window_closed", "Returns aren't available for this order" -
+    # and never the constant under test. A boundary or a refusal recomputed
+    # from ``CLOSED_RETURN_WINDOW_DAYS`` or ``DEFAULT_RETURN_WINDOW_DAYS``
+    # agrees with a WRONG constant from both sides, which is the defect this
+    # file has already been bitten by (SPEC-1-B07a cycle 2, and the ceiling
+    # probe above).
+    # ------------------------------------------------------------------
+
+    def test_the_three_states_are_three_and_each_is_spelled_out_by_hand(self):
+        # The state ENUMERATION, driven value by value: every value this
+        # column admits is written in the table, and both expectations beside
+        # it are literals. A 100%-covered gate can still be wrong about a value
+        # nothing drives it with, so the table is the coverage that counts -
+        # and 3651 is in it deliberately, because it is storable through the
+        # ORM even though the admin form refuses to write it (the ceiling
+        # probe above), so the gate has to have an answer for it too.
+        self.assertEqual(CLOSED_RETURN_WINDOW_DAYS, 0)
+
+        for published, resolved, is_closed in (
+            (None, 30, False),  # unset -> the default, and nothing is closed
+            (0, 0, True),  # the ruling: 0 closes returns
+            (1, 1, False),
+            (14, 14, False),
+            (30, 30, False),
+            (3650, 3650, False),  # the ceiling
+            (3651, 3651, False),  # storable, form-refused, still coherent
+        ):
+            with self.subTest(published=published):
+                row = SiteSettings.load()
+                row.return_window_days = published
+                row.save()
+                row.refresh_from_db()
+
+                self.assertEqual(row.return_window_days, published)
+                self.assertEqual(row.resolved_return_window_days(), resolved)
+                self.assertIs(row.returns_closed(), is_closed)
+                # The seam the gate reads, and the model predicate the refusal
+                # sentence is chosen by, must not disagree with the row.
+                self.assertEqual(_return_window_days(), resolved)
+                self.assertIs(_returns_closed(), is_closed)
+
+    def test_a_published_zero_closes_returns_at_the_exact_anchor_instant(self):
+        # THE SHARPEST CASE IN THE RULING, and the one the old arithmetic got
+        # wrong by accident: at the anchor instant a zero-day window evaluates
+        # ``now <= anchor + timedelta(days=0)`` to TRUE, so the shipped build
+        # ADMITTED the order here and refused it a second later. Both readings
+        # of the anchor are driven, because the anchor is a fork (delivery
+        # where the goods arrived, the order date otherwise) and a closed
+        # window has to close on either one.
+        row = SiteSettings.load()
+        row.return_window_days = 0
+        row.save()
+        self.login_as(self.buyer)
+
+        with self.clock_frozen_at():
+            # ``timedelta(seconds=0)`` is the anchor instant written out: the
+            # order stamped exactly now, and the same order delivered exactly
+            # now after fifty days in the warehouse.
+            at_its_own_instant = self._placed(
+                "RET-2026-0060", "delivered", timedelta(seconds=0)
+            )
+            just_delivered = self._placed(
+                "RET-2026-0061",
+                "delivered",
+                created_age=timedelta(days=50),
+                delivered_age=timedelta(seconds=0),
+            )
+
+            for order in (at_its_own_instant, just_delivered):
+                with self.subTest(anchor=_return_window_anchor(order)):
+                    self.assertEqual(_return_window_anchor(order), self.NOW)
+                    self.assertFalse(_return_eligible(order))
+                    # The refusal is a NAMED one, checked against a literal
+                    # rather than against the constant in the module.
+                    self.assertEqual(
+                        _return_window_refusal(order, self.NOW), "window_closed"
+                    )
+
+                    res = self.ask(order.order_number)
+
+                    self.assertEqual(res.status_code, 409, res.data)
+                    # ``details``, not ``code``: the error envelope ASSIGNS
+                    # ``code`` from the status family and moves the rest into
+                    # ``details`` (common/errors.py, _envelope), so the refusal
+                    # code has to be read from where it actually lands.
+                    self.assertEqual(
+                        res.data["details"]["return_refusal"], "window_closed"
+                    )
+                    self.assertEqual(
+                        res.data["error"], "Returns aren't available for this order"
+                    )
+
+            # No loophole: a refusal writes no return request, so closing the
+            # window cannot become a way to slip one past the seam.
+            self.assertEqual(ReturnRequest.objects.count(), 0)
+
+    def test_a_published_zero_closes_returns_for_an_order_of_any_age(self):
+        # "Every return request" is the ruling's phrase, so every age is
+        # driven rather than one: a closed store is not a store with a very
+        # short window, and the ages below include one INSIDE the default
+        # 30-day window, which is the value a reader is most likely to assume
+        # a 0 still obeys.
+        row = SiteSettings.load()
+        row.return_window_days = 0
+        row.save()
+        self.login_as(self.buyer)
+
+        with self.clock_frozen_at():
+            for index, age in enumerate(
+                (
+                    timedelta(seconds=1),
+                    timedelta(days=1),
+                    timedelta(days=29),
+                    timedelta(days=3650),
+                )
+            ):
+                with self.subTest(age=age):
+                    order = self._placed(f"RET-2026-006{index + 2}", "delivered", age)
+
+                    res = self.ask(order.order_number)
+
+                    self.assertEqual(res.status_code, 409, res.data)
+                    self.assertEqual(
+                        res.data["details"]["return_refusal"], "window_closed"
+                    )
+                    self.assertFalse(_return_eligible(order))
+
+        self.assertEqual(ReturnRequest.objects.count(), 0)
+
+    def test_a_closed_refusal_is_not_the_expired_window_refusal(self):
+        # THE DISTINGUISHABILITY PIN, and it is run on ONE order at ONE moment
+        # under TWO policies, so the only thing that differs between the two
+        # answers is the store's published window. A build that merely reworded
+        # the closed refusal, or that reused the expired body, fails here; a
+        # build that answers both with one body fails here too.
+        self.login_as(self.buyer)
+        row = SiteSettings.load()
+
+        with self.clock_frozen_at():
+            order = self._placed("RET-2026-0066", "delivered", timedelta(days=31))
+
+            row.return_window_days = 0
+            row.save()
+            closed = self.ask(order.order_number)
+
+            row.return_window_days = 30
+            row.save()
+            expired = self.ask(order.order_number)
+
+        self.assertEqual(closed.status_code, 409, closed.data)
+        self.assertEqual(expired.status_code, 409, expired.data)
+        # The two bodies, as literals. The closed one names the store's policy
+        # and carries the refusal code under ``details``; the expired one is the
+        # envelope this seam has always returned, unchanged, with ``details``
+        # EMPTY. Both keep ``code: "conflict"`` - that is the status family the
+        # error envelope assigns to every 409 in this app and this task does not
+        # change it - so the refusal code is what tells the two apart.
+        self.assertEqual(
+            closed.data["error"], "Returns aren't available for this order"
+        )
+        self.assertEqual(
+            expired.data["error"], "This order is not eligible for a return"
+        )
+        self.assertEqual(closed.data["details"]["return_refusal"], "window_closed")
+        self.assertEqual(expired.data["details"], {})
+        self.assertEqual(closed.data["code"], "conflict")
+        self.assertEqual(expired.data["code"], "conflict")
+        self.assertNotEqual(closed.content, expired.content)
+        # And the codes are module constants B07f-b and the storefront can
+        # import, which is what "programmatically distinguishable" has to mean
+        # for a task that has not been written yet.
+        self.assertEqual(RETURN_REFUSAL_WINDOW_CLOSED, "window_closed")
+        self.assertEqual(RETURN_REFUSAL_BODY_KEY, "return_refusal")
+        self.assertEqual(
+            RETURN_REFUSAL_ERRORS[RETURN_REFUSAL_WINDOW_CLOSED],
+            closed.data["error"],
+        )
+
+    def test_a_window_of_one_day_or_more_behaves_exactly_as_before(self):
+        # THE RULING CHANGED THE MEANING OF 0 AND NOTHING ELSE. Each N below
+        # is admitted on its last day and refused the day after, on both the
+        # predicate and the seam, with the refusal carrying the expired body
+        # and NO code - which is what proves the closed branch did not quietly
+        # widen. 3650 is the ceiling and 3651 the day past it, so the widest
+        # window the machine admits is exercised at its own boundary.
+        self.login_as(self.buyer)
+        row = SiteSettings.load()
+
+        with self.clock_frozen_at():
+            for index, (days, admitted_age, refused_age) in enumerate(
+                (
+                    (1, timedelta(days=1), timedelta(days=2)),
+                    (14, timedelta(days=14), timedelta(days=15)),
+                    (30, timedelta(days=30), timedelta(days=31)),
+                    (3650, timedelta(days=3650), timedelta(days=3651)),
+                )
+            ):
+                with self.subTest(days=days):
+                    row.return_window_days = days
+                    row.save()
+                    on_the_last_day = self._placed(
+                        f"RET-2026-007{index}0", "delivered", admitted_age
+                    )
+                    one_day_late = self._placed(
+                        f"RET-2026-007{index}1", "delivered", refused_age
+                    )
+
+                    self.assertEqual(_return_window_days(), days)
+                    self.assertFalse(_returns_closed())
+                    self.assertTrue(_return_eligible(on_the_last_day))
+                    self.assertFalse(_return_eligible(one_day_late))
+                    self.assertIsNone(_return_window_refusal(on_the_last_day, self.NOW))
+                    self.assertEqual(
+                        _return_window_refusal(one_day_late, self.NOW),
+                        "outside_window",
+                    )
+
+                    admitted = self.ask(on_the_last_day.order_number)
+                    refused = self.ask(one_day_late.order_number)
+
+                    self.assertEqual(admitted.status_code, 201, admitted.data)
+                    self.assertEqual(refused.status_code, 409, refused.data)
+                    self.assertEqual(
+                        refused.data["error"],
+                        "This order is not eligible for a return",
+                    )
+                    # No refusal code: an expired window is the plain conflict
+                    # this seam has always returned, and a body that grew a code
+                    # here would mean the closed branch has widened.
+                    self.assertEqual(refused.data["details"], {})
+
+    def test_a_closed_store_says_so_even_where_the_machine_itself_refuses(self):
+        # THE COMBINATION NOTHING ELSE IN THIS SECTION DRIVES. Every other
+        # closed-window probe here uses a delivered order, which PASSES the
+        # machine half of ``_return_eligible`` and is therefore refused by the
+        # window. A pending order is refused by the MACHINE instead - nothing
+        # shipped and no money captured - so the closed branch OVERRIDING the
+        # order-specific reason is a behaviour that shipped with no probe
+        # against it. Coverage cannot see this: it is one line, executed for
+        # either reason, and both reasons execute it.
+        #
+        # What is pinned is the SENTENCE and the CODE, because that is the only
+        # observable difference between the two policies on this order. The
+        # store's policy is a fact about the shop rather than about this order,
+        # and a customer of a shop that takes no returns should not be told
+        # their own window ran out.
+        row = SiteSettings.load()
+        row.return_window_days = 30
+        row.save()
+        self.login_as(self.buyer)
+
+        with self.clock_frozen_at():
+            machine_refused = self._placed(
+                "RET-2026-0077", "pending", timedelta(days=3)
+            )
+
+            self.assertFalse(_return_eligible(machine_refused))
+            self.assertFalse(_returns_closed())
+            open_res = self.ask(machine_refused.order_number)
+
+            row.return_window_days = 0
+            row.save()
+
+            self.assertTrue(_returns_closed())
+            closed_res = self.ask(machine_refused.order_number)
+
+        # THE SAME ORDER at THE SAME MOMENT: the published window is the only
+        # thing that differs between the two answers, so the override is what
+        # separates these bodies and nothing else can.
+        self.assertEqual(open_res.status_code, 409, open_res.data)
+        self.assertEqual(closed_res.status_code, 409, closed_res.data)
+        self.assertEqual(
+            open_res.data["error"], "This order is not eligible for a return"
+        )
+        self.assertEqual(open_res.data["details"], {})
+        self.assertEqual(
+            closed_res.data["error"], "Returns aren't available for this order"
+        )
+        self.assertEqual(closed_res.data["details"]["return_refusal"], "window_closed")
+        # Refused is not merely re-described: a refusal writes no row, so the
+        # override cannot become a way to write one.
+        self.assertEqual(ReturnRequest.objects.count(), 0)
+
+    def test_a_window_above_the_ceiling_is_an_ordinary_positive_window(self):
+        # 3651 IS THE STATE THE OTHER TWO PROBES LEAVE BETWEEN THEM, and the
+        # gate is the thing the ruling is about. The admin form refuses to
+        # WRITE it (the ceiling probe above), and the three-states probe reads
+        # it only through the model's own predicates - so nothing asked the
+        # GATE what it does with a value above the policy ceiling, which is
+        # the exact question a "closed is a magnitude rather than a state"
+        # regression would answer wrongly.
+        #
+        # It is reachable without the admin, which is why it needs a probe: the
+        # column is an integer whose validator runs on ``full_clean`` and not on
+        # ``save``, so an ORM write stores it. The expectation is that it
+        # behaves like any other positive window, because closed is a NAMED
+        # state and not a size - a build that treated the ceiling as the closed
+        # state would have to read 3651 as closed, and this is what holds that
+        # line. 3650 is NOT repeated here: the probe above already drives it at
+        # its own boundary, and duplicating a boundary makes two places to
+        # update rather than one.
+        row = SiteSettings.load()
+        row.return_window_days = 3651
+        row.save()
+        self.login_as(self.buyer)
+
+        with self.clock_frozen_at():
+            on_the_last_day = self._placed(
+                "RET-2026-0078", "delivered", timedelta(days=3651)
+            )
+            one_day_late = self._placed(
+                "RET-2026-0079", "delivered", timedelta(days=3652)
+            )
+
+            self.assertEqual(SiteSettings.load().return_window_days, 3651)
+            self.assertEqual(_return_window_days(), 3651)
+            self.assertFalse(_returns_closed())
+            self.assertTrue(_return_eligible(on_the_last_day))
+            self.assertFalse(_return_eligible(one_day_late))
+            self.assertIsNone(_return_window_refusal(on_the_last_day, self.NOW))
+            self.assertEqual(
+                _return_window_refusal(one_day_late, self.NOW), "outside_window"
+            )
+
+            admitted = self.ask(on_the_last_day.order_number)
+            refused = self.ask(one_day_late.order_number)
+
+            self.assertEqual(admitted.status_code, 201, admitted.data)
+            self.assertEqual(refused.status_code, 409, refused.data)
+            self.assertEqual(
+                refused.data["error"],
+                "This order is not eligible for a return",
+            )
+            self.assertEqual(refused.data["details"], {})
+
+    def test_a_stranger_is_never_told_whether_the_store_is_closed(self):
+        # THE DISCLOSURE HALF OF THE NEW CODE, on the seam that carries it.
+        # The closed refusal is a statement about the SHOP, so it is worth
+        # asking whether publishing it turns the create seam into a probe for
+        # store policy. It does not, and that is a property of WHERE the check
+        # sits rather than of what it says: it lives inside the
+        # ``not _return_eligible`` branch, which is reached only after
+        # ``select_for_update().get(..., user=request.user)`` has matched a row
+        # the caller OWNS.
+        #
+        # Both policies are driven for the SAME stranger on the SAME order, so
+        # the published window is the only thing that could separate the two
+        # answers - and nothing may.
+        order = self._placed("RET-2026-0080", "delivered", timedelta(days=3))
+        row = SiteSettings.load()
+        self.login_as(self.stranger)
+
+        with self.clock_frozen_at():
+            row.return_window_days = 0
+            row.save()
+            closed_res = self.ask(order.order_number)
+
+            row.return_window_days = 30
+            row.save()
+            open_res = self.ask(order.order_number)
+
+        self.assertEqual(closed_res.status_code, 404, closed_res.data)
+        self.assertEqual(open_res.status_code, 404, open_res.data)
+        self.assertEqual(closed_res.content, open_res.content)
+        # Nor smuggled in under some other key: the policy is not in this body
+        # at all, on either policy.
+        self.assertNotIn("return_refusal", closed_res.content.decode())
+        self.assertNotIn("window_closed", closed_res.content.decode())
+        self.assertEqual(ReturnRequest.objects.count(), 0)
+
+    def test_a_client_can_neither_open_nor_close_returns_through_the_body(self):
+        # CHECK 1 for the third state, in BOTH directions. A store-wide policy
+        # is merchant-controlled, so the probe is that a CUSTOMER can move it
+        # in neither direction: a closed store must not be reopened by a body
+        # field (which would be a way to buy eligibility), and an open store
+        # must not be closed by one (which would be a way to grief the desk).
+        self.login_as(self.buyer)
+        row = SiteSettings.load()
+        row.return_window_days = 0
+        row.save()
+        with self.clock_frozen_at():
+            closed_order = self._placed("RET-2026-0075", "delivered", timedelta(days=1))
+            attempts = (
+                {"return_window_days": 30},
+                {"return_window_days": 3650},
+                {"window_days": 30},
+                {"returns_closed": False},
+                {"site_settings": {"return_window_days": 30}},
+            )
+            baseline = None
+            for extra in attempts:
+                with self.subTest(closed_attempt=sorted(extra)):
+                    res = self.ask(closed_order.order_number, **extra)
+
+                    self.assertEqual(res.status_code, 409, res.data)
+                    if baseline is None:
+                        baseline = res.content
+                    # Byte-identical to the attempt that named nothing: a body
+                    # that differed would prove the field was read.
+                    self.assertEqual(res.content, baseline)
+
+        self.assertEqual(SiteSettings.load().return_window_days, 0)
+
+        # The other direction, on the same seam: naming a window in the body
+        # does not close the store either, so the order is still returnable.
+        row = SiteSettings.load()
+        row.return_window_days = 30
+        row.save()
+        with self.clock_frozen_at():
+            open_order = self._placed("RET-2026-0076", "delivered", timedelta(days=1))
+
+            res = self.ask(open_order.order_number, return_window_days=0)
+
+            self.assertEqual(res.status_code, 201, res.data)
+        self.assertEqual(SiteSettings.load().return_window_days, 30)
+
+    def test_the_closed_state_reaches_the_storefront_as_zero(self):
+        # The disclosure half. ``/api/settings/`` publishes the RESOLVED value,
+        # so a closed store has to reach the storefront as 0 or the frontend
+        # (SPEC-1-B07e) would be told to render a 30-day window for a store
+        # that takes no returns. Both directions are asserted, as literals,
+        # because this is the same conflation the model probe above pins and a
+        # second copy of it is exactly the kind that drifts.
+        res = self.client.get("/api/settings/")
+
+        self.assertEqual(res.status_code, 200)
+        self.assertIn('"return_window_days": 30', res.content.decode())
+
+        row = SiteSettings.load()
+        row.return_window_days = 0
+        row.save()
+
+        closed_res = self.client.get("/api/settings/")
+
+        self.assertEqual(closed_res.status_code, 200)
+        self.assertIn('"return_window_days": 0', closed_res.content.decode())
+
+    def test_the_admin_tells_the_merchant_that_zero_closes_returns(self):
+        # The merchant-facing half, asserted on the RENDERED change page,
+        # because a description in the fieldset config that never reaches the
+        # page tells the merchant nothing. No migration is bought for this
+        # prose: ``help_text`` is a field attribute, so the fieldset
+        # description is where the statement lives (ops.admin), and the
+        # field's own help text is deliberately left as it was.
+        SiteSettings.load()
+        self.client.force_login(role_user(ROLE_ADMIN, "window-closed-admin"))
+
+        res = self.client.get("/admin/ops/sitesettings/1/change/")
+
+        self.assertEqual(res.status_code, 200)
+        page = res.content.decode()
+        self.assertIn("to close returns entirely", page)
+        self.assertIn("not available rather than that the window expired", page)
+        # The default is quoted in the same paragraph, from the constant rather
+        # than from a number typed twice.
+        self.assertIn("store default of 30 days", page)
+        self.assertIn(f"{DEFAULT_RETURN_WINDOW_DAYS} days", page)
+        self.assertIn(f"{CLOSED_RETURN_WINDOW_DAYS} to close", page)
 
 
 @tag("e2e")

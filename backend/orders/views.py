@@ -81,7 +81,10 @@ from shipping.pricing import ShippingUnavailable, quote_shipping
 # eligibility gate honours. ops.models imports nothing from orders, so this is
 # a leaf import and cannot cycle; it is named in full rather than aliased so
 # the reader of ``_return_window_days`` can see where the policy comes from.
-from ops.models import SiteSettings
+# ``CLOSED_RETURN_WINDOW_DAYS`` rides the same import (SPEC-1-B07f-a): it is
+# part of that window's meaning, and the gate compares the resolved number
+# against it BEFORE it does any date arithmetic.
+from ops.models import CLOSED_RETURN_WINDOW_DAYS, SiteSettings
 
 import logging
 import razorpay
@@ -2577,6 +2580,52 @@ def _return_body(request):
     return fields
 
 
+# [R-1.16] SPEC-1-B07f-a: the refusals the returns gate can raise, as
+# MACHINE-READABLE CODES rather than as prose. A customer refused because the
+# store takes no returns at all, and a customer refused because their own
+# window ran out, are different facts and the owner's ruling (2026-10-02)
+# requires the first to SAY SO: "returns aren't available", not "not eligible".
+#
+# Prose alone would not carry it. SPEC-1-B07f-b has to surface the reason on
+# orders the customer is not attempting to return right now, and the storefront
+# has to render it, and neither can be built on an English string that a copy
+# edit would change. So the code is the contract and the sentence is the
+# rendering of it.
+RETURN_REFUSAL_NOT_ELIGIBLE = "not_eligible"
+RETURN_REFUSAL_WINDOW_CLOSED = "window_closed"
+RETURN_REFUSAL_OUTSIDE_WINDOW = "outside_window"
+
+# The two refusals that are about THIS order keep one sentence, byte-identical
+# to the body this seam has always returned: the caller owns the order either
+# way, so naming which of the two fired would disclose nothing but would fork a
+# contract the probes pin as one. The closed refusal is the exception the ruling
+# asks for, and it is the only body that carries a refusal code.
+RETURN_REFUSAL_ERRORS = {
+    RETURN_REFUSAL_NOT_ELIGIBLE: "This order is not eligible for a return",
+    RETURN_REFUSAL_OUTSIDE_WINDOW: "This order is not eligible for a return",
+    RETURN_REFUSAL_WINDOW_CLOSED: "Returns aren't available for this order",
+}
+
+# WHERE the refusal code rides in the body, and it is not ``code``.
+#
+# ``common.errors.ErrorEnvelopeMiddleware`` rewrites every recognised error body
+# into its one envelope, and ``_envelope`` ASSIGNS ``code`` from the status
+# family (409 -> "conflict") while moving every other key into ``details``. A
+# view that returned ``{"error": ..., "code": "window_closed"}`` therefore
+# published ``code: "conflict"`` and buried its own value at
+# ``details.code`` - the code was destroyed, and the thing that survived was an
+# accident of dict ordering rather than a contract anyone chose.
+#
+# So the code travels under its own key, which the envelope carries into
+# ``details`` - the place that module reserves for exactly this, "other
+# context". A closed refusal reaches the client as
+# ``{"error": ..., "code": "conflict", "details": {"return_refusal":
+# "window_closed"}}``, and an expired one as the same envelope with
+# ``details`` empty. The envelope's own ``code`` stays the status family for
+# every other endpoint in this app; only the closed refusal adds context.
+RETURN_REFUSAL_BODY_KEY = "return_refusal"
+
+
 def _return_eligible(order):
     """Whether ``order`` has anything at all a customer could send back.
 
@@ -2658,14 +2707,21 @@ def _return_eligible(order):
       env-driven, because a page density is a property of the deployment and
       does not vary per store; the two differ in kind, and that difference is
       why they do not share a home).
-    * age is now an input, read through ``_within_return_window`` below, and
+    * age is now an input, read through ``_return_window_refusal`` below, and
       the seam no longer answers "has anything happened yet" alone.
+    * 0 IS NOT A SHORT WINDOW. SPEC-1-B07f-a carries the owner's ruling of
+      2026-10-02: a published 0 CLOSES returns, and it closes them at every
+      age including the exact anchor instant, which the old arithmetic
+      admitted and then refused a second later. The closed check is a named
+      state consulted before the date arithmetic, and the refusal it produces
+      is a named one too, so a customer is never told their window expired
+      when the store is not taking returns at all.
     """
     money_moved = order.payment_status in CAPTURED_MONEY_PAYMENT_STATUSES
     goods_moved = order.fulfilment_status != "unfulfilled"
     if not (money_moved or goods_moved):
         return False
-    return _within_return_window(order, timezone.now())
+    return _return_window_refusal(order, timezone.now()) is None
 
 
 def _return_window_days():
@@ -2678,6 +2734,11 @@ def _return_window_days():
     default in the model's own method, so the number the gate enforces and the
     number ``/api/settings/`` publishes are one value by construction rather
     than two copies that could drift.
+
+    A published ``CLOSED_RETURN_WINDOW_DAYS`` (0) is returned AS 0, deliberately
+    not defaulted: it is a value this store publishes, and
+    ``_return_window_refusal`` reads it as the closed state before it reaches
+    any date arithmetic (SPEC-1-B07f-a).
 
     ``load()`` is a ``get_or_create`` on the singleton's pk, so the very first
     call on a store that has never saved the row INSERTS it. That happens
@@ -2723,20 +2784,74 @@ def _return_window_anchor(order):
     return order.delivered_at or order.created_at
 
 
-def _within_return_window(order, now):
-    """Whether ``now`` is still inside ``order``'s return window.
+def _returns_closed():
+    """Whether this store has published ``CLOSED_RETURN_WINDOW_DAYS`` (0).
 
-    INCLUSIVE at the boundary: the window admits the anchor instant plus N
-    whole days, so a customer who asks on the last day of their N has asked in
-    time. ``<=`` rather than ``<`` is that decision, stated once here so the
-    boundary probes and this line cannot drift apart.
+    Read for the SENTENCE the refusal carries, not for the verdict:
+    ``_return_eligible`` is the single place that decides whether an order may
+    be returned against, and it reaches its own answer through
+    ``_return_window_refusal``. Asking it a second time for the reason would
+    mean a second ``timezone.now()`` inside one request that has to be decided
+    by ONE clock read, and a request whose refusal sentence disagreed with its
+    own verdict is a worse bug than the extra read on the singleton this costs.
+
+    It is read AFTER the verdict, and it OVERRIDES the order-specific reason,
+    because it is a fact about the store rather than about the order: a closed
+    store refuses every order it has, and "your 30 days ran out" would be a
+    misleading thing to tell a customer whose window was never open.
+
+    It CANNOT disagree with the verdict the gate already reached, and that is
+    structural rather than incidental: this applies
+    ``return_window_days == CLOSED_RETURN_WINDOW_DAYS`` to the RAW column,
+    while ``_return_window_refusal`` applies the same comparison to
+    ``resolved_return_window_days()``, and for every value the column admits
+    the two expressions are equal - NULL resolves to 30, which is neither
+    closed nor equal to 0; 0 resolves to 0, which is both; N > 0 resolves to
+    itself, which is neither.
+    ``test_the_three_states_are_three_and_each_is_spelled_out_by_hand`` drives
+    all of those values and asserts both expressions together, so that
+    agreement is pinned by a test rather than claimed by this comment.
+
+    What is NOT claimed is that they are ONE read: they are two, so a merchant
+    saving the singleton between them inside one request could make them
+    differ. That is left in place deliberately. The window it opens is
+    sub-millisecond, it needs a concurrent admin save to enter it, and the only
+    divergence it can produce is a customer told their window expired moments
+    after the merchant reopened it. Removing it would mean threading the
+    verdict's own code back out of ``_return_eligible`` and re-deriving the
+    machine half of eligibility here, which trades a harmless race for two
+    sources of truth about whether an order may be returned.
+    """
+    return SiteSettings.load().returns_closed()
+
+
+def _return_window_refusal(order, now):
+    """The window's verdict on ``order`` at ``now``: a refusal code or None.
+
+    THE CLOSED CHECK COMES FIRST, and it is a named state rather than an
+    accident of the arithmetic. Before SPEC-1-B07f-a this function returned
+    ``now <= anchor + timedelta(days=window)`` and let a published 0 through
+    that comparison, which admitted an order AT THE EXACT ANCHOR INSTANT and
+    refused the same order one second later. The owner's ruling (2026-10-02) is
+    that 0 means returns are closed, so a closed store refuses at every age and
+    the date arithmetic below is not reached at all.
+
+    Every OTHER published value takes exactly the path it took before: the
+    window is INCLUSIVE of its last day, so ``<=`` and not ``<``, on the
+    anchor ``_return_window_anchor`` chooses. The ruling changed the meaning of
+    0 and nothing else.
 
     ``now`` is passed in rather than read here so the CALLER owns the single
     clock read of the whole predicate: one read means a request cannot be
     accepted by a gate that consulted one clock and refused by a gate that
     consulted a later one.
     """
-    return now <= _return_window_anchor(order) + timedelta(days=_return_window_days())
+    window = _return_window_days()
+    if window == CLOSED_RETURN_WINDOW_DAYS:
+        return RETURN_REFUSAL_WINDOW_CLOSED
+    if now > _return_window_anchor(order) + timedelta(days=window):
+        return RETURN_REFUSAL_OUTSIDE_WINDOW
+    return None
 
 
 def _return_request_miss():
@@ -3066,8 +3181,25 @@ def _create_return_request(request):
             # and "not eligible" is the honest sentence for an order past its
             # deadline. A never-paid one is refused on the capture half of the
             # machine test, whichever status it happens to wear.
+            #
+            # SPEC-1-B07f-a adds the THIRD refusal, and it is the one refusal
+            # here that is about the store rather than the order: returns closed
+            # outright. The store-wide fact is what the customer needs to know and
+            # an order-specific sentence would misdescribe it, so it overrides the
+            # reason the verdict would otherwise have given. The code travels under
+            # RETURN_REFUSAL_BODY_KEY - see there for why it cannot be ``code`` -
+            # so B07f-b and the storefront can tell this apart from the two above
+            # without matching on English.
+            if _returns_closed():
+                return Response(
+                    {
+                        "error": RETURN_REFUSAL_ERRORS[RETURN_REFUSAL_WINDOW_CLOSED],
+                        RETURN_REFUSAL_BODY_KEY: RETURN_REFUSAL_WINDOW_CLOSED,
+                    },
+                    status=status.HTTP_409_CONFLICT,
+                )
             return Response(
-                {"error": "This order is not eligible for a return"},
+                {"error": RETURN_REFUSAL_ERRORS[RETURN_REFUSAL_NOT_ELIGIBLE]},
                 status=status.HTTP_409_CONFLICT,
             )
 
