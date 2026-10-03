@@ -72,7 +72,52 @@ already been caught lying seven times in this run.
 | RUN-1 | Load / concurrency harness that finds **what breaks first and why** (SPEC-2-09, owner S2) | P2 | new | PENDING — blocked on PG-2a. Must use `TransactionTestCase` + real threads/connections; deterministic contention, not timing luck. |
 | RED-1 | Red-team + probe scripts, **in-repo and tracked** | P2 | new | PENDING — blocked on PG-2a. Written to **break** logic, never to demonstrate compliance. |
 
-## TIER 2 — async / worker triage (owner's external audit flagged this critical)
+## PG-2a RESULT — P0 fixed, and two of the orchestrator's premises were wrong
+
+`1b4f1f1` (`orders/admin.py` 36/10 · `orders/views.py` 17/4 · new `tests/test_postgres_row_locking.py` 258/0).
+
+**Both engines, full suite, measured by the builder:** SQLite **1776 / OK / xf 4 / 100.00% / 8818** (was 1769/8815) · PostgreSQL **1776 / `FAILED (failures=6, errors=1)` / xf 4 / 100.00% / 8818** (was `failures=6, errors=68`, 99.17%, 73 missed). **All 67 `NotSupportedError` gone, 67 -> 0**, measured by per-test exception map. `makemigrations --check` clean; Black 0 dirty added lines.
+
+**PREMISE 1 WAS WRONG — `of=("self",)` was never needed.** Measured on SQLite: `has_select_for_update=False`, `for_update_after_from=False`, and the emitted SQL tail was plain `FROM "orders_order"` with **no `FOR UPDATE` and no exception**. **Django 6.1 silently DROPS the construct on SQLite**; it does not break. The chosen fix needs no backend capability because it emits **no outer join at all** — PG tail `... FROM "orders_order" ORDER BY id ASC FOR UPDATE` executes; SQLite is the same minus `FOR UPDATE`.
+
+**PREMISE 2 WAS WRONG — admin does not "inherit `select_related` from `list_display`".** Neither `orders/admin.py` nor `common/admin.py` contains `select_related`, and `Order.objects.select_related()` with no arguments joins nothing. The real mechanism, read off captured SQL: **Django 6.1 `ChangeList.get_select_related_fields()` names the `list_display` FKs explicitly**, so `user` AND `coupon` both become LEFT OUTER JOINs under `select_for_update`.
+
+**THE COUPON WAS ALREADY LOCKED, SEPARATELY.** `views.py:1798-1800` read `order.coupon` only to take `.pk`, then **immediately re-fetched it under its own `Coupon.objects.select_for_update()`**, and every coupon field read (`active`/`valid_from`/`valid_until`/`usage_limit`/`used_count`) comes off the post-lock instance. So the join was a way to learn an FK id, not a locked read. Fix: read `order.coupon_id` off the already-locked Order row, keep the explicit coupon lock. **Strictly narrower — no new race.** Previously coupon columns were read at the instant of the order lock while unlocked; now every coupon field is read only after its own lock is held. Sole `Coupon` lock in the app, so no ABBA cycle is possible.
+
+**THE FINDING THAT MATTERS MOST FOR RUN-1: `OversellRaceTests` and `CouponRaceTests` ARE SEQUENTIAL, NOT CONCURRENT.** Their own docstring says "in sequence — exactly the interleaving the row locks permit". They exercise the **post-lock sufficiency re-check**, not lock contention — and **on SQLite they would pass even with `select_for_update` deleted entirely.** The builder proved they are not vacuous by mutation (neutering the stock sufficiency re-check -> `CheckViolation` on `products_stock_check`; neutering the coupon validity re-check -> 200 != 409). **They were never weakened by this fix, and they never proved locking.** The repo's only "race" tests do not test races. **This is the strongest argument yet for RUN-1, and it is now evidence rather than intuition.**
+
+**The third root cause is UNCHARACTERISED and has no task.** PG-1's 68 defects have **two** product root causes, not three. The remainder is **6 test-only Postgres failures** in two mechanisms: (a) **index introspection** — PG creates `varchar_pattern_ops` duplicates, so 4 tests assert a false "grew a non-unique duplicate index" invariant; (b) **sequences are NOT transactional**, so hardcoded PKs break — `data={"order_id": 1}` in `test_correlation_ids.py` (404 != 500) and `[611..615] != [1..5]` in `PaginationStabilityTests`. PG-2c is the xfail blind spot and PG-2d the `load_dotenv` hazard, so **nothing owns this.** Ledgered as **PG-2e**.
+
+| Task | Req | Pri | Status |
+|---|---|---|---|
+| PG-2b | Slug `varchar(100)` `StringDataRightTruncation` | P1 | PENDING — 1 error still live on PG. |
+| PG-2e | 6 test-only PG failures: `varchar_pattern_ops` index introspection + non-transactional sequences breaking hardcoded PKs | P1 | PENDING — **new, created by this task.** Test-side, but it means pagination and correlation-id tests are asserting engine-specific behaviour. |
+
+## ASYNC-1 RESULT — the hypothesis is CONFIRMED, and it is worse than "slow"
+
+**Confirmed with evidence.** One `send_mail` in the whole codebase (`common/notifications.py:47`, `fail_silently=False`); called inline from views, models and admin hooks; **no queue, no worker, no retry, no backoff, no dead-letter.** Not one `celery`/`rq`/`kombu` in `requirements.txt`, no `CACHES`, no scheduler, no cron service in `docker-compose.yml`.
+
+**1. NO `EMAIL_TIMEOUT` IS SET (`config/settings.py:422-428`).** Django then passes `timeout=None` to `smtplib` — an **unbounded socket wait**. `.env.example` has no key either. This is not a slow p99; **a hung mail provider hangs the request forever**, while holding row locks.
+
+**2. ZERO `transaction.on_commit` anywhere.** Every send happens **pre-commit, inside the caller's `atomic()`** — a cost the code itself documents. Worst: `orders/views.py:1943` (ORDER_PAID) inside payment verification's atomic, holding `select_for_update` on order, products and coupon.
+
+**3. HIGHEST-RISK SITE — `orders/views.py:1943`.** The only send on a money-critical storefront path; it runs under row locks, pays the full SMTP handshake in the p99 tail of "payment successful", and its failure is the worst available: **the money has moved, the order is confirmed, and the confirmation email fails SILENTLY.** The customer sees a success page and waits forever for mail the logs call attempted and the system calls fine. With no timeout, that request **holds those row locks indefinitely and blocks every concurrent checkout touching the same SKUs.** Second: `products/models.py:189` — the same unbounded wait executed **once per opted-in user in a loop**, inside `adjust_stock`'s locked transaction.
+
+**4. PER-PROCESS COOLDOWN.** `ops/alerts.py:22-23` admits `LocMemCache` ("Redis once SPEC-2-03 wires it") and **no `CACHES` is configured**, so the alert cooldown is **per-process** — gunicorn's workers each keep their own window, so the documented mail-bomb bound **does not hold across workers**.
+
+**5. THE REGISTRY IS A HOOK INTO A VOID.** `_EVENT_HANDLERS` has exactly one entry, `ORDER_PAID`. `orders/events.py:43-45` dispatches `order.shipped` / `order.delivered` / `order.cancelled` as **bare strings that are not members of `AuditEvent.EventType`** and match no handler — DEBUG-logged no-ops at `notifications.py:106-107`. No receipt, no return/refund notification, no enquiry acknowledgement.
+
+**6. ONE RECIPIENT'S FAILURE ABORTS THE REST.** `ops/alerts.py:107-111` wraps the whole recipient loop in one `try`, so a single SMTP failure abandons **every remaining recipient** and the partial failure is one swallowed exception.
+
+**7. FOUR STALE CLAIMS FOUND** — including **two in this repo's own ledger**: `ops/alerts.py:6-7` says "four alert types" and defines **five**; `:20-22` claims a stock-edit alert trigger that **does not exist** (one caller, `ops/views.py:90`); and **`section-00-infrastructure.md` + `spec-run-state.md` describe `send_mail` as "scattered … in controllers" — STALE, there is now exactly ONE call site.** The R-19.0 deviation was remediated; the async defect in the same paragraph is real and unfixed.
+
+| Task | Req | Pri | Status |
+|---|---|---|---|
+| ASYNC-2a | Set an SMTP timeout, env-driven, with a pin | **P1** | PENDING — smallest item in this queue and the cheapest risk reduction available: one settings key turns an unbounded hang into a bounded failure. |
+| ASYNC-2b | Stop sending pre-commit inside `atomic()` — at minimum `ORDER_PAID` and the back-in-stock loop, which hold row locks across an unbounded network wait | **P1** | PENDING — **the highest-value item in the entire async queue.** A row lock held across an SMTP handshake is a checkout-blocking outage waiting for a bad minute. |
+| ASYNC-2c | Jobs layer: outbox, retry with backoff, dead-letter, observability (**SPEC-2-03**) | P2 | PENDING — the structural fix. Depends on 2b establishing the outbox seam. |
+| ASYNC-2d | Per-recipient failure isolation in the alert loop; shared cooldown backend | P2 | PENDING |
+| ASYNC-2e | Register `shipped`/`delivered`/`cancelled` or stop dispatching them | P2 | PENDING — currently strings outside the `EventType` vocabulary, reaching nothing. |
 
 **The external audit is right, and the root cause is one thing: notifications are SYNCHRONOUS.** `send_mail` is called inline from controllers; the ledger records R-19.0 (scattered manual `send_mail`) as a deviation owned by SPEC-2-03, and §19 never mandates Celery or Redis — so there is no queue, no retry, no backoff and no dead-letter anywhere.
 
