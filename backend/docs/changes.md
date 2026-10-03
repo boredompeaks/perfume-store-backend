@@ -1629,10 +1629,10 @@ A send that fails is still swallowed with **no retry, no dead-letter and no cust
 
 | ASYNC-2b2 | SQLite | PostgreSQL 17 | scripts | claim-scan | Black 26.5.1 |
 |---|---|---|---|---|---|
-| before (`92139d0`) | `1790 / OK / xf 4 / 100.00% / 8828 stmts` | `1790 / FAILED (failures=6, errors=1) / xf 4 / 8828 stmts` | `167 / OK` | `0 error(s)` | 108 files repo-wide (no `pyproject.toml` pins it) |
-| after | `1796 / OK / xf 4 / 100.00% / 8920 stmts` | `1796 / FAILED (failures=6, errors=1) / xf 4 / 100.00% / 8920 stmts` | `167 / OK` | `0 error(s)` | exit 1, **0 new** dirty lines in the two touched files |
+| before (`92139d0`) | `1790 / OK / xf 4 / 100.00% / 8828 stmts` | `1790 / FAILED (failures=6, errors=1) / xf 4 / 8828 stmts` | `167 / OK` | `0 error(s)` | `products/models.py` 13 dirty `-` lines in 2 regions, `products/test_restock.py` 12 in 4 |
+| after | `1797 / OK / xf 4 / 100.00% / 8934 stmts` | `1797 / FAILED (failures=6, errors=1) / xf 4 / 100.00% / 8934 stmts` | `167 / OK` | `0 error(s)` | `products/models.py` **13** dirty `-` lines in 2 regions (head 54/95 = base 53/94, shifted by the one added import), `products/test_restock.py` **9** in 4 (head 16/68/120/163) |
 
-The 7 PostgreSQL failures are the same 7 PG-1 named above, by name and count, unchanged by this commit; the 6 tests added here pass on both engines.
+The 7 PostgreSQL failures are the same 7 PG-1 named above, by name and count, unchanged by this commit; the 7 tests added here pass on both engines. Black exits 1 on both files, which is the pre-existing 108-file repo-wide drift on 26.5.1 (no `pyproject.toml` pins it). The per-region heads above are the honest measurement, and cycle 2 of this task corrected the first version of this row, which had claimed "0 new dirty lines" on a count that included the blank line Black wanted after `RestockModelTests`' docstring, which the same commit had deleted: **every one of the 4 remaining regions in `products/test_restock.py` and both regions in `products/models.py` exists verbatim in the `92139d0` blob**, so no line this task added is one Black would rewrite. Counting dirty lines by set membership across the whole file over-reports here (`self.assertEqual(` appears in both blobs), which is why the claim is made per region instead.
 
 ### What the defect was, measured
 
@@ -1647,22 +1647,31 @@ Deferring alone is **not** the fix, and two things break if you stop there:
 - **Retry semantics (trap 1).** The spent stamp `notified_at` used to commit *with* the stock change. Keep the stamp in the transaction and only deferring the send means a failed send has already spent the row: no mail, and the customer is dropped permanently. So the stamp moved into the post-commit phase, where a failure can take it back.
 - **Double sends (trap 2).** The in-lock loop is what made "one cycle, one email" true. With the send after the mark's window, two rapid crossings can each reach the same armed row.
 
-The resolution is that **the claim is the mutual exclusion and it happens before the send**: each row is reserved by a conditional `UPDATE` whose filter is the arming predicate (`notified_at IS NULL`), `0` rows updated means a concurrent cycle won it and the send is skipped, and a failed send releases the claim, filtered on the claimed timestamp so it cannot clear a stamp a re-arm or a later cycle has since written. One stock cycle, one email per opt-in, retry on failure, and no product-row lock anywhere in the send path.
+The resolution is that **the claim is the mutual exclusion and it happens before the send**: each row is reserved by a conditional `UPDATE` whose filter is the arming predicate (`active=True AND notified_at IS NULL`), `0` rows updated means the row is not claimable and the send is skipped, and a failed send releases the claim, filtered on the claimed timestamp so it cannot clear a stamp a re-arm or a later cycle has since written. One stock cycle, one email per opt-in, retry on failure, and no product-row lock anywhere in the send path.
+
+**The claim filter carries `active=True`, and that is not decoration (cycle 2).** Cycle 1 called `notified_at IS NULL` "the arming predicate" in the docstring and in this row; it is not the full predicate, and a row opted out mid-fan-out was still claimed and still mailed - the auditor's cycle-1 probe printed `INACTIVE_ROW_STILL_CLAIMED_rows=1`, and this task's own reproduction against cycle 1's commit is the same fact: 2 sends where 1 is correct. The window is real because the armed list is captured **inside** the inventory transaction while the claim lands **after** it commits, so the two checks are no longer the same moment. Carrying `active=True` in both makes them the same predicate again and reuses the existing `0 rows updated -> skip` branch. Not a regression, on the auditor's measurement: the pre-fix stamp filter was identical and pre-fix code behaves the same, which is why this is a P3 and not a P1.
 
 ### Tests, and the ones that can actually fail
 
 Every send-exercising test in `products/test_restock.py` now wraps its crossing in `captureOnCommitCallbacks(execute=True)`. That is not cosmetic: `on_commit` callbacks never run inside a `TestCase`, so **without** it `test_inactive_row_never_mails` would have gone green on a fan-out that never executed. The pre-existing assertions are unchanged.
 
-Four of the added tests were run against the **pre-fix** `products/models.py` (`git restore --source=92139d0`) and all four fail there, so they are pinned to the mechanism and not to the outcome:
+Five of the added tests were run against the **pre-fix** `products/models.py` (`git restore --source=92139d0`) and all five fail there, so they are pinned to the mechanism and not to the outcome:
 
 | test | what it asserts | pre-fix failure |
 |---|---|---|
 | `test_send_runs_with_the_stock_lock_block_already_popped` | while the send runs, the innermost atomic block is still the **caller's** (`connection.atomic_blocks[-1]` is the same object), so `adjust_stock`'s block, and the lock it holds, is already gone | the innermost block is `adjust_stock`'s |
 | `test_notice_is_registered_not_performed_under_the_lock` | nothing has been sent when `adjust_stock` returns, and exactly one commit-hook callback was captured | `call_count` is already 1 inside the block |
 | `test_claim_before_send_drops_a_row_another_cycle_already_won` | a second cycle claiming the rows still ahead of the fan-out yields **one** send, not two | 2 sends |
+| `test_claim_skips_a_row_that_opted_out_after_the_capture` | a row opted out after the armed list was captured gets **no** send and stays unspent, while the one row still armed does | 2 sends |
 | `test_rollback_of_the_stock_write_discards_the_registered_send` | a rollback that happens **after** the crossing sends **zero** mails (asserted on the count, not on an exception) | 1 send |
 
-`test_failed_send_is_retried_on_the_next_crossing` is the trap-1 guard and does **not** fail against pre-fix code (pre-fix a failed send also left the row armed) - it fails against the naive deferral, which is the point. `test_rearm_clears_a_claim_whose_send_never_happened` pins that a claimed-but-unsent row cannot wedge the product out of future notifications. `test_transaction_rollback_also_rolls_the_spent_stamp` is kept and is now labelled honestly: it **cannot** fail against pre-fix code, because the `StockMovement` insert precedes the crossing branch, so no mail was attempted either way.
+`test_claim_skips_a_row_that_opted_out_after_the_capture` was added in cycle 2 and is the only test that fails against cycle 1's own commit: restored at `0a9ab5a` it fails `AssertionError: 2 != 1`, because the pk-only claim mailed the opted-out row, and against `92139d0` with the identical message.
+
+Three tests are **characterisations, not guards**, and are labelled as such in their own docstrings rather than left to be read as proof:
+
+- `test_failed_send_is_retried_on_the_next_crossing` is the trap-1 guard against the *naive* deferral. It is green against pre-fix code (pre-fix a failed send also left the row armed); what it rules out is the fix that keeps the stamp in the transaction.
+- `test_transaction_rollback_also_rolls_the_spent_stamp` cannot fail against pre-fix code, because the `StockMovement` insert precedes the crossing branch, so no mail was attempted either way. The rollback-must-not-mail invariant belongs to `test_rollback_of_the_stock_write_discards_the_registered_send`; this one hands it over and says so.
+- `test_rearm_clears_a_claim_whose_send_never_happened` is also green pre-fix (the pre-fix loop only ever stamped rows it had mailed). It documents that a claimed-but-unsent row does not wedge the product out of future notifications.
 
 Two existing tests were adjusted rather than added to: every crossing is wrapped in `captureOnCommitCallbacks`, and `test_send_failure_is_log_only_and_never_blocks_the_loop` keys its failure on the **recipient** instead of on call order, because the loop's row order is the planner's and the old order-dependent `side_effect` list would have become a coin flip on the other engine once the loop's query plan changed.
 

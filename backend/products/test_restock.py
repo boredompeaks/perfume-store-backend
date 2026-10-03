@@ -210,7 +210,9 @@ class RestockTriggerTests(ApiTestCase):
         """A row claimed by a cycle that died before sending must not wedge
         the product out of future notifications. Reached here by stamping the
         row directly, which is exactly the state a process killed between
-        claim and send leaves behind."""
+        claim and send leaves behind. A characterisation, not a guard: it is
+        green against the pre-ASYNC-2b2 code too, which only ever stamped
+        rows it had mailed."""
         self._opt_in(self.buyer)
         RestockNotification.objects.filter(user=self.buyer).update(
             notified_at=timezone.now()
@@ -286,7 +288,9 @@ class RestockTriggerTests(ApiTestCase):
     def test_failed_send_is_retried_on_the_next_crossing(self):
         """Trap 1, end to end: the spent stamp no longer rides the stock
         transaction, so a send failure must give the row back or that
-        customer is spent on an email that never went out."""
+        customer is spent on an email that never went out. A guard against
+        the naive deferral, not against the pre-ASYNC-2b2 code, which also
+        left the row armed after a failed send."""
         self._opt_in(self.buyer)
         with mock.patch(
             "common.notifications.send_email", side_effect=Exception("smtp down")
@@ -333,6 +337,41 @@ class RestockTriggerTests(ApiTestCase):
             RestockNotification.objects.filter(notified_at__isnull=False).count(),
             2,
         )
+
+    def test_claim_skips_a_row_that_opted_out_after_the_capture(self):
+        """The armed list is captured inside the inventory transaction and
+        the claim lands after it commits, so a customer who opts out in that
+        window is still in the list. The claim re-checks ``active=True``, so
+        the row is skipped and never mailed, and never spent. With a claim
+        filtered on the pk alone the opt-out was resurrected: a second email
+        to someone who had withdrawn consent, stamped on top of it."""
+        self._opt_in(self.buyer)
+        self._opt_in(self.other, client=self.fresh_client())
+
+        def opt_out_the_others(template, context, subject, recipient):
+            # The window: everyone else in the captured list opts out while
+            # our fan-out is mid-loop. Keyed on the recipient, so it does not
+            # matter which row the planner hands the loop first.
+            RestockNotification.objects.exclude(user__email=recipient).update(
+                active=False
+            )
+
+        with mock.patch(
+            "common.notifications.send_email", side_effect=opt_out_the_others
+        ) as send_mock:
+            with self.captureOnCommitCallbacks(execute=True):
+                self.product.adjust_stock(None, 5, "restock")
+        # One send: the opted-out row is not mailed.
+        self.assertEqual(send_mock.call_count, 1)
+        mailed = send_mock.call_args_list[0].args[3]
+        opted_out = list(RestockNotification.objects.filter(active=False))
+        # The opt-out really happened, so one send is not the trivial
+        # consequence of there being only one opt-in to begin with.
+        self.assertEqual(len(opted_out), 1)
+        self.assertNotEqual(opted_out[0].user.email, mailed)
+        # And the row is left unspent: nothing pairs it with a send that
+        # never happened.
+        self.assertIsNone(opted_out[0].notified_at)
 
     def test_send_runs_with_the_stock_lock_block_already_popped(self):
         """ASYNC-2b2's defect is the LOCK, so the assertion is about where
@@ -389,10 +428,11 @@ class RestockTriggerTests(ApiTestCase):
 
     def test_transaction_rollback_also_rolls_the_spent_stamp(self):
         """An exception inside adjust_stock leaves the stock and the stamp
-        untouched. Cannot fail against the pre-ASYNC-2b2 code — the
-        StockMovement insert precedes the crossing branch, so no mail was
-        attempted either way — which is why the two tests below carry the
-        rollback-must-not-mail invariant instead."""
+        untouched. This is a characterisation, not a guard: it cannot fail
+        against the pre-ASYNC-2b2 code, because the StockMovement insert
+        precedes the crossing branch, so no mail was attempted either way.
+        The rollback-must-not-mail invariant belongs to the single test
+        below, which does fail pre-fix."""
         self._opt_in(self.buyer)
         from products.models import StockMovement
 
@@ -451,6 +491,7 @@ class RestockTriggerTests(ApiTestCase):
 @tag("restock")
 class RestockModelTests(ApiTestCase):
     """Uniqueness constraint + str/repr sanity."""
+
     def test_unique_user_product_constraint(self):
         product = self.make_product(stock=0)
         user = self.make_user("dup")

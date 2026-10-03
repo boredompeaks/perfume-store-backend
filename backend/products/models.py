@@ -201,12 +201,17 @@ class products(models.Model):
 
         Each row is CLAIMED before its send, not after. The claim is the
         conditional UPDATE whose filter is the arming predicate
-        (``notified_at IS NULL``), so it is the mutual exclusion: 0 rows
-        updated means a concurrent stock cycle won this row first and the
-        send is skipped, which is what keeps one stock cycle to one email
-        per opt-in now that nothing else serialises the fan-out. Sending
-        first and stamping second, as this did under the lock, left two
-        rapid crossings free to each reach the same armed row.
+        (``active=True AND notified_at IS NULL``), so it is the mutual
+        exclusion: 0 rows updated means a concurrent stock cycle won this
+        row first and the send is skipped, which is what keeps one stock
+        cycle to one email per opt-in now that nothing else serialises the
+        fan-out. Sending first and stamping second, as this did under the
+        lock, left two rapid crossings free to each reach the same armed
+        row. Carrying ``active=True`` in the claim as well as in the
+        capture is load-bearing rather than decorative: the capture runs
+        inside the inventory transaction and the claim after it commits, so
+        without it a customer who opted out in that window would still be
+        mailed, on a row their own opt-out had already disarmed.
 
         The claim IS the spent stamp, so it is released when the send
         fails. The stamp no longer rides the inventory transaction, and a
@@ -231,12 +236,19 @@ class products(models.Model):
         ).select_related("user")
         for preference in armed:
             claimed_at = timezone.now()
+            # The claim carries the whole arming predicate, not just "not yet
+            # stamped": the list above was captured inside the inventory
+            # transaction while this claim lands post-commit, so a customer
+            # who opted out in between is still in the list and has to be
+            # re-checked here or they are mailed anyway.
             claimed = RestockNotification.objects.filter(
-                pk=preference.pk, notified_at__isnull=True
+                pk=preference.pk, active=True, notified_at__isnull=True
             ).update(notified_at=claimed_at)
             if not claimed:
-                # Another stock cycle's claim landed first: this row's email
-                # for the cycle is accounted for, so sending would double up.
+                # Another stock cycle's claim landed first, or this row is no
+                # longer armed: either way its email for the cycle is
+                # accounted for, so sending would double up or resurrect an
+                # opt-out.
                 continue
             try:
                 notifications.send_email(
