@@ -2800,27 +2800,33 @@ def _returns_closed():
     store refuses every order it has, and "your 30 days ran out" would be a
     misleading thing to tell a customer whose window was never open.
 
-    It CANNOT disagree with the verdict the gate already reached, and that is
-    structural rather than incidental: this applies
-    ``return_window_days == CLOSED_RETURN_WINDOW_DAYS`` to the RAW column,
-    while ``_return_window_refusal`` applies the same comparison to
+    THE COMPARISON agrees with the gate's, and the READS do not have to. This
+    applies ``return_window_days == CLOSED_RETURN_WINDOW_DAYS`` to the RAW
+    column, while ``_return_window_refusal`` applies the same comparison to
     ``resolved_return_window_days()``, and for every value the column admits
-    the two expressions are equal - NULL resolves to 30, which is neither
+    the two EXPRESSIONS are equal - NULL resolves to 30, which is neither
     closed nor equal to 0; 0 resolves to 0, which is both; N > 0 resolves to
     itself, which is neither.
     ``test_the_three_states_are_three_and_each_is_spelled_out_by_hand`` drives
-    all of those values and asserts both expressions together, so that
-    agreement is pinned by a test rather than claimed by this comment.
+    all of those values and asserts both expressions together.
 
-    What is NOT claimed is that they are ONE read: they are two, so a merchant
-    saving the singleton between them inside one request could make them
-    differ. That is left in place deliberately. The window it opens is
-    sub-millisecond, it needs a concurrent admin save to enter it, and the only
-    divergence it can produce is a customer told their window expired moments
-    after the merchant reopened it. Removing it would mean threading the
+    What is NOT claimed is that they are ONE read. They are two, each its own
+    ``get_or_create`` of the singleton, and the ``atomic`` block plus
+    ``select_for_update()`` in the seam locks the ORDER - not SiteSettings - so
+    a merchant saving the window between the two reads can make them disagree.
+
+    THE BOUND ON THAT, which is what makes it a bounded defect rather than a
+    hole: this is reached only INSIDE the ``not _return_eligible`` branch, so
+    the verdict is already decided and a stale read can only MISLABEL a
+    refusal that has already happened. It cannot admit a return - there is no
+    path from here back to an acceptance - so the seam fails CLOSED, and the
+    only artefact of the race is the wrong sentence and a missing refusal code
+    on a refusal the customer was getting anyway.
+
+    Two reads are kept deliberately. Collapsing them would mean threading the
     verdict's own code back out of ``_return_eligible`` and re-deriving the
-    machine half of eligibility here, which trades a harmless race for two
-    sources of truth about whether an order may be returned.
+    machine half of eligibility in the seam, trading a bounded, fail-closed
+    mislabel for two sources of truth about whether an order may be returned.
     """
     return SiteSettings.load().returns_closed()
 
@@ -2845,6 +2851,20 @@ def _return_window_refusal(order, now):
     clock read of the whole predicate: one read means a request cannot be
     accepted by a gate that consulted one clock and refused by a gate that
     consulted a later one.
+
+    WHO CONSUMES THE CODE, precisely, because it is NOT the seam. The only
+    production caller is ``_return_eligible``, which reduces this to a boolean
+    with ``is None`` and therefore DISCARDS which code it was: both refusal
+    codes collapse to the same False there. The body the customer finally gets
+    is re-derived by the seam from an INDEPENDENT read - ``_returns_closed()``
+    - so at the seam the closed code is load-bearing and the other two are
+    not, and ``RETURN_REFUSAL_OUTSIDE_WINDOW`` reaches no response body at
+    all. Stated here because a reader of the vocabulary would otherwise
+    assume all three codes steer the shipped response. They do not; what the
+    seam distinguishes is closed against everything else, and that is the
+    distinction the ruling asks for. It is also why the closed/expired
+    distinguishability pin survives mutating either code name: the seam's
+    choice is made from the store's policy, not from the string.
     """
     window = _return_window_days()
     if window == CLOSED_RETURN_WINDOW_DAYS:
