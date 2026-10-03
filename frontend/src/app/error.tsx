@@ -14,7 +14,7 @@ export default function ErrorPage({
       <h1 className="mt-4 font-display text-4xl tracking-tight">
         We couldn&apos;t load this page.
       </h1>
-      <p className="mx-auto mt-4 max-w-md text-ink-muted">
+      <p className="mx-auto mt-4 max-w-md text-ink-secondary">
         The request failed. Retry, or come back in a moment.
       </p>
       <button

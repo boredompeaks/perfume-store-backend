@@ -21,7 +21,7 @@ async function NewArrivals() {
 
     return (
       <section className="mx-auto max-w-6xl px-4 py-24 sm:px-6">
-        <div className="flex items-baseline justify-between gap-4 border-t border-line pt-10">
+        <div className="flex items-baseline justify-between gap-4 border-t border-hairline pt-10">
           <h2 className="font-display text-3xl tracking-tight">
             New arrivals
           </h2>
@@ -63,7 +63,7 @@ export default function HomePage() {
         }}
       />
 
-      <section className="noise relative overflow-hidden border-b border-line">
+      <section className="noise relative overflow-hidden border-b border-hairline">
         <span
           aria-hidden="true"
           className="text-ghost pointer-events-none absolute -right-8 top-6 hidden select-none font-display text-[20rem] leading-none lg:block"
@@ -78,7 +78,7 @@ export default function HomePage() {
             Perfumes composed with{" "}
             <em className="italic text-bronze">restraint</em>.
           </h1>
-          <p className="mt-8 max-w-xl text-lg leading-relaxed text-ink-muted">
+          <p className="mt-8 max-w-xl text-lg leading-relaxed text-ink-secondary">
             {site.name} is a small perfume house. Fewer materials, longer
             macerations, no seasonal noise — fragrances built to be worn
             often.
@@ -97,11 +97,11 @@ export default function HomePage() {
               See new arrivals
             </Link>
           </div>
-          <p className="mt-14 flex flex-wrap gap-x-6 gap-y-2 text-xs uppercase tracking-[0.15em] text-ink-muted">
+          <p className="mt-14 flex flex-wrap gap-x-6 gap-y-2 text-xs uppercase tracking-[0.15em] text-ink-secondary">
             <span>Ships across India</span>
-            <span aria-hidden="true" className="text-line">·</span>
+            <span aria-hidden="true" className="text-hairline">·</span>
             <span>Secure Razorpay payments</span>
-            <span aria-hidden="true" className="text-line">·</span>
+            <span aria-hidden="true" className="text-hairline">·</span>
             <span>7-day returns</span>
           </p>
         </div>
@@ -118,7 +118,7 @@ export default function HomePage() {
       </Suspense>
 
       <section className="mx-auto max-w-6xl px-4 pb-24 sm:px-6">
-        <div className="grid gap-10 border-t border-line pt-10 md:grid-cols-2">
+        <div className="grid gap-10 border-t border-hairline pt-10 md:grid-cols-2">
           <div>
             <p className="text-xs uppercase tracking-[0.2em] text-bronze">
               The house position
@@ -127,7 +127,7 @@ export default function HomePage() {
               Built around a single idea, worked until it holds.
             </h2>
           </div>
-          <div className="space-y-4 leading-relaxed text-ink-muted md:pt-12">
+          <div className="space-y-4 leading-relaxed text-ink-secondary md:pt-12">
             <p>
               Every fragrance is built around a single idea, worked until it
               holds. We would rather release three perfumes we stand behind

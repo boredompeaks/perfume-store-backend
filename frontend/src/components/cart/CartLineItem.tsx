@@ -61,10 +61,10 @@ export default function CartLineItem({ item }: { item: CartItem }) {
   const busy = patch.isPending || remove.isPending;
 
   return (
-    <div className="flex gap-4 border-b border-line py-6 first:pt-0">
+    <div className="flex gap-4 border-b border-hairline py-6 first:pt-0">
       <Link
         href={`/products/${item.product.slug}`}
-        className="relative aspect-[4/5] h-28 w-24 shrink-0 bg-bronze-soft"
+        className="relative aspect-[4/5] h-28 w-24 shrink-0 bg-hairline"
         aria-label={item.product.name}
       >
         <ProductImage
@@ -83,7 +83,7 @@ export default function CartLineItem({ item }: { item: CartItem }) {
             >
               {item.product.name}
             </Link>
-            <p className="mt-0.5 text-sm text-ink-muted">
+            <p className="mt-0.5 text-sm text-ink-secondary">
               {item.product.size} ml · {formatINR(item.product.price)} each
             </p>
           </div>
@@ -96,7 +96,7 @@ export default function CartLineItem({ item }: { item: CartItem }) {
           className={`mt-auto flex items-center justify-between pt-3 ${busy ? "opacity-60" : ""}`}
         >
           <div
-            className="flex items-center border border-line"
+            className="flex items-center border border-hairline"
             role="group"
             aria-label={`Quantity for ${item.product.name}`}
           >
@@ -109,7 +109,7 @@ export default function CartLineItem({ item }: { item: CartItem }) {
               }}
               disabled={qty <= 1 || busy}
               aria-label="Decrease quantity"
-              className="px-3 py-1.5 text-ink-muted transition-colors hover:text-ink disabled:opacity-40"
+              className="px-3 py-1.5 text-ink-secondary transition-colors hover:text-ink disabled:opacity-40"
             >
               −
             </button>
@@ -123,7 +123,7 @@ export default function CartLineItem({ item }: { item: CartItem }) {
               }}
               disabled={qty >= maxQty || busy}
               aria-label="Increase quantity"
-              className="px-3 py-1.5 text-ink-muted transition-colors hover:text-ink disabled:opacity-40"
+              className="px-3 py-1.5 text-ink-secondary transition-colors hover:text-ink disabled:opacity-40"
             >
               +
             </button>
@@ -133,7 +133,7 @@ export default function CartLineItem({ item }: { item: CartItem }) {
             type="button"
             onClick={() => remove.mutate()}
             disabled={busy}
-            className="text-sm text-ink-muted underline underline-offset-4 transition-colors hover:text-bronze disabled:opacity-40"
+            className="text-sm text-ink-secondary underline underline-offset-4 transition-colors hover:text-bronze disabled:opacity-40"
           >
             {remove.isPending ? "Removing…" : "Remove"}
           </button>

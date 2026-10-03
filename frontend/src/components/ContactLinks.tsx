@@ -124,7 +124,7 @@ export default function ContactLinks({
             aria-label={item.label}
             title={item.label}
             {...(item.external ? { target: "_blank", rel: "noreferrer" } : {})}
-            className="flex h-10 w-10 items-center justify-center border border-line bg-surface text-ink transition-all hover:border-bronze hover:text-bronze active:scale-95"
+            className="flex h-10 w-10 items-center justify-center border border-hairline bg-surface text-ink transition-all hover:border-bronze hover:text-bronze active:scale-95"
           >
             {item.icon}
           </a>

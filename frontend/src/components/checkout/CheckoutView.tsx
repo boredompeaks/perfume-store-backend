@@ -42,7 +42,7 @@ export default function CheckoutView() {
 
   if (authStatus === "loading" || cartLoading) {
     return (
-      <div className="border border-line p-10 text-ink-muted" role="status">
+      <div className="border border-hairline p-10 text-ink-secondary" role="status">
         Loading checkout…
       </div>
     );
@@ -50,11 +50,11 @@ export default function CheckoutView() {
 
   if (authStatus === "anonymous") {
     return (
-      <div className="border border-line p-10 text-center">
+      <div className="border border-hairline p-10 text-center">
         <p className="font-display text-2xl tracking-tight">
           Sign in to check out.
         </p>
-        <p className="mx-auto mt-3 max-w-sm text-ink-muted">
+        <p className="mx-auto mt-3 max-w-sm text-ink-secondary">
           Orders are tied to your account. Your cart is saved on this device
           and waits for you.
         </p>
@@ -71,7 +71,7 @@ export default function CheckoutView() {
 
   if (cartError || !cart) {
     return (
-      <div className="border border-line p-10 text-center">
+      <div className="border border-hairline p-10 text-center">
         <p className="font-display text-2xl tracking-tight">
           We couldn&apos;t load your cart.
         </p>
@@ -88,7 +88,7 @@ export default function CheckoutView() {
 
   if (cart.items.length === 0 && !order) {
     return (
-      <div className="border border-line p-10 text-center">
+      <div className="border border-hairline p-10 text-center">
         <p className="font-display text-2xl tracking-tight">
           Your cart is empty.
         </p>
@@ -167,8 +167,8 @@ export default function CheckoutView() {
                 }}
               />
             </div>
-            <div className="mt-8 border-t border-line pt-6">
-              <h3 className="text-sm font-medium uppercase tracking-wide text-ink-muted">
+            <div className="mt-8 border-t border-hairline pt-6">
+              <h3 className="text-sm font-medium uppercase tracking-wide text-ink-secondary">
                 Coupon
               </h3>
               <div className="mt-3">
@@ -186,7 +186,7 @@ export default function CheckoutView() {
             >
               Review your order
             </h2>
-            <ul className="mt-6 divide-y divide-line border-y border-line">
+            <ul className="mt-6 divide-y divide-hairline border-y border-hairline">
               {cart.items.map((item) => (
                 <li
                   key={item.id}
@@ -194,7 +194,7 @@ export default function CheckoutView() {
                 >
                   <span>
                     {item.product.name}{" "}
-                    <span className="text-ink-muted">× {item.quantity}</span>
+                    <span className="text-ink-secondary">× {item.quantity}</span>
                   </span>
                   <span>
                     {formatINR(Number(item.product.price) * item.quantity)}
@@ -202,11 +202,11 @@ export default function CheckoutView() {
                 </li>
               ))}
             </ul>
-            <p className="mt-3 text-sm text-ink-muted">
+            <p className="mt-3 text-sm text-ink-secondary">
               Subtotal {formatINR(clientSubtotal)}
               {couponCode ? ` · coupon ${couponCode}` : ""}
             </p>
-            <p className="text-xs text-ink-muted">
+            <p className="text-xs text-ink-secondary">
               The final total is computed server-side when the order is
               created.
             </p>
@@ -246,14 +246,14 @@ export default function CheckoutView() {
             <h2 id="step-pay" className="font-display text-2xl tracking-tight">
               Payment
             </h2>
-            <p className="mt-3 text-sm text-ink-muted">
+            <p className="mt-3 text-sm text-ink-secondary">
               Order #{order.id} · total{" "}
               <strong className="text-ink">
                 {formatINR(order.total_amount)}
               </strong>{" "}
               — computed and held server-side.
             </p>
-            <p className="mt-1 text-xs text-ink-muted">
+            <p className="mt-1 text-xs text-ink-secondary">
               The cart is now frozen into this order. Editing it on the cart
               page won&apos;t change this amount.
             </p>
@@ -272,26 +272,26 @@ export default function CheckoutView() {
         )}
       </div>
 
-      <aside className="self-start border border-line p-6 lg:sticky lg:top-24">
+      <aside className="self-start border border-hairline p-6 lg:sticky lg:top-24">
         <h2 className="font-display text-xl tracking-tight">Order summary</h2>
         <div className="mt-4 flex items-baseline justify-between text-sm">
-          <span className="text-ink-muted">Cart subtotal</span>
+          <span className="text-ink-secondary">Cart subtotal</span>
           <span>{formatINR(clientSubtotal)}</span>
         </div>
         {order && (
           <>
             <div className="mt-2 flex items-baseline justify-between text-sm">
-              <span className="text-ink-muted">Order total (server)</span>
+              <span className="text-ink-secondary">Order total (server)</span>
               <span>{formatINR(order.total_amount)}</span>
             </div>
             {Number(order.discount_amount) > 0 && (
-              <p className="mt-1 text-xs text-ink-muted">
+              <p className="mt-1 text-xs text-ink-secondary">
                 Includes coupon discount of {formatINR(order.discount_amount)}.
               </p>
             )}
           </>
         )}
-        <p className="mt-4 border-t border-line pt-4 text-xs text-ink-muted">
+        <p className="mt-4 border-t border-hairline pt-4 text-xs text-ink-secondary">
           Payments are processed by Razorpay. Card details never touch our
           servers.
         </p>

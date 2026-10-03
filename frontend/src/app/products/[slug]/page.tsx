@@ -98,7 +98,7 @@ export default async function ProductPage({ params }: Props) {
         }}
       />
 
-      <nav aria-label="Breadcrumb" className="text-sm text-ink-muted">
+      <nav aria-label="Breadcrumb" className="text-sm text-ink-secondary">
         <ol className="flex items-center gap-2">
           <li>
             <Link href="/" className="transition-colors hover:text-bronze">
@@ -122,7 +122,7 @@ export default async function ProductPage({ params }: Props) {
       </nav>
 
       <div className="mt-8 grid gap-10 md:grid-cols-2">
-        <div className="relative aspect-[4/5] bg-bronze-soft">
+        <div className="relative aspect-[4/5] bg-hairline">
           <ProductImage
             src={product.image}
             alt={product.name}
@@ -139,7 +139,7 @@ export default async function ProductPage({ params }: Props) {
             {product.name}
           </h1>
           <p className="mt-4 text-lg">{formatINR(product.price)}</p>
-          <p className="mt-1 text-sm text-ink-muted">{product.size} ml</p>
+          <p className="mt-1 text-sm text-ink-secondary">{product.size} ml</p>
 
           <p className="mt-6 flex items-center gap-2 text-sm">
             {inStock ? (
@@ -151,7 +151,7 @@ export default async function ProductPage({ params }: Props) {
                 In stock
               </>
             ) : (
-              <span className="text-ink-muted">Sold out</span>
+              <span className="text-ink-secondary">Sold out</span>
             )}
           </p>
 
@@ -159,11 +159,11 @@ export default async function ProductPage({ params }: Props) {
             <AddToCartButton productId={product.id} stock={product.stock} />
           </div>
 
-          <div className="mt-10 border-t border-line pt-8">
+          <div className="mt-10 border-t border-hairline pt-8">
             <h2 className="font-display text-xl tracking-tight">
               About this fragrance
             </h2>
-            <p className="mt-4 leading-relaxed text-ink-muted">
+            <p className="mt-4 leading-relaxed text-ink-secondary">
               {product.description}
             </p>
           </div>

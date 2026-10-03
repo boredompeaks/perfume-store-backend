@@ -26,24 +26,24 @@ export default async function Footer() {
   const contact = await getContactSettings();
 
   return (
-    <footer className="border-t border-line">
+    <footer className="border-t border-hairline">
       <div className="mx-auto grid max-w-6xl gap-10 px-4 py-14 sm:px-6 md:grid-cols-[2fr_1fr_1fr_1fr]">
         <div>
           <p className="font-display text-lg tracking-tight">
             {site.name}<span aria-hidden="true">™</span>
           </p>
-          <p className="mt-2 max-w-xs text-sm leading-relaxed text-ink-muted">
+          <p className="mt-2 max-w-xs text-sm leading-relaxed text-ink-secondary">
             {site.tagline}. Fewer materials, longer macerations, no seasonal
             noise.
           </p>
-          <p className="mt-6 text-xs uppercase tracking-[0.15em] text-ink-muted">
+          <p className="mt-6 text-xs uppercase tracking-[0.15em] text-ink-secondary">
             Get in touch
           </p>
           <ContactLinks className="mt-3" settings={contact} />
         </div>
 
         <nav aria-label="Shop" className="flex flex-col items-start gap-2 text-sm">
-          <p className="text-xs uppercase tracking-[0.15em] text-ink-muted">Shop</p>
+          <p className="text-xs uppercase tracking-[0.15em] text-ink-secondary">Shop</p>
           {shopLinks.map((link) => (
             <Link
               key={link.label}
@@ -56,7 +56,7 @@ export default async function Footer() {
         </nav>
 
         <nav aria-label="Help" className="flex flex-col items-start gap-2 text-sm">
-          <p className="text-xs uppercase tracking-[0.15em] text-ink-muted">Help</p>
+          <p className="text-xs uppercase tracking-[0.15em] text-ink-secondary">Help</p>
           {helpLinks.map((link) => (
             <Link
               key={link.label}
@@ -75,7 +75,7 @@ export default async function Footer() {
         </nav>
 
         <nav aria-label="Legal" className="flex flex-col items-start gap-2 text-sm">
-          <p className="text-xs uppercase tracking-[0.15em] text-ink-muted">Legal</p>
+          <p className="text-xs uppercase tracking-[0.15em] text-ink-secondary">Legal</p>
           {legalLinks.map((link) => (
             <Link
               key={link.label}
@@ -85,14 +85,14 @@ export default async function Footer() {
               {link.label}
             </Link>
           ))}
-          <p className="text-xs leading-relaxed text-ink-muted">
+          <p className="text-xs leading-relaxed text-ink-secondary">
             Payments secured by Razorpay
           </p>
         </nav>
       </div>
 
-      <div className="border-t border-line">
-        <div className="mx-auto flex max-w-6xl flex-wrap items-center justify-between gap-2 px-4 py-5 text-xs text-ink-muted sm:px-6">
+      <div className="border-t border-hairline">
+        <div className="mx-auto flex max-w-6xl flex-wrap items-center justify-between gap-2 px-4 py-5 text-xs text-ink-secondary sm:px-6">
           <p>
             © {new Date().getFullYear()} {site.name}
             <span aria-hidden="true">™</span>. All rights reserved.

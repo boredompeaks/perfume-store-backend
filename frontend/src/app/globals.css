@@ -12,14 +12,19 @@
    from the cascade is not a token. `static` pins every key declared in this
    block to be emitted on every route without pulling in the default theme.
 
-   NOTE the naming break with the pre-refs build: `--color-ink-muted`,
-   `--color-line` and `--color-line-strong` are VOID (§2.1.1 renamed them to
-   `--color-ink-secondary`, `--color-hairline` and `--color-field-border`,
-   and the hexes behind them are void too). §2.1's round-4 preamble: "Every
-   ratio in the pre-refs spec was computed for `paper #faf8f3` / `bronze
-   #8a5a24` / `ink-muted #57534e` and is **void**." Components still on the old
-   names are listed in the task report, not silently aliased here — an alias
-   would let the old names outlive the decision.
+   NOTE the naming break with the pre-refs build. §2.1.1 renamed three tokens
+   and voided the hexes behind them: the muted-ink token (#57534E) became
+   `--color-ink-secondary` (#78716A), the rule token became
+   `--color-hairline` (#E5E2DC), and the strong-rule token became
+   `--color-field-border` (#857C72) — the WCAG 1.4.11 control boundary, which
+   is why hairline and field-border are separate families and must never be
+   collapsed. §2.1's round-4 preamble: "Every ratio in the pre-refs spec was
+   computed for `paper #faf8f3` / `bronze #8a5a24` / muted ink #57534e and is
+   **void**." The old names were removed with NO aliases, and the migration off
+   them is complete: `src/**` references only the canonical names, and
+   `lib/ui.test.ts` fails if any component ever asks for a colour token this
+   block does not declare. An alias would let the old names outlive the
+   decision.
    ========================================================================== */
 @theme static {
   /* ------------------------------------------------------------------
@@ -48,7 +53,15 @@
      textarea. `--color-hairline` is 1.23:1 and is therefore DECORATIVE ONLY —
      dividers, card edges, list rules — under exemption E2. It is never the
      sole boundary of an interactive control. Collapsing these two into one
-     token reintroduces the 1.4.11 bug the token layer exists to prevent. */
+     token reintroduces the 1.4.11 bug the token layer exists to prevent.
+
+     Hairline has one non-divider job: it is the 4:5 product plate behind
+     `ProductImage`, which §2.1.2 already prices as "plate #E5E2DC". The
+     pre-refs warm plate tint (#F1E9DC) has no canonical successor, and the
+     plate is the one surface where a page must differ from the canvas, so the
+     plate takes hairline and the body copy stays off it (§2.1.4 D3). Under
+     `prefers-contrast: more` the plate drops to `--color-surface`
+     (§3); that override is still outstanding. */
   --color-field-border: #857c72;
 
   /* ------------------------------------------------------------------
@@ -288,7 +301,7 @@
 /* Flat hairline base with a lighter sweep across it. The base is
    `--color-hairline` per CHANGE-7; the highlight composes `--color-surface`,
    the lightest token in the system, because the pre-refs sweep colour
-   (`--color-bronze-soft` #F1E9DC) is void with no successor in §2.1.1. */
+   (#F1E9DC) is void with no successor in §2.1.1. */
 .skeleton {
   background: linear-gradient(
     90deg,

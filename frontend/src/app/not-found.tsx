@@ -7,7 +7,7 @@ export default function NotFound() {
       <h1 className="mt-4 font-display text-4xl tracking-tight">
         This page doesn&apos;t exist.
       </h1>
-      <p className="mx-auto mt-4 max-w-md text-ink-muted">
+      <p className="mx-auto mt-4 max-w-md text-ink-secondary">
         The link may be outdated, or the product may have been retired.
       </p>
       <Link

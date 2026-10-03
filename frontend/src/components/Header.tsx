@@ -61,7 +61,7 @@ export default function Header() {
   return (
     <>
       <header
-        className={`sticky top-0 z-40 border-b border-line bg-paper transition-shadow ${
+        className={`sticky top-0 z-40 border-b border-hairline bg-paper transition-shadow ${
           scrolled ? "shadow-[0_2px_12px_-6px_rgb(28_25_23/0.15)]" : ""
         }`}
       >
@@ -122,7 +122,7 @@ export default function Header() {
                 <button
                   type="button"
                   onClick={logout}
-                  className="hidden text-ink-muted transition-colors hover:text-bronze sm:inline"
+                  className="hidden text-ink-secondary transition-colors hover:text-bronze sm:inline"
                 >
                   Sign out
                 </button>

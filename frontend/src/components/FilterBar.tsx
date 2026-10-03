@@ -66,7 +66,7 @@ export default function FilterBar() {
   const ordering = (searchParams.get("ordering") as Ordering) ?? DEFAULT_ORDERING;
 
   return (
-    <div className="mt-8 border-b border-line pb-5">
+    <div className="mt-8 border-b border-hairline pb-5">
       <div className="flex flex-wrap items-center gap-3">
         <div>
           <label htmlFor="product-search" className="sr-only">
@@ -117,7 +117,7 @@ export default function FilterBar() {
         </div>
 
         <div className="ml-auto flex items-center gap-2">
-          <label htmlFor="sort" className="text-sm text-ink-muted">
+          <label htmlFor="sort" className="text-sm text-ink-secondary">
             Sort
           </label>
           <select
@@ -148,11 +148,11 @@ export default function FilterBar() {
 
       {category && (
         <div className="mt-3 flex items-center gap-2 text-sm">
-          <span className="text-ink-muted">Category:</span>
+          <span className="text-ink-secondary">Category:</span>
           <button
             type="button"
             onClick={() => update({ category: null })}
-            className="flex items-center gap-1.5 border border-line px-2.5 py-1 transition-colors hover:border-ink"
+            className="flex items-center gap-1.5 border border-hairline px-2.5 py-1 transition-colors hover:border-ink"
           >
             {category}
             <span aria-hidden="true">×</span>

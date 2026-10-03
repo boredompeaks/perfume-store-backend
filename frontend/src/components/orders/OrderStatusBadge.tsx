@@ -13,7 +13,7 @@ export default function OrderStatusBadge({ status }: { status: OrderStatus }) {
   return (
     <span
       className={`inline-block px-2 py-0.5 text-xs uppercase tracking-wide ${
-        muted ? "border border-line text-ink-muted" : "bg-ink text-paper"
+        muted ? "border border-hairline text-ink-secondary" : "bg-ink text-paper"
       }`}
     >
       {labels[status]}

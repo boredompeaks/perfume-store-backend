@@ -74,7 +74,7 @@ export default function MenuOverlay({
       aria-label="Menu"
       className="fixed inset-0 z-50 flex flex-col bg-paper"
     >
-      <div className="flex h-16 items-center justify-between border-b border-line px-4 sm:px-6">
+      <div className="flex h-16 items-center justify-between border-b border-hairline px-4 sm:px-6">
         <span className="font-display text-xl tracking-tight">
           {site.name}
         </span>
@@ -114,7 +114,7 @@ export default function MenuOverlay({
         </ul>
       </nav>
 
-      <div className="border-t border-line px-6 py-6 text-sm">
+      <div className="border-t border-hairline px-6 py-6 text-sm">
         {status === "authenticated" ? (
           <button
             type="button"
@@ -122,7 +122,7 @@ export default function MenuOverlay({
               logout();
               onClose();
             }}
-            className="text-ink-muted transition-colors hover:text-bronze"
+            className="text-ink-secondary transition-colors hover:text-bronze"
           >
             Sign out
           </button>

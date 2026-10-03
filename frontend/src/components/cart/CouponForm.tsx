@@ -92,7 +92,7 @@ export default function CouponForm({
 
   if (preview) {
     return (
-      <div className="border border-line p-4 text-sm">
+      <div className="border border-hairline p-4 text-sm">
         <div className="flex items-center justify-between gap-3">
           <span className="font-medium uppercase tracking-wide">
             {preview.coupon} applied
@@ -100,18 +100,18 @@ export default function CouponForm({
           <button
             type="button"
             onClick={remove}
-            className="text-ink-muted underline underline-offset-4 transition-colors hover:text-bronze"
+            className="text-ink-secondary underline underline-offset-4 transition-colors hover:text-bronze"
           >
             Remove
           </button>
         </div>
-        <div className="mt-3 space-y-1 text-ink-muted">
+        <div className="mt-3 space-y-1 text-ink-secondary">
           <p>Discount: −{formatINR(preview.discount)}</p>
           <p className="text-ink">
             Total after coupon: {formatINR(preview.final_total)}
           </p>
         </div>
-        <p className="mt-3 text-xs text-ink-muted">
+        <p className="mt-3 text-xs text-ink-secondary">
           The coupon is re-validated server-side at checkout.
         </p>
       </div>
