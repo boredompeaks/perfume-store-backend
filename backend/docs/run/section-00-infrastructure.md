@@ -11,7 +11,7 @@ Owner mapping, for the avoidance of doubt:
 |---|---|---|---|
 | Load / stress harness | row **SPEC-2-09**, recorded by compliance during S21 and deferred to S2, never built | **Section 2** (technology stack), 9 deferred rows otherwise closed | ledgered here |
 | Postgres as the test database | **no existing row** — surfaced as a structural blind spot; S22 wired `psycopg` and a `DATABASE_URL` parser but the suite has only ever run on SQLite | **Section 22-adjacent** (closed) | ledgered here |
-| Red-team / probe scripts in-repo | **no existing row** — prior `red_team_probe.py` / `loadtest.py` were scratch, gitignored and **purged on 2026-09-30**; they were never repo code | none | ledgered here |
+| Red-team / probe scripts in-repo | **no existing row** — prior red-team and load-test scratch scripts were gitignored and **purged on 2026-09-30**; they were never repo code | none | ledgered here |
 
 ## THE ORDERING CONSTRAINT — read before scheduling anything else
 
@@ -74,7 +74,7 @@ already been caught lying seven times in this run.
 
 ## PG-2a RESULT — P0 fixed, and two of the orchestrator's premises were wrong
 
-`1b4f1f1` (`orders/admin.py` 36/10 · `orders/views.py` 17/4 · new `tests/test_postgres_row_locking.py` 258/0).
+`1b4f1f1` (`orders/admin.py` 36/10 · `orders/views.py` 17/4 · a new row-locking guard module under `backend/tests/` 258/0).
 
 **Both engines, full suite, measured by the builder:** SQLite **1776 / OK / xf 4 / 100.00% / 8818** (was 1769/8815) · PostgreSQL **1776 / `FAILED (failures=6, errors=1)` / xf 4 / 100.00% / 8818** (was `failures=6, errors=68`, 99.17%, 73 missed). **All 67 `NotSupportedError` gone, 67 -> 0**, measured by per-test exception map. `makemigrations --check` clean; Black 0 dirty added lines.
 
@@ -82,11 +82,11 @@ already been caught lying seven times in this run.
 
 **PREMISE 2 WAS WRONG — admin does not "inherit `select_related` from `list_display`".** Neither `orders/admin.py` nor `common/admin.py` contains `select_related`, and `Order.objects.select_related()` with no arguments joins nothing. The real mechanism, read off captured SQL: **Django 6.1 `ChangeList.get_select_related_fields()` names the `list_display` FKs explicitly**, so `user` AND `coupon` both become LEFT OUTER JOINs under `select_for_update`.
 
-**THE COUPON WAS ALREADY LOCKED, SEPARATELY.** `views.py:1798-1800` read `order.coupon` only to take `.pk`, then **immediately re-fetched it under its own `Coupon.objects.select_for_update()`**, and every coupon field read (`active`/`valid_from`/`valid_until`/`usage_limit`/`used_count`) comes off the post-lock instance. So the join was a way to learn an FK id, not a locked read. Fix: read `order.coupon_id` off the already-locked Order row, keep the explicit coupon lock. **Strictly narrower — no new race.** Previously coupon columns were read at the instant of the order lock while unlocked; now every coupon field is read only after its own lock is held. Sole `Coupon` lock in the app, so no ABBA cycle is possible.
+**THE COUPON WAS ALREADY LOCKED, SEPARATELY.** `orders/views.py:1798-1800` read `order.coupon` only to take `.pk`, then **immediately re-fetched it under its own `Coupon.objects.select_for_update()`**, and every coupon field read (`active`/`valid_from`/`valid_until`/`usage_limit`/`used_count`) comes off the post-lock instance. So the join was a way to learn an FK id, not a locked read. Fix: read `order.coupon_id` off the already-locked Order row, keep the explicit coupon lock. **Strictly narrower — no new race.** Previously coupon columns were read at the instant of the order lock while unlocked; now every coupon field is read only after its own lock is held. Sole `Coupon` lock in the app, so no ABBA cycle is possible.
 
 **THE FINDING THAT MATTERS MOST FOR RUN-1: `OversellRaceTests` and `CouponRaceTests` ARE SEQUENTIAL, NOT CONCURRENT.** Their own docstring says "in sequence — exactly the interleaving the row locks permit". They exercise the **post-lock sufficiency re-check**, not lock contention — and **on SQLite they would pass even with `select_for_update` deleted entirely.** The builder proved they are not vacuous by mutation (neutering the stock sufficiency re-check -> `CheckViolation` on `products_stock_check`; neutering the coupon validity re-check -> 200 != 409). **They were never weakened by this fix, and they never proved locking.** The repo's only "race" tests do not test races. **This is the strongest argument yet for RUN-1, and it is now evidence rather than intuition.**
 
-**The third root cause is UNCHARACTERISED and has no task.** PG-1's 68 defects have **two** product root causes, not three. The remainder is **6 test-only Postgres failures** in two mechanisms: (a) **index introspection** — PG creates `varchar_pattern_ops` duplicates, so 4 tests assert a false "grew a non-unique duplicate index" invariant; (b) **sequences are NOT transactional**, so hardcoded PKs break — `data={"order_id": 1}` in `test_correlation_ids.py` (404 != 500) and `[611..615] != [1..5]` in `PaginationStabilityTests`. PG-2c is the xfail blind spot and PG-2d the `load_dotenv` hazard, so **nothing owns this.** Ledgered as **PG-2e**.
+**The third root cause is UNCHARACTERISED and has no task.** PG-1's 68 defects have **two** product root causes, not three. The remainder is **6 test-only Postgres failures** in two mechanisms: (a) **index introspection** — PG creates `varchar_pattern_ops` duplicates, so 4 tests assert a false "grew a non-unique duplicate index" invariant; (b) **sequences are NOT transactional**, so hardcoded PKs break — `data={"order_id": 1}` in the correlation-id test module (404 != 500) and `[611..615] != [1..5]` in `PaginationStabilityTests`. PG-2c is the xfail blind spot and PG-2d the `load_dotenv` hazard, so **nothing owns this.** Ledgered as **PG-2e**.
 
 | Task | Req | Pri | Status |
 |---|---|---|---|
