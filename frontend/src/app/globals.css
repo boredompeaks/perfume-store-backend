@@ -1,4 +1,49 @@
-@import "tailwindcss";
+/* ==========================================================================
+   SOURCE DETECTION — the scanner is the build's blind spot, so it is pinned.
+
+   Tailwind v4 has no JS `content` array; source scanning is configured here in
+   CSS. Left to default, v4 walks the whole project from its detected base and
+   reads every text file it recognises, `docs/**` included — it does not parse
+   code, it tokenises strings, so any class-name-shaped token in prose becomes a
+   rule. `docs/design/UI-UX-SPEC.md` is 259 KB of specification that quotes
+   utilities by name; the pinning below is BUG-10.
+
+   Measured on this tree, stylesheet bytes emitted by `next build`:
+   44,632 before; 36,463 with the allowlist alone (-8,169 B, -18.3%, -83 rules,
+   -77 selectors); 34,444 with the test exclusion too (-10,188 B, -22.8%,
+   -101 rules). The dead weight was the spec's own `z-50`, `z-[55]`,
+   `duration-500`, `group-hover:scale-[1.04]`, `group-hover:scale-[1.02]`,
+   `backdrop-blur`, `rounded-2xl` and `text-8xl` — utilities an earlier commit
+   deliberately removed from components, still shipping because a document
+   mentions them.
+
+   Two directives, and both are required:
+
+     source(none)  turns OFF automatic detection. Without it, `@source` is
+                   additive and the project-wide walk still runs — the docs are
+                   explicit that `@source` *adds* paths, so an allowlist alone
+                   would still admit every doc file.
+     @source ".."  re-registers exactly one root. Paths resolve relative to
+                   THIS stylesheet (`src/app/globals.css`), so `..` is
+                   `frontend/src` — the only tree that renders. It resolves as
+                   a directory, so v4's normal extension heuristics still
+                   apply within it and a new component file needs no edit here.
+
+   `docs/`, `e2e/` and the run ledger are now outside the scanner entirely. The
+   spec prose stays readable and stays citable; it just stops compiling.
+
+   The second rule carves the co-located unit tests back out of `src/`. They live
+   inside the allowlisted root, and `lib/ui.test.ts` quotes utilities by name
+   while asserting the token contract — which pulled `border-x-2`,
+   `outline-2`, `stroke-2`, `bg-linear-to-r`, `ordinal` and the 3-D rotate/skew
+   properties in as production rules. A test file renders nothing, so no rule it
+   names can ever be needed. The pattern is deliberately scoped to this
+   stylesheet's own `@source` root (`../**` === `frontend/src`) rather than a
+   bare `**`, which the docs warn does not resolve reliably.
+   ========================================================================== */
+@import "tailwindcss" source(none);
+@source "..";
+@source not "../**/*.test.ts";
 
 /* ==========================================================================
    DESIGN TOKENS — the single source of truth.
@@ -206,11 +251,10 @@
      these tokens through Tailwind's `z-(--z-*)` variable shorthand, so the
      stacking order is a property of the values below instead of an accident
      of DOM position — which is all it was while the menu overlay and the
-     toast container sat on the same step. Written without literal class names
-     on purpose: Tailwind's source detection scans the project's text files,
-     `docs/design/*.md` included, so a utility name quoted in the spec still
-     emits a dead rule — whereas this file's own comments are not scanned.
-     A new z-index is a new token, or it is a bug. */
+     toast container sat on the same step.
+     A new z-index is a new token, or it is a bug. Note the scanner no longer
+     reads this file's neighbours, so a raw `z-50` typed into a component is
+     the only thing that could reintroduce one. */
   --z-sticky: 30; /* sticky purchase / summary panels — no consumer yet */
   --z-header: 40; /* <header> — Header.tsx */
   --z-overlay: 50; /* menu overlay, any modal — MenuOverlay.tsx */
