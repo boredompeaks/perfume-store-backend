@@ -1949,11 +1949,16 @@ def verify_payment(request):
             },
         )
         # [R-19.0] Event-driven customer notification beside the audit
-        # hook, inside this same atomic block (rollback-together, like
-        # record). dispatch never raises: a send failure is logged on the
-        # notifications channel and the captured payment stays confirmed
-        # (the SMTP-503 account-still-created behavior, mirrored).
-        notifications.dispatch(
+        # hook, in this same atomic block. Registered, not sent: the send
+        # itself moves to transaction.on_commit (ASYNC-2b1) so this block's
+        # select_for_update rows (Order, products, Coupon) are released at
+        # commit instead of being held for the length of the SMTP round
+        # trip — a slow mail provider no longer blocks other checkouts on
+        # the same SKU or coupon. dispatch never raises: a send failure is
+        # logged on the notifications channel at ERROR with its traceback
+        # and the captured payment stays confirmed (the SMTP-503
+        # account-still-created behavior, mirrored).
+        notifications.dispatch_on_commit(
             AuditEvent.EventType.ORDER_PAID,
             {"order": order},
         )

@@ -7,6 +7,12 @@
   ``AuditEvent.record`` hooks inside the caller's atomic block. A send
   failure is logged and swallowed (never breaks the business transaction);
   unregistered events are no-ops.
+- ASYNC-2b1 adds ``dispatch_on_commit()``: the verify_payment hook site
+  registers its order.paid send instead of performing it, so the money
+  path's ``select_for_update`` rows are released at commit rather than
+  held across the SMTP round trip. Deferral, rollback-discard and the
+  post-commit failure log are pinned; the proof-event tests execute the
+  callback via ``captureOnCommitCallbacks`` so they cannot pass vacuously.
 - Proof event: ``order.paid`` -> order-confirmation email (order number,
   total, frontend URL) on ``verify_payment`` success, with a failing send
   leaving the captured payment confirmed. locmem backend only — no network.
@@ -16,6 +22,7 @@ from unittest import mock
 
 from django.conf import settings
 from django.core import mail
+from django.db import transaction
 from django.test import tag
 
 from common import notifications
@@ -181,16 +188,23 @@ class OrderPaidProofEventTests(ApiTestCase):
             "/api/orders/payment/", {"order_id": order_id}, format="json"
         )
         self.assertEqual(res.status_code, 200, res.data)
-        return self.client.post(
-            "/api/orders/payment/verify/",
-            {
-                "razorpay_order_id": "order_TEST0001",
-                "razorpay_payment_id": "pay_TEST0001",
-                "razorpay_signature": "sig",
-                "order_id": order_id,
-            },
-            format="json",
-        )
+        # ASYNC-2b1: verify_payment REGISTERS the order.paid send on
+        # transaction.on_commit, and a TestCase rolls its own transaction
+        # back — so without captureOnCommitCallbacks the callback would
+        # never run and every assertion below would pass only because
+        # nothing was sent. execute=True runs the real callback; the
+        # assertions are the original ones, not relaxed.
+        with self.captureOnCommitCallbacks(execute=True):
+            return self.client.post(
+                "/api/orders/payment/verify/",
+                {
+                    "razorpay_order_id": "order_TEST0001",
+                    "razorpay_payment_id": "pay_TEST0001",
+                    "razorpay_signature": "sig",
+                    "order_id": order_id,
+                },
+                format="json",
+            )
 
     def test_verify_success_sends_confirmation_email(self):
         res = self._pay()
@@ -221,3 +235,67 @@ class OrderPaidProofEventTests(ApiTestCase):
             ).exists()
         )
         self.assertEqual(len(mail.outbox), 0)
+
+
+@tag("notifications")
+class PostCommitDispatchTests(ApiTestCase):
+    """ASYNC-2b1: ``dispatch_on_commit`` defers the send past the commit so
+    a money-path ``transaction.atomic()`` block is not holding its
+    ``select_for_update`` rows across an SMTP round trip."""
+
+    def test_send_is_deferred_until_the_transaction_commits(self):
+        order = _make_order(self.make_user("deferred"))
+        with self.captureOnCommitCallbacks(execute=True):
+            with transaction.atomic():
+                notifications.dispatch_on_commit(
+                    AuditEvent.EventType.ORDER_PAID, {"order": order}
+                )
+                # Inside the block, while the row locks are held: nothing
+                # sent, so no socket is open under them.
+                self.assertEqual(len(mail.outbox), 0)
+            # Leaving a savepoint is not the commit either - only the real
+            # outermost commit runs the callback.
+            self.assertEqual(len(mail.outbox), 0)
+        self.assertEqual(len(mail.outbox), 1)
+        self.assertEqual(mail.outbox[0].to, [order.user.email])
+
+    def test_rollback_discards_the_registered_send(self):
+        # The inline send this replaced could not be recalled: a later
+        # rollback in the same block still emailed a confirmed-looking
+        # order. A registered callback dies with its transaction.
+        order = _make_order(self.make_user("rolledback"))
+        with self.captureOnCommitCallbacks(execute=True):
+            with self.assertRaises(RuntimeError):
+                with transaction.atomic():
+                    notifications.dispatch_on_commit(
+                        AuditEvent.EventType.ORDER_PAID, {"order": order}
+                    )
+                    raise RuntimeError("later in the money block failed")
+        self.assertEqual(len(mail.outbox), 0)
+
+    def test_post_commit_send_failure_is_logged_and_swallowed(self):
+        # A callback runs where a raise could not roll anything back, so
+        # the broad catch in dispatch() is what keeps it out of an
+        # already-decided response - proven here through the real path.
+        order = _make_order(self.make_user("postcommitfail"))
+        with mock.patch(
+            "common.notifications.send_email", side_effect=Exception("smtp down")
+        ):
+            with self.assertLogs("common.notifications", level="ERROR") as logs:
+                with self.captureOnCommitCallbacks(execute=True):
+                    notifications.dispatch_on_commit(
+                        AuditEvent.EventType.ORDER_PAID, {"order": order}
+                    )
+        # ERROR with traceback, not a DEBUG line and not a silent pass.
+        self.assertTrue(any(r.levelname == "ERROR" for r in logs.records), logs.records)
+        self.assertIn("smtp down", "\n".join(logs.output))
+
+    def test_plain_dispatch_still_sends_synchronously(self):
+        # dispatch_on_commit is opt-in: the registry itself was NOT made
+        # to defer, so the ASYNC-2b2/2b3 hook sites (back-in-stock,
+        # shipped/delivered, webhooks) keep sending inside their own
+        # transaction and a caller can still ask for a synchronous send.
+        order = _make_order(self.make_user("syncreg"))
+        with self.captureOnCommitCallbacks(execute=True):
+            notifications.dispatch(AuditEvent.EventType.ORDER_PAID, {"order": order})
+            self.assertEqual(len(mail.outbox), 1)
