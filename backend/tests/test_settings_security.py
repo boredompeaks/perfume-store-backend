@@ -13,11 +13,13 @@ import sys
 import tempfile
 from datetime import timedelta
 from pathlib import Path
+from unittest import mock
 from urllib.parse import unquote
 
 import config.settings as config_settings
 from django.conf import settings
 from django.core.exceptions import ImproperlyConfigured
+from django.core.mail import send_mail
 from django.test import SimpleTestCase, override_settings
 from django.urls import resolve
 from django.views.static import serve as serve_media
@@ -250,6 +252,155 @@ class MfaTrustConfigTests(SimpleTestCase):
                 )
                 self.assertEqual(res.returncode, 0, res.stderr)
                 self.assertIn(expected, res.stdout)
+
+
+class EmailTimeoutConfigTests(SimpleTestCase):
+    """SPEC-ASYNC-2a: the SMTP socket wait is bounded, env-driven, and cannot
+    take the process down at settings import.
+
+    Before this, `EMAIL_TIMEOUT` was unset, so Django handed smtplib no
+    timeout at all: `socket.settimeout` is never called and a provider that
+    accepts the connection then stalls holds the request open forever. Every
+    send in this project is inline and pre-commit (inside the caller's
+    `transaction.atomic()`), so that wait is a checkout-blocking hang rather
+    than a slow request.
+
+    Import-time setting, so the resolution is pinned through the file's
+    subprocess pattern; every expected value below is a hand-written literal,
+    because an expectation recomputed from the constant under test would
+    agree with a wrong default from both sides.
+    """
+
+    _BOOT_ENV = _NON_DEBUG_ENV
+    _SNIPPET = "import config.settings as s; print('TIMEOUT', s.EMAIL_TIMEOUT)"
+
+    def test_the_documented_default_is_ten_seconds(self):
+        """The default is the number .env.example documents, written out by
+        hand here rather than read back from the setting.
+
+        `EMAIL_*` is already stripped from the child environment by
+        `run_settings_import`, so this observes the code's own default and
+        not a developer's local .env."""
+        res = run_settings_import(dict(self._BOOT_ENV), snippet=self._SNIPPET)
+        self.assertEqual(res.returncode, 0, res.stderr)
+        self.assertIn("TIMEOUT 10", res.stdout)
+
+    def test_the_environment_value_is_used(self):
+        for raw, expected in (
+            ("3", "TIMEOUT 3"),
+            ("1", "TIMEOUT 1"),
+            ("120", "TIMEOUT 120"),
+        ):
+            with self.subTest(value=raw):
+                res = run_settings_import(
+                    {**self._BOOT_ENV, "EMAIL_TIMEOUT": raw}, snippet=self._SNIPPET
+                )
+                self.assertEqual(res.returncode, 0, res.stderr)
+                self.assertIn(expected, res.stdout)
+
+    def test_a_malformed_or_unusable_value_still_imports_on_the_default(self):
+        """The precedent this guards is a settings-import crash (the quiet
+        NaN in SHIPPING_FREE_THRESHOLD), so the load-bearing half of the pin
+        is `returncode == 0`: five bad values, a clean import every time, and
+        the documented default each time.
+
+        0 and -5 are in the list because they PARSE: the socket consumer is
+        what refuses them (`settimeout(0)` is non-blocking, a negative raises
+        at the send call), so a parse-only resolver would hand them on."""
+        for raw in ("ten", "", "3.5", "0", "-5"):
+            with self.subTest(value=raw):
+                res = run_settings_import(
+                    {**self._BOOT_ENV, "EMAIL_TIMEOUT": raw}, snippet=self._SNIPPET
+                )
+                self.assertEqual(res.returncode, 0, res.stderr)
+                self.assertIn("TIMEOUT 10", res.stdout)
+
+
+class EmailTimeoutResolverTests(SimpleTestCase):
+    """The resolver's two branches, driven in-process.
+
+    The subprocess pins above observe the import; they cannot cover the
+    resolver's refusal branch in this process, so it is called directly (the
+    `DatabaseUrlParsingTests` precedent) to keep settings.py at 100%."""
+
+    def test_a_usable_value_is_returned_unchanged(self):
+        for raw in ("7", "1", "600"):
+            with self.subTest(value=raw):
+                with mock.patch.dict(os.environ, {"EMAIL_TIMEOUT": raw}):
+                    self.assertEqual(
+                        config_settings._env_positive_int("EMAIL_TIMEOUT", 10),
+                        int(raw),
+                    )
+
+    def test_a_non_positive_value_falls_back_and_says_so(self):
+        # Only this branch warns. `_env_int`'s own malformed-value fallback
+        # is silent (pre-existing, and shared with a dozen other keys), so
+        # nothing here claims a warning the code does not emit.
+        for raw in ("0", "-5"):
+            with self.subTest(value=raw):
+                with mock.patch.dict(os.environ, {"EMAIL_TIMEOUT": raw}):
+                    with self.assertLogs("config.settings", level="WARNING") as logs:
+                        self.assertEqual(
+                            config_settings._env_positive_int("EMAIL_TIMEOUT", 10), 10
+                        )
+                # A silent fallback is how a knob becomes a mystery: the
+                # warning has to name the key and the value it refused.
+                self.assertTrue(
+                    any("EMAIL_TIMEOUT" in line for line in logs.output), logs.output
+                )
+
+    def test_an_unparseable_value_falls_back_through_the_int_resolver(self):
+        # Covered in a subprocess by the class above (the property that
+        # matters there is that the import survives); asserted here without a
+        # log expectation, because `_env_int` refuses a malformed value
+        # silently.
+        with mock.patch.dict(os.environ, {"EMAIL_TIMEOUT": "ten"}):
+            self.assertEqual(config_settings._env_positive_int("EMAIL_TIMEOUT", 10), 10)
+
+
+_SMTP_PROBE_ENV = {
+    "EMAIL_BACKEND": "django.core.mail.backends.smtp.EmailBackend",
+    "EMAIL_HOST": "smtp.example.test",
+    "EMAIL_PORT": 587,
+    "EMAIL_USE_TLS": False,
+    "DEFAULT_FROM_EMAIL": "probe@example.test",
+}
+
+
+class SmtpTimeoutReachesTheSocketTests(SimpleTestCase):
+    """Why the setting is not decorative: the resolved value has to arrive at
+    the socket, and the faked conversation is the only place that is visible.
+
+    Hermetic by construction - `smtplib.SMTP` is faked, so no socket is
+    opened and no test can wait on a real timeout (the wait itself is
+    deliberately NOT pinned by sleeping; the resolution is what is pinned).
+    The second test is the control that gives the first its meaning: with
+    the setting at Django's own default (None) NO timeout reaches smtplib,
+    which is the unbounded wait this task removed.
+    """
+
+    def _send_once(self):
+        with mock.patch("smtplib.SMTP") as smtp:
+            smtp.return_value.ehlo.return_value = (250, b"ok")
+            smtp.return_value.sendmail.return_value = {}
+            send_mail(
+                "subject",
+                "body",
+                "sender@example.test",
+                ["recipient@example.test"],
+                fail_silently=False,
+            )
+        return smtp.call_args
+
+    def test_the_configured_timeout_is_handed_to_smtplib(self):
+        with override_settings(**_SMTP_PROBE_ENV, EMAIL_TIMEOUT=7):
+            call_args = self._send_once()
+        self.assertEqual(call_args.kwargs.get("timeout"), 7)
+
+    def test_without_the_setting_no_timeout_is_handed_to_smtplib_at_all(self):
+        with override_settings(**_SMTP_PROBE_ENV, EMAIL_TIMEOUT=None):
+            call_args = self._send_once()
+        self.assertNotIn("timeout", call_args.kwargs)
 
 
 class SettingsGuardTests(SimpleTestCase):
