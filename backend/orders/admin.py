@@ -446,6 +446,40 @@ class OrderAdmin(SavedFilterMixin, RoleAwareModelAdmin):
 
     # ——— bulk actions (respect the same guards) ———
 
+    @staticmethod
+    def _locked_orders(queryset, pks):
+        """The bulk writers' locked read of the snapshot pks.
+
+        Both bulk writers hand their snapshot to this so the locked
+        statement is built in one place: the writes below touch Order rows
+        and nothing else, so the Order row is the only row that needs
+        locking, and the locked query carries no join.
+
+        The joins are stripped with ``select_related(None)`` because the
+        queryset arrives from the changelist, where Django 6.1's
+        ``ChangeList.get_select_related_fields`` adds a join for every
+        ForeignKey named in ``list_display`` - and ``user`` and ``coupon``
+        are both nullable here, so those joins are LEFT OUTER JOINs.
+        FOR UPDATE over the nullable side of an outer join is rejected by
+        PostgreSQL ("FOR UPDATE cannot be applied to the nullable side of
+        an outer join") and silently dropped by SQLite, so without this
+        every bulk action raised on Postgres and none of them could fail
+        on SQLite.
+
+        Stripping the join costs no extra query: the loop reads Order
+        columns, ``order.items`` (a reverse FK, never covered by
+        ``select_related``) and the transition preconditions, which are
+        ``payment_method`` / ``payment_status`` scalars - the lifecycle
+        notifications these writers fire have no registered handler, so
+        nothing here dereferences ``order.user`` or ``order.coupon``.
+        """
+        return (
+            queryset.filter(pk__in=pks)
+            .select_related(None)
+            .select_for_update()
+            .order_by("pk")
+        )
+
     def _bulk_set_status(self, request, queryset, new_status):
         allowed_from = [s for s, targets in ALLOWED_TRANSITIONS.items() if new_status in targets]
         matched_pks = list(
@@ -472,11 +506,7 @@ class OrderAdmin(SavedFilterMixin, RoleAwareModelAdmin):
                 # skipped. Per-row saves (unlike .update()) also fire
                 # auto_now, fixing the stale updated_at the bulk path
                 # shipped with.
-                for order in (
-                    queryset.filter(pk__in=matched_pks)
-                    .select_for_update()
-                    .order_by("pk")
-                ):
+                for order in self._locked_orders(queryset, matched_pks):
                     if order.status not in allowed_from:
                         continue  # flipped between snapshot and save: skip
                     # [R-10.19]/[R-10.14] SPEC-10-03: the per-row
@@ -640,11 +670,7 @@ class OrderAdmin(SavedFilterMixin, RoleAwareModelAdmin):
                 # orders is impossible by design, so it is skipped, never
                 # swept. Per-row saves also fire auto_now (no stale
                 # updated_at) and carry the audit event per row.
-                for order in (
-                    queryset.filter(pk__in=unpaid_pks)
-                    .select_for_update()
-                    .order_by("pk")
-                ):
+                for order in self._locked_orders(queryset, unpaid_pks):
                     if order.status != "pending":
                         continue  # flipped between snapshot and save: skip
                     _append_status_event(

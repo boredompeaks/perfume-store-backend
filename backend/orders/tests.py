@@ -11,6 +11,7 @@ from unittest import mock
 from django.conf import settings
 from django.contrib.auth.models import User
 from django.core.cache import cache
+from django.core import mail
 from django.core.management import call_command
 from django.db import IntegrityError, connection
 from django.test import SimpleTestCase, TransactionTestCase, override_settings, tag
@@ -1315,6 +1316,48 @@ class VerifyPaymentTests(OrderTestBase):
             "razorpay_signature": "sig",
         }, format="json")
         self.assertEqual(res.status_code, 404, res.data)
+
+    # ——— ASYNC-2b1: send registered, not performed under the locks ———
+
+    def test_confirmation_send_is_registered_not_performed_inline(self):
+        """The defect this pins: dispatch ran inside the atomic block that
+        holds select_for_update on Order, products and Coupon, so the SMTP
+        round trip happened with those rows locked. verify_payment must
+        register the send instead."""
+        client_mock, order, payload = self._prepare_paid_setup()
+
+        with mock.patch("orders.views.notifications.dispatch") as sync_dispatch:
+            with mock.patch(
+                "orders.views.notifications.dispatch_on_commit"
+            ) as post_commit_dispatch:
+                res = self.client.post(
+                    "/api/orders/payment/verify/", payload, format="json"
+                )
+
+        self.assertEqual(res.status_code, 200, res.data)
+        sync_dispatch.assert_not_called()
+        post_commit_dispatch.assert_called_once_with(
+            AuditEvent.EventType.ORDER_PAID, {"order": order}
+        )
+
+    def test_no_mail_is_sent_before_the_verify_transaction_commits(self):
+        """Ordering witness at the view: while the response is being built
+        the money block is still open, so the outbox must be empty; the
+        send only appears once the commit callback runs."""
+        client_mock, order, payload = self._prepare_paid_setup()
+
+        with self.captureOnCommitCallbacks(execute=True):
+            res = self.client.post(
+                "/api/orders/payment/verify/", payload, format="json"
+            )
+            self.assertEqual(res.status_code, 200, res.data)
+            self.assertEqual(len(mail.outbox), 0)
+
+        order.refresh_from_db()
+        self.assertEqual(order.status, "confirmed")
+        self.assertEqual(len(mail.outbox), 1)
+        self.assertEqual(mail.outbox[0].to, [order.user.email])
+        self.assertIn(f"#{order.id}", mail.outbox[0].subject)
 
 
 @tag("orders")

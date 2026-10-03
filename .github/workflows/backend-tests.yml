@@ -74,14 +74,15 @@ jobs:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           # Full history, and the remote-tracking refs, because the claim scan
-          # below is DIFF-SCOPED: it runs
-          # `git diff --unified=0 origin/spec-comp...HEAD`. The default
-          # fetch-depth: 1 checkout fetches neither -- `origin/spec-comp` does
-          # not exist as a ref, so the diff would abort with a git error and
-          # the step would exit 2, turning the gate red on a green tree. A
-          # 3-dot diff also needs a merge base, which a shallow clone cannot
-          # compute. The byte-integrity half needs no history, but it is the
-          # same command, so the whole step pays this once.
+          # below is DIFF-SCOPED: it runs `git diff --unified=0 <base>...HEAD`
+          # where <base> is a SHA resolved at RUN TIME -- the step's own
+          # DOC_CLAIMS_BASE env, further down. The default fetch-depth: 1
+          # checkout fetches neither that SHA nor the history, so the diff
+          # would abort with a git error and the step would exit 2, turning
+          # the gate red on a green tree. A 3-dot diff also needs a merge base,
+          # which a shallow clone cannot compute. The byte-integrity half needs
+          # no history, but it is the same command, so the whole step pays this
+          # once.
           fetch-depth: 0
 
       - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
@@ -128,7 +129,35 @@ jobs:
       # pre-publication check for a mutation claim, not a build gate.
       - name: Documentation claim scan (doc_claims)
         working-directory: ${{ github.workspace }}
-        run: python scripts/doc_claims.py --base origin/spec-comp --head HEAD
+        # THE BASE MUST MOVE WITH THE PROMOTION, and it must be the ONLY thing
+        # that picks it. resolve_base() takes the FIRST hit of --base, then
+        # $DOC_CLAIMS_BASE, then origin/$GITHUB_BASE_REF under CI, then the
+        # local default -- so a pinned `--base origin/spec-comp` was not merely
+        # redundant, it SHADOWED every source below it and made this step scan
+        # ZERO claims, permanently (BUG-5, TOOL-01). On a pull_request event
+        # HEAD is the merge commit whose SECOND parent is origin/spec-comp, so
+        # `origin/spec-comp...HEAD` is empty by construction: a green gate that
+        # had read no prose at all, indistinguishable from a gate that passed.
+        # Naming no --base hands the decision to the one input that actually
+        # tracks the promotion -- the PR's base sha when there is a PR, else the
+        # pushed ref's previous tip.
+        env:
+          DOC_CLAIMS_BASE: ${{ github.event.pull_request.base.sha || github.event.before }}
+        run: |
+          set -euo pipefail
+          # `github.event.before` is forty zeros when the ref is CREATED, and
+          # `git diff 0000...HEAD` is "fatal: bad object" -> exit 2 -> a red
+          # gate on a branch that has never been promoted. A newly created ref
+          # has no prior promoted state to diff against, so drop the variable
+          # and let resolve_base() fall through to its own defaults. The
+          # scanner prints its loud zero-file notice on stderr in that case, so
+          # this is an HONEST green rather than a silent one, and the
+          # byte-integrity half runs either way.
+          if [ -z "${DOC_CLAIMS_BASE}" ] || [ "${DOC_CLAIMS_BASE}" = "0000000000000000000000000000000000000000" ]; then
+            echo "doc_claims: no usable diff base (empty or all-zeros -- branch creation); falling back to the scanner's own defaults."
+            unset DOC_CLAIMS_BASE
+          fi
+          python scripts/doc_claims.py --head HEAD
 
       # `coverage report` is the gate (fail_under=90 in .coveragerc); the HTML
       # report is a separate step so the upload below always has an artifact to

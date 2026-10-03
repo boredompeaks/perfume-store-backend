@@ -15,6 +15,45 @@ are hard failures:
   * a ``file.py:123`` reference whose file is missing or whose line is past
     the end of the file
 
+A cited token is read as ONE of those, never as two at once. ``file.py:123``
+is a path citation and not also a test name, so the ``test_`` inside
+``test_e2e_concurrency.py`` is never demanded of a ``def`` -- it is the
+module's stem, and the module is checked where a module is checked: the file
+has to resolve and the line has to be inside it. Reading one token as both a
+path and a method is what made this gate RED on correct prose (BUG-1, TOOL-01),
+and the two available responses to a red gate are to delete the check or to
+stop citing real files, so the scanner is fixed instead. A ``test_`` token that
+is NOT inside a cited path is a method and is still held to the method check,
+and a ``test_*.py`` path that does not resolve is still an error -- dressing a
+real error up as a path buys nothing.
+
+One of those three cannot tell a CLAIM from a COUNTER-EXAMPLE. Prose that
+quotes a retired test name, or a misspelling, or a path that a byte-eaten
+write left as a fragment, in order to REPORT that it does not exist, is the
+same sentence shape as prose that asserts it does -- and this repository is
+full of the former, in its own ledger. A gate that is red on correct prose
+gets deleted or made ``continue-on-error``, which is worse than having no
+gate, so the author states the counter-example explicitly and this script
+reads the statement rather than guessing at the sentence::
+
+    the file now reads `ests_returns.py`
+    <!-- doc-claims:absent ests_returns.py (corrupted-fragment-of
+         tests_returns.py) ; reason: c873b27 ate the leading byte -->
+
+That directive silences at most ONE claim, on at most ONE line: two or more
+directives on a line and the line is read as carrying none. A named witness
+has to be real -- a ``def`` for a test name, or for a path a tracked file
+whose own path ends with the cited fragment, since that fragment is the
+intact name with its front truncated. ``retired`` names no witness at all and
+is therefore the weakest kind, held only by the review. The reason has to
+clear a length floor AND contain a token that looks like a ledger reference;
+that second rule is a shape test that raises the cost of filler, not a proof
+that anyone can follow the trail, and the review is the control there too. It
+is not a suppression list, not a file exemption, and not a regex escape
+hatch, and it cannot be produced by editing the sentence: "there is not a
+test named ``test_x``" is still an error. The full grammar, and every rule
+that keeps it narrow, are on ``parse_counter_examples``.
+
 Everything else is reported, never failed, because a machine cannot decide
 whether "kills 7 tests" was true. Those become the auditor's checklist:
 
@@ -32,11 +71,31 @@ Scope discipline: claim extraction is diff-scoped against a base ref, so
 pre-existing debt is never re-reported and the output cannot die of noise.
 Run it with a wide base after a long-lived branch to see everything at once.
 
+THE BASE MUST MOVE WITH THE PROMOTION. After a train is promoted,
+``origin/spec-comp`` is an ANCESTOR of the branch tip, so ``A...B`` is
+legitimately empty, the claim half scans nothing, and the step is green
+because it looked at nothing (BUG-5, TOOL-01). A base is therefore resolved,
+first hit winning:
+
+  1. ``--base REF``
+  2. ``$DOC_CLAIMS_BASE``       <- the hook the CI workflow should set
+  3. ``origin/$GITHUB_BASE_REF`` when ``$CI`` is set
+  4. ``origin/spec-comp``       (the local default, unchanged)
+
+``git diff A...B`` is already the merge-base diff, so naming the PR base branch
+is sufficient; no merge-base call is needed. The run also prints the base it
+resolved and where it came from, and says so loudly on stderr when the claim
+half scanned zero files, so "green" can never again mean "empty".
+
 Usage::
 
     python scripts/doc_claims.py --base origin/spec-comp
     python scripts/doc_claims.py --base origin/spec-comp --json > claims.json
     python scripts/doc_claims.py --update-baseline
+
+    # in CI, with DOC_CLAIMS_BASE set by the workflow:
+    DOC_CLAIMS_BASE="${{ github.event.pull_request.base.sha }}" \\
+        python scripts/doc_claims.py
 
 Exit codes: 0 clean, 1 errors present, 2 usage or environment failure.
 """
@@ -45,6 +104,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import re
 import subprocess
 import sys
@@ -57,6 +117,12 @@ BASELINE_PATH = REPO_ROOT / "scripts" / "doc_claims_baseline.json"
 
 DEFAULT_DOCS = ("backend/docs/",)
 BYTE_INTEGRITY_DOCS = ("backend/docs/changes.md",)
+
+# Where the diff base comes from, first hit winning. See resolve_base().
+BASE_ENV_VAR = "DOC_CLAIMS_BASE"
+PR_BASE_ENV_VAR = "GITHUB_BASE_REF"
+CI_ENV_VAR = "CI"
+FALLBACK_BASE = "origin/spec-comp"
 
 # Directories never walked when building the repository index.
 SKIP_DIRS = frozenset(
@@ -82,8 +148,33 @@ _BOUNDARY = r"(?<![A-Za-z0-9_])"
 # length, and a length floor here would silently drop short names from the
 # check rather than report them.
 RE_TEST_NAME = re.compile(_BOUNDARY + r"(test_[A-Za-z0-9_]+)")
-RE_MODULE_PATH = re.compile(_BOUNDARY + r"([A-Za-z0-9_][A-Za-z0-9_./-]*\.py)\b")
-RE_PATH_LINE = re.compile(_BOUNDARY + r"([A-Za-z0-9_][A-Za-z0-9_./-]*\.py):(?:L)?(\d+)")
+# The tail after `.py` is `\w*(?:\.\w+)*`, and BOTH halves are load-bearing.
+#
+# `(?:\.\w+)*` rather than a bare `\b`: a `.py` followed by another dot is not
+# the end of a path, it is the front of a longer filename (`views.py.bak`,
+# `x.py.orig`). Under `\b` the dot is a boundary, so
+# `test_e2e_concurrency.py.bak` resolved to the real `test_e2e_concurrency.py`
+# and the trailing `.bak` -- a file nobody has -- was dropped without comment.
+# That was a false pass before BUG-1; once the name inside a path stopped being
+# demanded as a method it would have been a false pass with nothing left behind
+# it.
+#
+# `\w*` closes the same hole one character class further out: a tail that does
+# not BEGIN with a dot is not thereby not a tail. `views.pyx`,
+# `test_e2e_concurrency.pyt` and `foo.pyc` each name a file nobody has while
+# resolving to the real `.py` beside them -- the identical laundering, still a
+# false pass, and caught by nothing. So the tail is "anything a name can be
+# made of", dot-led groups and bare word characters alike.
+#
+# The tail must still be able to END in a word character and must still be
+# allowed to be EMPTY: `\w*` matches nothing when the next character is not a
+# word character, and `(?:\.\w+)*` matches nothing when the period is not
+# followed by one. That is what keeps the sentence-closing period in "see
+# views.py." out of the filename while `views.py.bak` keeps its dot. The two
+# patterns agree on where a path token ends rather than each guessing.
+_PATH_TOKEN = r"[A-Za-z0-9_][A-Za-z0-9_./-]*\.py\w*(?:\.\w+)*"
+RE_MODULE_PATH = re.compile(_BOUNDARY + f"({_PATH_TOKEN})")
+RE_PATH_LINE = re.compile(_BOUNDARY + f"({_PATH_TOKEN}):(?:L)?(\\d+)")
 RE_DEF_TEST = re.compile(_BOUNDARY + r"def\s+(test_[A-Za-z0-9_]+)")
 
 # A number welded to something countable. Deliberately verbose: a bare digit
@@ -118,23 +209,235 @@ RE_SELF_REF = re.compile(
     re.IGNORECASE,
 )
 
+# --------------------------------------------------------------------------
+# The counter-example directive (BUG-4, then BUG-A/B/C, TOOL-01 c1 and c2).
+#
+# Grammar, all on ONE source line, inside an HTML comment so it never becomes
+# part of the document's voice:
+#
+#   <!-- doc-claims:absent <test> (renamed-to <test>
+#                              | misspelling-of <test>
+#                              | retired) ; reason: <text> -->
+#   <!-- doc-claims:absent <path> (corrupted-fragment-of <path>)
+#                              ; reason: <text> -->
+#
+# Narrowness, which is the whole point. Each bullet is what the CODE does:
+#
+#   * AT MOST ONE directive is accepted per line, so at most ONE claim on a
+#     line can be silenced by this mechanism. Two or more well-formed
+#     directives on one line means NONE is accepted: the script will not pick
+#     one, because picking one is a guess, and a guess is what this file
+#     refuses to do everywhere else (BUG-A). One line rather than one per
+#     document, because a per-document cap would depend on which lines the
+#     diff happened to touch -- a cap that changes with the base ref is not a
+#     cap, it is a lottery.
+#   * it names ONE target, and only that target, so a sibling claim on the same
+#     sentence is still checked.
+#   * `renamed-to` and `misspelling-of` MUST name a witness, and the witness
+#     must have a real `def` in the tree; `corrupted-fragment-of` MUST name a
+#     witness that resolves to a tracked file whose path ENDS WITH the cited
+#     fragment -- resolving alone would prove only that SOME file exists, and
+#     would silence any absent path at all.
+#   * a kind is only accepted on a target it can mean: a path target takes
+#     `corrupted-fragment-of` and nothing else, so `retired` -- the one kind
+#     with no witness to check -- cannot be spent on a path.
+#   * the reason must clear MIN_REASON_CHARS, which is a LENGTH FLOOR and buys
+#     exactly one thing: that the reason is a fragment rather than a bare
+#     token. It is not evidence of anything. What makes a reason auditable is
+#     RE_REASON_REFERENCE: it must name a commit sha or a task id, so the
+#     statement points at a ledger row a reviewer can open (BUG-B).
+#   * a directive NEVER excuses a line past the end of a file that resolved.
+#     The file existing is proof that the citation is not a counter-example,
+#     so only the missing-file half of a `file.py:123` claim is reachable
+#     here at all.
+#   * a MALFORMED or over-quota directive honours nothing, and says so in the
+#     error it leaves behind. Failing closed is the only safe direction: a
+#     typo leaves the gate red, with the reason, and the author finds out.
+#
+# It is deliberately not satisfiable by rewriting the sentence. "there is not a
+# test named test_x" contains no directive and is still a hard error, which is
+# the test that pins the guarantee.
+# --------------------------------------------------------------------------
+MIN_REASON_CHARS = 24
+
+# The checkable half of a reason: a token that LOOKS like a ledger reference.
+# Both branches require a DIGIT inside the token, which is the whole fix
+# (BUG-B): without it any hyphenated English word passes, and this repository's
+# prose is saturated with them, so the rule accepted `well-known`,
+# `counter-example`, `e-mail`, `read-only`, `up-to-date` and `so-so`. The sha
+# branch needs it for the same reason -- `defaced`, `effaced`, and a bare run of
+# a-f letters all matched `[0-9a-f]{7,40}` and named nothing at all.
+#
+# What this is NOT: proof that the reason is traceable. It is a SHAPE test that
+# raises the cost of filler, and the review remains the control. Filler that
+# still survives it is any hyphenated token containing a digit -- `a-1`,
+# `utf-8`, `sha-1` -- which is recorded as a known residual rather than papered
+# over, because the alternative (an uppercase-led token) would reject id forms
+# this repository has not written yet and is a decision for the next cycle.
+RE_REASON_REFERENCE = re.compile(
+    r"(?:\b(?=[0-9a-f]*[0-9])[0-9a-f]{7,40}\b"
+    r"|\b(?=[A-Za-z0-9-]*[0-9])[A-Za-z][A-Za-z0-9]*(?:-[A-Za-z0-9]+)+\b)"
+)
+RE_COUNTER_EXAMPLE = re.compile(
+    r"<!--\s*doc-claims:absent\s+"
+    r"(?P<target>test_[A-Za-z0-9_]+|[A-Za-z0-9_][A-Za-z0-9_./-]*\.py)\s+"
+    r"\((?:renamed-to\s+(?P<renamed_to>test_[A-Za-z0-9_]+)"
+    r"|misspelling-of\s+(?P<misspelling_of>test_[A-Za-z0-9_]+)"
+    r"|corrupted-fragment-of\s+(?P<fragment_of>[A-Za-z0-9_][A-Za-z0-9_./-]*\.py)"
+    r"|retired)\)"
+    r"\s*;\s*reason:\s*(?P<reason>[^\n]+?)\s*-->"
+)
+# Which kinds each kind of target can carry. A path target gets ONLY the kind
+# with a checkable witness, so extending the directive to paths (BUG-C) added
+# no new unwitnessed escape.
+COUNTER_EXAMPLE_KINDS = {
+    "test": frozenset({"renamed-to", "misspelling-of", "retired"}),
+    "path": frozenset({"corrupted-fragment-of"}),
+}
+OVER_QUOTA = (
+    "more than one directive on this line; at most one is accepted, so this "
+    "line is read as carrying none"
+)
+RE_HTML_COMMENT = re.compile(r"<!--.*?-->", re.DOTALL)
+
+
+def _strip_directive_comments(line: str) -> str:
+    """Remove the machine-readable directives from the prose being scanned.
+
+    A directive is metadata, not prose: left in place, the name it names and
+    the witness it cites would each be extracted as claims in their own right
+    and the line would fail on its own annotation. Only comments carrying the
+    marker are removed, so a genuine claim cannot be parked in a comment and
+    hidden -- and a MALFORMED directive is stripped too, which keeps failing
+    closed: it suppresses nothing, it just stops annotating itself.
+    """
+    return RE_HTML_COMMENT.sub(
+        lambda match: "" if "doc-claims:" in match.group(0) else match.group(0), line
+    )
+
+
 # Decidable -> hard failure. Not decidable -> report only.
 # ``byte_integrity`` is decided by this script, so a failure there is an error.
 ERROR_KINDS = frozenset({"test_name", "module_path", "path_line", "byte_integrity"})
 
 
 @dataclass(frozen=True)
+class CounterExample:
+    """One author's explicit statement that a quoted target is reported ABSENT.
+
+    ``target_kind`` is ``test`` or ``path`` and decides which kinds may appear
+    here at all. ``witness`` is the surviving name (tests) or the intact file
+    (paths); it is empty only for ``retired``, the one kind with nothing to
+    check against. ``verify_claims`` refuses a directive whose witness does not
+    exist, so a directive can never swap one absent target for another.
+    """
+
+    target: str
+    target_kind: str
+    kind: str
+    witness: str
+    reason: str
+
+
+def _directive_kind(match: re.Match) -> tuple[str, str, str]:
+    """``(kind, witness)`` for one grammar match, or ``("", "")`` if unknown."""
+    if match.group("renamed_to"):
+        return "renamed-to", match.group("renamed_to")
+    if match.group("misspelling_of"):
+        return "misspelling-of", match.group("misspelling_of")
+    if match.group("fragment_of"):
+        return "corrupted-fragment-of", match.group("fragment_of")
+    return "retired", ""
+
+
+def parse_counter_examples(
+    line: str,
+) -> tuple[dict[str, CounterExample], dict[str, str]]:
+    """Read the counter-example directives out of ONE source line.
+
+    Returns ``(accepted, refused)``, both keyed by target. Narrow by
+    construction, and every refusal carries its reason so the error the
+    directive failed to prevent says WHY it was not honoured -- a gate that
+    goes red without saying why is a gate the author cannot act on.
+
+    Refused: an over-quota line, a malformed target/kind pairing, a reason
+    under the length floor, and a reason that names no ledger reference. A
+    target is only ever in one of the two mappings.
+    """
+    accepted: dict[str, CounterExample] = {}
+    refused: dict[str, str] = {}
+    candidates: list[CounterExample] = []
+    for match in RE_COUNTER_EXAMPLE.finditer(line):
+        target = match.group("target")
+        kind, witness = _directive_kind(match)
+        reason = match.group("reason").strip()
+        target_kind = "path" if target.endswith(".py") else "test"
+        if len(reason) < MIN_REASON_CHARS:
+            refused[target] = f"reason is under {MIN_REASON_CHARS} characters"
+            continue
+        if not RE_REASON_REFERENCE.search(reason):
+            refused[target] = "reason names no commit sha or task id"
+            continue
+        if kind not in COUNTER_EXAMPLE_KINDS[target_kind]:
+            refused[target] = (
+                f"kind {kind!r} is not accepted on a {target_kind} target "
+                f"(accepted: {', '.join(sorted(COUNTER_EXAMPLE_KINDS[target_kind]))})"
+            )
+            continue
+        candidates.append(
+            CounterExample(
+                target=target,
+                target_kind=target_kind,
+                kind=kind,
+                witness=witness,
+                reason=reason,
+            )
+        )
+
+    if len(candidates) > 1:
+        # The cap. Refusing ALL of them rather than keeping the first is
+        # deliberate: the script does not get to decide which of two
+        # statements on one line the author meant.
+        for candidate in candidates:
+            refused[candidate.target] = OVER_QUOTA
+        return {}, refused
+
+    for candidate in candidates:
+        accepted[candidate.target] = candidate
+    return accepted, refused
+
+
+@dataclass(frozen=True)
 class Claim:
-    """One extracted claim. ``value`` is the matched text a human checks."""
+    """One extracted claim. ``value`` is the matched text a human checks.
+
+    ``detail`` is the machine half (a ``path_line`` claim parses its own cited
+    path out of it), ``note`` is the human half (why a counter-example
+    directive was accepted, for the run log). Keeping them apart is what stops
+    an annotation from being parsed back as part of a citation.
+    """
 
     kind: str
     value: str
     path: str
     line: int
     detail: str = ""
+    note: str = ""
+    directive: CounterExample | None = None
+    refusal: str = ""
 
     @property
     def severity(self) -> str:
+        """Whether this claim failed, or is a warning for a human to read.
+
+        A claim only KEEPS its directive when the directive was accepted, so
+        ``directive is not None`` is exactly "this absent-name citation was
+        stated by its author and is not a claim that the name exists". A
+        refused directive is dropped onto a fresh Claim by ``verify_claims``
+        and reads as an error again.
+        """
+        if self.directive is not None:
+            return "warn"
         return "error" if self.kind in ERROR_KINDS else "warn"
 
 
@@ -144,6 +447,7 @@ class Report:
 
     base: str
     head: str
+    base_source: str = ""
     files_scanned: list[str] = field(default_factory=list)
     claims: list[Claim] = field(default_factory=list)
     errors: list[Claim] = field(default_factory=list)
@@ -159,6 +463,31 @@ class Report:
 # --------------------------------------------------------------------------
 
 
+def _directive_note(directive: CounterExample | None) -> str:
+    """The one-line human note for an accepted directive, or ``""``.
+
+    Written for all three kinds by one function so the log cannot show a
+    counter-example for a path and stay mute for a test.
+    """
+    if directive is None:
+        return ""
+    return f"cited as a counter-example ({directive.kind}): {directive.reason}"
+
+
+def _inside_any_span(span: tuple[int, int], spans: list[tuple[int, int]]) -> bool:
+    """Whether ``span`` lies wholly inside any one of ``spans``.
+
+    Span containment, not string equality: the decision is "was this token part
+    of a path the author wrote", which is a question about POSITION on the line,
+    and a name-equality test would also silence a bare ``test_foo`` merely
+    because a path containing a different ``foo`` was cited beside it.
+    Containment rather than overlap so that a token which reaches ACROSS a path
+    without sitting inside it stays its own claim.
+    """
+    start, end = span
+    return any(low <= start and end <= high for low, high in spans)
+
+
 def extract_claims(text: str, path: str, first_line: int = 1) -> list[Claim]:
     """Pull every claim out of one blob of added documentation text.
 
@@ -171,12 +500,23 @@ def extract_claims(text: str, path: str, first_line: int = 1) -> list[Claim]:
         line = raw.strip()
         if not line:
             continue
+        accepted, refused = parse_counter_examples(line)
+        # Directives are metadata; claims are read from the prose around them.
+        prose = _strip_directive_comments(line)
 
         # A path cited as `file.py:123` is one claim, not two. Record which
         # names were consumed as path:line so the bare-module pass skips them.
         cited_with_line: set[str] = set()
-        for match in RE_PATH_LINE.finditer(line):
-            cited_with_line.add(match.group(1))
+        # The SPAN of every path token, so the test-name pass cannot read a
+        # `test_` that is part of a filename (BUG-1). Recorded in the module pass
+        # alone, and that is not an omission: `_PATH_TOKEN` and `_BOUNDARY` are
+        # shared with `RE_PATH_LINE`, which only adds the `:NN` requirement, so
+        # every `path:line` citation is also a module citation at the identical
+        # span. Two records would be two chances to record only one of them.
+        path_spans: list[tuple[int, int]] = []
+        for match in RE_PATH_LINE.finditer(prose):
+            cited = match.group(1)
+            cited_with_line.add(cited)
             claims.append(
                 Claim(
                     kind="path_line",
@@ -184,23 +524,62 @@ def extract_claims(text: str, path: str, first_line: int = 1) -> list[Claim]:
                     path=path,
                     line=line_no,
                     detail=f"path={match.group(1)} line={match.group(2)}",
+                    note=_directive_note(accepted.get(cited)),
+                    directive=accepted.get(cited),
+                    refusal=refused.get(cited, ""),
                 )
             )
 
-        for match in RE_MODULE_PATH.finditer(line):
+        for match in RE_MODULE_PATH.finditer(prose):
+            path_spans.append(match.span(1))
             if match.group(1) in cited_with_line:
                 continue
-            claims.append(Claim("module_path", match.group(1), path, line_no))
+            cited = match.group(1)
+            claims.append(
+                Claim(
+                    "module_path",
+                    cited,
+                    path,
+                    line_no,
+                    note=_directive_note(accepted.get(cited)),
+                    directive=accepted.get(cited),
+                    refusal=refused.get(cited, ""),
+                )
+            )
 
-        for match in RE_TEST_NAME.finditer(line):
-            claims.append(Claim("test_name", match.group(1), path, line_no))
+        for match in RE_TEST_NAME.finditer(prose):
+            # A `test_` INSIDE a cited path is the module's stem, not a method,
+            # and demanding a `def` for it reported correct prose as a missing
+            # test (BUG-1). The path claim above is not skipped in exchange --
+            # it is still extracted and still verified -- so this closes one
+            # reading rather than removing a check. Scoped to the PATH TOKEN's
+            # own span, so a method cited anywhere else on the line is
+            # unaffected.
+            if _inside_any_span(match.span(), path_spans):
+                continue
+            name = match.group(1)
+            # A quoted name is one claim whether it is asserted or reported
+            # absent; only an explicit directive on THIS line tells the two
+            # apart, and only for the one target the directive spells out.
+            directive = accepted.get(name)
+            claims.append(
+                Claim(
+                    "test_name",
+                    name,
+                    path,
+                    line_no,
+                    note=_directive_note(directive),
+                    directive=directive,
+                    refusal=refused.get(name, ""),
+                )
+            )
 
         # A figure already claimed by a narrower pattern is not claimed twice:
         # "exactly 2 places" is one figure, not two, and a doubled figure makes
         # a reviewer count the wrong number of things to check.
         covered: list[tuple[int, int]] = []
         for regex in (RE_MEASURED, RE_EXACTLY_PLACES):
-            for match in regex.finditer(line):
+            for match in regex.finditer(prose):
                 covered.append(match.span())
                 claims.append(
                     Claim(
@@ -211,7 +590,7 @@ def extract_claims(text: str, path: str, first_line: int = 1) -> list[Claim]:
                         detail=f"n={match.group(1)}",
                     )
                 )
-        for match in RE_COUNT.finditer(line):
+        for match in RE_COUNT.finditer(prose):
             if any(start <= match.start(1) < end for start, end in covered):
                 continue
             claims.append(
@@ -224,17 +603,17 @@ def extract_claims(text: str, path: str, first_line: int = 1) -> list[Claim]:
                 )
             )
 
-        universal = RE_UNIVERSAL.search(line)
+        universal = RE_UNIVERSAL.search(prose)
         if universal:
             claims.append(Claim("universal", universal.group(0), path, line_no))
 
         # A count a file makes about itself cannot survive being written.
         counts_here = any(c.kind == "count" for c in claims if c.line == line_no)
-        if counts_here and RE_SELF_REF.search(line):
+        if counts_here and RE_SELF_REF.search(prose):
             claims.append(
                 Claim(
                     kind="self_count",
-                    value=line[:120],
+                    value=prose[:120],
                     path=path,
                     line=line_no,
                     detail="a file counting its own occurrences is wrong "
@@ -256,47 +635,72 @@ def verify_claims(
     errors: list[Claim] = []
     warnings: list[Claim] = []
     for claim in claims:
+        # Computed once, and handed to the error text, so the message cannot
+        # describe a different failure from the one that actually happened.
+        failure = (
+            _directive_failure(claim.directive, known_tests, known_paths)
+            if claim.directive is not None
+            else ""
+        )
         if claim.kind == "test_name":
-            if claim.value not in known_tests:
+            if claim.value in known_tests:
+                warnings.append(claim)
+            elif claim.directive is not None and not failure:
+                # The author stated this name is being reported ABSENT and the
+                # statement survives the one check a machine can make on it.
+                warnings.append(claim)
+            else:
                 errors.append(
                     Claim(
                         claim.kind,
                         claim.value,
                         claim.path,
                         claim.line,
-                        "no `def` for this name anywhere in the tree",
+                        _absent_detail(
+                            claim,
+                            "no `def` for this name anywhere in the tree",
+                            failure,
+                        ),
                     )
                 )
-            else:
-                warnings.append(claim)
         elif claim.kind == "module_path":
-            if not _path_exists(claim.value, known_paths):
+            if _path_exists(claim.value, known_paths):
+                warnings.append(claim)
+            elif claim.directive is not None and not failure:
+                warnings.append(claim)
+            else:
                 errors.append(
                     Claim(
                         claim.kind,
                         claim.value,
                         claim.path,
                         claim.line,
-                        "no such file in the tree",
+                        _absent_detail(claim, "no such file in the tree", failure),
                     )
                 )
-            else:
-                warnings.append(claim)
         elif claim.kind == "path_line":
             _, _, rest = claim.detail.partition("path=")
             cited, _, tail = rest.partition(" line=")
             resolved = _resolve_path(cited, known_paths)
             if resolved is None:
-                errors.append(
-                    Claim(
-                        claim.kind,
-                        claim.value,
-                        claim.path,
-                        claim.line,
-                        f"no such file: {cited}",
+                if claim.directive is not None and not failure:
+                    warnings.append(claim)
+                else:
+                    errors.append(
+                        Claim(
+                            claim.kind,
+                            claim.value,
+                            claim.path,
+                            claim.line,
+                            _absent_detail(claim, f"no such file: {cited}", failure),
+                        )
                     )
-                )
             elif int(tail) > known_paths[resolved]:
+                # No directive reaches this branch, deliberately. The file
+                # resolved, which is proof the citation is not a
+                # counter-example: a wrong line number is a wrong number, and
+                # letting prose declare it absent is how a stale reference gets
+                # to live forever.
                 errors.append(
                     Claim(
                         claim.kind,
@@ -314,18 +718,100 @@ def verify_claims(
     return errors, warnings
 
 
+def _directive_failure(
+    directive: CounterExample, known_tests: set[str], known_paths: dict[str, int]
+) -> str:
+    """Why this directive is NOT acceptable, or ``""`` when it is.
+
+    Returning the reason rather than a bool is what keeps the error honest: a
+    single "not in the tree either" for every path failure would be a lie the
+    moment the witness resolves and merely is not this fragment's intact form.
+
+    A named witness must be REAL, and it must be the intact form of THIS
+    target. A test witness must have a ``def``; a path witness must resolve to
+    a tracked file whose own path ENDS WITH the cited fragment. Resolving alone
+    would prove only that SOME file exists, so `corrupted-fragment-of
+    orders/views.py` would otherwise silence any absent path at all, and a
+    directive could swap one absent target for another absent one.
+
+    SUFFIX, not "ends with /<fragment>". A byte-eaten write truncates the
+    FRONT of a name, so the intact form is the fragment with something
+    prepended: `ests_returns.py` is the intact `tests_returns.py`, and
+    requiring a slash before the fragment would reject the very corruption
+    case this whole kind exists for. A suffix match still cannot cut into an
+    unrelated file, because `orders/views.py` does not end with
+    `accounts/whatever.py` or with `whatever.py`.
+
+    ``retired`` names no witness, has nothing to fail, and is the weakest kind
+    by construction; the review is the control there.
+    """
+    if directive.kind == "retired":
+        return ""
+    if directive.target_kind == "test":
+        if directive.witness in known_tests:
+            return ""
+        return (
+            f"the directive names {directive.witness} as the surviving name, "
+            f"which does not exist either"
+        )
+    resolved = _resolve_path(directive.witness, known_paths)
+    if resolved is None:
+        return (
+            f"the directive names {directive.witness} as the intact file, "
+            f"which is not in the tree either"
+        )
+    if not resolved.endswith(directive.target):
+        return (
+            f"the directive names {directive.witness}, which resolves to "
+            f"{resolved} and does not end with {directive.target}"
+        )
+    return ""
+
+
+def _absent_detail(claim: Claim, base: str, failure: str = "") -> str:
+    """Why an absent-target claim is an error, including any failed directive."""
+    if failure:
+        return f"{base}, and {failure}"
+    if claim.refusal:
+        return (
+            f"{base} (a counter-example directive was present and refused: "
+            f"{claim.refusal})"
+        )
+    return base
+
+
 def _resolve_path(candidate: str, known_paths: dict[str, int]) -> str | None:
     """Resolve a cited module path against the index, or return ``None``.
 
-    Prose cites both ``backend/orders/views.py`` and bare ``views.py``; a bare
-    name resolves only when it is unambiguous, so a citation that could mean
-    two different files is reported rather than guessed at.
+    Three passes, most specific first: the exact path, then a suffix match on a
+    PATH BOUNDARY, then the bare basename.
+
+    The middle pass is BUG-3 (TOOL-01). Prose cites app-relative paths
+    constantly -- ``orders/views.py`` -- and without it the only fallback is a
+    basename match, which is ambiguous across the four apps that each own a
+    views.py. The result was that a correct citation was reported as an error,
+    and 94 of the 121 errors on the wide base were that. The ``/`` in the
+    suffix is load-bearing: ``orders/views.py`` is a path, ``ders/views.py`` is
+    not, and only the boundary tells them apart.
     """
-    if candidate in known_paths:
-        return candidate
-    tail = candidate.rsplit("/", 1)[-1]
-    matches = [p for p in known_paths if p.rsplit("/", 1)[-1] == tail]
-    return matches[0] if len(matches) == 1 else None
+    normalised = candidate[2:] if candidate.startswith("./") else candidate
+    if normalised in known_paths:
+        return normalised
+    for predicate in (_ends_with_path, _same_basename):
+        matches = [p for p in known_paths if predicate(p, normalised)]
+        if len(matches) == 1:
+            return matches[0]
+    return None
+
+
+def _ends_with_path(tracked: str, cited: str) -> bool:
+    """Whether a tracked path ENDS WITH the cited path, at a boundary."""
+    return tracked.endswith("/" + cited)
+
+
+def _same_basename(tracked: str, cited: str) -> bool:
+    """Whether a tracked path has the same final segment as the cited one."""
+    return tracked.rsplit("/", 1)[-1] == cited.rsplit("/", 1)[-1]
 
 
 def _path_exists(candidate: str, known_paths: dict[str, int]) -> bool:
@@ -400,6 +886,56 @@ def check_byte_integrity(blob: bytes, baseline: dict) -> dict:
 # --------------------------------------------------------------------------
 # Shell. Git and filesystem live here and nowhere else.
 # --------------------------------------------------------------------------
+
+
+def resolve_base(
+    explicit: str | None = None, env: dict[str, str] | None = None
+) -> tuple[str, str]:
+    """Pick the diff base, and say where the choice came from.
+
+    First hit wins:
+
+    1. ``--base REF``
+    2. ``$DOC_CLAIMS_BASE`` -- the hook the CI workflow is expected to set
+    3. ``origin/$GITHUB_BASE_REF`` when ``$CI`` is set
+    4. ``origin/spec-comp`` -- the local default, unchanged
+
+    The base has to MOVE WITH THE PROMOTION or the claim half checks nothing.
+    Once a train is promoted ``origin/spec-comp`` is an ancestor of the branch
+    tip, ``A...B`` is legitimately empty, and the step goes green having read
+    zero lines of prose (BUG-5, TOOL-01). ``git diff A...B`` is already the
+    merge-base diff, so naming the PR base branch is enough; no merge-base call
+    is needed here.
+    """
+    environ = os.environ if env is None else env
+    if explicit:
+        return explicit, "--base"
+    from_env = environ.get(BASE_ENV_VAR, "").strip()
+    if from_env:
+        return from_env, f"${BASE_ENV_VAR}"
+    pr_base = environ.get(PR_BASE_ENV_VAR, "").strip()
+    if environ.get(CI_ENV_VAR, "").strip() and pr_base:
+        return f"origin/{pr_base}", f"origin/${PR_BASE_ENV_VAR} (CI)"
+    return FALLBACK_BASE, "default"
+
+
+def empty_scan_notice(files_scanned: Iterable[str], base: str, head: str) -> str:
+    """The message for a claim half that found nothing to look at, else ``""``.
+
+    Silence here is the defect: a gate that scanned zero lines reports zero
+    errors and is indistinguishable from a gate that passed. This says so on
+    stderr, every run, so "green" cannot quietly mean "empty" again.
+    """
+    if list(files_scanned):
+        return ""
+    return (
+        f"claim half scanned 0 file(s) against base {base!r} (head {head!r}). "
+        f"The base is an ancestor of the head, so there is no ADDED "
+        f"documentation to check and every claim in this run passed by not "
+        f"being looked at. Byte integrity still ran. To widen the base, set "
+        f"${BASE_ENV_VAR} to the last promoted sha or the PR base branch "
+        f"before this step."
+    )
 
 
 def _git(*args: str, check: bool = True) -> str:
@@ -510,7 +1046,7 @@ def write_baseline() -> dict:
     return baseline
 
 
-def run(base: str, head: str) -> Report:
+def run(base: str, head: str, base_source: str = "") -> Report:
     known_tests, known_paths = build_index()
     files = added_lines(base, head, DEFAULT_DOCS)
 
@@ -544,6 +1080,7 @@ def run(base: str, head: str) -> Report:
     report = Report(
         base=base,
         head=head,
+        base_source=base_source,
         files_scanned=sorted(files),
         claims=claims,
         errors=errors,
@@ -570,8 +1107,15 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
         "--base",
-        default="origin/spec-comp",
-        help="base ref for the diff (default: origin/spec-comp)",
+        default=None,
+        help="base ref for the diff. Unset, the base is resolved in this "
+        f"order: --base, ${BASE_ENV_VAR}, origin/${PR_BASE_ENV_VAR} when "
+        f"${CI_ENV_VAR} is set, then {FALLBACK_BASE}. The base must move "
+        "WITH THE PROMOTION: once a train is promoted the default is an "
+        "ancestor of HEAD, the three-dot diff is empty, and the claim half "
+        f"scans nothing. CI should set ${BASE_ENV_VAR} to the PR base sha "
+        f"(${{{{ github.event.pull_request.base.sha }}}}) or to the branch "
+        f"name ({FALLBACK_BASE} is an ancestor of HEAD in a push context).",
     )
     parser.add_argument("--head", default="HEAD", help="head ref (default: HEAD)")
     parser.add_argument(
@@ -592,11 +1136,16 @@ def main(argv: list[str] | None = None) -> int:
         print(json.dumps(recorded, indent=2, sort_keys=True))
         return 0
 
+    base, base_source = resolve_base(args.base)
     try:
-        report = run(args.base, args.head)
+        report = run(base, args.head, base_source)
     except (RuntimeError, OSError) as error:
         print(f"doc_claims: {error}", file=sys.stderr)
         return 2
+
+    notice = empty_scan_notice(report.files_scanned, base, args.head)
+    if notice:
+        print(notice, file=sys.stderr)
 
     if args.json:
         print(report.to_json())
@@ -606,6 +1155,7 @@ def main(argv: list[str] | None = None) -> int:
             f"{len(report.files_scanned)} file(s) — "
             f"{len(report.errors)} error(s), {len(report.warnings)} to verify"
         )
+        print(f"  base   {report.base} (from {report.base_source})")
         for claim in report.errors:
             print(
                 f"  ERROR  {claim.path}:{claim.line} [{claim.kind}] "
@@ -618,6 +1168,15 @@ def main(argv: list[str] | None = None) -> int:
                 f"({entry['control_bytes']} control, CR {entry['cr']}, "
                 f"LF {entry['trailing_lf']})"
             )
+        # Every honoured counter-example is printed, never silently dropped: a
+        # directive that leaves no trace in the log is not reviewable, and
+        # "reviewable" is the entire control on the weakest kind.
+        for claim in report.warnings:
+            if claim.directive is not None:
+                print(
+                    f"  ABSENT {claim.path}:{claim.line} [{claim.kind}] "
+                    f"{claim.value} — {claim.note}"
+                )
         if report.warnings:
             print(f"  {len(report.warnings)} claim(s) need a human or an auditor.")
     return 1 if report.errors else 0

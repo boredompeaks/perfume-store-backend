@@ -13,16 +13,27 @@ Deliberately out of scope here (SPEC-2-03): no queue, outbox table,
 retries or backoff. ``dispatch`` therefore logs and continues on any send
 failure — an SMTP outage must never roll back the business transaction it
 notifies about, mirroring the accounts flows where SMTP 503 still leaves
-the account created. The flip side of the in-process substrate: the send
-happens before the caller's transaction commits, so a later rollback in
-the same block cannot recall an already-handed-off email — exactly the
-window the SPEC-2-03 outbox closes.
+the account created.
+
+``dispatch_on_commit`` is the post-commit variant, added in ASYNC-2b1. A
+synchronous SMTP send inside a money-path ``transaction.atomic()`` holds
+that block's ``select_for_update`` rows — Order, products, Coupon — for the
+whole provider round trip, so one bad minute from a mail provider becomes a
+checkout-blocking outage. Deferring the send to ``transaction.on_commit``
+releases those locks at commit and opens the socket afterwards.
+
+The honest limit of that fix: ``on_commit`` runs after commit but still
+inside the request/response cycle, so a stalled provider still makes *this*
+response slow. What it stops is *other* requests blocking behind our locks.
+Getting the send off the response path entirely needs a real worker, which is
+ASYNC-2c, not here.
 """
 
 import logging
 
 from django.conf import settings
 from django.core.mail import send_mail
+from django.db import transaction
 from django.template.loader import render_to_string
 
 from common.models import AuditEvent
@@ -97,6 +108,10 @@ def dispatch(event_type, context=None):
     caller's ``transaction.atomic()`` block (rollback-together, same as
     record). Send failures are logged with their traceback and swallowed,
     so a notification outage can never break the business transaction.
+
+    This sends immediately, locks held. Sites that must not sit on their
+    ``select_for_update`` rows for an SMTP round trip register the send
+    with ``dispatch_on_commit`` instead.
     """
     handler = _EVENT_HANDLERS.get(event_type)
     if handler is None:
@@ -109,3 +124,38 @@ def dispatch(event_type, context=None):
         handler(context or {})
     except Exception:
         logger.exception("Notification dispatch failed for event %s", event_type)
+
+
+def dispatch_on_commit(event_type, context=None):
+    """Register ``dispatch`` to run once the caller's transaction commits.
+
+    ASYNC-2b1. For hook sites inside a ``transaction.atomic()`` block that
+    holds ``select_for_update`` rows: sending inline holds those locks for
+    the length of the SMTP round trip, so a slow provider blocks every other
+    checkout touching the same order, SKU or coupon. Registering the send
+    instead of performing it means the locks are released at commit and the
+    socket opens after.
+
+    Two consequences, both intentional:
+
+    - A rollback discards the callback, so a rolled-back order no longer
+      emails anyone. The old inline send could not be recalled.
+    - ``dispatch`` still swallows a send failure and logs it at ERROR
+      with a traceback, and callbacks run post-commit where a raise cannot
+      roll anything back anyway. That keeps a failing send out of an
+      already-decided response.
+
+    Still on the response path: ``on_commit`` fires before the response is
+    returned, so the SMTP latency is unchanged. Only the lock hold is gone.
+
+    Deliberately opt-in rather than folded into ``dispatch``: making the
+    registry itself defer would silently convert the other registry hook
+    sites - shipped/delivered (``orders/events.py``) and the webhook
+    callback (``orders/webhooks.py``) - and remove any caller's ability to
+    send inside its own transaction. The back-in-stock notice is NOT one of
+    them: ``products/models.py`` calls ``send_email`` directly and never
+    reaches this registry, so no change here could convert it and ASYNC-2b2
+    has to move it explicitly. All three are converted one at a time in
+    ASYNC-2b2/2b3.
+    """
+    transaction.on_commit(lambda: dispatch(event_type, context))

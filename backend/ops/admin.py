@@ -1,7 +1,11 @@
 from django.contrib import admin
 
 from common.admin import RoleAwareModelAdmin
-from .models import SiteSettings
+from .models import (
+    CLOSED_RETURN_WINDOW_DAYS,
+    DEFAULT_RETURN_WINDOW_DAYS,
+    SiteSettings,
+)
 
 admin.site.site_header = "Maison Aurel — store admin"
 admin.site.site_title = "Maison Aurel admin"
@@ -51,7 +55,29 @@ class SiteSettingsAdmin(RoleAwareModelAdmin):
             # would exist, be writable through the ORM, and be UNREACHABLE in
             # the one surface the merchant has for editing settings.
             "Store policy (read by the returns gate; blank = store default)",
-            {"fields": ("return_window_days",)},
+            {
+                "fields": ("return_window_days",),
+                # SPEC-1-B07f-a: what 0 DOES, in the one form the merchant
+                # reads. The fieldset DESCRIPTION rather than the field's
+                # ``help_text`` because ``help_text`` is a model field
+                # attribute and restating it writes a migration - a poor price
+                # for prose. Both render on this same change page and this one
+                # sits directly above the input, so the merchant who types 0 is
+                # not left to infer it from the field's name.
+                "description": (
+                    "<p><strong>Return window.</strong> The days a customer has "
+                    "to request a return, counted from delivery where the goods "
+                    "have arrived and from the order date otherwise, with the "
+                    "last day counted as inside the window. Leave blank to "
+                    "publish the store default of "
+                    f"{DEFAULT_RETURN_WINDOW_DAYS} days. <strong>Set it to "
+                    f"{CLOSED_RETURN_WINDOW_DAYS} to close returns entirely:"
+                    " every return request is then refused, whatever the age of "
+                    "the order and including one made at the very moment of "
+                    "delivery, and the customer is told returns are not "
+                    "available rather than that the window expired.</p>"
+                ),
+            },
         ),
     )
 

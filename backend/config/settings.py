@@ -416,6 +416,41 @@ WHITENOISE_USE_FINDERS = DEBUG
 WHITENOISE_AUTOREFRESH = DEBUG
 
 
+# Env-driven ints must never take the app down at startup: a malformed
+# value falls back to the documented default instead of raising.
+def _env_int(name, default):
+    # Declared ahead of the Email block below because EMAIL_TIMEOUT is the
+    # first key above this line that needs it, and a resolver has to exist
+    # before the module body reads it.
+    try:
+        return int(os.getenv(name, str(default)))
+    except ValueError:
+        return default
+
+
+def _env_positive_int(name, default):
+    """Resolve an env-driven int that a socket/size consumer cannot accept
+    zero or below, never crashing startup.
+
+    ``_env_int`` refuses a value it cannot PARSE. This refuses a value the
+    CONSUMER cannot use: ``socket.settimeout(0)`` puts the socket in
+    non-blocking mode (every later send then fails on its own, far from the
+    cause) and a negative value raises ``ValueError`` inside the send call.
+    Both would turn one operator typo into a runtime failure, so the value
+    is checked here at import time and the documented default is used
+    instead - the same fail-safe direction as ``_env_int``, warned about the
+    same way ``_env_money`` warns, because a silent fallback is how a knob
+    becomes a mystery.
+    """
+    value = _env_int(name, default)
+    if value < 1:
+        logging.getLogger(__name__).warning(
+            "Ignoring non-positive %s value %r; using %s", name, value, default
+        )
+        return default
+    return value
+
+
 # Email
 # https://docs.djangoproject.com/en/6.1/topics/email/#topic-email-configuration
 
@@ -425,6 +460,30 @@ EMAIL_PORT = int(os.getenv('EMAIL_PORT', '587'))
 EMAIL_HOST_USER = os.getenv('EMAIL_HOST_USER', '')
 EMAIL_HOST_PASSWORD = os.getenv('EMAIL_HOST_PASSWORD', '')
 EMAIL_USE_TLS = os.getenv('EMAIL_USE_TLS', 'true').lower() == 'true'
+# SPEC-ASYNC-2a: the socket wait on an SMTP send is BOUNDED. Django hands
+# this setting to smtplib, which hands it to socket.settimeout(), so leaving
+# it unset (Django's own default is None) means a socket with NO timeout: a
+# provider that accepts the TCP connection and then stalls holds the thread
+# forever, with no request deadline to save it. That is a hang, not a slow
+# p99, and every send in this project is inline and pre-commit, inside the
+# caller's transaction.atomic() - the order-confirmation path holds
+# select_for_update() row locks for the whole wait - so one bad minute from
+# a provider blocks checkouts instead of slowing them.
+#
+# 10 seconds is the deliberate trade: several times what a healthy provider
+# needs (a TLS handshake plus a DATA round trip is sub-second on a
+# mainstream relay, and the provider's OWN queue/retry policy, not ours,
+# covers the rare slow one), and still short enough to be a bounded failure
+# long before a browser or an upstream proxy gives up on the request. It is
+# env-driven because that trade is deployment-shaped: a store relaying
+# through a slow internal MTA raises it, and nothing else has to change.
+#
+# When it trips, smtplib raises (socket.timeout/SMTPServerDisconnected) at
+# the send call site, where every caller in this project already handles a
+# send failure - so the bounded wait lands on an existing handled path
+# (common.notifications.send_email raises; dispatch and the alerts path log
+# and continue) instead of hanging.
+EMAIL_TIMEOUT = _env_positive_int("EMAIL_TIMEOUT", 10)
 DEFAULT_FROM_EMAIL = os.getenv('DEFAULT_FROM_EMAIL', EMAIL_HOST_USER)
 FRONTEND_URL = os.getenv('FRONTEND_URL', 'http://localhost:3000').rstrip('/')
 # SPEC-20-13: where the admin login page sends an account that MFA has
@@ -486,15 +545,6 @@ STORAGES = {
         'BACKEND': 'django.contrib.staticfiles.storage.StaticFilesStorage'
     },
 }
-
-
-def _env_int(name, default):
-    # Env-driven ints must never take the app down at startup: a malformed
-    # value falls back to the documented default instead of raising.
-    try:
-        return int(os.getenv(name, str(default)))
-    except ValueError:
-        return default
 
 
 # Ops dashboard / /health/: a product with stock at or below this many units
