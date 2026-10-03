@@ -17,8 +17,9 @@ orchestrator runs `UI-UX-SPEC.md` §14 and records the promotion there.
 | R2 | Reference-site analytics + 3D/cube feasibility | §3, §10, §11, §13 | **DONE** | 1 | Sizes measured, not estimated. A-6 superseded; A-18–A-21 added. |
 | R3 | Cost of being wrong; budget doubling; middle point; rationing curve | §11.4, §11.5, §13 | **DONE** | 1 | Three transfer conditions measured; throttled rates are model constants (A-23/A-24). Retracted the round-1 CSP inference in §10.5 and §11.5.1. |
 | C1 | Commit verified design docs | — | **DONE** | — | `9e6561a`. Tree clean at commit time. |
-| R4 | **Reconcile spec against the 17 selected Stitch refs** | §2, §3, §4, §7, §10, §12, §13 | **BLOCKED** | 1 | Dispatch failed: `free-models-per-day-stealth` — daily free-model quota exhausted. Brief is written and ready to re-fire. |
-| B1 | Phase 3 build | — | **NOT STARTED** | — | Sequenced behind R4. Cannot start: the refs change palette, fonts and radii, so building first means building twice. |
+| R4 | **Reconcile spec against the 17 selected Stitch refs** + harmonise cross-page drift | §0b, §2, §3, §4, §7, §10, §12, §13 | **DONE** | 2 | Commit `ca54e90`. Attempt 1 blocked by `free-models-per-day-stealth`; attempt 2 succeeded. Followed by a currency correction round (below). §14 byte-identical, zero `TODO`. |
+| R4c | Currency correction after orchestrator-caught error | §0b, §12.D | **DONE** | 1 | R4 wrote 16 yen (U+00A5) signs into the spec; refs contain 0 yen / 53 rupee (U+20B9). Corrected to INR; 3 further transcription fabrications removed. Verified: yen=0, rupee=33. Commit folded into the R4 lineage. |
+| B1 | Phase 3 build | — | **READY TO START** | — | Sequenced behind R4, now cleared. Build one task at a time, each ≤5 files / ≤1 new shared component. |
 
 ---
 
@@ -35,6 +36,7 @@ Each check re-run against the working tree, not taken from an agent's report.
 | No `refs/` directory | `Test-Path` at root and under `frontend/` | PASS — absent |
 | No images committed | `.gitignore:11` = `media/`; `git check-ignore -v` on the zips | PASS — ignored, cannot be committed |
 | Stale agent self-report | researcher's 1st two `write` calls both errored (truncated payload, missing `content`); tree was clean after | caught before any verification was trusted |
+| Fabricated currency glyph | codepoint count U+00A5 vs U+20B9, spec vs all 17 refs, read as UTF-8 bytes | **CAUGHT** — refs 0 yen / 53 rupee; spec had 16 yen. Corrected; re-verified yen=0. Root cause: PowerShell console rendered U+20B9 as `?` and the misreading was written into a commerce spec as fact. |
 
 ### Source claims independently re-derived by the orchestrator
 
