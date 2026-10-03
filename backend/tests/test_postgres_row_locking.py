@@ -18,18 +18,39 @@ from being "fixed" by deleting the lock:
 
 * no locked statement joins a nullable FK - asserted against the SQL the
   real endpoint and the real admin action actually emit;
-* the rows that must be locked are still locked - asserted at the ORM
-  level (``query.select_for_update``) so it holds on SQLite too, and on
-  the emitted ``FOR UPDATE`` clause where the backend produces one.
+* the rows that must be locked are still locked.
+
+**BOTH LOCKS ARE PINNED ENGINE-INDEPENDENTLY, and the two levels are not
+interchangeable.** Read this before trusting coverage of either lock:
+
+* the admin bulk writers' **Order** lock is asserted at the ORM level
+  (``queryset.query.select_for_update``);
+* the verify path's **coupon** lock is asserted at the ORM level by
+  ``recording_locks``, which records the ``select_for_update()`` CALL.
+
+Neither could have been pinned from the emitted SQL alone, and an earlier
+version of this docstring claimed the ORM-level assertion covered the
+coupon lock when it did not - there was no such assertion, and the
+clause check it pointed at is gated on
+``connection.features.has_select_for_update``, so on SQLite deleting
+``select_for_update()`` from the coupon fetch left this module green. What
+IS still PostgreSQL-only is the weaker half: that the clause is actually
+EMITTED. SQLite's compiler drops ``FOR UPDATE`` entirely, so no
+SQL-phrased assertion can fire there. The split is deliberate and each
+half is asserted where it can actually fail.
 
 Dropping the join must not drop the coupon row lock: the verify path
 re-checks that coupon's validity and increments its ``used_count``, and
 that read-modify-write needs the row lock to be real.
 """
 
+from contextlib import contextmanager
+from unittest import mock
+
+from django.contrib import admin as admin_site
 from django.contrib.auth import get_user_model
 from django.db import connection
-from django.test import tag
+from django.test import RequestFactory, tag
 from django.test.utils import CaptureQueriesContext
 
 from common.testing import ApiTestCase
@@ -37,6 +58,30 @@ from orders.admin import OrderAdmin
 from orders.models import Coupon, Order
 
 NULLABLE_FK_JOINS = ('LEFT OUTER JOIN "orders_coupon"', 'LEFT OUTER JOIN "auth_user"')
+
+
+@contextmanager
+def recording_locks():
+    """Yield the set of models whose queryset had ``select_for_update()`` called.
+
+    This is the ORM-level observation SQLite cannot hide. SQLite's COMPILER
+    drops the ``FOR UPDATE`` clause, so no assertion phrased in terms of the
+    emitted SQL can see the lock there - but the CALL is still made by the
+    code under test, and intercepting the call records it on every backend.
+    That is what lets the coupon lock below be pinned engine-independently
+    instead of only where the clause happens to survive.
+    """
+    from django.db.models import QuerySet
+
+    locked = set()
+    original = QuerySet.select_for_update
+
+    def spy(queryset, *args, **kwargs):
+        locked.add(queryset.model)
+        return original(queryset, *args, **kwargs)
+
+    with mock.patch.object(QuerySet, "select_for_update", spy):
+        yield locked
 
 
 def _locking_sql(queryset):
@@ -52,9 +97,32 @@ def _locking_sql(queryset):
     return sql
 
 
+def changelist_orders(request):
+    """The queryset the changelist really hands a bulk action.
+
+    Deliberately NOT ``Order.objects.all()``. That manager chain never
+    carried a join, so any assertion built on it passes whatever
+    ``_locked_orders`` does with ``select_related`` - it cannot fail for the
+    change it is meant to guard. The defect arrived on the changelist
+    queryset, because ``ModelAdmin.get_changelist_instance`` builds the real
+    ``ChangeList`` and ``ChangeList.get_queryset`` applies the
+    ``select_related`` that ``get_select_related_fields()`` derives from
+    ``list_display``. Building it the same way is the only way for an
+    assertion about "no join" to mean anything.
+    """
+    model_admin = OrderAdmin(Order, admin_site.site)
+    changelist = model_admin.get_changelist_instance(request)
+    return changelist.get_queryset(request)
+
+
 @tag("e2e")
 class LockedQuerysetShapeTests(ApiTestCase):
     """The bulk writers' locked statement, engine-independent."""
+
+    def setUp(self):
+        self.staff = self.make_staff(username="pg2achangelist")
+        self.request = RequestFactory().get("/admin/orders/order/")
+        self.request.user = self.staff
 
     def test_admin_bulk_locked_queryset_joins_no_nullable_fk(self):
         """The lock carries no join at all.
@@ -63,8 +131,24 @@ class LockedQuerysetShapeTests(ApiTestCase):
         ``ChangeList.get_select_related_fields`` joins every ForeignKey named
         there; both are nullable on Order, so both joins are LEFT OUTER
         JOINs. Fails if a join is reintroduced into the locked queryset.
+
+        Driven from the real changelist queryset, and the premise is asserted
+        first: if the input ever stopped carrying the joins, the "no join"
+        assertion below would pass for the wrong reason, so this also fails
+        when the fixture stops resembling production.
         """
-        sql = _locking_sql(OrderAdmin._locked_orders(Order.objects.all(), [1, 2]))
+        incoming = changelist_orders(self.request)
+
+        premise = _locking_sql(incoming.filter(pk__in=[1, 2]))
+        for fragment in NULLABLE_FK_JOINS:
+            self.assertIn(
+                fragment,
+                premise,
+                "the changelist queryset no longer joins the nullable FKs this "
+                "guard is about, so the assertion below would be vacuous",
+            )
+
+        sql = _locking_sql(OrderAdmin._locked_orders(incoming, [1, 2]))
         for fragment in NULLABLE_FK_JOINS:
             self.assertNotIn(fragment, sql)
         self.assertNotIn("JOIN", sql.upper())
@@ -73,9 +157,10 @@ class LockedQuerysetShapeTests(ApiTestCase):
         """Dropping the join must not have dropped the lock.
 
         ORM-level, so it is asserted on SQLite too even though SQLite emits
-        no ``FOR UPDATE`` clause.
+        no ``FOR UPDATE`` clause. This is the one lock in this module with a
+        genuine engine-independent pin.
         """
-        queryset = OrderAdmin._locked_orders(Order.objects.all(), [1, 2])
+        queryset = OrderAdmin._locked_orders(changelist_orders(self.request), [1, 2])
         self.assertIs(queryset.query.select_for_update, True)
         if connection.features.has_select_for_update:
             self.assertIn("FOR UPDATE", _locking_sql(queryset).upper())
@@ -213,23 +298,55 @@ class VerifyLocksWhatItMutatesTests(ApiTestCase):
     def test_verify_locks_the_coupon_row_it_reads_and_increments(self):
         """The coupon lock is what makes the ``used_count`` bump safe.
 
-        The clause assertion is gated on the backend emitting ``FOR UPDATE``
-        (SQLite cannot); the value assertion below runs on every engine.
+        TWO CLAIMS AT TWO LEVELS, because no single level covers both
+        engines on its own:
+
+        * engine-INDEPENDENT - the coupon is fetched by its OWN statement,
+          never through the order's join (visible in the SQL everywhere),
+          and that fetch asks the ORM for a row lock
+          (``recording_locks``, which sees the CALL that SQLite's compiler
+          would otherwise drop). Both fire on SQLite as well as PostgreSQL.
+        * PostgreSQL-ONLY - that the fetch actually emits ``FOR UPDATE``.
+          SQLite emits no such clause, so THIS half cannot be pinned there
+          and is not claimed to be.
         """
         coupon = self.make_coupon(code="LOCKCPN", discount_value="10", usage_limit=5)
         order, _product = self._buy(coupon_code="LOCKCPN")
         self.assertEqual(order.coupon_id, coupon.pk)
 
-        res, sqls = self._pay_then_verify(order, "order_CPNLOCK", "pay_CPNLOCK")
+        with recording_locks() as locked_models:
+            res, sqls = self._pay_then_verify(order, "order_CPNLOCK", "pay_CPNLOCK")
         self.assertEqual(res.status_code, 200, res.data)
 
+        # Engine-independent #1: a standalone read of orders_coupon exists...
+        own_reads = [
+            s
+            for s in sqls
+            if 'FROM "orders_coupon"' in s and "LEFT OUTER JOIN" not in s.upper()
+        ]
+        self.assertTrue(
+            own_reads,
+            "verify read the coupon only through the order's join, so there is "
+            "no independent statement to lock",
+        )
+        # ...and no statement joins the coupon at all.
+        joined = [s for s in sqls if 'LEFT OUTER JOIN "orders_coupon"' in s]
+        self.assertEqual(joined, [], "verify joined the nullable coupon FK")
+
+        # Engine-independent #2: the ORM was actually asked to lock it.
+        self.assertIn(
+            Coupon,
+            locked_models,
+            "verify read and incremented the coupon without asking the ORM for "
+            "a row lock",
+        )
+
         if connection.features.has_select_for_update:
-            coupon_locks = [
-                s for s in sqls if "FOR UPDATE" in s.upper() and "orders_coupon" in s
-            ]
+            coupon_locks = [s for s in own_reads if "FOR UPDATE" in s.upper()]
             self.assertTrue(
                 coupon_locks,
-                "verify read and incremented the coupon without locking it",
+                "the coupon statement carried no FOR UPDATE on an engine that "
+                "emits one",
             )
             for sql in coupon_locks:
                 self.assertNotIn("LEFT OUTER JOIN", sql.upper())
