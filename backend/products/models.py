@@ -1,4 +1,5 @@
 from datetime import timedelta
+from functools import partial
 import os
 
 from django.conf import settings
@@ -146,7 +147,17 @@ class products(models.Model):
             # alert/dispatch log-only contracts.
             previous_stock = locked.stock - delta
             if locked.stock > 0 and previous_stock <= 0:
-                self._notify_back_in_stock(locked)
+                # ASYNC-2b2: REGISTER the fan-out on the commit hook, do
+                # not run it here. It is one SMTP round trip per opted-in
+                # user, and this block holds the product row's
+                # `select_for_update` lock for every one of them — the
+                # same row verify_payment locks, so a restock with N
+                # subscribers parked N x EMAIL_TIMEOUT of checkout traffic
+                # behind the mail. Committing releases the lock before the
+                # sockets open; a rollback drops the callback, so the mail
+                # still cannot outlive an inventory write that never
+                # happened (the reason it was pre-commit at all).
+                transaction.on_commit(partial(self._notify_back_in_stock, locked))
             elif locked.stock == 0 and previous_stock > 0:
                 self._rearm_restock_notifications(locked)
 
@@ -167,15 +178,49 @@ class products(models.Model):
         """Email every armed opt-in for ``product`` via the single send
         path, marking each row spent (``notified_at``) exactly once.
 
-        Runs INSIDE adjust_stock's atomic block (rollback-together, the
-        StockMovement pattern): the email hand-off happens pre-commit —
-        the documented in-process substrate cost, identical to every
-        other dispatch site — while the spent-stamp commits with the
-        stock change, so a rollback cannot leave a notified row paired
-        with stock that does not exist. ``update()`` (not per-row save)
-        makes the mark exact even under concurrent adjustments: a row is
-        stamped only when the UPDATE itself lands, and the notified_at
-        filter in the same statement re-checks armament at write time.
+        ASYNC-2b2. ``adjust_stock`` REGISTERS this on
+        ``transaction.on_commit`` instead of calling it inside its own
+        ``atomic()`` block: the fan-out is one SMTP round trip per
+        opted-in user, and running it under the block held this product's
+        ``select_for_update`` row for every one of them. That is the row
+        ``orders.verify_payment`` locks to decrement stock, so a restock
+        with N subscribers parked N x ``EMAIL_TIMEOUT`` worth of
+        checkout traffic behind the mail — the admin request was slow, the
+        customers queueing to buy the product were the actual defect. The
+        commit hook releases the lock before any socket opens, and a
+        rollback discards the callback, so no email can still escape an
+        inventory write that did not happen.
+
+        The lock is released *because* ``adjust_stock``'s own block is the
+        OUTERMOST transaction at every call site (the changelist inline
+        cell, the bulk action and the staff REST wrapper are all
+        non-atomic; only the admin *change form* view is atomic and it is
+        not an ``adjust_stock`` caller). A future caller that wraps this in
+        a longer transaction would still hold the product row across the
+        send, and would have to defer the crossing itself to avoid that.
+
+        Each row is CLAIMED before its send, not after. The claim is the
+        conditional UPDATE whose filter is the arming predicate
+        (``notified_at IS NULL``), so it is the mutual exclusion: 0 rows
+        updated means a concurrent stock cycle won this row first and the
+        send is skipped, which is what keeps one stock cycle to one email
+        per opt-in now that nothing else serialises the fan-out. Sending
+        first and stamping second, as this did under the lock, left two
+        rapid crossings free to each reach the same armed row.
+
+        The claim IS the spent stamp, so it is released when the send
+        fails. The stamp no longer rides the inventory transaction, and a
+        failure that committed it would spend the row on an email that
+        never went out — silently dropping that customer for good, where
+        before ASYNC-2b2 a failed send left the row armed for the next
+        crossing. The release filters on the claimed timestamp rather than
+        the pk alone, so it cannot clear a stamp that a sell-out re-arm or
+        a later cycle has since written.
+
+        Honest limit, not papered over: a process killed between the claim
+        and the send leaves the row spent with no mail behind it. Closing
+        that window needs a real worker with its own retry (ASYNC-2c); the
+        next sell-out re-arms the row.
         """
         from common import notifications
 
@@ -183,8 +228,16 @@ class products(models.Model):
             product=product,
             active=True,
             notified_at__isnull=True,
-        ).select_related("user", "product")
+        ).select_related("user")
         for preference in armed:
+            claimed_at = timezone.now()
+            claimed = RestockNotification.objects.filter(
+                pk=preference.pk, notified_at__isnull=True
+            ).update(notified_at=claimed_at)
+            if not claimed:
+                # Another stock cycle's claim landed first: this row's email
+                # for the cycle is accounted for, so sending would double up.
+                continue
             try:
                 notifications.send_email(
                     "back_in_stock",
@@ -195,16 +248,17 @@ class products(models.Model):
             except Exception:
                 # Log-only: one user's SMTP failure must not abort the
                 # loop for the remaining opt-ins (and the inventory write
-                # itself is unaffected by contract).
+                # itself is unaffected by contract). The claim goes back so
+                # the next crossing retries this row, as it did when the
+                # send ran under the stock lock.
                 logger.exception(
                     "Back-in-stock email failed: user %s, product %s",
                     preference.user_id,
                     product.pk,
                 )
-                continue
-            RestockNotification.objects.filter(
-                pk=preference.pk, notified_at__isnull=True
-            ).update(notified_at=timezone.now())
+                RestockNotification.objects.filter(
+                    pk=preference.pk, notified_at=claimed_at
+                ).update(notified_at=None)
 
     @property
     def stock_health(self) -> str:

@@ -1624,3 +1624,50 @@ The 7 PostgreSQL failures are the identical pre-existing set PG-1 recorded — a
 ### Still open, and none of it is closed by this section
 
 A send that fails is still swallowed with **no retry, no dead-letter and no customer-visible signal** (ASYNC-2c/2d); `products/models.py` still sends once per opted-in user **inside** `adjust_stock`'s locked transaction, so the request is bounded per send but unbounded in N (ASYNC-2b2); the alert cooldown is **per-process** under `LocMemCache` with no `CACHES` configured, so the documented mail-bomb bound does not hold across gunicorn workers; and `shipped`/`delivered`/`cancelled` are still dispatched as bare strings that are not members of `AuditEvent.EventType` and reach no handler.
+
+## 2026-10-04 - SPEC-1 ASYNC-2b2 (Section 0, [R-19.11]) - builder: the restock fan-out no longer runs while the product row is locked, and the claim, not the lock, is what makes it one email per stock cycle
+
+| ASYNC-2b2 | SQLite | PostgreSQL 17 | scripts | claim-scan | Black 26.5.1 |
+|---|---|---|---|---|---|
+| before (`92139d0`) | `1790 / OK / xf 4 / 100.00% / 8828 stmts` | `1790 / FAILED (failures=6, errors=1) / xf 4 / 8828 stmts` | `167 / OK` | `0 error(s)` | 108 files repo-wide (no `pyproject.toml` pins it) |
+| after | `1796 / OK / xf 4 / 100.00% / 8920 stmts` | `1796 / FAILED (failures=6, errors=1) / xf 4 / 100.00% / 8920 stmts` | `167 / OK` | `0 error(s)` | exit 1, **0 new** dirty lines in the two touched files |
+
+The 7 PostgreSQL failures are the same 7 PG-1 named above, by name and count, unchanged by this commit; the 6 tests added here pass on both engines.
+
+### What the defect was, measured
+
+`products.adjust_stock` took the product row's `select_for_update` lock and then, still inside its own `atomic()` block, emailed every armed opt-in. `orders.verify_payment` locks **the same product rows** to decrement stock, so one restock with N subscribers held a row for up to N x `EMAIL_TIMEOUT` and every customer trying to buy that product queued behind the mail. The admin request being slow was the symptom; the checkout stall was the defect.
+
+### The shape, and why not the naive one
+
+`adjust_stock` now **registers** the fan-out on `transaction.on_commit` instead of calling it, so the commit releases the lock before the first socket opens. The lock is released *because* `adjust_stock`'s block is the outermost transaction at all three call sites (the changelist inline cell, the bulk action and the staff REST wrapper are all non-atomic; `ATOMIC_REQUESTS` is unset, and the only atomic admin view, the change form, is not an `adjust_stock` caller). That dependence is now stated in the code rather than left implicit.
+
+Deferring alone is **not** the fix, and two things break if you stop there:
+
+- **Retry semantics (trap 1).** The spent stamp `notified_at` used to commit *with* the stock change. Keep the stamp in the transaction and only deferring the send means a failed send has already spent the row: no mail, and the customer is dropped permanently. So the stamp moved into the post-commit phase, where a failure can take it back.
+- **Double sends (trap 2).** The in-lock loop is what made "one cycle, one email" true. With the send after the mark's window, two rapid crossings can each reach the same armed row.
+
+The resolution is that **the claim is the mutual exclusion and it happens before the send**: each row is reserved by a conditional `UPDATE` whose filter is the arming predicate (`notified_at IS NULL`), `0` rows updated means a concurrent cycle won it and the send is skipped, and a failed send releases the claim, filtered on the claimed timestamp so it cannot clear a stamp a re-arm or a later cycle has since written. One stock cycle, one email per opt-in, retry on failure, and no product-row lock anywhere in the send path.
+
+### Tests, and the ones that can actually fail
+
+Every send-exercising test in `products/test_restock.py` now wraps its crossing in `captureOnCommitCallbacks(execute=True)`. That is not cosmetic: `on_commit` callbacks never run inside a `TestCase`, so **without** it `test_inactive_row_never_mails` would have gone green on a fan-out that never executed. The pre-existing assertions are unchanged.
+
+Four of the added tests were run against the **pre-fix** `products/models.py` (`git restore --source=92139d0`) and all four fail there, so they are pinned to the mechanism and not to the outcome:
+
+| test | what it asserts | pre-fix failure |
+|---|---|---|
+| `test_send_runs_with_the_stock_lock_block_already_popped` | while the send runs, the innermost atomic block is still the **caller's** (`connection.atomic_blocks[-1]` is the same object), so `adjust_stock`'s block, and the lock it holds, is already gone | the innermost block is `adjust_stock`'s |
+| `test_notice_is_registered_not_performed_under_the_lock` | nothing has been sent when `adjust_stock` returns, and exactly one commit-hook callback was captured | `call_count` is already 1 inside the block |
+| `test_claim_before_send_drops_a_row_another_cycle_already_won` | a second cycle claiming the rows still ahead of the fan-out yields **one** send, not two | 2 sends |
+| `test_rollback_of_the_stock_write_discards_the_registered_send` | a rollback that happens **after** the crossing sends **zero** mails (asserted on the count, not on an exception) | 1 send |
+
+`test_failed_send_is_retried_on_the_next_crossing` is the trap-1 guard and does **not** fail against pre-fix code (pre-fix a failed send also left the row armed) - it fails against the naive deferral, which is the point. `test_rearm_clears_a_claim_whose_send_never_happened` pins that a claimed-but-unsent row cannot wedge the product out of future notifications. `test_transaction_rollback_also_rolls_the_spent_stamp` is kept and is now labelled honestly: it **cannot** fail against pre-fix code, because the `StockMovement` insert precedes the crossing branch, so no mail was attempted either way.
+
+Two existing tests were adjusted rather than added to: every crossing is wrapped in `captureOnCommitCallbacks`, and `test_send_failure_is_log_only_and_never_blocks_the_loop` keys its failure on the **recipient** instead of on call order, because the loop's row order is the planner's and the old order-dependent `side_effect` list would have become a coin flip on the other engine once the loop's query plan changed.
+
+### Found, not fixed
+
+**P2, latent test-harness defect.** `orders.tests.CurrencyBackfillMigrationTests` and `LifecycleBackfillMigrationTests` run `migrate orders 0007` / `0011`, which unapplies `products/0009+` through its dependency on `orders/0014`; the full `migrate` they restore with does not put those tables back, so afterwards `products_restocknotification` **does not exist**. Any `products` test that runs in the same invocation after them fails in `setUp` with `no such table: products_restocknotification`. Nothing in the suite was affected before this change only because every `products` test is a `TestCase`, and those all run before the `TransactionTestCase` group. The direct instrument for "no transaction spans the send" (a real commit, i.e. a `TransactionTestCase`) is therefore unavailable in this suite, which is why the lock assertion is made against Django's atomic stack instead. Fixing it means changing `orders/tests.py`, outside this task's scope and against the certified PostgreSQL floor.
+
+**Accepted trade, stated in the code.** A process killed between the claim and the send leaves the row spent with no mail behind it; the next sell-out re-arms it. Closing that window needs a real worker with its own retry (ASYNC-2c). And `on_commit` still fires inside the request/response cycle, so this response's own latency is unchanged: what is gone is other requests blocking behind our locks.
