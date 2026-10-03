@@ -1664,7 +1664,7 @@ def verify_payment(request):
 
     with transaction.atomic():
         try:
-            order = Order.objects.select_for_update().select_related('coupon').get(
+            order = Order.objects.select_for_update().get(
                 id=order_id,
                 user=request.user
             )
@@ -1795,9 +1795,22 @@ def verify_payment(request):
                     status=status.HTTP_409_CONFLICT
                 )
 
-        coupon = order.coupon
-        if coupon:
-            coupon = Coupon.objects.select_for_update().get(pk=coupon.pk)
+        # The coupon is located by its id on the already-locked Order row
+        # and locked on its own FOR UPDATE below, never joined into the
+        # order's locked query. `coupon` is nullable, so a select_related
+        # here compiles to a LEFT OUTER JOIN, and FOR UPDATE over the
+        # nullable side of an outer join is rejected by PostgreSQL
+        # ("FOR UPDATE cannot be applied to the nullable side of an outer
+        # join") while SQLite never emits FOR UPDATE at all
+        # (features.has_select_for_update is False) - so the join made
+        # every verify return 500 in production and no SQLite test could
+        # ever see it. Nothing is unlocked by dropping it: every coupon
+        # field read below (active / valid_from / valid_until /
+        # usage_limit / used_count) comes off the instance fetched here,
+        # after its own row lock, never off the order's join.
+        coupon = None
+        if order.coupon_id is not None:
+            coupon = Coupon.objects.select_for_update().get(pk=order.coupon_id)
             now = timezone.now()
             if (
                 not coupon.active
