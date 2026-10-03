@@ -60,6 +60,8 @@ one session's context dies with that session.
 
 ## Section index
 
+> **Cross-section run infrastructure** (Postgres test DB, load/stress harness, red-team scripts — with their owner mapping and the PG-1-before-harnesses ordering constraint): `backend/docs/run/section-00-infrastructure.md`. Ledgered here rather than in a section queue because no single spec section owns them.
+
 | # | Title | Spec lines | Status |
 |---|---|---|---|
 | 1 | System overview | 29–151 | SHIPPED (build-now tasks SPEC-1-01/02/03/22 all PR-OPENED; 20 deferred tasks tracked with owner sections) |
