@@ -1,34 +1,266 @@
 @import "tailwindcss";
 
-@theme {
-  /* Warm ivory / ink / single bronze accent — contrast-checked on paper. */
-  --color-paper: #faf8f3;
-  --color-surface: #ffffff;
-  --color-ink: #1c1917;
-  --color-ink-muted: #57534e;
-  --color-line: #e6e1d7;
-  /* Field borders only (inputs/selects). WCAG 1.4.11 needs ≥3:1 against the
-     adjacent background; `line` (≈1.25:1 on surface) stays decorative for
-     dividers/cards so the quiet look elsewhere is unchanged. */
-  --color-line-strong: #75706a;
-  --color-bronze: #8a5a24;
-  --color-bronze-soft: #f1e9dc;
+/* ==========================================================================
+   DESIGN TOKENS — the single source of truth.
+   Every value below cites `frontend/docs/design/UI-UX-SPEC.md`.
+   Nothing in `src/**` may write a hex, a duration in ms, or a z-index that
+   does not appear here (§2 opening line: "The single source of truth.
+   Everything else cites these names.").
 
-  --font-display: var(--font-fraunces), Georgia, "Times New Roman", serif;
-  --font-sans: var(--font-source-sans), ui-sans-serif, system-ui, sans-serif;
+   `@theme static` rather than `@theme`: Tailwind v4 tree-shakes theme
+   variables that no utility happens to reference, and a token that is absent
+   from the cascade is not a token. `static` pins every key declared in this
+   block to be emitted on every route without pulling in the default theme.
+
+   NOTE the naming break with the pre-refs build: `--color-ink-muted`,
+   `--color-line` and `--color-line-strong` are VOID (§2.1.1 renamed them to
+   `--color-ink-secondary`, `--color-hairline` and `--color-field-border`,
+   and the hexes behind them are void too). §2.1's round-4 preamble: "Every
+   ratio in the pre-refs spec was computed for `paper #faf8f3` / `bronze
+   #8a5a24` / `ink-muted #57534e` and is **void**." Components still on the old
+   names are listed in the task report, not silently aliased here — an alias
+   would let the old names outlive the decision.
+   ========================================================================== */
+@theme static {
+  /* ------------------------------------------------------------------
+     §2.1.1 Canonical palette.
+     Literals taken from the markup of the 17 selected refs, which override
+     the refs' own DESIGN.md (17/17 use #FCF9F3; #F7F4EE appears in zero).
+     Every ratio in §2.1.2 / §2.1.3 was recomputed against these and only
+     these; none of them carries over from the superseded palette.
+     ------------------------------------------------------------------ */
+  --color-paper: #fcf9f3; /* the page canvas, every route, every breakpoint */
+  --color-surface: #ffffff; /* product sheets, field boxes, plates */
+  --color-ink: #1c1c18; /* titles, body copy, all text on paper — 16.26:1 */
+  --color-ink-deep: #1e1b19; /* solid buttons, header bar, dark surfaces */
+  --color-ink-secondary: #78716a; /* notes, captions, attribution, labels */
+  --color-hairline: #e5e2dc; /* structural rules, card framing — decorative */
+  --color-hairline-hover: #857c72; /* OVERRIDE (D2): the ref's #B8AF9F is 2.07:1 */
+  --color-bronze: #8c5338; /* the single chromatic accent */
+  --color-bronze-alt: #885035; /* the accent where it needs more weight on white */
+  --color-danger: #9e2a2b; /* validation and failed states ONLY — 7.09:1 */
+  --color-success: #2a5a3b; /* stock confirmation, secure auth, purchase done */
+  --color-focus: #9c6a2e; /* focus ring and focus boundary — see §7.3 below */
+
+  /* Two token families that mean different things, and must stay separate.
+     WCAG 1.4.11 needs >=3:1 for a boundary that identifies a control, so
+     `--color-field-border` (3.90:1 on paper) is every input, select and
+     textarea. `--color-hairline` is 1.23:1 and is therefore DECORATIVE ONLY —
+     dividers, card edges, list rules — under exemption E2. It is never the
+     sole boundary of an interactive control. Collapsing these two into one
+     token reintroduces the 1.4.11 bug the token layer exists to prevent. */
+  --color-field-border: #857c72;
+
+  /* ------------------------------------------------------------------
+     §2.2 — the type pairing. Playfair Display (display) + Plus Jakarta Sans
+     (body / UI / eyebrows). Replaces Fraunces + Source Sans 3 (§2.2).
+     The `var()` targets are written by next/font/google in layout.tsx;
+     `adjustFontFallback` is left at its default (true) because the two faces
+     are NOT metric-similar and §2.2.5 makes the metric-adjusted fallback the
+     thing that holds CLS near 0 under `display: "swap"`.
+     ------------------------------------------------------------------ */
+  --font-display: var(--font-playfair), Georgia, "Times New Roman", serif;
+  --font-sans: var(--font-jakarta), ui-sans-serif, system-ui, sans-serif;
+
+  /* ------------------------------------------------------------------
+     §2.2.2 The scale, verbatim from the refs' `typography:` block.
+     Nine steps, replacing the ad-hoc text-6xl / text-8xl / raw text-xs
+     sprawl (CHANGE-10). Line-height, tracking and weight ride along as
+     Tailwind's companion variables so one utility is a whole step.
+     Font-family is NOT a companion variable in Tailwind v4: compose
+     `font-display` on the four Playfair steps and `font-sans` on the rest.
+       Playfair    : display, h1, h2, h3
+       Plus Jakarta: body-lg, body, small, eyebrow, label, label-sm, money
+     ------------------------------------------------------------------ */
+  --text-display: clamp(2.25rem, 1.4rem + 3.8vw, 3.5rem);
+  --text-display--line-height: 1.14;
+  --text-display--letter-spacing: -0.01em;
+  --text-display--font-weight: 400;
+
+  --text-h1: clamp(1.75rem, 1.3rem + 2.0vw, 2.25rem);
+  --text-h1--line-height: 1.22;
+  --text-h1--letter-spacing: 0em;
+  --text-h1--font-weight: 400;
+
+  --text-h2: 1.625rem;
+  --text-h2--line-height: 1.23;
+  --text-h2--letter-spacing: 0em;
+  --text-h2--font-weight: 400;
+
+  --text-h3: 1.25rem;
+  --text-h3--line-height: 1.4;
+  --text-h3--letter-spacing: 0.01em;
+  --text-h3--font-weight: 400;
+
+  --text-body-lg: 1.125rem;
+  --text-body-lg--line-height: 1.56;
+  --text-body-lg--letter-spacing: 0;
+  --text-body-lg--font-weight: 400;
+
+  --text-body: 0.9375rem;
+  --text-body--line-height: 1.6;
+  --text-body--letter-spacing: 0;
+  --text-body--font-weight: 400;
+
+  --text-small: 0.8125rem;
+  --text-small--line-height: 1.54;
+  --text-small--letter-spacing: 0;
+  --text-small--font-weight: 400;
+
+  --text-eyebrow: 0.6875rem;
+  --text-eyebrow--line-height: 1.45;
+  --text-eyebrow--letter-spacing: 0.2em;
+  --text-eyebrow--font-weight: 600;
+
+  --text-label: 0.8125rem;
+  --text-label--line-height: 1.23;
+  --text-label--letter-spacing: 0.04em;
+  --text-label--font-weight: 500;
+
+  --text-label-sm: 0.6875rem;
+  --text-label-sm--line-height: 1.27;
+  --text-label-sm--letter-spacing: 0.08em;
+  --text-label-sm--font-weight: 500;
+
+  /* §2.2.3 makes `tabular-nums lining-nums` MANDATORY on money, volumes and
+     batch codes. Tailwind v4 has no font-variant-numeric companion variable,
+     so the size step is declared here and the numeric pairing is applied by
+     composing Tailwind's own `tabular-nums` utility on the element. Any bare
+     numeric element needs the same pairing. Recorded as a mechanism gap. */
+  --text-money: 0.9375rem;
+  --text-money--line-height: 1.4;
+  --text-money--letter-spacing: 0;
+  --text-money--font-weight: 600;
+
+  /* ------------------------------------------------------------------
+     §2.3 Radii — 0px absolute, and the exceptions are judged per instance
+     (six survive, every one a circle that is circular by nature: the stock
+     dot, the radio, the avatar, the account monogram, the bag counter and
+     the count badge; 15 container usages normalise to 0). Tailwind's
+     preflight already sets `border-radius: 0` on form controls, so the rule
+     is enforced by default rather than by discipline.
+     ------------------------------------------------------------------ */
+  --radius-none: 0px; /* buttons, cards, inputs, modals, toasts, partitions */
+  --radius-circle: 9999px; /* the six sanctioned circle exceptions */
+}
+
+/* ==========================================================================
+   §2.3 / §2.4 tokens that have NO Tailwind v4 namespace.
+   Tailwind v4's theme namespaces are colour, font, text, radius, shadow, ease
+   and animate; there is no `--space-*`, `--border-*`, `--elevation-*`, `--z-*`
+   or `--motion-*`. These are therefore plain custom properties, referenced by
+   hand-written CSS and by `var()` in components.
+   ========================================================================== */
+:root {
+  /* ---- §2.3 Spacing ------------------------------------------------
+     4px baseline, cadence 4 / 8 / 16 / 24 / 32 / 64 / 128 (96 for the tablet
+     section gap). `--space-3`, `--space-12`, `--space-20` and `--space-48`
+     are REMOVED: a scale that admits a 48px step lets the 4:1 rhythm
+     (128px between sections : 32px inside one) be broken silently. */
+  --space-1: 4px; /* icon-to-label inside a control; error copy 4px below */
+  --space-2: 8px; /* tight label pairs, chip padding */
+  --space-4: 16px; /* default sibling gap; mobile margin and gutter */
+  --space-6: 24px; /* between a heading and the item it introduces */
+  --space-8: 32px; /* card padding; desktop gutter; internal grouping */
+  --space-16: 64px; /* desktop outer margin; section gap on mobile */
+  --space-24: 96px; /* section gap on tablet */
+  --space-32: 128px; /* section gap on desktop; hero vertical padding */
+
+  /* ---- §2.3 Borders — 1px only, two tokens, by role -----------------
+     No 2px borders except the focus ring's 2px outline, and no outline for
+     anything but focus. */
+  --border-hairline: 1px solid var(--color-hairline); /* decorative (E2) */
+  --border-field: 1px solid var(--color-field-border); /* every control */
+  --border-strong: 1px solid var(--color-ink); /* secondary button, current page */
+  --border-danger: 1px solid var(--color-danger); /* captured-dead-end panel */
+
+  /* ---- §2.3 Elevation — the complete list, and it is two -----------
+     A shadow says "floating", and nothing on this site floats. Every other
+     surface is separated by a hairline. Neither of these animates. */
+  --elevation-bar: 0 2px 12px -6px rgb(28 25 23 / 0.15); /* header, once scrolled */
+  --elevation-modal: 0 24px 48px -24px rgb(28 25 23 / 0.28); /* menu overlay only */
+
+  /* ---- §2.3 Z-index — 5 steps, no exceptions ------------------------
+     Replaces three `z-50`s that were ordered correctly only by DOM accident.
+     A new z-index is a new token, or it is a bug. */
+  --z-sticky: 30; /* sticky purchase / summary panels */
+  --z-header: 40; /* <header> */
+  --z-overlay: 50; /* menu overlay, any modal */
+  --z-toast: 60; /* above the overlay: a confirmation must not hide behind it */
+  --z-skip: 70; /* skip link, visible over everything */
+
+  /* ---- §2.2.4 Measure -----------------------------------------------
+     34–40 characters per line, which is the only measure that survives a
+     font swap: above 36ch Playfair's high stroke contrast sets badly, below
+     ~34ch Jakarta's wide apertures produce rivers. Long-form prose only —
+     never UI chrome, buttons, table rows or nav. The 34rem cap on wide
+     screens is a max-width on the same rule. */
+  --measure: 36ch;
+
+  /* ---- §2.4 Motion ---------------------------------------------------
+     Durations and easings BY INTENT CLASS, not by component, so the whole
+     site feels like one system. A component never writes a duration in ms.
+
+     §2.4.1: the refs spell the same curve two ways (spaced 5x, unspaced 3x),
+     which makes a grep for the curve find one spelling and miss the other.
+     The SPACED form is canonical, defined once, and is what §7.8 check 2
+     greps for.
+
+         intent      duration    easing
+         state       --motion-state-dur      --motion-ease
+         enter       --motion-enter-dur      --motion-ease
+         exit        --motion-exit-dur       --motion-ease-exit
+         hover       --motion-hover-dur      --motion-ease
+         narrative   --motion-narrative-dur  --motion-ease
+         progress    --motion-progress-dur   --motion-ease
+         track       --motion-track-dur      --motion-ease-track
+         loading     --motion-loading-dur    linear, infinite
+         toast       --motion-toast-dur      --motion-ease
+     */
+  --motion-ease: cubic-bezier(0.16, 1, 0.3, 1);
+  --motion-ease-exit: cubic-bezier(0.4, 0, 1, 1);
+  --motion-ease-track: cubic-bezier(0.25, 1, 0.5, 1);
+
+  --motion-state-dur: 200ms; /* colour and border changes need no motion */
+  --motion-enter-dur: 200ms; /* arrival; appears at final position */
+  --motion-exit-dur: 160ms; /* the refs' ease-out */
+  --motion-hover-dur: 250ms; /* live-target feedback; the 240ms ceiling in P3 */
+  --motion-narrative-dur: 600ms; /* one accent moment per page */
+  --motion-progress-dur: 200ms; /* checkout step hairline */
+  --motion-track-dur: 500ms; /* carousel / large horizontal slide only */
+  --motion-loading-dur: 1200ms; /* skeleton shimmer, infinite, linear */
+  --motion-toast-dur: 200ms; /* reduced-motion: opacity only */
+
+  /* §2.4.2: the refs' `group-hover:scale-[1.02]`. Beyond this it stops being
+     feedback that the target is live and becomes decoration. */
+  --hover-scale: 1.02;
+}
+
+/* ==========================================================================
+   §7.3 Focus visibility.
+   `#8a5a24` — the value this rule used to carry — computes 2.97:1 on the
+   solid-ink button, under the 3:1 floor of WCAG 1.4.11. `#9C6A2E` is the
+   highest minimum across paper (4.43), white (4.65) and deep ink (3.68).
+   The opaque outline is the indicator; the 22%-alpha halo only separates the
+   ring from the button edge. `outline: transparent` is never used to remove a
+   ring, and under forced-colors the halo correctly vanishes — which is why
+   the outline, not the halo, is the opaque part.
+   ======================================================================== */
+:focus-visible {
+  outline: 2px solid var(--color-focus);
+  outline-offset: 2px;
+  box-shadow: 0 0 0 4px rgb(156 106 46 / 0.22);
 }
 
 ::selection {
-  background: var(--color-bronze-soft);
+  background: var(--color-bronze-alt);
+  color: var(--color-paper);
 }
 
-:focus-visible {
-  outline: 2px solid var(--color-bronze);
-  outline-offset: 2px;
-}
-
-/* Functional animations (toast entry, skeleton shimmer). The global
-   prefers-reduced-motion rule below disables both. */
+/* Functional animations (toast entry, skeleton shimmer). Both source their
+   duration from §2.4 tokens so the reduced-motion block below reaches them.
+   CHANGE-6 (drop the box-shadow transition) and CHANGE-7 (composited
+   transform shimmer) are component-layer work and are not done here. */
 @keyframes toast-in {
   from {
     opacity: 0;
@@ -41,7 +273,7 @@
 }
 
 .toast-enter {
-  animation: toast-in 200ms ease-out;
+  animation: toast-in var(--motion-toast-dur) var(--motion-ease);
 }
 
 @keyframes shimmer {
@@ -53,20 +285,26 @@
   }
 }
 
+/* Flat hairline base with a lighter sweep across it. The base is
+   `--color-hairline` per CHANGE-7; the highlight composes `--color-surface`,
+   the lightest token in the system, because the pre-refs sweep colour
+   (`--color-bronze-soft` #F1E9DC) is void with no successor in §2.1.1. */
 .skeleton {
   background: linear-gradient(
     90deg,
-    var(--color-line) 25%,
-    var(--color-bronze-soft) 50%,
-    var(--color-line) 75%
+    var(--color-hairline) 25%,
+    var(--color-surface) 50%,
+    var(--color-hairline) 75%
   );
   background-size: 200% 100%;
-  animation: shimmer 1.2s linear infinite;
+  animation: shimmer var(--motion-loading-dur) linear infinite;
 }
 
 /* ——— UI polish layer ——— */
 
-/* Animated underline for footer/nav links. */
+/* Animated underline for footer/nav links. Compositor-only (`transform`,
+   never `width` or `clip-path`) with the origin flipping right->left, so the
+   wipe reads as the same line on enter and on exit. */
 .link-underline {
   position: relative;
 }
@@ -80,7 +318,7 @@
   background: currentColor;
   transform: scaleX(0);
   transform-origin: right;
-  transition: transform 250ms ease;
+  transition: transform var(--motion-hover-dur) var(--motion-ease);
 }
 .link-underline:hover::after,
 .link-underline:focus-visible::after {
@@ -91,18 +329,18 @@
 /* Quiet lift for interactive cards. */
 .card-lift {
   transition:
-    transform 250ms ease,
-    box-shadow 250ms ease;
+    transform var(--motion-hover-dur) var(--motion-ease),
+    box-shadow var(--motion-hover-dur) var(--motion-ease);
 }
 .card-lift:hover {
   transform: translateY(-3px);
   box-shadow: 0 14px 32px -14px rgb(28 25 23 / 0.22);
 }
 
-/* Ghost watermark text (outlined, decorative only). */
+/* Ghost watermark text (outlined, decorative only — exemption E1). */
 .text-ghost {
   color: transparent;
-  -webkit-text-stroke: 1px var(--color-line);
+  -webkit-text-stroke: 1px var(--color-hairline);
 }
 
 /* Paper grain for large surfaces (alpha-only noise, multiply blend). */
@@ -114,7 +352,40 @@
   background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='160' height='160'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='2'/%3E%3CfeColorMatrix values='0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0.05 0'/%3E%3C/filter%3E%3Crect width='160' height='160' filter='url(%23n)'/%3E%3C/svg%3E");
 }
 
+/* ==========================================================================
+   §3 / §7.6 REDUCED MOTION — enforced AT THE TOKEN LAYER.
+   The block below neutralises the tokens themselves, so a component cannot
+   opt out by forgetting: every duration in the system is read from a
+   `--motion-*` variable, and a 0ms duration is not animatable, so the element
+   lands on its final state. That is §2.4's "Reduced-motion behaviour" column
+   applied once, instead of a `prefers-reduced-motion` block per component.
+
+   `--motion-loading-dur` goes to 0ms rather than to a small value on purpose:
+   §2.4 requires the skeleton to become a STATIC flat block, and the blanket
+   backstop below also collapses the iteration count to 1, which parks the
+   sweep off-canvas and leaves the flat `--color-hairline` base showing.
+
+   The blanket rule below is the spec's KEEP-ed backstop (globals.css:117),
+   not the primary mechanism. It is retained because CHANGE-5 is right that a
+   blanket `animation-duration` cannot neutralise a progress-based
+   `animation-timeline`, where the duration is the mapper — scroll-driven work
+   must additionally be declared inside `@media (prefers-reduced-motion:
+   no-preference)`. None exists yet, so that gate belongs to the task that
+   introduces it.
+   ========================================================================== */
 @media (prefers-reduced-motion: reduce) {
+  :root {
+    --motion-state-dur: 0ms;
+    --motion-enter-dur: 0ms;
+    --motion-exit-dur: 0ms;
+    --motion-hover-dur: 0ms;
+    --motion-narrative-dur: 0ms;
+    --motion-progress-dur: 0ms;
+    --motion-track-dur: 0ms;
+    --motion-loading-dur: 0ms;
+    --motion-toast-dur: 0ms;
+  }
+
   *,
   *::before,
   *::after {
