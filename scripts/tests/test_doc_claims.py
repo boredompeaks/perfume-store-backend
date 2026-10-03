@@ -588,6 +588,126 @@ class TestStemmedModuleVersusMethodTests(unittest.TestCase):
         self.assertEqual(claims[0].value, "models.py/admin.py/views.py")
 
 
+class NonDotPySuffixTests(unittest.TestCase):
+    """A tail after `.py` that does not start with a dot is still a tail.
+
+    The residual left open when ``test_e2e_concurrency.py.bak`` was caught: the
+    tail was ``(?:\\.\\w+)*``, so it only claimed a suffix that BEGAN with a
+    dot. ``views.pyx``, ``test_e2e_concurrency.pyt`` and ``foo.pyc`` each named
+    a file nobody has and were truncated to the real ``.py`` beside them, so
+    prose could cite a nonexistent path and the scan passed -- the same
+    laundering as ``.bak``, one character class out. ``\\w*`` closes it.
+
+    Each of the three below FAILS against the ``(?:\\.\\w+)*`` tail and passes
+    against ``\\w*(?:\\.\\w+)*``. Every "still" test in here is the other
+    direction: a tail that claims too much is a false positive, and a fix that
+    refuses correct prose is worse than the hole it closed.
+    """
+
+    KNOWN = {
+        "backend/orders/views.py": 900,
+        "backend/foo.py": 10,
+        "tests/test_e2e_concurrency.py": 300,
+    }
+
+    def _errors(self, prose):
+        errors, _ = verify_claims(extract_claims(prose, DOC), set(), self.KNOWN)
+        return errors
+
+    def test_a_pyx_tail_is_not_truncated_away(self):
+        errors = self._errors("see `backend/orders/views.pyx`")
+        self.assertEqual([c.kind for c in errors], ["module_path"])
+        self.assertEqual(errors[0].value, "backend/orders/views.pyx")
+
+    def test_a_pyt_tail_on_a_test_stemmed_path_is_still_an_error(self):
+        # The case that mixes both bugs: the `test_` is the module's stem and is
+        # still not demanded of a `def` (BUG-1), so the ONLY claim on the line is
+        # the path -- and that path does not exist, so it is an error. Pre-fix
+        # this line produced no claim at all, which is the laundering.
+        claims = extract_claims("see `tests/test_e2e_concurrency.pyt:114`", DOC)
+        self.assertEqual([c.kind for c in claims], ["path_line"])
+        errors, _ = verify_claims(claims, set(), self.KNOWN)
+        self.assertEqual([c.kind for c in errors], ["path_line"])
+        self.assertIn("no such file: tests/test_e2e_concurrency.pyt", errors[0].detail)
+
+    def test_a_pyc_tail_is_not_truncated_away(self):
+        errors = self._errors("see `backend/foo.pyc`")
+        self.assertEqual([c.kind for c in errors], ["module_path"])
+        self.assertEqual(errors[0].value, "backend/foo.pyc")
+
+    def test_a_suffixed_path_next_to_a_real_one_separates_them(self):
+        # The loophole guard in the other direction. The tightened tail must not
+        # grow a claim that runs past its own suffix and drag a true citation
+        # on the same line down with it.
+        claims = extract_claims(
+            "`backend/orders/views.pyx` is not `backend/orders/views.py`", DOC
+        )
+        self.assertEqual(
+            [c.value for c in claims if c.kind == "module_path"],
+            ["backend/orders/views.pyx", "backend/orders/views.py"],
+        )
+        errors, warnings = verify_claims(claims, set(), self.KNOWN)
+        self.assertEqual([c.value for c in errors], ["backend/orders/views.pyx"])
+        self.assertEqual(len(warnings), 1)
+
+    def test_the_good_case_still_resolves_with_the_wider_tail(self):
+        # `tests/test_e2e_concurrency.py:114` is the citation BUG-1 was written
+        # for, and closing a laundering hole by refusing it would trade a false
+        # pass for a false positive and green nothing.
+        errors, warnings = verify_claims(
+            extract_claims("see `tests/test_e2e_concurrency.py:114`", DOC),
+            set(),
+            self.KNOWN,
+        )
+        self.assertEqual(errors, [])
+        self.assertEqual(len(warnings), 1)
+
+    def test_a_sentence_closing_period_is_still_not_absorbed(self):
+        # The trap the first iteration of the tail fell into, re-checked with
+        # `\w*` in place: `\w*` must be allowed to match NOTHING, or the period
+        # ending the sentence joins the filename and correct prose fails.
+        # Unbackticked, so the period really does abut the token.
+        for prose in (
+            "see backend/orders/views.py. Done.",
+            "see `backend/orders/views.py`.",
+            "see backend/orders/views.py.",
+        ):
+            claims = kinds(extract_claims(prose, DOC), "module_path")
+            self.assertEqual(
+                [c.value for c in claims], ["backend/orders/views.py"], prose
+            )
+        self.assertEqual(self._errors("see backend/orders/views.py. Done."), [])
+
+    def test_a_line_number_after_a_suffixed_path_is_still_read(self):
+        # The line half has to reach the widened tail too, or `x.pyc:12` would
+        # drop the `:12` and be checked as a bare module -- and a bare module
+        # that resolves is a pass, which is the hole again with the tail cut
+        # off rather than the suffix.
+        claims = extract_claims("see `backend/foo.pyc:12`", DOC)
+        self.assertEqual([c.kind for c in claims], ["path_line"])
+        self.assertEqual(claims[0].value, "backend/foo.pyc:12")
+        self.assertEqual(
+            [c.kind for c in self._errors("see `backend/foo.pyc:12`")], ["path_line"]
+        )
+
+    def test_the_widened_tail_keeps_the_two_patterns_agreeing(self):
+        # Same invariant `TestStemmedModuleVersusMethodTests` pins, re-pinned on
+        # the widened tail: span containment in `extract_claims` is only sound
+        # while the module pass and the line pass end a token in the same place.
+        for cited in (
+            "orders/views.py:12",
+            "backend/foo.pyc:12",
+            "tests/test_e2e_concurrency.pyt:114",
+            "orders/views.pyx:12",
+            "orders/views.py.bak:12",
+        ):
+            self.assertEqual(
+                RE_MODULE_PATH.search(cited).span(1),
+                RE_PATH_LINE.search(cited).span(1),
+                cited,
+            )
+
+
 class PathSpanContainmentTests(unittest.TestCase):
     """The decision BUG-1 rests on, pinned on its own: exact containment.
 

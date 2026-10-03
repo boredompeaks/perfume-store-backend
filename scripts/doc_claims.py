@@ -148,18 +148,31 @@ _BOUNDARY = r"(?<![A-Za-z0-9_])"
 # length, and a length floor here would silently drop short names from the
 # check rather than report them.
 RE_TEST_NAME = re.compile(_BOUNDARY + r"(test_[A-Za-z0-9_]+)")
-# `(?:\.\w+)*` rather than a bare `\b` after `.py`: a `.py` followed by another
-# dot is not the end of a path, it is the front of a longer filename
-# (`views.py.bak`, `x.py.orig`). Under `\b` the dot is a boundary, so
+# The tail after `.py` is `\w*(?:\.\w+)*`, and BOTH halves are load-bearing.
+#
+# `(?:\.\w+)*` rather than a bare `\b`: a `.py` followed by another dot is not
+# the end of a path, it is the front of a longer filename (`views.py.bak`,
+# `x.py.orig`). Under `\b` the dot is a boundary, so
 # `test_e2e_concurrency.py.bak` resolved to the real `test_e2e_concurrency.py`
 # and the trailing `.bak` -- a file nobody has -- was dropped without comment.
 # That was a false pass before BUG-1; once the name inside a path stopped being
 # demanded as a method it would have been a false pass with nothing left behind
-# it. The tail has to be able to END in a word character, or the sentence-
-# closing period in "see views.py." would be swallowed into the filename and a
-# correct citation would start failing. The two patterns agree on where a path
-# token ends rather than each guessing.
-_PATH_TOKEN = r"[A-Za-z0-9_][A-Za-z0-9_./-]*\.py(?:\.\w+)*"
+# it.
+#
+# `\w*` closes the same hole one character class further out: a tail that does
+# not BEGIN with a dot is not thereby not a tail. `views.pyx`,
+# `test_e2e_concurrency.pyt` and `foo.pyc` each name a file nobody has while
+# resolving to the real `.py` beside them -- the identical laundering, still a
+# false pass, and caught by nothing. So the tail is "anything a name can be
+# made of", dot-led groups and bare word characters alike.
+#
+# The tail must still be able to END in a word character and must still be
+# allowed to be EMPTY: `\w*` matches nothing when the next character is not a
+# word character, and `(?:\.\w+)*` matches nothing when the period is not
+# followed by one. That is what keeps the sentence-closing period in "see
+# views.py." out of the filename while `views.py.bak` keeps its dot. The two
+# patterns agree on where a path token ends rather than each guessing.
+_PATH_TOKEN = r"[A-Za-z0-9_][A-Za-z0-9_./-]*\.py\w*(?:\.\w+)*"
 RE_MODULE_PATH = re.compile(_BOUNDARY + f"({_PATH_TOKEN})")
 RE_PATH_LINE = re.compile(_BOUNDARY + f"({_PATH_TOKEN}):(?:L)?(\\d+)")
 RE_DEF_TEST = re.compile(_BOUNDARY + r"def\s+(test_[A-Za-z0-9_]+)")
