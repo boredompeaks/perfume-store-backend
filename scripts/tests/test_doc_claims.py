@@ -18,6 +18,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from doc_claims import (  # noqa: E402
+    _inside_any_span,
     _path_exists,
     _resolve_path,
     check_byte_integrity,
@@ -28,7 +29,7 @@ from doc_claims import (  # noqa: E402
     verify_claims,
 )
 from doc_claims import FALLBACK_BASE, MIN_REASON_CHARS  # noqa: E402
-from doc_claims import RE_REASON_REFERENCE  # noqa: E402
+from doc_claims import RE_MODULE_PATH, RE_PATH_LINE, RE_REASON_REFERENCE  # noqa: E402
 
 DOC = "backend/docs/changes.md"
 
@@ -386,6 +387,232 @@ class PartialPathResolutionTests(unittest.TestCase):
             extract_claims("changed `orders/nope.py`", DOC), set(), self.KNOWN
         )
         self.assertEqual([c.kind for c in errors], ["module_path"])
+
+
+class TestStemmedModuleVersusMethodTests(unittest.TestCase):
+    """BUG-1 (TOOL-01): a `test_`-stemmed MODULE is not a `test_*` METHOD.
+
+    ``RE_TEST_NAME`` matches the ``test_`` inside ``test_e2e_concurrency.py``,
+    so a prose citation of the file was reported as a missing ``def`` for the
+    name ``test_e2e_concurrency``. The gate was red on correct prose, which is
+    worse than no gate: the two available responses are to delete the check or
+    to stop citing real files.
+
+    The rule is one rule, in both directions. A token that is part of a cited
+    PATH is a path claim and is verified as a path -- file resolves, line in
+    range. A token that is not part of a path is still verified as a method.
+    Every test below that says "still an error" is the loophole guard: the fix
+    must not become a way to dress a real error up as a path.
+    """
+
+    KNOWN = {
+        "backend/orders/views.py": 900,
+        "tests/test_e2e_concurrency.py": 300,
+    }
+
+    def test_a_test_stemmed_module_path_is_not_also_a_method_claim(self):
+        # The real failing case, for the RIGHT reason: the path_line claim is
+        # still extracted and still verified, and no method claim is invented
+        # out of the middle of the filename.
+        claims = extract_claims("see `tests/test_e2e_concurrency.py:114`", DOC)
+        self.assertEqual([c.kind for c in claims], ["path_line"])
+        errors, warnings = verify_claims(claims, set(), self.KNOWN)
+        self.assertEqual(errors, [])
+        self.assertEqual(len(warnings), 1)
+
+    def test_a_test_stemmed_module_without_a_line_is_a_path_claim(self):
+        claims = extract_claims("see `test_e2e_concurrency.py`", DOC)
+        self.assertEqual([c.kind for c in claims], ["module_path"])
+        errors, _ = verify_claims(claims, set(), self.KNOWN)
+        self.assertEqual(errors, [])
+
+    def test_a_method_name_next_to_a_path_is_still_a_method_claim(self):
+        # Resolution is scoped to the PATH TOKEN. A real method cited in the
+        # same sentence is untouched by the path beside it.
+        claims = extract_claims(
+            "`test_oversell_race` pins `tests/test_e2e_concurrency.py:114`", DOC
+        )
+        self.assertEqual(
+            [c.value for c in claims if c.kind == "test_name"],
+            ["test_oversell_race"],
+        )
+        errors, _ = verify_claims(claims, {"test_oversell_race"}, self.KNOWN)
+        self.assertEqual(errors, [])
+
+    def test_a_missing_method_name_is_still_an_error(self):
+        errors, _ = verify_claims(
+            extract_claims("killed `test_never_existed` today", DOC),
+            set(),
+            self.KNOWN,
+        )
+        self.assertEqual([c.kind for c in errors], ["test_name"])
+        self.assertIn("no `def` for this name", errors[0].detail)
+
+    def test_a_method_name_missing_while_a_real_path_sits_beside_it(self):
+        # The loophole, in its plainest form: a TRUE citation on the line must
+        # not launder a FALSE one next to it.
+        errors, _ = verify_claims(
+            extract_claims(
+                "`tests/test_e2e_concurrency.py:114` does NOT pin `test_never_existed`",
+                DOC,
+            ),
+            set(),
+            self.KNOWN,
+        )
+        self.assertEqual([c.kind for c in errors], ["test_name"])
+
+    def test_a_non_existent_test_stemmed_path_is_still_an_error(self):
+        # Dropping the `.py` is not an escape: the method check is still there
+        # and the path check is now the only one, so it must fire.
+        errors, _ = verify_claims(
+            extract_claims("see `test_no_such_file.py`", DOC), set(), self.KNOWN
+        )
+        self.assertEqual([c.kind for c in errors], ["module_path"])
+        self.assertIn("no such file in the tree", errors[0].detail)
+
+    def test_a_non_existent_test_stemmed_path_with_a_line_is_still_an_error(self):
+        errors, _ = verify_claims(
+            extract_claims("see `test_no_such_file.py:114`", DOC), set(), self.KNOWN
+        )
+        self.assertEqual([c.kind for c in errors], ["path_line"])
+        self.assertIn("no such file: test_no_such_file.py", errors[0].detail)
+
+    def test_an_out_of_range_line_in_a_resolved_module_is_still_an_error(self):
+        errors, _ = verify_claims(
+            extract_claims("see `tests/test_e2e_concurrency.py:99999`", DOC),
+            set(),
+            self.KNOWN,
+        )
+        self.assertEqual([c.kind for c in errors], ["path_line"])
+        self.assertIn("past the end", errors[0].detail)
+
+    def test_a_module_that_holds_no_test_defs_at_all_is_not_demanded_one(self):
+        # The mechanism, stated independently of the `test_` stem: the demand
+        # for a `def` comes from the METHOD reading, and a cited path never
+        # gets that reading.
+        claims = extract_claims("see `backend/orders/views.py:12`", DOC)
+        self.assertEqual([c.kind for c in claims], ["path_line"])
+
+    def test_a_path_prefix_that_merely_starts_with_test_keeps_its_own_span(self):
+        # `tests/` before `test_` is part of the path token, so nothing inside
+        # the filename leaks out as a name; but a token AFTER the citation is
+        # back to normal scanning.
+        claims = extract_claims(
+            "at `tests/test_e2e_concurrency.py:114`, `test_after` still needs checking",
+            DOC,
+        )
+        self.assertEqual(
+            [c.value for c in claims if c.kind == "test_name"], ["test_after"]
+        )
+
+    def test_a_py_suffix_on_a_non_test_name_is_unchanged(self):
+        # Nothing about the rule is specific to `test_`: any cited path token
+        # consumes itself, which is what `module_path` already meant.
+        claims = extract_claims("see `orders/views.py:12`", DOC)
+        self.assertEqual([c.kind for c in claims], ["path_line"])
+
+    def test_a_trailing_dot_ends_no_path_and_re_opens_the_method_check(self):
+        # The loophole this fix opened, found by attacking it: `x.py.bak`
+        # matched the old module pattern under `\b`, resolved to the real
+        # `x.py`, and with the name no longer demanded as a method the whole
+        # citation passed -- a file nobody has, cited as if it existed. A dot
+        # after `.py` is the front of a longer name, so the longer name is
+        # what gets claimed, and it does not resolve.
+        errors, _ = verify_claims(
+            extract_claims("see `test_e2e_concurrency.py.bak`", DOC), set(), self.KNOWN
+        )
+        self.assertEqual([c.kind for c in errors], ["module_path"])
+        self.assertEqual(errors[0].value, "test_e2e_concurrency.py.bak")
+
+    def test_a_trailing_dot_before_a_line_is_not_a_path_either(self):
+        errors, _ = verify_claims(
+            extract_claims("see `test_e2e_concurrency.py.bak:12`", DOC),
+            set(),
+            self.KNOWN,
+        )
+        self.assertEqual([c.kind for c in errors], ["path_line"])
+        self.assertIn("no such file: test_e2e_concurrency.py.bak", errors[0].detail)
+
+    def test_a_sentence_closing_period_is_not_absorbed_into_the_path(self):
+        # The tightening cuts the other way too: the tail must end in a word
+        # character, or `see views.py.` would cite a file called `views.py.`
+        # and fail on a correct sentence. Unbackticked, so the period really
+        # does abut the token -- inside backticks it cannot, which is how a
+        # weaker version of this test passed a mutant.
+        for prose in ("see orders/views.py. Done.", "see `orders/views.py`."):
+            claims = kinds(extract_claims(prose, DOC), "module_path")
+            self.assertEqual([c.value for c in claims], ["orders/views.py"], prose)
+
+    def test_every_path_line_citation_is_also_a_module_citation(self):
+        # The invariant BUG-1's fix leans on, pinned so a future edit to either
+        # pattern cannot quietly break it: the span of a path token is recorded
+        # in the module pass alone, and that is only sound while the two
+        # patterns agree on where the token ends.
+        for cited in (
+            "orders/views.py:12",
+            "tests/test_e2e_concurrency.py:114",
+            "test_e2e_concurrency.py.bak:12",
+            "orders/views.py:L12",
+        ):
+            path_group = RE_PATH_LINE.search(cited).group(1)
+            self.assertEqual(RE_MODULE_PATH.search(cited).group(1), path_group, cited)
+            self.assertEqual(
+                RE_MODULE_PATH.search(cited).span(1),
+                RE_PATH_LINE.search(cited).span(1),
+                cited,
+            )
+
+    def test_a_bak_path_for_a_non_test_stem_is_still_an_error(self):
+        # The same tightening on the module half, on its own: `views.py.bak`
+        # resolves to nothing, exactly as `views.py.nope` did.
+        errors, _ = verify_claims(
+            extract_claims("see `orders/views.py.bak`", DOC), set(), self.KNOWN
+        )
+        self.assertEqual([c.kind for c in errors], ["module_path"])
+
+    def test_a_real_path_line_still_resolves_with_the_tightened_pattern(self):
+        errors, warnings = verify_claims(
+            extract_claims("see `tests/test_e2e_concurrency.py:114`", DOC),
+            set(),
+            self.KNOWN,
+        )
+        self.assertEqual(errors, [])
+        self.assertEqual(len(warnings), 1)
+
+    def test_a_slash_separated_path_list_is_unchanged(self):
+        # Prose enumerates `models.py/admin.py/views.py` in one breath. The
+        # tightened pattern must keep reading that the way it always did --
+        # one token, which does not resolve -- and not start splitting it.
+        claims = extract_claims("from `models.py/admin.py/views.py` today", DOC)
+        self.assertEqual([c.kind for c in claims], ["module_path"])
+        self.assertEqual(claims[0].value, "models.py/admin.py/views.py")
+
+
+class PathSpanContainmentTests(unittest.TestCase):
+    """The decision BUG-1 rests on, pinned on its own: exact containment.
+
+    Pinned here rather than only through ``extract_claims`` because the
+    difference between containment and overlap is not reachable from prose --
+    the boundary patterns make a partially-overlapping token impossible -- and
+    a rule that is only correct by accident of two other regexes is a rule that
+    one edit away from being a loophole.
+    """
+
+    def test_a_span_inside_a_path_span_is_consumed(self):
+        self.assertTrue(_inside_any_span((5, 10), [(0, 20)]))
+
+    def test_a_span_touching_a_path_span_but_outside_it_is_not(self):
+        # Reaches across the path without sitting inside it. Not reachable from
+        # prose -- the boundary patterns make it impossible -- which is exactly
+        # why it is pinned here.
+        self.assertFalse(_inside_any_span((0, 10), [(0, 9)]))
+        self.assertFalse(_inside_any_span((0, 3), [(5, 9)]))
+
+    def test_a_span_containing_a_path_span_is_not_consumed(self):
+        self.assertFalse(_inside_any_span((0, 30), [(5, 10)]))
+
+    def test_no_spans_consumes_nothing(self):
+        self.assertFalse(_inside_any_span((0, 3), []))
 
 
 class CounterExampleDirectiveTests(unittest.TestCase):

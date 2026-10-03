@@ -15,6 +15,18 @@ are hard failures:
   * a ``file.py:123`` reference whose file is missing or whose line is past
     the end of the file
 
+A cited token is read as ONE of those, never as two at once. ``file.py:123``
+is a path citation and not also a test name, so the ``test_`` inside
+``test_e2e_concurrency.py`` is never demanded of a ``def`` -- it is the
+module's stem, and the module is checked where a module is checked: the file
+has to resolve and the line has to be inside it. Reading one token as both a
+path and a method is what made this gate RED on correct prose (BUG-1, TOOL-01),
+and the two available responses to a red gate are to delete the check or to
+stop citing real files, so the scanner is fixed instead. A ``test_`` token that
+is NOT inside a cited path is a method and is still held to the method check,
+and a ``test_*.py`` path that does not resolve is still an error -- dressing a
+real error up as a path buys nothing.
+
 One of those three cannot tell a CLAIM from a COUNTER-EXAMPLE. Prose that
 quotes a retired test name, or a misspelling, or a path that a byte-eaten
 write left as a fragment, in order to REPORT that it does not exist, is the
@@ -136,8 +148,20 @@ _BOUNDARY = r"(?<![A-Za-z0-9_])"
 # length, and a length floor here would silently drop short names from the
 # check rather than report them.
 RE_TEST_NAME = re.compile(_BOUNDARY + r"(test_[A-Za-z0-9_]+)")
-RE_MODULE_PATH = re.compile(_BOUNDARY + r"([A-Za-z0-9_][A-Za-z0-9_./-]*\.py)\b")
-RE_PATH_LINE = re.compile(_BOUNDARY + r"([A-Za-z0-9_][A-Za-z0-9_./-]*\.py):(?:L)?(\d+)")
+# `(?:\.\w+)*` rather than a bare `\b` after `.py`: a `.py` followed by another
+# dot is not the end of a path, it is the front of a longer filename
+# (`views.py.bak`, `x.py.orig`). Under `\b` the dot is a boundary, so
+# `test_e2e_concurrency.py.bak` resolved to the real `test_e2e_concurrency.py`
+# and the trailing `.bak` -- a file nobody has -- was dropped without comment.
+# That was a false pass before BUG-1; once the name inside a path stopped being
+# demanded as a method it would have been a false pass with nothing left behind
+# it. The tail has to be able to END in a word character, or the sentence-
+# closing period in "see views.py." would be swallowed into the filename and a
+# correct citation would start failing. The two patterns agree on where a path
+# token ends rather than each guessing.
+_PATH_TOKEN = r"[A-Za-z0-9_][A-Za-z0-9_./-]*\.py(?:\.\w+)*"
+RE_MODULE_PATH = re.compile(_BOUNDARY + f"({_PATH_TOKEN})")
+RE_PATH_LINE = re.compile(_BOUNDARY + f"({_PATH_TOKEN}):(?:L)?(\\d+)")
 RE_DEF_TEST = re.compile(_BOUNDARY + r"def\s+(test_[A-Za-z0-9_]+)")
 
 # A number welded to something countable. Deliberately verbose: a bare digit
@@ -437,6 +461,20 @@ def _directive_note(directive: CounterExample | None) -> str:
     return f"cited as a counter-example ({directive.kind}): {directive.reason}"
 
 
+def _inside_any_span(span: tuple[int, int], spans: list[tuple[int, int]]) -> bool:
+    """Whether ``span`` lies wholly inside any one of ``spans``.
+
+    Span containment, not string equality: the decision is "was this token part
+    of a path the author wrote", which is a question about POSITION on the line,
+    and a name-equality test would also silence a bare ``test_foo`` merely
+    because a path containing a different ``foo`` was cited beside it.
+    Containment rather than overlap so that a token which reaches ACROSS a path
+    without sitting inside it stays its own claim.
+    """
+    start, end = span
+    return any(low <= start and end <= high for low, high in spans)
+
+
 def extract_claims(text: str, path: str, first_line: int = 1) -> list[Claim]:
     """Pull every claim out of one blob of added documentation text.
 
@@ -456,6 +494,13 @@ def extract_claims(text: str, path: str, first_line: int = 1) -> list[Claim]:
         # A path cited as `file.py:123` is one claim, not two. Record which
         # names were consumed as path:line so the bare-module pass skips them.
         cited_with_line: set[str] = set()
+        # The SPAN of every path token, so the test-name pass cannot read a
+        # `test_` that is part of a filename (BUG-1). Recorded in the module pass
+        # alone, and that is not an omission: `_PATH_TOKEN` and `_BOUNDARY` are
+        # shared with `RE_PATH_LINE`, which only adds the `:NN` requirement, so
+        # every `path:line` citation is also a module citation at the identical
+        # span. Two records would be two chances to record only one of them.
+        path_spans: list[tuple[int, int]] = []
         for match in RE_PATH_LINE.finditer(prose):
             cited = match.group(1)
             cited_with_line.add(cited)
@@ -473,6 +518,7 @@ def extract_claims(text: str, path: str, first_line: int = 1) -> list[Claim]:
             )
 
         for match in RE_MODULE_PATH.finditer(prose):
+            path_spans.append(match.span(1))
             if match.group(1) in cited_with_line:
                 continue
             cited = match.group(1)
@@ -489,6 +535,15 @@ def extract_claims(text: str, path: str, first_line: int = 1) -> list[Claim]:
             )
 
         for match in RE_TEST_NAME.finditer(prose):
+            # A `test_` INSIDE a cited path is the module's stem, not a method,
+            # and demanding a `def` for it reported correct prose as a missing
+            # test (BUG-1). The path claim above is not skipped in exchange --
+            # it is still extracted and still verified -- so this closes one
+            # reading rather than removing a check. Scoped to the PATH TOKEN's
+            # own span, so a method cited anywhere else on the line is
+            # unaffected.
+            if _inside_any_span(match.span(), path_spans):
+                continue
             name = match.group(1)
             # A quoted name is one claim whether it is asserted or reported
             # absent; only an explicit directive on THIS line tells the two
