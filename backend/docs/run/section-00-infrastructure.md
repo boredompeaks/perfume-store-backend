@@ -72,7 +72,15 @@ already been caught lying seven times in this run.
 | RUN-1 | Load / concurrency harness that finds **what breaks first and why** (SPEC-2-09, owner S2) | P2 | new | PENDING — blocked on PG-2a. Must use `TransactionTestCase` + real threads/connections; deterministic contention, not timing luck. |
 | RED-1 | Red-team + probe scripts, **in-repo and tracked** | P2 | new | PENDING — blocked on PG-2a. Written to **break** logic, never to demonstrate compliance. |
 
-## PG-2a RESULT — P0 fixed, and two of the orchestrator's premises were wrong
+## TOOL-01 FOLLOW-UP — ruled a TOOL DEFECT, fix the scanner not the prose
+
+The `doc_claims` scanner **cannot distinguish a `test_`-stemmed MODULE from a `test_` METHOD**, so any prose naming a test file trips a `test_name` check and demands a `def`. It fired **three times in one cycle**: once forcing a workaround in `changes.md`, twice in this ledger. Satisfying it cost **three real file identifiers** while two genuine bare-basename defects still had to be repaired by hand — the scanner could not tell those apart either.
+
+**Auditor's ruling: a tool that punishes true prose and misses real defects is backwards, and rewordings are the wrong response** — that trains authors to write vaguer prose about real files, which is the exact failure the oracle exists to prevent. The fix is small and **strictly additive**: resolve a backticked `test_*` token against tracked files — if it is a file, classify it `[module_path]` and validate as a path; if not, keep today's `[test_name]` check. Under that rule all three workarounds become unnecessary. The oracle-conservatism counter (a false negative is worse than a false positive) was considered and does not survive **the tree being available**, because resolving the token is more informative, not less. **Land with the CI wiring.**
+
+**Also pinned: `--base` convention.** A green `doc_claims` scan means "no errors across the diff from `<base>`", so a base several commits stale makes the scan **broader and therefore stronger**, never narrower — but a reader must not take a green scan as covering only the intended range. RE's CI must pass an explicit `--base`.
+
+## PG-2a RESULT — SHIPPED
 
 `1b4f1f1` (`orders/admin.py` 36/10 · `orders/views.py` 17/4 · a new row-locking guard module under `backend/tests/` 258/0).
 
