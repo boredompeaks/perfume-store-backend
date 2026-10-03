@@ -1,19 +1,33 @@
-# Google Stitch prompt file — perfume-store storefront
+﻿# Google Stitch prompt file — perfume-store storefront
 
-> **STATUS: FILLED by `design-research`, 2026-10-02.** No dispatch blocker
-> remains. §1 (design system) and §2 (all 17 coverage rows) are complete, and §3
-> carries a per-page block for every row — including the two the skeleton's own
-> route list understated (`/track-order`, and `/returns` as a policy page rather
-> than a request flow). §3.2, the worked example, is retained deliberately as the
-> density bar.
+> **STATUS: FILLED by `design-research`, 2026-10-02. REVISED 2026-10-03 (round 4)
+> after the user selected 17 Stitch designs by hand.** Those designs — "Artisanal
+> Parfumerie" / *Maison Éther* — are now the authority for the visual direction.
+> `UI-UX-SPEC.md` §0b is the provenance contract.
 >
-> **One correction to the worked example is recorded in §3.2's header** and in
-> `UI-UX-SPEC.md` §3: the spec overrides its "scale-and-settle on the gallery
-> image" instruction, because that image is the largest painted element on the
-> product page.
+> **THE REFS ARE A DESIGN SYSTEM, NOT CONTENT.** "Maison Éther", "Éther
+> éculaire", every product name, all copy, all imagery, every price amount, and every
+> commercial figure are Stitch placeholders. The refs do already use the rupee sign
+> and INR, which is correct — what is fabricated is the **amount**, never the currency.
+> **The system transfers. The content does not.** The
+> API-binding table in `UI-UX-SPEC.md` §12.D makes each placeholder impossible to
+> transcribe by accident.
 >
-> Owner: `design-research`. Consumers: the user (drives Stitch by hand) and
-> `frontend-architect` (executes the resulting design).
+> **The 17 designs drifted**, because Stitch does not carry context between
+> generations. Canonical is `#FCF9F3` / `#1C1C18` / `#1E1B19` / `#E5E2DC`. **The
+> auth family is entirely on-canonical**; the drifters are the PDP, the products
+> listing, the home page and password-reset step 2. See `UI-UX-SPEC.md` §2.1.1.
+>
+> **Five overrides apply to the refs** and are not questions — the focus ring
+> (`#9C6A2E`, not the ref's `#B8AF9F`, which fails 3:1), the settle animation
+> (must not hide content by default), no permanent `will-change`, the wipe as
+> `transform: scaleX()`, and no autoplay. See `UI-UX-SPEC.md` §3 O1–O5.
+>
+> **Coverage:** 17 designed routes, 5 derived (`/contact`, `/terms`, `/privacy`,
+> `not-found`, `error`), 3 inferred (the three recovery routes). Every per-page
+> block below is marked **USER-DESIGNED** or **DERIVED**; see §5.12.
+
+---
 
 ---
 
@@ -372,94 +386,115 @@ Overall feeling: expensive, quiet, confident. Restraint everywhere except the
 gallery, which is the one moment allowed to move.
 ```
 
-### 3.1 — `/` — home
+### 3.1 — `/` — home — **USER-DESIGNED, canonical**
+
+> **This block is superseded by the design the user selected.** It is retained
+> because `UI-UX-SPEC.md` §3.1 and §5.12.1 reference it, and because the prompt
+> remains the specification for the five pages with **no** design (§5.12.2).
+>
+> **The selected design** (`maison_ther_catalogue_accueil_carousel_edition`)
+> implements **exactly the option-(a) accent this block and `UI-UX-SPEC.md` §3.1
+> already specify** — a scroll-triggered settle reveal — **plus a manual carousel
+> track**, which is new to this spec and is now specced in §2.4 (`track`) and §3
+> (override O5). **The 3D cube option was considered and declined** by the
+> stakeholder; its measured reason is in `MOTION-3D-ANALYSIS.md` §5.5 and
+> `UI-UX-SPEC.md` §11.5.3.
 
 - **Job:** say what the house is, and get the visitor into the catalogue.
 - **Sections, in order:**
-  1. **Hero.** A left-aligned column on warm ivory, not a full-bleed photograph.
-     A small widely-tracked uppercase bronze eyebrow, then a very large display
-     serif headline with one single word in bronze italic — that one word is the
-     only emphasis on the page. Below it a short paragraph in the sans at a
-     comfortable reading size, held to a narrow measure. Then two actions: one
-     solid dark square-cornered button, and beside it a plain text link with an
-     underline that wipes in from the left. The whole column sits slightly above
-     the optical centre of the screen, not on it.
-  2. **New arrivals.** A hairline rule, then a section heading in the display
-     serif with a small "View all" link pushed to the far right. Below, a
-     four-column grid of products, each on a soft bronze-tinted plate holding one
-     portrait photograph with the bottle alone on it, then the name in the serif
-     and the price right-aligned in the sans with evenly spaced digits.
-  3. **House position.** A hairline rule, then two columns: a short display-serif
-     heading on the left, two paragraphs of quiet prose on the right, set in the
-     muted grey and held to a narrow measure.
-  4. **Fact strip.** Three short facts in small tracked capitals — shipping
-     across India, secure payment, a seven-day return window — separated by small
-     centred dots. These are statements of fact, so they are set as plain type,
-     not as badges or logos.
-- **Accent moment:** the three page sections settling very slightly as each comes
-  into view, in reading order — a soft fade with a short downward travel, nothing
-  more. It earns its place because it paces the page without asking for attention.
-  The hero does not move; it is what the visitor arrived to read.
-- **Responsive notes:** phone — single-column hero with the section gap halved, a
-  two-column product grid, the fact strip wrapping onto two lines. Tablet — a
-  three-column grid. Desktop — a four-column grid, full section gaps, and a very
-  faint oversized outlined letterform sitting behind the hero at the far right,
-  purely decorative and low contrast.
-- **Negative direction:** no hero photograph, no full-bleed image, no category
-  tiles (there is no category data), no testimonial carousel, no customer count,
-  no review stars, no newsletter form, no percentage-off badges, no promotional
-  strip, no scrolling announcement bar.
-- **Spine:** palette, type and spacing from §1; imagery direction from §1; motion
-  from §1's motion character, capped at three reveals.
+  1. **Hero.** A left-aligned column on warm ivory (`#FCF9F3`), not a full-bleed
+     photograph. A small widely-tracked uppercase **bronze** eyebrow (`#8C5338`,
+     11px, `0.2em`) reading that these are extraits, made in small batches. Then a
+     very large Playfair headline, tight and confident, with **one** word in bronze
+     italic and nothing else emphasised. A short paragraph in Plus Jakarta Sans at
+     `--measure`, then two actions: one solid deep-ink (`#1E1B19`) square-cornered
+     button at 48px minimum height with `0.1em`-tracked uppercase, and a plain text
+     link whose underline **wipes in from the left** on hover.
+  2. **The carousel rail.** Full-width panels on a single track, moved by
+     `transform` only, at 500ms on a dedicated curve. **Manual controls only:**
+     previous and next buttons that go `disabled:` at the ends, four dot buttons,
+     and an `01`/`04` counter. **No autoplay** — see §3 O5. This is the *narrative*
+     rail and it does not count as the page's accent moment, because it only
+     moves on a deliberate click.
+  3. **New arrivals.** A hairline rule, a section heading in Playfair with a
+     "View all" link on the far right, and a 4-up grid at desktop, 3-up at tablet,
+     2-up on mobile. Each product: one portrait photograph of the bottle alone on a
+     seamless warm background, soft side light, generous empty space, on a white
+     plate framed by a 1px `#E5E2DC` hairline. Beneath: the name in Playfair, the
+     price right-aligned in tabular numerals, the volume in small muted grey.
+  4. **House position.** A hairline rule, then two columns: a bronze eyebrow and a
+     Playfair heading on the left, two quiet paragraphs on the right at
+     `--measure`.
+  5. **Fact strip.** Three verifiable facts in small tracked capitals — ships
+     across India, secure payment, a return window — separated by faint centred
+     dots. **The window is bound to `/api/settings/` and renders nothing until that
+     field exists** (`UI-UX-SPEC.md` §12.D.2). Plain type; no badges, no logos.
+- **Accent moment:** **the settle reveal.** Sections fade and settle 8px into place
+  as they are reached — specified as `animation-timeline: view()`, **not** the
+  design's `IntersectionObserver` script, because the default state must be the
+  final state (`UI-UX-SPEC.md` §3, override O4). One moment. The carousel is
+  user-initiated and does not count against it.
+- **Responsive notes:** 2-up grid and 64px section gap at mobile; 3-up and 96px at
+  tablet; 4-up and 128px at desktop with 64px margins and 32px gutters.
+- **Negative direction:** no hero photograph, no autoplay, no swipe-only
+  navigation, no full-bleed image, category tiles, testimonials, review stars,
+  customer counts, newsletter form, percentage-off badges, trust logos, scrolling
+  announcement bar, gradients, `backdrop-filter`, glow, emoji as icons, rounded
+  buttons, or centred-everything layouts.
+- **Spine:** §1 palette and type; §2 tokens; motion from §2.4's intent classes.
 
 ```
 A perfume house's home page. Warm ivory paper, deep warm-black ink, one bronze
-accent, and almost nothing moving.
+accent, square corners, hairline rules, and exactly one thing that moves on its
+own.
 
-An open, left-aligned hero on the ivory — no photograph at all. A small
-widely-tracked uppercase bronze eyebrow reading that these are eau de parfum,
-made in small batches. Beneath it a very large display serif headline, tight and
-confident, about perfumes composed with restraint, with the single word
-"restraint" set in bronze italic and nothing else emphasised. A short paragraph
-below in a warm grey humanist sans, held to a narrow measure. Then two actions
+An open, left-aligned hero on the ivory — no photograph. A small widely-tracked
+uppercase bronze eyebrow reading that these are extraits de parfum, made in small
+batches. Beneath it a very large display serif headline, tight and confident, with
+one single word set in bronze italic and nothing else emphasised. A short
+paragraph below in a warm grey sans, held to a narrow measure. Then two actions
 side by side: a solid deep-ink square-cornered button, and a plain small text link
-with an underline that wipes in from the left on hover. The column sits slightly
-above the optical centre, leaving air beneath it. In the far background at the
-very edge, a single enormous letterform rendered as a hairline outline in a
-colour barely darker than the paper — decoration only, never legible as content,
-and hidden on narrow screens.
+whose underline wipes in from the left on hover. The column sits slightly above the
+optical centre, leaving air beneath it.
 
-A hairline rule, then a section: a display serif heading reading New arrivals with
-a small "View all" text link pushed to the far right on the same baseline. Below
-it a four-column grid of four products. Each product is a portrait-oriented
-photograph of a single perfume bottle alone on a seamless warm background, lit
-softly from one side, occupying the middle half of the frame with generous empty
-space around it, on a soft bronze-tinted plate. Beneath the plate the fragrance
-name in the display serif, the price right-aligned in the sans with evenly spaced
-digits, and the volume in a smaller warm grey beneath. Nothing else on the card:
-no rating, no badge, no strikethrough price, no ribbon.
+Then a full-width editorial carousel: large panels of a single perfume bottle alone
+on a seamless warm background, lit softly from one side with generous empty space
+around the object. Beneath the panels, previous and next square hairline-bordered
+buttons, four small dot buttons, and a two-digit counter showing which panel is
+showing and how many there are. The previous button is disabled on the first panel
+and the next is disabled on the last. Movement between panels is manual only — it
+never advances by itself, and it is controlled by those buttons and dots.
+
+Then a hairline rule, then a section: a display serif heading reading New arrivals
+with a small "View all" text link pushed to the far right on the same baseline.
+Below it a four-column grid of products. Each product is a portrait photograph of a
+single bottle alone on a seamless warm background with soft side light and lots of
+empty space, on a white plate framed by a single hairline. Beneath the plate the
+fragrance name in the display serif, the price right-aligned in the sans with
+evenly spaced digits, and the volume in a smaller warm grey underneath. Nothing
+else on the card: no rating, no badge, no strikethrough price, no ribbon.
 
 Another hairline rule, then a two-column editorial block. Left: a short bronze
 eyebrow and a display serif heading about building around a single idea until it
 holds. Right: two quiet paragraphs in warm grey explaining that the house releases
-few perfumes rather than a large catalogue, and that everything stated on the
-page is what is in the bottle. Narrow measure, generous leading.
+few perfumes rather than a large catalogue, and that everything stated on the page
+is what is in the bottle. Narrow measure, generous leading.
 
 Then a single line of three short facts in small tracked capitals, separated by
 faint centred dots: that orders ship across India, that payment is handled by a
-named secure provider, and that unopened items may be returned within seven days.
-Plain type, no icons, no logos, no badges.
+named secure provider, and the return window. Plain type, no icons, no logos, no
+badges.
 
-Accent motion, and only this: the product grid section and the editorial block
-each settle very slightly into place as they are first reached, a soft fade with a
-short downward travel over a fifth of a second. The hero does not move at all.
-Nothing else on the page is animated.
+Accent motion, and only this: each section settles very slightly into place as it
+is first reached, a soft fade with a short eight-pixel downward travel over about a
+fifth of a second. The hero does not move. The carousel moves only when a visitor
+presses a button or a dot.
 
-Avoid: hero photography, full-bleed imagery, category shortcut tiles,
+Avoid: autoplay or any self-advancing slider, swipe-only navigation without
+buttons, hero photography, full-bleed imagery, category shortcut tiles,
 testimonials, review stars, customer counts, newsletter signup, percentage-off
-badges, trust logos, a scrolling announcement bar, gradients, glass effects, glow,
-emoji as icons, rounded buttons, centred-everything layouts, and more than one
-animated element.
+badges, trust logos, a scrolling announcement bar, gradients, frosted or glass
+panels, glow, emoji as icons, rounded buttons, and centred-everything layouts.
 
 Overall feeling: the first page of a printed catalogue that happens to be
 interactive. Expensive because it is quiet.

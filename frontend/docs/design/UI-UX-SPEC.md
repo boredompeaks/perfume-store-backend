@@ -1,4 +1,4 @@
-# UI/UX specification — perfume-store storefront
+﻿# UI/UX specification — perfume-store storefront
 
 > **STATUS: FILLED by `design-research`, 2026-10-02.** Every placeholder marker
 > is resolved and no dispatch blocker remains. Sources read in full before writing: `frontend/src/**` (all 22 route
@@ -59,6 +59,88 @@ Also verified, and it changes two other things:
 no `frame-src`. `src/lib/razorpay.ts:19` injects that script. **The payment step
 cannot load the gateway under the CSP the app already sets.** This is recorded
 in §12-G8 and must be fixed in config, not worked around in the client.
+
+---
+
+## 0b. DESIGN PROVENANCE — the refs are a SYSTEM, not CONTENT
+
+> **Added 2026-10-03, after the user selected 17 Stitch designs by hand.** Those
+> designs — "Artisanal Parfumerie" / *Maison Éther*, with its own `DESIGN.md`,
+> a `code.html` and a `screen.png` per page — are **now the authority for the
+> visual direction.** Where they and the earlier prose in this file disagree, the
+> designs win. Everything below records exactly which half transfers.
+
+### 0b.1 THE RULE — read this before writing a single component
+
+> **The refs transfer as a design system. Their content does not transfer at all.**
+>
+> **"Maison Éther", "Éther Séculaire", "N° 04", "Batch 01/24 - Grasse / Paris",
+> "16 h", "120 Jours", "Retours 30 Jours", "14 jours
+> calendaires", "₹ 41,300", "Paris · Grasse · Kyoto", "Includes a complimentary
+> 2ml matching vial" — every one of these is a Stitch placeholder. None is real.
+> Every one of them must be rendered from the API or not rendered at all.**
+>
+> **The failure mode this rule exists to prevent:** an architect transcribing
+> "Éther Séculaire" into a component, or a designer keeping "30 JOURS" because it
+> looks right, and the storefront shipping **a fabricated brand and a fabricated
+> return policy** to customers. §12-D is the binding table that makes each of
+> these impossible to transcribe by accident.
+
+### 0b.2 What is BINDING from the refs
+
+| Binding | Source | Where it lands in this spec |
+|---|---|---|
+| Palette (paper, surface, ink, secondary ink, hairline, bronze, error, pine) | `DESIGN.md` §Colors | **§2.1** — recomputed from the literals |
+| Type pairing: **Playfair Display** (display) + **Plus Jakarta Sans** (body/UI/eyebrows) | `DESIGN.md` §Typography | **§2.2** — replaces Fraunces + Source Sans 3 |
+| Type scale, `0.2em` eyebrow tracking, 11px eyebrow | `DESIGN.md` `typography:` block | **§2.2** |
+| `tabular-nums lining-nums` mandatory on money, volumes, batch codes | `DESIGN.md` line 161 | **§2.2** — elevated to a hard rule |
+| 34–40 character measure on long-form | `DESIGN.md` line 159 | **§2.2** |
+| **Radius 0px absolute**, one exception: header bag counter as an 18px micro-circle | `DESIGN.md` §Shapes | **§2.3** |
+| 4px baseline; 4/8/16/24/32/64/128 cadence; 128px section gap as a 4:1 multiple of 32px | `DESIGN.md` §Layout | **§2.3** |
+| Grid: 12-col desktop ≥1200px / 64px margins / 32px gutters; 8-col tablet 768–1199; 4-col mobile 320–767 / 16px margins | `DESIGN.md` §Grid | **§4** |
+| Elevation: **paper layering and hairlines, not shadows.** Cards flat. Only a scrolled-header rule and a full-screen overlay may cast any shadow | `DESIGN.md` §Elevation | **§2.3** — consistent with the existing two-shadow rule |
+| Card hover: lift 2px, hairline darkens, line wipe | `DESIGN.md` line 182 | **§3** — with overrides 2 and 3 |
+| Motion profiles: 200ms arrival, 160ms departure, 250ms card lift | `DESIGN.md` line 183 | **§2.4** — consolidated into intent classes |
+| Button anatomy: 48px min height, 32px padding, uppercase `0.1em`, 0px radius, no shadow; hover `#2E2A27` | `DESIGN.md` §Buttons | **§6** |
+| Input anatomy: label outside in secondary-ink uppercase; error baseline in error rust with copy 4px below | `DESIGN.md` §Inputs | **§6** |
+| Product-card anatomy: white plate, 1px hairline, bronze eyebrow, serif title, notes in secondary ink, tabular price | `DESIGN.md` §Cards | **§6** |
+| Pyramid anatomy: Top/Heart/Base separated by hairlines, 11px uppercase wide-tracked indicators | `DESIGN.md` line 206 | **§5.2**, §6 |
+| Accord chips: rectangular, hairline, paper fill — **never pill-shaped** | `DESIGN.md` line 205 | **§6** |
+| Exclusions: no gradients, no backdrop filter, no pills, no star ratings, no urgency counters, no crossed-out prices | `DESIGN.md` §Exclusions | reinforces §3's rejects; **and the refs break two of these — see §0b.4** |
+
+### 0b.3 What is PLACEHOLDER — do not transcribe
+
+| Placeholder class | Instances observed in the refs | Rule |
+|---|---|---|
+| **Brand identity** | Maison Éther, Maison Aurel, the wordmark, `logo.png` | Single source `lib/site.ts`. The refs' name is not ours |
+| **All copy** | every headline, paragraph, editorial block, and both languages of it (the refs are French/English mixed) | Our copy, `site.ts`, and the policy pages' real text |
+| **All product data** | names, olfactory pyramids (Top/Heart/Base botanicals), descriptions | `GET /api/products/**` — see §12-D |
+| **All money** | **the refs price in INR, correctly, with the rupee sign U+20B9 — but as hardcoded literals** (53 rupee signs across the 17 files; examples: `₹ 41,300`, `₹ 19,800`, `₹ 21,500`, `₹ 0`) | `formatINR(order/item.product.price)` from the server string. **The currency is correct; the amounts are fabricated.** Nothing is transcribed |
+| **All imagery** | `lh3.googleusercontent.com` AI still-lifes | `next/image` + `Product.image` |
+| **All commercial claims** | `16 h`, `120 Jours`, four-month maceration, "tenacity approximately 14-18 hours", "14-18 hours", complimentary 2 ml vial and "échantillon d'essai de 2 ml", carbon-neutral dispatch "across Europe", 30-day and 14-day return windows, "5 – 7 jours" delivery | **Removed under P5** unless a field exists — §12-D, §12.D.2, §12.D.3. **The `Tenue` label exists on the PDP with no number beside it; labels may render, numbers never do** |
+| **Provenance strings** | "N° 04", "N° 01 – Éveil", "Batch 01/24 - Grasse / Paris", "Batch archive sealed", "BATCHES", "PARIS · GRASSE · KYOTO" | No field exists. Removed or bound to nothing |
+| **Addresses / geography** | "Grasse", "Paris", "Kyoto", "dispatch across **Europe**" | The store ships across **India** (`shipping/page.tsx`). A French atelier address would be a false claim |
+| **Dead links** | **201 of the refs' `href` values are literally `href="#"`**; plus 9 unresolving anchors (`#atelier` ×5, `#archives`, `#concierge`, `#lost-folio`, `#signin`) | §12-D decides each: real route, non-link, or gap |
+| **Third-party integrations** | `cdn.tailwindcss.com`, Google Fonts CSS, Material Symbols icon webfont | None permitted. Self-hosted fonts via `next/font`, inline SVG only, no CDN (§10.5) |
+
+### 0b.4 Where the refs contradict their own `DESIGN.md`
+
+Recorded because an architect reading the HTML without the `DESIGN.md` would
+inherit all three:
+
+1. **The PDP violates zero-roundedness.** `DESIGN.md` line 186 says "absolute
+   radius of 0px" for all buttons, cards, inputs and modals. The PDP design ships
+   `rounded-lg`, `rounded-xl` and `rounded-2xl` on the size buttons, the primary
+   CTA, the pyramid cards and the editorial panel.
+2. **The PDP violates "no backdrop filters."** `DESIGN.md` line 210 excludes them.
+   The PDP ships `backdrop-blur-sm bg-white/60` on three pyramid cards. This is
+   also §3's R8.
+3. **The PDP violates "the flat plane."** `DESIGN.md` line 178 forbids shadows on
+   cards and dialogs. The PDP ships `shadow-xs`,
+   `shadow-[0_4px_20px_-4px_…]` and `shadow-[0_8px_25px_-8px_…]`.
+
+**Resolution: `DESIGN.md` wins on all three.** The HTML's radii, blurs and shadows
+are dropped. §2.3 and §2.4 record the reason.
 
 ---
 
@@ -310,185 +392,314 @@ The single source of truth. Everything else cites these names.
 Every text/background pair that ships states its **computed contrast ratio** and
 its target (AA normal text 4.5:1, AA large text 3:1, non-text/UI 3:1).
 
-Ratios below are **computed**, not estimated, using the WCAG 2.x relative
-luminance formula (sRGB → linearise → `0.2126R + 0.7152G + 0.0722B` →
-`(L1+0.05)/(L2+0.05)`) on the exact hex values in `globals.css:5-15`. Any token
-whose value changes invalidates its row and must be recomputed.
+> **FULLY RECOMPUTED 2026-10-03 (round 4) from the canonical literals.** Every
+> ratio in the pre-refs spec was computed for `paper #faf8f3` / `bronze #8a5a24` /
+> `ink-muted #57534e` and is **void**. Ratios below use the WCAG 2.x relative
+> luminance formula (sRGB -> linearise -> `0.2126R + 0.7152G + 0.0722B` ->
+> `(L1+0.05)/(L2+0.05)`) on the canonical hexes in §2.1.1.
 
-| Token | Value | On | Ratio | Target | Meets | Where it is used |
-|---|---|---|---|---|---|---|
-| `--color-ink` | `#1c1917` | `--color-paper` | **16.48:1** | 4.5 (normal) | ✅ | body text, headings, buttons on `paper` |
-| `--color-ink` | `#1c1917` | `--color-surface` | **17.49:1** | 4.5 | ✅ | form fields, cards, panels |
-| `--color-ink` | `#1c1917` | `--color-bronze-soft` | **14.51:1** | 4.5 | ✅ | monogram fallback, price on a tinted plate |
-| `--color-paper` | `#faf8f3` | `--color-ink` | **16.48:1** | 4.5 | ✅ | solid-ink buttons, badges, toast body |
-| `--color-ink-muted` | `#57534e` | `--color-paper` | **7.19:1** | 4.5 | ✅ | secondary copy, placeholders, footer legal |
-| `--color-ink-muted` | `#57534e` | `--color-surface` | **7.63:1** | 4.5 | ✅ | field placeholders — **the `ui.test.ts` pin** |
-| `--color-ink-muted` | `#57534e` | `--color-bronze-soft` | **6.33:1** | 4.5 | ✅ | muted text inside a tinted panel |
-| `--color-bronze` | `#8a5a24` | `--color-paper` | **5.54:1** | 4.5 | ✅ | eyebrows, hover text, focus-adjacent accents |
-| `--color-bronze` | `#8a5a24` | `--color-surface` | **5.88:1** | 4.5 | ✅ | eyebrow labels, "sold out" chip text |
-| `--color-bronze` | `#8a5a24` | `--color-bronze-soft` | **4.88:1** | 4.5 | ✅ | monogram glyph (`bronze/60` → see exemption E3) |
-| `--color-line-strong` | `#75706a` | `--color-surface` | **4.90:1** | 3 (1.4.11) | ✅ | **field borders** — the `ui.test.ts` pin |
-| `--color-line-strong` | `#75706a` | `--color-paper` | **4.62:1** | 3 | ✅ | field borders on `paper` |
-| `--color-line-strong` | `#75706a` | `--color-bronze-soft` | **4.07:1** | 3 | ✅ | field borders on a tinted plate |
-| `--color-line` | `#e6e1d7` | `--color-paper` | **1.23:1** | — | **decorative only** | section rules, card borders, list dividers. Never a control boundary. |
-| `--color-line` | `#e6e1d7` | `--color-surface` | **1.30:1** | — | **decorative only** | as above |
-| `--color-bronze-soft` | `#f1e9dc` | `--color-surface` | **1.20:1** | — | **decorative only** | image placeholder plate, `:selection`, cart-count fill |
-| `--color-bronze-soft` | `#f1e9dc` | `--color-paper` | **1.14:1** | — | **decorative only** | as above |
+#### 2.1.1 Canonical palette — and why the markup beats `DESIGN.md`
 
-**New tokens.** Four, all additive. None replaces an existing value.
+The 17 designs **drifted**, and the drift is not where it looks. I re-measured all
+17 files and confirmed the stakeholder's ground truth exactly:
 
-| Token | Value | On | Ratio | Target | Meets | Purpose |
-|---|---|---|---|---|---|---|
-| `--color-focus` | `#9c6a2e` | `--color-paper` | **4.38:1** | 3 (1.4.11) | ✅ | focus ring, light surfaces |
-| `--color-focus` | `#9c6a2e` | `--color-surface` | **4.65:1** | 3 | ✅ | focus ring, fields and cards |
-| `--color-focus` | `#9c6a2e` | `--color-ink` | **3.76:1** | 3 | ✅ | focus ring **on solid-ink buttons** — the case `#8a5a24` failed at 2.97:1 |
-| `--color-focus` | `#9c6a2e` | `--color-bronze-soft` | **3.86:1** | 3 | ✅ | focus ring on a tinted plate |
-| `--color-bronze-light` | `#c9a26a` | `--color-ink` | **7.38:1** | 4.5 | ✅ | the only accent permitted on a dark surface |
-| `--color-danger` | `#b42318` | `--color-paper` | **6.19:1** | 4.5 | ✅ | field errors, `role="alert"`, capture-failure border |
-| `--color-danger` | `#b42318` | `--color-surface` | **6.57:1** | 4.5 | ✅ | as above |
-| `--color-danger` | `#b42318` | `--color-bronze-soft` | **5.46:1** | 4.5 | ✅ | error inside a tinted panel |
-| `--color-success` | `#1f6f47` | `--color-paper` | **5.78:1** | 4.5 | ✅ | "In stock", applied-coupon confirmation |
-| `--color-success` | `#1f6f47` | `--color-surface` | **6.13:1** | 4.5 | ✅ | as above |
-| `--color-success` | `#1f6f47` | `--color-bronze-soft` | **5.09:1** | 4.5 | ✅ | as above |
+| Value | Role | Pages | Verdict |
+|---|---|---|---|
+| **`#1C1C18`** | body / headings ink | **16 / 17** | **CANONICAL** |
+| **`#1E1B19`** | deep ink: buttons, header bar | **16 / 17** | **CANONICAL** |
+| **`#FCF9F3`** | paper / page background | **17 / 17** | **CANONICAL** |
+| **`#E5E2DC`** | hairline | **16 / 17** | **CANONICAL** |
+| `#1F1B18` | ink | 1 (home) | **DRIFT** — ΔE ≈ 0 from `#1C1C18`; visually identical |
+| `#1A1715` | ink | 2 (PDP, password-reset **step 2**) | **DRIFT** |
+| `#FAF7F2` | paper | 1 (PDP) | **DRIFT** |
+| `#F8F5EE` / `#F5F2EB` | paper | 2 (products listing) | **DRIFT** |
+| `#E2DDD5` | hairline | 1 (products listing) | **DRIFT** |
+| `#E6E0D6` | hairline | 2 (home, password-reset **step 2**) | **DRIFT** |
 
-Spec §15.1 offers `#B42318` (Error) and `#247A50` (Success). `#247A50` measures
-**4.98:1** on paper — it passes, but with 0.48 of headroom, and it is the tighter
-of the two. `#1f6f47` at 5.78:1 is the same hue family with real margin. Adopted
-on that basis; the spec's own note is that the palette there is "illustrative".
+**`DESIGN.md` states the paper as `#F7F4EE` / `#F4EFEB`. `#F7F4EE` appears in ZERO
+of the 17 HTML files.** The refs' `DESIGN.md` and their own markup disagree, and
+the markup is what was reviewed and selected. **The value the 17 pages actually
+use, `#FCF9F3`, is canonical. `DESIGN.md`'s stated paper is recorded as STALE**
+— not silently overridden, because a future reader will go back to `DESIGN.md`
+and need to know why their build differs from it.
 
-**Exemptions, stated so they cannot be quietly widened.** WCAG 1.4.3 excludes
-purely decorative content. Three elements rely on that and each carries a
-condition that keeps it honest:
+**Three conclusions, stated plainly:**
 
-- **E1 — `.text-ghost` watermark** (`line` stroke, 1.23:1). Legal only because it
-  is `aria-hidden`, `pointer-events-none`, carries no information, and is
-  `hidden` below `lg`. **If it ever becomes readable text, it must move to
-  `--color-ink-muted`.**
-- **E2 — `--color-line` hairlines** (1.23:1). Legal as a *decorative* divider. It
-  is **not** legal as the sole indicator of a control's boundary — that is why
-  fields use `--color-line-strong` (4.62–4.90:1). Any new control must use
-  `--color-line-strong`.
-- **E3 — `text-bronze/60` monogram** (`ProductImage.tsx:38`). Full-strength
-  `bronze` on `bronze-soft` is 4.88:1; the `/60` composited variant lands near
-  2.1:1. Legal only because the whole block is `aria-hidden="true"` and the
-  product name is in the `alt`/`aria-label`. **Do not apply `/NN` opacity to any
-  text that is not already decorative** — that is precisely the bug
-  `ui.test.ts` pins against for placeholders.
+1. **The auth family is NOT the drift.** login, register, email verification
+   (×2), account recovery and password-reset **step 1** are all fully canonical
+   (16/17 on ink, deep ink and hairline; 17/17 on paper). **They are left
+   untouched.**
+2. **The four drifters are the PDP, the products listing, the home page, and
+   password-reset step 2.** They are normalised **onto** the canonical set.
+3. **The sharpest single defect is password-reset step 1 vs step 2.** Step 1 is
+   canonical; step 2 uses `#1A1715` ink and `#E6E0D6` hairline. **A single two-step
+   flow changes colour halfway through** — the customer is told to set a password
+   and the page they land on is a different product. That is the one to fix first.
+
+| Token | Value | Role |
+|---|---|---|
+| `--color-paper` | `#FCF9F3` | the page canvas, every route, every breakpoint |
+| `--color-surface` | `#FFFFFF` | product sheets, field boxes, plates |
+| `--color-ink` | `#1C1C18` | titles, body copy, all text on paper |
+| `--color-ink-deep` | `#1E1B19` | solid buttons, header bar, dark surfaces |
+| `--color-ink-secondary` | `#78716A` | notes, captions, attribution, field labels |
+| `--color-hairline` | `#E5E2DC` | structural rules, card framing — **decorative** |
+| `--color-hairline-hover` | `#857C72` | **OVERRIDE** — the ref's `#B8AF9F` fails; see 2.1.4 D2 |
+| `--color-bronze` | `#8C5338` | the single chromatic accent: eyebrows, metadata, inline hover |
+| `--color-bronze-alt` | `#885035` | the accent where it needs more weight on white |
+| `--color-danger` | `#9E2A2B` | validation and failed states only |
+| `--color-success` | `#2A5A3B` | stock confirmation, secure auth, completed purchase |
+| `--color-focus` | `#9C6A2E` | **NEW** — focus ring and focus boundary; see 2.1.4 D1 |
+| `--color-field-border` | `#857C72` | control boundaries; **NEW** |
+
+#### 2.1.2 Text pairs — every pair the designs actually use
+
+| Token | On | Ratio | Target | Meets |
+|---|---|---|---|---|
+| `--color-ink #1C1C18` | paper `#FCF9F3` | **16.26:1** | 4.5 | OK |
+| `--color-ink` | surface `#FFFFFF` | **17.09:1** | 4.5 | OK |
+| `--color-ink` | plate `#E5E2DC` | **13.22:1** | 4.5 | OK |
+| `--color-ink-deep #1E1B19` | paper | **16.30:1** | 4.5 | OK |
+| `--color-ink-deep` | surface | **17.13:1** | 4.5 | OK |
+| `--color-ink-deep` | plate | **13.25:1** | 4.5 | OK |
+| `--color-ink-secondary #78716A` | paper | **4.57:1** | 4.5 | **OK — passes by 0.07** |
+| `--color-ink-secondary` | surface | **4.81:1** | 4.5 | OK |
+| `--color-ink-secondary` | plate `#E5E2DC` | **3.72:1** | 4.5 | **FAIL** — see D3 |
+| `--color-bronze #8C5338` | paper | **5.86:1** | 4.5 | OK |
+| `--color-bronze` | surface | **6.16:1** | 4.5 | OK |
+| `--color-bronze` | plate | **4.76:1** | 4.5 | OK |
+| `--color-bronze-alt #885035` | paper | **6.16:1** | 4.5 | OK |
+| `--color-bronze-alt` | surface | **6.47:1** | 4.5 | OK |
+| `--color-bronze-alt` | plate | **5.00:1** | 4.5 | OK |
+| `--color-danger #9E2A2B` | paper | **7.09:1** | 4.5 | OK |
+| `--color-danger` | surface | **7.45:1** | 4.5 | OK |
+| `--color-danger` | plate | **5.76:1** | 4.5 | OK |
+| `--color-success #2A5A3B` | paper | **7.62:1** | 4.5 | OK |
+| `--color-success` | surface | **8.00:1** | 4.5 | OK |
+| `--color-success` | plate | **6.19:1** | 4.5 | OK |
+| `--color-paper` | `--color-ink-deep` | **16.30:1** | 4.5 | OK |
+| `--color-surface` | `--color-ink-deep` | **17.13:1** | 4.5 | OK |
+
+**The 11px bronze eyebrow — checked specifically, as required.** `DESIGN.md` sets
+eyebrows at 11px / 600. 11px is **normal text** (large is >= 24px, or >= 18.66px
+bold), so it is held to **4.5:1**. `#8C5338` on the canonical paper measures
+**5.86:1**, and **4.76:1 even on a `--color-hairline` plate**. It passes everywhere
+it is used, with margin. On the dark header it is never used — bronze on
+`--color-ink-deep` is **2.78:1** and therefore forbidden as text there (§2.1.4 D4).
+
+**A note on `#78716A` passing by 0.07.** On the *stale* `#F7F4EE` paper this value
+was **4.38:1 and failed**. The canonical `#FCF9F3` paper is lighter and it passes.
+I am recording this because it is the kind of margin that a future palette tweak
+erases silently: `#78716A` is the **tightest-passing text token in the system**,
+and any darkening of `--color-paper` breaks it. The grep gate in §7.8 check 5 is
+what catches that; nothing else will.
+
+#### 2.1.3 Non-text and boundaries — 3:1
+
+| Token | On | Ratio | Target | Meets |
+|---|---|---|---|---|
+| `--color-hairline #E5E2DC` | paper | 1.23:1 | — | **decorative only** |
+| `--color-hairline` | surface | 1.29:1 | — | **decorative only** |
+| **ref's `#B8AF9F`** | paper | **2.07:1** | 3 | **FAIL** — D2 |
+| **ref's `#B8AF9F`** | surface | **2.17:1** | 3 | **FAIL** — D2 |
+| **ref's `#B8AF9F`** | deep ink | 7.89:1 | 3 | OK (dark surfaces only) |
+| **`--color-hairline-hover #857C72`** | paper | **3.90:1** | 3 | **OK** |
+| **`--color-hairline-hover`** | surface | **4.10:1** | 3 | **OK** |
+| **`--color-field-border #857C72`** | paper | **3.90:1** | 3 | **OK** |
+| **`--color-field-border`** | surface | **4.10:1** | 3 | **OK** |
+| **`--color-focus #9C6A2E`** | paper | **4.43:1** | 3 | **OK** |
+| **`--color-focus`** | surface | **4.65:1** | 3 | **OK** |
+| **`--color-focus`** | deep ink | **3.68:1** | 3 | **OK — worst case, and it clears** |
+
+#### 2.1.4 Four deviations from the refs, with the numbers that forced them
+
+**D1 — FOCUS RING: `--color-focus #9C6A2E`.** `DESIGN.md` line 144 has the hairline
+"darken to `#B8AF9F` on hover and **active focus**." Measured on the canonical
+literals: **2.07:1 on paper, 2.17:1 on surface** — about two-thirds of the 3:1 floor
+of WCAG 1.4.11. **A focus indicator is not a taste decision, so the ref value is
+rejected outright.**
+
+`#9C6A2E` was chosen for the **worst case across all three surfaces**: paper
+**4.43:1**, white **4.65:1**, deep ink **3.68:1**. It is the highest minimum of any
+candidate tested. The alternatives and why they lose:
+
+| Candidate | paper | white | deep ink | min | Verdict |
+|---|---|---|---|---|---|
+| `#8C5338` (the accent itself) | 5.86 | 6.16 | **2.78** | 2.78 | **fails on the dark button** |
+| `#8A5A2A` | 5.59 | 5.87 | **2.92** | 2.92 | fails |
+| `#8F5C1E` | 5.38 | 5.65 | 3.03 | 3.03 | clears by 0.03 — too thin |
+| `#96601F` | 5.01 | 5.26 | 3.25 | 3.25 | clears |
+| **`#9C6A2E`** | **4.43** | **4.65** | **3.68** | **3.68** | **ADOPTED** |
+| `#A87533` | 3.80 | 3.99 | 4.29 | 3.80 | clears, but weak on paper |
+
+The failure mode across the rejected set is consistent: darkening the bronze to
+strengthen it on paper **weakens it on the dark button**, because the two poles
+move in opposite directions. `#9C6A2E` is the best compromise, and it still reads
+as the system's own bronze family rather than an imported colour.
+
+**D2 — HOVER HAIRLINE needs its own token: `#857C72`.** Answering the question
+directly: **`#B8AF9F` does NOT pass 3:1 as a hover hairline either** — 2.07:1 on
+paper, 2.17:1 on white. A card frame darkening to it on hover is a state change
+that is *perceptible* (1.23 -> 2.07 is a visible shift) but is still below the
+floor of WCAG 1.4.11 for a boundary that identifies the control. So hover gets
+**its own token**, `#857C72` at **3.90:1 / 4.10:1**. `#B8AF9F` is therefore
+**retained nowhere** — not as a focus ring, not as a hover boundary. It survives
+only as a purely decorative tint if one is ever wanted, under exemption E4.
+
+**D3 — secondary ink is forbidden on hairline plates.** `#78716A` on
+`#E5E2DC` is **3.72:1 and fails**. It passes on paper and on white. So notes,
+captions and field labels may sit on paper, paper-alt or white, and **not** on a
+hairline-tinted plate. Where a plate is needed, secondary ink steps up to
+`--color-ink` (13.22:1). This is a placement rule, not a palette change.
+
+**D4 — bronze is forbidden as text on the dark header.** `#8C5338` on
+`--color-ink-deep` is **2.78:1**. The header's paper-on-ink treatment (16.30:1) is
+the only permitted one. Accent on a dark surface uses `--color-bronze-alt` at
+reduced weight, or paper.
+
+#### 2.1.5 Exemptions
+
+- **E1 — `.text-ghost` watermark.** Decorative, `aria-hidden`, never legible as
+  content. If it ever becomes text it moves to `--color-ink-secondary` on paper.
+- **E2 — `--color-hairline`.** Decorative dividers and card framing only. It is
+  **never** the sole boundary of an interactive control; that is
+  `--color-field-border` (3.90:1).
+- **E3 — the `ProductImage` monogram.** `aria-hidden`; the name is in the
+  `alt`/`aria-label`. **No `/NN` opacity on any text that is not already
+  decorative** — the rule `ui.test.ts` already pins for placeholders.
+- **E4 — `#B8AF9F`, retained as a decorative tint only.** It is not a boundary and
+  not a focus indicator (D1, D2).
 
 **The rule.** A new colour is added only with (a) a computed ratio recorded
 against every background it will appear on, and (b) a named role. There is no
 "temporary" colour in this system; if a role is missing, the token is missing,
 not improvised.
-
 ### 2.2 Typography
 
-**The pairing — KEEP, unchanged.** `Fraunces` (variable, display: headings,
-product names, prices-as-display, the wordmark) + `Source Sans 3` (variable,
-text: body, UI, labels, all form controls). Already wired at `layout.tsx:9-19`.
+**REWRITTEN 2026-10-03 (round 4) for the selected refs.** The pairing is now
+**Playfair Display** (display, headlines, editorial titles, product names, pyramid
+labels) + **Plus Jakarta Sans** (body, UI, eyebrows, labels, every form control).
+This **replaces** Fraunces + Source Sans 3. It is a swap of two `next/font`
+families and of the two CSS custom properties `--font-fraunces` /
+`--font-source-sans`; nothing else in the system is typeface-aware, so the blast
+radius is `layout.tsx:9-19` and `globals.css`'s `@theme`. **The fonts themselves
+are on-canonical — the auth pages, which use the canonical colour set, are also
+fully canonical in type. No typeface drift was found.**
 
-Why this pairing and not a swap: Fraunces is a *soft-serif with wonk*. Its
-high-contrast didone-adjacent strokes and its slightly irregular terminals read
-as hand-set rather than machine-set, which is the whole luxury register. It also
-holds up at `clamp()`-sized hero sizes because its optical-size axis means the
-counters do not go spindly. Source Sans 3 is a humanist sans with a large x-height
-and unambiguous `l`/`1`/`I` — it is legible at 12px in a filter field, which is
-where a storefront actually loses money (a mis-read price filter).
+#### 2.2.1 Why this pairing
 
-**What is added: the optical axis, for free.** `Fraunces` is a variable font
-carrying `wght` (100–900), `opsz` (9–144), `SOFT` (0–100) and `WONK` (0–1). The
-current build loads the variable file and uses none of that. Setting
-`font-variation-settings` per size step costs **0 KB** — the axes are already in
-the same `woff2`. The rule: `opsz` tracks the rendered size, `WONK` and `SOFT` are
-pinned to 0 everywhere except the wordmark.
+`DESIGN.md` line 156 states the intent precisely: Playfair's "terminal swashes and
+distinct transitional contrast evoke traditional copperplate printing," and the
+brief is "archival botanical folios, hand-milled rag paper, cold-pressed ink." That
+is a **transitional** serif — high stroke contrast, ball terminals, vertical
+stress — and Playfair is the canonical web face of that register. It is also the
+correct *display* face rather than a *text* face, which is exactly how it is used
+here: Playfair never sets a body paragraph. Plus Jakarta Sans is a geometric-humanist
+with a tall x-height and unambiguous `l`/`1`/`I`, which is what a filter field and
+a tabular price need.
 
-**The scale — 9 steps, replacing 9 ad-hoc Tailwind sizes.** Named, not
-arbitrary. `clamp()` on the three fluid steps so the hero does not need a
-breakpoint override.
+#### 2.2.2 The scale — the refs' own tokens, plus fluid floors
 
-| Token | Size | Line-height | Tracking | Family | Where |
-|---|---|---|---|---|---|
-| `--text-display` | `clamp(2.75rem, 1.6rem + 5.2vw, 5rem)` | `0.98` | `-0.02em` | Fraunces 500 | home hero only |
-| `--text-h1` | `clamp(2rem, 1.5rem + 2.2vw, 3rem)` | `1.04` | `-0.015em` | Fraunces 500 | page titles, PDP name |
-| `--text-h2` | `clamp(1.5rem, 1.25rem + 1.1vw, 2rem)` | `1.1` | `-0.01em` | Fraunces 500 | section headings |
-| `--text-h3` | `1.25rem` | `1.2` | `-0.005em` | Fraunces 500 | card titles, subsection heads |
-| `--text-body-lg` | `1.125rem` | `1.6` | `0` | Source Sans 3 400 | PDP description, editorial paragraphs |
-| `--text-body` | `1rem` | `1.6` | `0` | Source Sans 3 400 | default body, cart lines |
-| `--text-small` | `0.875rem` | `1.5` | `0` | Source Sans 3 400 | metadata, secondary copy, fields |
-| `--text-label` | `0.75rem` | `1.4` | `0.15em` + uppercase | Source Sans 3 600 | eyebrows, section labels, table headers |
-| `--text-money` | `1rem` (tabular) | `1.4` | `0` | Source Sans 3 600 + `font-variant-numeric: tabular-nums` | every price, total, discount |
+Taken from the `DESIGN.md` `typography:` block. The refs give discrete desktop and
+mobile steps for the two largest; everything else is a single step. `clamp()` adds
+fluid behaviour without adding steps.
 
-The `600` label weight with `0.15em` tracking replaces the four different
-arbitrary tracking values currently in the tree (`[0.15em]`, `[0.2em]`,
-`[0.25em]`, and none).
+| Token | Font | Size | Line-height | Tracking | Weight | Ref |
+|---|---|---|---|---|---|---|
+| `--text-display` | Playfair | `clamp(2.25rem, 1.4rem + 3.8vw, 3.5rem)` | 1.14 | `-0.01em` | 400 | `display-hero` 56/64 ->36/44 |
+| `--text-h1` | Playfair | `clamp(1.75rem, 1.3rem + 2.0vw, 2.25rem)` | 1.22 | `0em` | 400 | `headline-lg` 36/44 ->28/36 |
+| `--text-h2` | Playfair | `1.625rem` | 1.23 | `0em` | 400 | `headline-md` 26/32 |
+| `--text-h3` | Playfair | `1.25rem` | 1.4 | `0.01em` | 400 | `headline-sm` 20/28 |
+| `--text-body-lg` | Plus Jakarta | `1.125rem` | 1.56 | `0` | 400 | `body-lg` 18/28 |
+| `--text-body` | Plus Jakarta | `0.9375rem` | 1.6 | `0` | 400 | `body-md` 15/24 |
+| `--text-small` | Plus Jakarta | `0.8125rem` | 1.54 | `0` | 400 | `body-sm` 13/20 |
+| `--text-eyebrow` | Plus Jakarta | `0.6875rem` | 1.45 | **`0.2em`** | 600 | `eyebrow-uppercase` 11/16 |
+| `--text-label` | Plus Jakarta | `0.8125rem` | 1.23 | `0.04em` | 500 | `label-md` 13/16 |
+| `--text-label-sm` | Plus Jakarta | `0.6875rem` | 1.27 | `0.08em` | 500 | `label-sm` 11/14 |
+| `--text-money` | Plus Jakarta | `0.9375rem` + `tabular-nums lining-nums` | 1.4 | `0` | 600 | §2.2.3 |
 
-**Line-height rules, stated as rules:**
+`DESIGN.md` line 158 fixes one structural rule worth restating because it is a
+*spacing* rule expressed as a type rule: **headings sit exactly 24px above the
+item they introduce.** That is `--space-6` and it is not negotiable — it is what
+makes an editorial page feel typeset rather than assembled.
 
-- Display and heading steps are set **tight** (0.98–1.2). Fraunces has a large
-  internal leading; loose leading on a serif display makes it look like a
-  document, not a storefront.
-- Body steps are set at **1.6**. Below 1.5 a 16px sans paragraph in `ink-muted`
-  at 7.19:1 loses its shape on a phone at arm's length; above 1.7 it stops being
-  a paragraph and starts being a layout.
-- **No line length above 68ch.** `--measure` caps prose at `34rem`. The PDP
-  description, the house-position copy and every legal section use it. A luxury
-  storefront with 90-character measure reads as a blog, not a label.
-- Money is **tabular**. `formatINR` already returns a grouped string; without
-  `tabular-nums` a subtotal re-renders on every quantity change and the digits
-  jitter, which reads as a *different* number.
+#### 2.2.3 Tabular numerals — mandatory, not optional
 
-**Loading strategy.** Self-hosted by `next/font/google` at build time; the Google
-Fonts download happens during `next build`, and only local `.woff2` files are
-ever served. Consequences, all verified in config:
+`DESIGN.md` line 161: "All currencies, volumes (ml/fl. oz.), and batch identifiers
+must use `font-variant-numeric: tabular-nums lining-nums` to eliminate character
+jitter during basket mutations."
 
-- `font-src 'self'` in the CSP (`next.config.ts:24`) is therefore already
-  correct and needs no third-party origin. **Do not add a `preconnect` to
-  `fonts.gstatic.com`** — there is no request to preconnect to. That is a common
-  and entirely wasted optimisation for a `next/font` build.
-- `subsets: ["latin"]`, `display: "swap"`.
-- **Both families are variable, so both are one file each regardless of how many
-  weights are used.** Asking for `weight: ["400","600"]` on a non-variable request
-  would pull *two* files per family and roughly double the font bytes for no
-  benefit. Keep them variable.
-- **The `swap` trade-off.** `swap` means a period of fallback-text rendering.
-  `next/font` generates a metric-adjusted fallback face (`size-adjust`,
-  `ascent-override`, `descent-override`, `line-gap-override`) so the fallback
-  occupies the same box as the webfont — which is what keeps CLS at ~0 despite
-  `swap`. **Verify before claiming it:** open the built CSS and confirm the
-  generated `@font-face` for the fallback carries those descriptors. If it does
-  not, this is a CLS regression and the fix is `adjustFontFallback` explicitly
-  set, not `display: "optional"`.
-- Both fonts are used in `layout.tsx`, so `next/font` preloads both on every
-  route. At an estimated **35–55 KB gz each** for a latin-subset variable file
-  that is roughly 90–110 KB of font. That is a real number against a 120 KB JS
-  budget (fonts are a separate budget — §10) and the honest mitigation is
-  **not** a second font. If it ever needs cutting, the axis-range-subset route is
-  unavailable through `next/font/google`; the correct lever is `opsz` clamping in
-  CSS, which does not reduce bytes. Recorded as a known cost, not a solved problem.
+**This is a hard rule, not a preference**, and it extends beyond the refs: it
+applies to **every** price, line total, subtotal, discount, total, delivery charge,
+`{size} ml`, order reference, tracking number, and date. `MOTION-3D-ANALYSIS.md`
+§1 is the reason — without it, a total re-renders on every quantity change and the
+digits shift, which reads as a *different number* to a customer deciding whether
+to buy. It is one declaration on `--text-money` plus the same pair on any bare
+numeric element.
 
-*Wrong when:* a page needs a third family. This site will not get one. A
-monospace for order numbers is the only candidate and it is refused: the order
-reference is read aloud on WhatsApp support calls, where a human reads it, and a
-third webfont would cost more than the legibility is worth.
+#### 2.2.4 Measure
 
+`DESIGN.md` line 159 fixes long-form at **34–40 characters per line**. Restated as
+a *character* constraint, which is the only measure that survives a font swap:
+
+> **`--measure: 36ch`** for long-form prose, capped at `34rem` on wide screens.
+> Above 36ch Playfair's high stroke contrast sets badly; below ~34ch Plus
+> Jakarta's wide apertures produce rivers.
+
+Applied to: the PDP description, the house-position block, every `LegalSection`
+prose block, and any `body-lg` editorial paragraph. **Not** applied to UI chrome,
+buttons, table rows or nav. **Unchanged in substance** — the previous `34rem` is
+replaced by `36ch`, which is stricter and font-correct.
+
+#### 2.2.5 Loading strategy — self-hosted, and what it costs
+
+| Property | Value | Reason |
+|---|---|---|
+| Mechanism | `next/font/google`, resolved **at build time** | Only local `.woff2` is served. **All 17 refs load Playfair/Jakarta from `fonts.googleapis.com` plus a Material Symbols webfont from the same origin — none is permitted** (§10.5; the CSP's `font-src 'self'`) |
+| Subsets | `["latin"]` | The store is English-language. The refs are French/English mixed; French copy needs no glyphs beyond latin |
+| `display` | **`"swap"`** | Layout-shift consequence below |
+| Axes | **Playfair: `ital` + `wght`. Jakarta: `wght` only** | Both stay **variable** — one file each regardless of how many weights are used. The refs' own `<link>` requests `wght@400..900` + `ital`, which is the same variable coverage |
+| Third font | **none** | The refs' Material Symbols icon webfont is replaced by inline SVG (§6). A second icon webfont would add a render-blocking stylesheet and a glyph network request for the sake of a handful of 18px glyphs |
+
+**The `swap` trade-off, stated.** `swap` means a period of fallback rendering.
+`next/font` generates a metric-adjusted fallback face (`size-adjust`,
+`ascent-override`, `descent-override`, `line-gap-override`), so the fallback
+occupies the same box as the webfont — which is what holds CLS near 0. **Verify
+before claiming it:** open the built CSS and confirm the generated `@font-face`
+for the fallback carries those descriptors. If it does not, this is a CLS
+regression and the fix is `adjustFontFallback` set explicitly, **not**
+`display: "optional"` — which would make the Playfair headline swap in late and
+read as a flash. The two families are also **not metric-similar** (a didone-adjacent
+transitional serif vs a geometric-humanist sans), so the fallback face matters more
+here than it would for two similar faces.
+
+**Payload — unmeasured, and labelled as such.** See §10.4. Both families are used
+in `layout.tsx`, so `next/font` preloads both on every route. **A-31.**
 ### 2.3 Spacing, radii, borders, elevation, z-index
 
-**Spacing — a 10-step scale, extending spec §15.1's `4,8,12,16,24,32,48,64`.**
-The two added steps (`96`, `128`) are the editorial ones: the hero and the
-between-section rhythm need a value and `64` was being stretched to do it, which
-is what makes a scale decay.
+**Spacing — the refs' cadence, adopted verbatim.** `DESIGN.md` line 164 fixes a
+4px baseline and an unyielding cadence: **4, 8, 16, 24, 32, 64, 128**. This
+*replaces* the previous 10-step scale and matches `DESIGN.md` exactly rather than
+approximating it.
 
 | Token | px | Role |
 |---|---|---|
-| `--space-1` | 4 | icon-to-label inside a control |
-| `--space-2` | 8 | tight label pairs, badge padding |
-| `--space-3` | 12 | inside a control, list row padding |
-| `--space-4` | 16 | **default gap between siblings** |
-| `--space-6` | 24 | between a heading and its first child |
-| `--space-8` | 32 | card internal padding, sidebar gutters |
-| `--space-12` | 48 | between blocks *inside* a section |
-| `--space-16` | 64 | **between sections, phone** |
-| `--space-24` | 96 | between sections, tablet |
-| `--space-32` | 128 | **between sections, desktop**; hero vertical padding |
+| `--space-1` | 4 | icon-to-label inside a control; `DESIGN.md`'s "error copy 4px below" |
+| `--space-2` | 8 | tight label pairs, accord-chip padding |
+| `--space-4` | 16 | **default gap between siblings**; mobile outer margin and gutter |
+| `--space-6` | 24 | **between a heading and the item it introduces** (`DESIGN.md` line 158) |
+| `--space-8` | 32 | card internal padding; **desktop gutter**; the internal module grouping in the 4:1 rule |
+| `--space-16` | 64 | **desktop outer margin**; section gap on mobile |
+| `--space-24` | 96 | section gap on tablet |
+| `--space-32` | 128 | **section gap on desktop**; hero vertical padding |
+
+`--space-3`, `--space-12`, `--space-20` and `--space-48` **are removed.**
+`DESIGN.md` line 167 makes the reason load-bearing: *"128px of white space (a 4:1
+multiple over internal 32px module groupings)"* — the rhythm is a **ratio**, and a
+scale that admits a 48px step lets that ratio be broken silently. Two steps were
+also dropped for a second reason: the refs' own `spacing:` block lists
+`space-xs .25rem / space-sm .5rem / space-md 1rem / space-lg 1.5rem / space-xl 2rem`,
+which is 4/8/16/24/32 — the same cadence, already on the grid.
 
 **The rule that makes a value land on the scale rather than near it.** There is
 no "close enough" and no arbitrary value; Tailwind arbitrary spacing
@@ -504,15 +715,38 @@ The gap between two *sections* comes from the responsive rhythm above and is
 never chosen per section. This is why P1 could state a 4:1 ratio as the layout
 signature: the ratio is a consequence of the rule, not a separate convention.
 
-**Radii — the corner language is square. `0px`, everywhere.**
+**Radii — `0px` absolute, and the exceptions are judged per instance, not applied
+as a blanket.** `DESIGN.md` line 186: "Geometry is strictly rectilinear. All
+buttons, product cards, entry inputs, modals, toasts, and structural partitions
+possess an absolute radius of 0px." Line 188 permits **exactly one** named
+exception: the header bag counter, an 18px micro-circle.
 
-This is the load-bearing part of the current build and it is KEEP. There is
-exactly one exception, and it is a number, not a container: the cart-count
-counter in the header, which is `rounded-full` because a count is a lozenge. A
-rounded *container* is a different object and this system has none — no cards, no
-buttons, no inputs, no panels are rounded. Compare the reference sites, where
-every surface is an 8–24px pill or radius and the page reads as a template
-because of it.
+**I did not apply "make everything square."** I enumerated every non-`rounded-none`
+instance across all 17 files — **21 of them** — and judged each on what it actually
+is. Six are circles that would become ellipses if squared.
+
+| # | Instance | Count | Pages | Decision |
+|---|---|---|---|---|
+| 1 | `w-1.5 h-1.5 rounded-full bg-secondary` — **status dot** | 5 | PDP, cart, listing, order-detail, verify | **KEEP circular.** A 6px dot at any other radius is an ellipse. It encodes availability, so it is information, not ornament |
+| 2 | `w-5 h-5 rounded-full border` — **radio button** | 1 | listing | **KEEP circular.** Shape *is* the affordance for a radio (WCAG 1.4.1); a square radio is read as a checkbox. `DESIGN.md` line 199 says "sharp **square** geometries" — that is **wrong for a radio** and is overridden |
+| 3 | `w-8 h-8 rounded-full` + `alt="Profile"` — **account avatar** | 1 | PDP | **KEEP circular.** A human silhouette in a square reads as a broken image |
+| 4 | `w-8 h-8 rounded-full bg-primary` — **account monogram** (login, register) | 2 | login, register | **KEEP circular** — same reason as #3; a letter in a circle is a standard identity mark |
+| 5 | `w-4 h-4 rounded-full bg-primary` — **count badge** | 1 | PDP | **KEEP circular, 18px per `DESIGN.md` line 188.** The sanctioned exception |
+| 6 | `px-3 py-1 rounded-full` — **pill-shaped chip** | 1 | PDP | **NORMALISE to 0.** This is the actual violation. `DESIGN.md` line 205: accord chips are "Rectangular, unrounded… **Never pill-shaped**" |
+| 7 | `rounded-lg` on `.size-btn` size selector ×2, CTA, `rounded-xl` ×6 on pyramid cards, `rounded-2xl` ×3 on editorial panel | 14 | **PDP** | **NORMALISE to 0.** All are containers, cards and buttons. Also carries `backdrop-blur` + shadows — §0b.4 |
+| 8 | `rounded-lg` on checkout buttons ×4 | 4 | checkout | **NORMALISE to 0** |
+| 9 | `rounded-[2px]` ×2 — success chip + copy | 2 | **password-reset step 1** | **NORMALISE to 0.** A 2px radius is a near-miss on zero, not a circle, and this is a container |
+
+**So: 6 named circle exceptions survive, 15 container usages normalise to 0.** The
+`DESIGN.md` allowance is widened from one to six — **every one of them is a circle
+that is circular by nature**, and each is recorded here with its reason rather than
+assumed. `rounded-none` appears 86 times already, so the majority of the system was
+already correct.
+
+**The current app tree already conforms** and this costs almost nothing: the only
+two `rounded-*` usages in all of `frontend/src` are `Header.tsx:151` (the bag
+counter) and `page.tsx:149` (the 6px in-stock dot) — **both of which are instances
+#1 and #5 above.** There is no rounded card, panel, button or input today.
 
 **Borders — 1px only, two tokens, by role.**
 
@@ -564,55 +798,170 @@ feels like one system.
 Defined in `@theme` in `globals.css` alongside the colour tokens, so a component
 never writes a duration in milliseconds.
 
+> **CONSOLIDATED 2026-10-03 (round 4) for the 17 selected designs.** I measured
+> duration frequency across all 17 files: **200ms ×98** (13 pages),
+> **150ms ×25** (4), **300ms ×20** (4), **500ms ×15** (3), **700ms ×5** (2),
+> **1000ms ×2** (2). `DESIGN.md` sanctions only three — 200ms arrival, 160ms
+> departure, 250ms card lift. **So 150 / 300 / 500 / 700 / 1000 are all
+> off-token**, and every one is mapped below. **No duration survives in the design
+> that the token table cannot name.**
+
 | Intent | Token | Duration | Easing | Reduced-motion behaviour |
 |---|---|---|---|---|
-| `state` | `--motion-state-dur` | **120ms** | `cubic-bezier(0.2, 0, 0, 1)` | instant. Colour and border changes need no motion at all; they simply take 0ms. |
-| `enter` | `--motion-enter-dur` | **220ms** | `cubic-bezier(0.16, 1, 0.3, 1)` | instant. The element appears at its final position. **No opacity flash** — a 0ms opacity transition is a flicker, not an absence. |
-| `exit` | `--motion-exit-dur` | **160ms** | `cubic-bezier(0.4, 0, 1, 1)` | instant. The element is removed. |
-| `hover` | `--motion-hover-dur` | **240ms** | `cubic-bezier(0.2, 0, 0, 1)` | instant. |
-| `narrative` | `--motion-narrative-dur` | **600ms** | `cubic-bezier(0.16, 1, 0.3, 1)` | instant. Used only by the one accent moment per page. |
-| `progress` | `--motion-progress-dur` | **180ms** | `cubic-bezier(0.2, 0, 0, 1)` | instant. The progress hairline snaps to its final position. |
-| `scrub` | — (timeline-driven) | n/a | `linear` | **the animation is removed entirely**, not shortened (§3) |
-| `loading` | `--motion-loading-dur` | **1200ms** | `linear`, infinite | **static**. The skeleton becomes a flat `--color-line` block. No shimmer at all — a shimmer is the one thing that is pure "something is happening" with no information in it. |
-| `toast` | `--motion-toast-dur` | **200ms** | `cubic-bezier(0.16, 1, 0.3, 1)` | **opacity only, 100ms.** A toast is an announcement; the announcement must survive, only the movement is dropped. |
+| `state` | `--motion-state-dur` | **200ms** | `cubic-bezier(0.16, 1, 0.3, 1)` | instant. Colour and border changes need no motion; they simply take 0ms |
+| `enter` | `--motion-enter-dur` | **200ms** | `cubic-bezier(0.16, 1, 0.3, 1)` | instant. Appears at final position. **No opacity flash** — a 0ms opacity transition is a flicker, not an absence |
+| `exit` | `--motion-exit-dur` | **160ms** | `cubic-bezier(0.4, 0, 1, 1)` — the refs' `ease-out` | instant |
+| `hover` | `--motion-hover-dur` | **250ms** | `cubic-bezier(0.16, 1, 0.3, 1)` | instant |
+| `narrative` | `--motion-narrative-dur` | **600ms** | `cubic-bezier(0.16, 1, 0.3, 1)` | instant. One accent moment per page |
+| `progress` | `--motion-progress-dur` | **200ms** | `cubic-bezier(0.16, 1, 0.3, 1)` | instant |
+| `track` | `--motion-track-dur` | **500ms** | `cubic-bezier(0.25, 1, 0.5, 1)` | **instant, and the transition declaration is removed entirely** — see the note below |
+| `scrub` | — (timeline-driven) | n/a | `linear` | **the animation is removed entirely**, not shortened |
+| `loading` | `--motion-loading-dur` | **1200ms** | `linear`, infinite | **static**. The skeleton becomes a flat `--color-hairline` block |
+| `toast` | `--motion-toast-dur` | **200ms** | `cubic-bezier(0.16, 1, 0.3, 1)` | reduced-motion: opacity only |
 
-The three names that matter:
+#### 2.4.1 The easing literal is consolidated — one string, one spelling
 
-- `enter` (220ms) and `exit` (160ms) are deliberately **asymmetric and the exit
-  is faster**. Symmetric timing is the default that makes an interface feel
-  mechanical; a shorter exit reads as "that is done".
-- `narrative` (600ms) is the only duration above 240ms. It exists so the accent
-  moment can be *slow* enough to be noticed once. It appears in exactly one
-  place per page.
-- Nothing is `linear` except the shimmer and the scrub timelines. `linear` on a
-  UI transition is the reason things feel cheap.
+The refs write the **same curve two ways**: `cubic-bezier(0.16, 1, 0.3, 1)` with
+spaces **5×** and `cubic-bezier(0.16,1,0.3,1)` without **3×**. Identical value,
+two literals — which means a grep for the curve finds one spelling and misses the
+other, so the §7.8 greps would have been unreliable.
 
-**Easing, defined as curves with a reason:**
+**One canonical spelling, defined once:**
 
-| Curve | Shape | Why it exists |
-|---|---|---|
-| `cubic-bezier(0.2, 0, 0, 1)` | fast start, long settle | state and hover. The element is *already* moving when the eye catches it; a long settle is what makes it read as responsive rather than sluggish. |
-| `cubic-bezier(0.16, 1, 0.3, 1)` | near-instant start, very long tail | enter and narrative. This is an ease-out-expo; it front-loads the movement so the perceptual latency is ~1 frame even though the tail is 600ms. |
-| `cubic-bezier(0.4, 0, 1, 1)` | slow start, fast exit | exit. It acknowledges that the element is leaving before committing. |
-| `linear` | — | only where the input is itself a continuous timeline (scrub) or a repeating loop (shimmer). |
+```
+--motion-ease: cubic-bezier(0.16, 1, 0.3, 1);      /* spaced = canonical */
+--motion-ease-exit: cubic-bezier(0.4, 0, 1, 1);
+--motion-ease-track: cubic-bezier(0.25, 1, 0.5, 1);
+```
 
-**The `hover` 1.03 scale is a token too:** `--hover-scale: 1.03`. Capped. The
-current `1.04` at 500ms (`ProductCard.tsx:26`) is the only value that has to
-change, and it changes because 500ms is over the `hover` ceiling.
+**Rule: the spaced form is canonical.** Both ref variants map to `--motion-ease`,
+and §7.8 check 2 greps for the spaced literal.
 
-**Why durations live in tokens and not per component.** A component that writes
-`220ms` is correct today and inconsistent after the next redesign. A component
-that writes `var(--motion-enter-dur)` is correct forever. This is also what makes
-the reduced-motion override a one-line change in one place (§3), which is the
-whole point of "honoured at the token layer".
+**Is the carousel's `cubic-bezier(0.25, 1, 0.5, 1)` a token or retired?** Kept as
+`--motion-ease-track`, used on **exactly one component**. It is not a page-wide
+curve: it is tuned to a large-horizontal-momentum slide, where a long tail reads as
+mass. Applying it elsewhere would make the whole site feel like one sliding panel.
+**Retiring it was considered and rejected** — the alternative forces the carousel
+onto the page curve, which visibly cheapens a slide between full-width panels. One
+token, one component, is the cheaper cost.
+
+#### 2.4.2 What each off-token duration becomes, by page
+
+| Ref value | Pages | What it is | Decision |
+|---|---|---|---|
+| **500ms** ×15 | listing (12), home (1), cart (2) | Carousel/track slide; two cart grid transitions | **Carousel → `--motion-track-dur`** (500ms, `ease-track`). **The two cart usages → `--motion-enter-dur`** (200ms); a 500ms line-item transition is not `track`, it is an arrival |
+| **700ms** ×5 | home, PDP | The carousel image's `group-hover:scale-[1.02]` | **`--motion-hover-dur` (250ms).** 700ms exceeds every intent class; `DESIGN.md` line 183 sets card lift at 250ms, so the image lift is a `hover`. **The track keeps its 500ms** — a discrete user-initiated navigation, not a hover |
+| **1000ms** ×2 | register, PDP | Long mount fades | **`--motion-enter-dur` (200ms).** A one-second fade-in is the most template-like timing in the set and it delays the perceived availability of a form |
+| **300ms** ×20 | listing (12), home, PDP, password-reset 1 | Card hover, chip transitions, link underlines | **`--motion-hover-dur` (250ms)** — `DESIGN.md`'s card-lift value. Underlines and hovers are `hover`, not `enter` |
+| **150ms** ×25 | listing, returns, orders, cart | Colour and border changes | **`--motion-state-dur` (200ms).** Within 50ms of the ref value and it keeps one literal |
+
+**Net effect: the duration vocabulary goes from 6 values to 4 intent classes plus
+one track class.** Five of six original values were off-token; none is retained
+off-token.
+
+**`--hover-scale: 1.02`** (the refs' `group-hover:scale-[1.02]`).
 
 ---
 
 ## 3. Motion
 
-The load-bearing table. The "why" column is not commentary — it is the
+The "why" column is not commentary — it is the
 acceptance criterion. A row whose "why" cannot be phrased as *communicates
 state* or *directs attention* does not ship (P3).
+
+> ## 3.0 OVERRIDES to the selected refs — five, all applied 2026-10-03
+>
+> The 17 selected designs are the authority for the visual direction (§0b). They
+> are static HTML, and in five places their CSS contradicts both this spec and
+> `DESIGN.md`'s own intent. Each override below is recorded with the reason and
+> with what the refs' approach would actually cost.
+>
+> **O1 — FOCUS RING: `#B8AF9F` is not a focus indicator.**
+> `DESIGN.md` line 144 has the hairline "darken to `#B8AF9F` on hover and **active
+> focus**." Measured (§2.1.3): **1.98:1 on paper, 2.17:1 on surface** — roughly
+> half the 3:1 floor of WCAG 1.4.11, and it *inverts* on dark surfaces. **A focus
+> indicator is not a taste decision.** Overridden to `--color-focus #96601F`, which
+> clears 3:1 on paper (4.79), on white (5.26) **and on the ink button (3.39)**.
+> Full derivation in §2.1.4 D2; the focus rule is stated explicitly in §7.3.
+>
+> **O2 — COMPOSITOR-ONLY: the wipe is `transform: scaleX()`, not a width or
+> clip-path change.** `DESIGN.md` line 195 describes the tertiary link's hover as
+> "an animated left-to-right **clip path**", and the refs' actual CSS is worse than
+> that: `.wipe-link::after { width: 0 }` → `width: 100%`, plus a second copy at
+> `w-0` → `w-full` with `transition-all`. **`width` runs layout on every frame** —
+> §0's rule one, and the reason this row exists. **Override:** the wipe is a
+> `::after` pseudo-element at `width: 100%` with
+> `transform: scaleX(0 → 1)` and `transform-origin: left`, transitioned on
+> `transform` for `--motion-hover-dur`. Composited, zero layout, zero paint. The
+> refs' `DESIGN.md` line 195 clip-path description is **not** adopted either: a
+> clip-path change repaints every frame where a `transform` does not. **And
+> `transition-all` is banned outright** — it animates every animatable property,
+> which is how a 700ms hover sneaks in unnoticed.
+>
+> **O3 — NO PERMANENT `will-change`.** The refs ship
+> `will-change: opacity, transform` on every `.settle-target` **and**
+> `will-change-transform` on the carousel track, permanently. `will-change` is not
+> a hint, it is an instruction to **pin a composited layer and its backing texture
+> for the lifetime of the element** — GPU memory held for the whole page session,
+> including while idle. **Override:** `will-change` is scoped to the duration of
+> the transition and removed afterwards, or omitted entirely. For the settle
+> reveal it is **omitted** — `animation-timeline: view()` is already compositor-
+> driven, so promoting the layer permanently buys nothing. Rule: **`will-change`
+> appears only inside a `:active`/`.is-animating` scope, never in a base rule.**
+>
+> **O4 — THE SETTLE ANIMATION MUST NOT HIDE CONTENT BY DEFAULT. The most
+> important of the five.** The refs ship:
+> `.settle-target { opacity: 0; transform: translateY(-8px) }` and then add
+> `.is-settled` **from script** via an `IntersectionObserver`. That inverts this
+> section's foundational rule — *the default state is the final state* — and
+> creates exactly the failure mode §12 names as "theatre that silently never
+> plays": **with script blocked, slow, or failed, the content is simply
+> invisible.** A crawler sees an empty section.
+>
+> Note *why* the ref screenshots look correct: the delivered markup hardcodes
+> `class="... settle-target is-settled"` on the sections themselves. The design is
+> only ever seen in its post-animation state. An architect who copies the CSS
+> without that baked-in class ships a blank page — and any content added later
+> without hand-editing the HTML vanishes.
+>
+> **Override — specify it as `animation-timeline: view()`.** No script is
+> involved at all, so there is no script to fail, and the declaration lives inside
+> `@media (prefers-reduced-motion: no-preference)` where the **default state is
+> already final**. Specified shape:
+>
+> - The element's **base style carries no `opacity` and no `transform`.** It is
+>   visible and settled by default.
+> - The animation is declared only inside
+>   `@media (prefers-reduced-motion: no-preference)`, animating `opacity 0→1` and
+>   `translateY(-8px → 0)` over `--motion-enter-dur` (200ms),
+>   `animation-range: entry 0% entry 40%`, `animation-fill-mode: both`.
+> - `animation-fill-mode: both` is **mandatory**; it supplies the pre-entry state
+> without that state being in the base rule.
+> - `IntersectionObserver` and the `.is-settled` class are **not used.** No JS,
+>   no observer, 0 KB.
+> - **Reduced-motion end state:** every target renders at its final position,
+>   fully opaque, because the whole animation is absent rather than shortened.
+>
+> The refs' `threshold: 0.12` and `rootMargin: "0px 0px -40px 0px"` are
+> approximated by `animation-range: entry 0% entry 40%`, which is the declarative
+> equivalent and needs no listener.
+>
+> **O5 — NO AUTOPLAY, AND THE CAROUSEL IS RECONCILED PER PAGE.** I checked all 17
+> files: **there is no `setInterval` and no autoplay anywhere.** The home carousel
+> is a **manual** control — `carousel-prev` / `carousel-next` buttons with
+> `disabled:` at the ends, four `.carousel-dot` buttons, and an `01`/`04`
+> counter — moving a single track with a 500ms `transform` transition. **It does
+> not fail WCAG 2.2.2** and it **can be kept.** Recorded as a rule: **autoplay must
+> never be added**, and if it ever is, it requires a visible pause control first.
+>
+> The **apparent contradiction** with the worked example's avoid-list, reconciled
+> per page rather than left standing:
+>
+> | Page | Pattern | Decision |
+> |---|---|---|
+> | **`/` (home)** | Carousel with prev/next + four dots + counter | **KEEP.** Manual, no autoplay, `disabled` edges, 2.2.2-clean. It is the *narrative* rail — §3.1's accent is the settle reveal, and the carousel is a second, discrete, **user-initiated** transition, not a page-level accent. **It does not breach P2** because P2 governs what moves *on its own* |
+> | **`/products`, `/products/[slug]`** | dots-and-arrows product carousel | **BANNED**, per the worked example. The product model is one image per product (§12-G10) and a PDP carousel would be a UI for data that does not exist. The listing is a grid |
+> | anywhere | autoplay, swipe-only, drag-to-reorder, infinite loop | **BANNED.** No autoplay ever; no gesture-only navigation without buttons; no infinite loop |
 
 Every "Cost" cell states: the mechanism, the bytes, whether it runs on the
 compositor, whether it needs JS per frame, and whether it can block LCP.
@@ -650,9 +999,14 @@ compositor, whether it needs JS per frame, and whether it can block LCP.
 > would exceed this budget by 1.25×–2.1×. The CSS-3D version costs 0 KB but
 > **cannot be the LCP element**, consumes this section's six-element budget in one
 > object, and costs **20–25 MB of GPU memory** across six render surfaces. **Not
-> adopted.** Cheaper alternative priced at 0 KB in §11.5.3. The decision about
-> whether it replaces the home page's existing accent moment is open and sits with
-> the user (§11.5.4) — **nothing in this section changes until they choose.**
+> adopted.** Cheaper alternative priced at 0 KB in §11.5.3.
+
+> **DECIDED 2026-10-03.** The user has **declined the cube for now**, and the home
+> page keeps the option-(a) accent this section already specified — the scroll
+> settle reveal, which the selected home design implements. `§11.5.4`'s open
+> decision is **closed**: §3.1 and the `STITCH-PROMPTS.md` 3.1 block stand as
+> written. The measured reason it was declined is retained in
+> `MOTION-3D-ANALYSIS.md` §5.5 and summarised in §11.5.3.
 
 Two techniques, both CSS-native, both with the same three conditions:
 
@@ -776,39 +1130,51 @@ cheapest documentation in the repo.
 A breakpoint table with **concrete per-breakpoint layout differences** — the word
 "responsive" is not an answer.
 
-Five breakpoints, mapped exactly onto Tailwind v4's defaults so no custom
-breakpoint ever ships (spec §15.1 asks for small mobile / large mobile / tablet /
-desktop / wide desktop; this is that list). The build already uses `sm: md: lg:`
-throughout, so the tokens are names, not new numbers.
+Five breakpoints, mapped onto Tailwind v4's defaults. **The refs' grid is
+adopted verbatim** (`DESIGN.md` lines 166–169) and it replaces the previous
+`max-w-6xl`-container model, because the refs specify **margins and gutters in
+fixed pixels per breakpoint** rather than a centred max-width. That is a real
+change to how a section is measured.
+
+**The grid, from the refs:**
+
+| Range | Columns | Outer margin | Gutter | Section gap |
+|---|---|---|---|---|
+| **≥ 1200px** | **12** | **64px** (`--space-16`) | **32px** (`--space-8`) | **128px** (`--space-32`) |
+| **768–1199px** | **8** | **32px** (`--space-16` at the tablet step) | **24px** (`--space-6`) | **96px** (`--space-24`) |
+| **320–767px** | **4** | **16px** (`--space-4`) | **16px** (`--space-4`) | **64px** (`--space-16`) |
+
+`DESIGN.md` line 172 adds the composition rule: *"Product grids prefer single or
+double column arrangements on handheld viewports and 3-to-4 column spreads on
+desktop to preserve imagery presence."* So the grid count and the column count are
+**different things** and must not be conflated: the 12/8/4 is the layout
+substrate; a product grid spans 4 of 12 at desktop, 4 of 12 at tablet, and 2 of 4
+on mobile.
 
 | Breakpoint | Range | Nav | Grid | Type scale | Page-specific changes |
 |---|---|---|---|---|---|
-| **xs — small mobile** | `< 640px` | Full-screen overlay (`MenuOverlay`), hamburger left, wordmark centred, cart right. Account link moves **into** the overlay — at `sm:inline` today the "Sign in" link simply vanishes below 640 with no replacement, which is the one real gap in the current nav | Product grid **2 columns**. Prose measure full-bleed minus 16px gutters. Sticky summary panels unstick and stack below content | `--text-display` clamps to its 44px floor; `--text-h1` to 32px; eyebrows stay 12px; body stays 16px (never 14 — a 14px sans at 7.19:1 on a phone in daylight is the reason carts get abandoned) | **Home:** hero padding `--space-16`; ghost watermark hidden (already `hidden lg:block`, KEEP); New-arrivals 2-up. **PDP:** single column, image first, purchase block second; **`position: sticky` bottom purchase bar** (price + stepper + Add to cart, `--z-sticky`, `env(safe-area-inset-bottom)` padding); notes stack single-column. **Cart:** lines stack — 96px thumb left, name + line-total right, stepper and Remove on a second row (`CartLineItem` already uses `flex-col` on the text column). **Checkout:** one column; **order summary moves *below* the step**, because at 448px a 380px sticky sidebar has no room; step indicator is a 3-dot row plus the current step's label. **Orders:** rows stack — `Order #` / badge on line 1, date + total on line 2, item summary truncated on line 3. **Track order:** timeline markers in the left gutter at 1px, text at 14px; carrier and tracking number in a `dl`, full-width, because a tracking number must be selectable and copyable. |
-| **sm — large mobile** | `640–767px` | Same overlay. Account links return to the bar (the current `sm:inline` breakpoint is correct) | Product grid **2 columns** (unchanged — 3 columns at 640px gives 190px cards, too narrow for a bottle to read) | as xs | As xs, plus: the sticky PDP purchase bar shows the price only, with the full stepper+button row in the page — the bar is a shortcut, not the only path. |
-| **md — tablet** | `768–1023px` | Overlay still. Wordmark stays centred | Product grid **3 columns**. Prose measure capped at `34rem` and centred-left | `--text-h1` reaches ~40px; `--text-display` ~56px | **Home:** 3-up New-arrivals. **PDP:** two columns — image 50% / purchase 50%; the sticky purchase panel is **off** here (a 380px column at 768px viewport leaves no reading width); the sticky bottom bar **replaces** it. Notes become a 3-up row but each note keeps its own heading — at 3 × 220px a single shared heading would be unreadable. **Cart:** back to `grid-cols-[1fr_360px]`. **Checkout:** two columns — form 1fr / summary 380px, sticky at `--z-sticky`. **Track order:** timeline marker rail moves to a 2px rule with 12px dots. |
-| **lg — desktop** | `1024–1279px` | **Inline nav** returns (`md:flex` today — see note). Wordmark centred absolutely, links left, account + cart right | Product grid **4 columns** in `max-w-6xl` (72rem). Prose measure still capped at `34rem` — the cap does **not** relax on wide screens | `--text-h1` reaches 48px; `--text-display` ~72px | **Home:** 4-up New-arrivals; ghost watermark visible (the "A" at `20rem`, `-right-8 top-6`). Section rhythm `--space-32`. **PDP:** two columns with the purchase panel `lg:sticky lg:top-24` (current behaviour, KEEP) and the bottom bar **removed**. The story image becomes the `position: sticky` parallax frame. **Cart / checkout:** sidebar sticky, `--z-sticky`. **Orders:** back to a single row with `ml-auto` on the total. |
-| **xl — wide desktop** | `≥ 1280px` | as lg | 4 columns — **not 5**. The container caps at `max-w-6xl`; going wider would make the card-to-card gap smaller than the card's internal padding and the grid would read as a spreadsheet | unchanged; `--text-display` reaches its 80px ceiling | Everything is `max-w-6xl` and centred. The only difference is the viewport gutters grow. **A luxury storefront that fills a 2560px monitor is a catalogue, not a house** — the whitespace at xl is the design, not an absence of content. |
+| **xs** | `320–767px` | Full-screen overlay (`MenuOverlay`), hamburger left, wordmark centred, bag right with the **18px micro-circle** (§2.3). Account links move **into** the overlay — at `sm:inline` today the "Sign in" link simply vanishes below 640px with no replacement, which is the one real gap in the current nav | **4 columns**, 16px margins, 16px gutters. Product grid spans **2 of 4** | `--text-display` clamps to its 36px floor (`display-hero-mobile`), `--text-h1` to 28px (`headline-lg-mobile`); eyebrows stay 11px; body stays 15px | **Home:** section gap `--space-16`; the carousel track keeps its 500ms `track` duration; one slide visible. **PDP:** single column, image first, purchase block second; **sticky bottom purchase bar** (`env(safe-area-inset-bottom)`, `--z-sticky`); the pyramid stack is single-column with hairline separators. **Cart:** lines stack — thumb left, name + line-total right, stepper and Remove on a second row. **Checkout:** one column; **order summary below the step**; step indicator is three 11px tracked labels plus the current step. **Orders:** rows stack. **Track order:** timeline markers in a narrow left gutter. **Policy pages:** one column, **no table of contents** |
+| **sm** | `640–767px` | As `xs`. Account links return to the bar (the current `sm:inline` breakpoint is correct) | Still 4 columns, still 2 product columns — 3 columns at 640px gives 190px cards, too narrow for a bottle to read | as `xs` | As `xs`; the sticky PDP bar shows the price only, with the full stepper + button in the page |
+| **md — tablet** | `768–1199px` | Overlay still. Wordmark centred | **8 columns**, 32px margins, **24px gutters**. Product grid spans **3 of 8** | `--text-h1` reaches 36px (`headline-lg`); `--text-display` ~48px | **Home:** 3-up; section gap `--space-24`. **PDP:** two columns — image / purchase, 50/50; the sticky purchase panel is **off** here and the sticky bottom bar **replaces** it. The pyramid becomes a 3-across row, each tier keeping its own 11px eyebrow. **Cart / checkout:** two columns, form 1fr / summary 380px. **Policy pages:** ToC appears at `md` |
+| **lg — desktop** | `≥ 1024px` | **Inline nav** returns. Wordmark centred, links left, account + bag right | **12 columns**, **64px margins**, **32px gutters**. Product grid spans **4 of 12** | `--text-display` reaches 56px (`display-hero`); `--text-h1` 36px | **Home:** 4-up; section gap `--space-32` (the 4:1 multiple of 32px module groupings). **PDP:** two columns with `lg:sticky lg:top-24`; the bottom bar is **removed**. The story image becomes the sticky parallax frame. **Cart / checkout:** sidebar sticky. **Policy pages:** `grid-cols-[200px_1fr]` with a sticky ToC |
+| **xl — wide desktop** | `≥ 1440px` | as `lg` | 12 columns still; **margins grow to 64px and stay fixed** — the content measure does not grow with the viewport | unchanged; `--text-display` capped at 56px | The difference is **only** the outer margin. `DESIGN.md` line 136's "expansive unprinted margins" is the design at this size: on a 2560px monitor the margins grow, not the columns. **The measure is `--measure: 36ch` (§2.2.4) and it never relaxes** |
 
 **Notes on the nav breakpoint, which is a CHANGE.** `Header.tsx:90` uses
 `md:flex` (768px) for the inline nav while `MenuOverlay` is `md:hidden`. At
-768–1023px the header therefore shows "Shop · New arrivals · Sign in · Cart" in
-a 768px bar, which fits but leaves no room for the wordmark at `text-xl` plus
-both account actions. The inline nav should return at **`lg` (1024px)**, matching
-the sticky-purchase and sidebar story: below `lg`, the page is a single column
-and the overlay menu is the right navigation for it. This is one breakpoint
-change in one file.
+768–1023px the header shows "Shop · New arrivals · Sign in · Bag" in a 768px bar.
+The inline nav returns at **`lg` (1024px)**, matching the sticky-purchase and
+sidebar story: below `lg` the page is a single column and the overlay menu is the
+right navigation for it.
 
-**Two rules that are not per-breakpoint but are enforced at every breakpoint:**
+**Two rules enforced at every breakpoint:**
 
-- **Touch targets are 44×44px minimum** at `xs` and `sm`; they may shrink to 32px
-  at `lg` for the quantity stepper only. Every other control keeps 44px.
-  `pagination`'s `h-9 min-w-9` (36px) is **below the floor on touch** and must be
-  `h-11 min-w-11` below `lg`.
-- **Nothing is hidden by breakpoint that carries information.** The ghost
-  watermark, the `.sr-only` account links and the `sm:inline` account cluster are
-  the only things that disappear, and each has a real alternative at the smaller
-  breakpoint. The PDP's "delivery and returns" line (§5.2) is **not** among them:
-  spec §18.1 and a customer who cannot meet a deadline they cannot see.
+- **Touch targets are 44×44px minimum** at `xs` and `sm`; 32px at `lg` for the
+  quantity stepper only. **Pagination's `h-9 min-w-9` (36px) is below the floor on
+  touch** and becomes `h-11 min-w-11` below `lg`. `DESIGN.md` line 193's "minimum
+  height 48px" for primary buttons is adopted outright.
+- **Nothing is hidden by breakpoint that carries information.** The PDP's
+  delivery-and-returns line (§5.2) is **not** among them: spec §18.1, and a
+  customer who cannot meet a deadline they cannot see.
 
 ---
 
@@ -1268,6 +1634,78 @@ addition this redesign makes.**
 
 ---
 
+### 5.12 Coverage: which pages were designed, and which are derived
+
+**The stakeholder selected 17 designs by hand.** Stitch does not carry context
+between generations, so the set drifts (§2.1.1) and it is **not complete**. This
+subsection is the coverage contract's completion.
+
+#### 5.12.1 User-designed (17 designs)
+
+| # | Route | Design |
+|---|---|---|
+| 1 | `/` | `maison_ther_catalogue_accueil_carousel_edition` — **the settle reveal + manual carousel** |
+| 2 | `/products` | `maison_ther_all_fragrances_refined_cards_atmosphere` |
+| 3 | `/products/[slug]` | `ther_s_culaire_extrait_de_parfum_refined_hero_flow` |
+| 4 | `/cart` | `maison_ther_votre_panier` |
+| 5 | `/checkout` | `maison_ther_commande_r_glement` |
+| 6 | `/orders` | `maison_ther_vos_commandes` |
+| 7 | `/orders/[id]` | `maison_ther_order_detail_nested_tracking` |
+| 8 | `/track-order` | `maison_ther_suivi_public_de_commande` |
+| 9 | `/returns` | `maison_ther_politique_de_retour` |
+| 10 | `/shipping` | `maison_ther_politique_de_livraison` |
+| 11 | `/login` | `maison_ther_connexion_sign_in` |
+| 12 | `/register` | `maison_ther_cr_ation_de_compte_create_account` |
+| 13 | `/reset-password` step 1 | `maison_ther_nouveau_mot_de_passe_1` |
+| 14 | `/reset-password` step 2 | `maison_ther_nouveau_mot_de_passe_2` |
+| 15 | `/verify-email` | `maison_ther_v_rification_de_courriel_standard_chrome` |
+| 16 | `/verify-email` (alt) | `maison_ther_v_rification_de_courriel` |
+| 17 | account recovery | `maison_ther_r_cup_ration_de_compte` |
+
+#### 5.12.2 DERIVED — no design exists; built from the canonical token set
+
+The stakeholder authorised improvising these. **They are not placeholders — they
+are specified below at the same density as the designed pages**, and the rule for
+each is the same: **write them from §2's tokens exactly as if a design existed, so
+they are indistinguishable from the designed pages.** Harmonisation is not only
+about matching what exists; the derived pages must agree with the designed ones
+too.
+
+| Route | Status | How it is derived | Accent |
+|---|---|---|---|
+| **`/contact`** | **NO DESIGN** | §5.8 + the canonical set. `LegalShell` becomes a single measured column with the same eyebrow/h1/`--space-6` rhythm as the two policy pages. `ContactLinks` uses the four hand-drawn inline SVGs at 18px in **square `--color-field-border` buttons** (§2.3 #9 judgement applied — a contact button is a container, not a circle). Sticky sub-column at `lg`, 3:1 boundary. Contact channels from `getContactSettings()` | **none** |
+| **`/terms`** | **NO DESIGN** | §5.11 + the canonical set. Two-column at `lg`: a sticky 200px table of contents in `--text-label` on the left, prose at `--measure: 36ch` on the right. Section headings `--text-h2` in Playfair with `--space-6` above their first paragraph (the `DESIGN.md` line 158 rule). Prose `--color-ink-secondary`, defined terms promoted to `--color-ink`. Hairline rule above the closing contact block | **none** |
+| **`/privacy`** | **NO DESIGN** | Identical construction to `/terms` — **the two must be visually indistinguishable in structure**, since they are siblings. Same ToC, same measure, same rhythm | **none** |
+| **`not-found`** | **NO DESIGN** | Centre column, `--text-label` eyebrow reading "404", Playfair `--text-h1`, one muted paragraph, then **four real links** — all fragrances, new arrivals, contact, home — as `--text-label` tracked caps with `scaleX` underlines (§3 O2). No illustration, no mascot, no search box | **none** |
+| **`error`** | **NO DESIGN** | Same skeleton as `not-found`, eyebrow "Something went wrong", one solid `--color-ink-deep` "Try again" button at 48px min-height (`DESIGN.md` line 193), and beneath it a `--color-field-border` row exposing `error.digest` as a quoted reference | **none** |
+
+#### 5.12.3 INFERRED — a design exists but does not cover the route
+
+| Route | Coverage | Decision |
+|---|---|---|
+| `/forgot-password` | **INFERRED** from `EmailOnlyForm` + the login design's field anatomy | One field, one 48px solid button, `--text-label` label above in `--color-ink-secondary`, on success a `--color-field-border` panel with the server's verbatim message. **Identical construction to `/resend-verification`** — they are the same component, so they must be identical pages |
+| `/forgot-username` | **INFERRED** as above | Identical, with the label changed. **No separate design is invented** |
+| `/resend-verification` | **INFERRED** from the account-recovery design's "resend" affordance | Identical to the two above |
+
+#### 5.12.4 The harmonisation rules that apply to derived and inferred pages
+
+1. **Same tokens, same spacing rhythm, same type scale, same motion classes.** No
+   page may introduce a value that is not in §2.
+2. **The `--space-6` heading rule** (`DESIGN.md` line 158) applies to every derived
+   page's headings.
+3. **Zero accent moments** on all five derived pages and all three inferred ones.
+   This is consistent with §5.7/§5.11 and with the *auth family the user actually
+   designed*, which has no motion — **so the derived auth pages inherit the
+   designed auth pages' silence rather than contradicting it.** That is the
+   strongest evidence that this is the right call.
+4. **A derived page may not be quieter or louder than a designed sibling.**
+   `/terms` and `/privacy` must match each other exactly; `/contact` must match the
+   two policy pages; the three inferred recovery pages must match `/login`.
+5. **If a design later arrives for a derived page, the design wins** — and the
+   drift table in §2.1.1 is re-run, because a new design is a new drift risk.
+
+---
+
 ### Out of scope: `/admin`, `/staff/login`, `/staff/mfa/enroll`, `error.tsx`, `not-found.tsx`
 
 The coverage contract asks for an explicit decision here, so:
@@ -1429,23 +1867,47 @@ rather than asserting it.**
 
 ### 7.3 Focus visibility
 
+**The value, stated explicitly as override O1 requires: `#9C6A2E`.**
+
 ```
-outline: 2px solid var(--color-focus);   /* #9c6a2e — 3.76:1 on ink, 4.38:1 on paper */
+--color-focus: #9C6A2E;
+
+outline: 2px solid var(--color-focus);   /* #9C6A2E */
 outline-offset: 2px;
 box-shadow: 0 0 0 4px rgb(156 106 46 / 0.22);   /* the halo */
 ```
 
-The halo is not decoration. The outline alone clears 3:1 against all four
-surfaces (§2.1), but a 2px bronze ring on a `--color-ink` button with a
-`--color-paper` label is legible in a screenshot and ambiguous in a photograph of
-a screen. The 22%-alpha halo separates the ring from the button edge without
-adding a second opaque colour that would compete with the label. **The outline
-colour must never be set to `transparent` to remove a ring** — if a design cannot
-tolerate a ring, it is a hover-only affordance and a 7.3 failure.
+**Measured from the canonical literals** (§2.1.3): **4.43:1 on `--color-paper`
+#FCF9F3**, **4.65:1 on `--color-surface` #FFFFFF**, **3.68:1 on `--color-ink-deep`
+#1E1B19**. The **worst case is 3.68:1**, so one token clears WCAG 1.4.11's 3:1 on
+every surface in the system, including the solid-ink buttons.
 
-`scroll-behavior: smooth` is **off** globally. It is disabled by the reduced-motion
-backstop already, and it should be off unconditionally: it is a WCAG 2.3.3
-concern and it interferes with the focus ring on in-page anchors (the legal ToC).
+**The refs' `#B8AF9F` is rejected for both roles**, and the two failures are
+different and worth separating:
+
+| Role | Ref value | Measured | Verdict |
+|---|---|---|---|
+| Active **focus** indicator | `#B8AF9F` | **2.07:1** paper / 2.17:1 surface | **rejected** — ~2/3 of the 3:1 floor |
+| **Hover** card-frame boundary | `#B8AF9F` | **2.07:1** paper / 2.17:1 surface | **also rejected** — gets `--color-hairline-hover #857C72` at **3.90:1 / 4.10:1** |
+
+Hover needed its own token because the two jobs are different: focus must be
+**unambiguous and machine-detectable**, while a card-frame hover is a **state
+affordance**. A card frame that merely darkens by 1.23 -> 2.07 is perceptible but
+not compliant, so it gets a compliant value too.
+
+The halo is not decoration. A 2px bronze ring on an ink button with a paper label
+is legible in a screenshot and ambiguous in a photograph of a screen; the 22%-alpha
+halo separates the ring from the button edge without adding a second opaque colour
+that would compete with the label. **`outline: transparent` is never used to
+remove a ring.**
+
+**Input focus is separate and comes from the refs:** `DESIGN.md` line 198 has the
+field's hairline shift to ink on focus — **16.26:1 on paper**, comfortably passing.
+Both apply together: the ring as the indicator, the border shift as the field's own
+state.
+
+`scroll-behavior: smooth` is **off** globally — a WCAG 2.3.3 concern, and it
+interferes with the focus ring on in-page anchors (the policy ToC).
 
 ### 7.4 Contrast targets
 
@@ -1827,12 +2289,37 @@ its ancestor, or the noise will not paint. **Do not nest these two techniques.**
 
 ### 10.4 Fonts
 
-Per §2.2: two self-hosted variable `woff2` files, `subsets: ["latin"]`,
-`display: "swap"`, metric-adjusted fallbacks, preloaded on every route because
-both are used in `layout.tsx`. Estimated **35–55 KB gz each**, so roughly
-**70–110 KB** of font. Fonts are a **separate budget from JS** and are not
-counted against the 120 KB. No `preconnect` — there is no third-party font
-request to preconnect to.
+Per §2.2: two self-hosted **variable** `woff2` files — **Playfair Display** (`ital`
++ `wght`) and **Plus Jakarta Sans** (`wght`) — `subsets: ["latin"]`,
+`display: "swap"`, metric-adjusted fallbacks, preloaded on every route because both
+are used in `layout.tsx`. **This replaces the Fraunces + Source Sans 3 figures
+below, which are void.**
+
+| | Family | Axes | Payload |
+|---|---|---|---|
+| Display | Playfair Display | `wght` 400–900, `ital` | **unmeasured** (A-31) |
+| Body/UI | Plus Jakarta Sans | `wght` 200–800 | **unmeasured** (A-31) |
+| **Total** | | | **not measured; carried as an estimate only** |
+
+**The honest state of this figure.** I have no build and therefore no measured
+`woff2` payload. The previous spec carried **35–55 KB gz each (~70–110 KB total)**
+for variable latin subsets; Playfair and Plus Jakarta are of comparable class, so
+that is the order of magnitude — **but it is an estimate and it is now labelled as
+one rather than restated as a number.** Fonts are a **separate budget from JS** and
+do not count against 120 KB.
+
+**What must not be adopted from the refs.** All 17 designs load fonts from
+`fonts.googleapis.com` and a **Material Symbols webfont** from the same origin.
+Neither is permitted: `font-src 'self'` in the CSP (`next.config.ts:24`) forbids
+them, and a render-blocking third-party stylesheet is a §10.2 budget failure on
+every route. **No `preconnect`** is added, because after `next/font` there is no
+third-party font request to preconnect to.
+
+**The measured decision when a build exists:** inspect
+`_next/static/media/*.woff2`. If the total exceeds ~110 KB, the lever is
+`preload: false` on Plus Jakarta with a `swap` fallback — protecting the Playfair
+headline — **not** a smaller typeface and **not** a third family. Record the
+number here when it exists.
 
 ### 10.5 The CSP is a performance control
 
@@ -2119,6 +2606,159 @@ non-negotiably:
   branch on them. `conventions.md:25` requires this and the backend's audit cycles
   spent real effort closing it.
 
+### 12.D API BINDING — every ref value that must come from the API
+
+> **Added 2026-10-03 after the user selected 17 designs. This is the section that
+> makes §0b.1's rule enforceable.** The refs are static HTML with plausible
+> hardcoded commerce values; each is a fabrication risk. **A value below is never
+> transcribed from the markup.** Where there is no field, the value is removed —
+> P5 forbids inventing a number.
+
+**Column meaning.** *Bind* = what the value must be rendered from. *Absent* = the
+designed behaviour when that data does not exist — **never** a literal fallback.
+
+#### 12.D.1 Money — the single largest risk
+
+| In the ref | Bind to | Absent behaviour |
+|---|---|---|
+| `₹ 41,300`, `₹ 21,500`, `₹ 19,800`, `₹ 24,000`, `₹ 18,500`, `₹ 15,000`, `₹ 62,800`, `₹ 26,000`, `₹ 22,000`, `₹ 19,200`, `₹ 25,500`, `₹ 19,500`, `₹ 23,000`, `₹ 20,400`, `₹ 18,800`, `₹ 0` — **16 distinct amounts, all hardcoded literals** | **`Product.price` → `formatINR()`**, which is `Intl.NumberFormat("en-IN", {style:"currency", currency:"INR"})` over the server's decimal **string** (`lib/money.ts`) | **Never a literal, and never a computed price.** No arithmetic except `price × quantity` for a labelled estimate (`CartView`) |
+| **The U+20B9 rupee sign itself** | **CORRECT — keep it.** The refs already price in INR (`DEFAULT_CURRENCY = 'INR'`, `config/settings.py:679`; Razorpay charges INR) and use U+20B9, 53 times. There is **no currency defect in the refs** | The glyph comes from `formatINR`, not from markup. **The defect is the hardcoded amount, not the currency** |
+| Line totals, subtotals, discount, delivery charge, order total | `CouponPreview.{discount,final_total}` from `POST /api/orders/apply-coupon/`; `Order.{discount_amount,shipping_amount,total_amount}` from `POST /api/orders/checkout/`; `shipping.options[].amount` from `GET /api/shipping/estimate/` | The row is omitted, or shows "confirmed at checkout" — **never** a client-computed figure |
+| `{size} ml` / "fl. oz." | `Product.size` (int, ml) | **Volume is always rendered from `Product.size`.** The refs' dual-unit "ml / fl. oz." conversion has no field and no rate table — **removed** (§12-D.5) |
+
+#### 12.D.2 Policy and windows — where the refs contradict themselves
+
+This is the clearest evidence for the rule: **the refs state two different return
+windows, and our own policy is a third.** All three strings verified present:
+
+| In the ref | Where | Bind to | Absent behaviour |
+|---|---|---|---|
+| **"Retours 30 Jours"** | PDP, a `<span>` in the returns strip | **`GET /api/settings/` — but it does not return a window today** (see §12-G11) | **The window is not rendered at all** until the field exists |
+| **"We offer a 30-day return window for unopened flacons"** | PDP, delivery paragraph | same | same |
+| **"14 jours calendaires dès réception"** and **"un délai de quatorze (14) jours calendaires à compter de la date…"** | the returns policy page, **twice** — EU consumer-law language | same | same |
+| *(our real policy)* | **`returns/page.tsx` and `page.tsx:105` say 7 days** | single-sourced constant | — |
+
+**The direction of the contradiction.** The PDP says **30**, the policy page says
+**14** and cites EU law, and the store's own policy is **7**. So the refs disagree
+with each other *and* with us. The resolution is **not to pick a number**: it is to
+**not render a number until a field exists**, and to single-source the prose window
+in one module imported by all three call sites so it cannot drift — which is
+exactly how the refs arrived at three numbers.
+
+Also in that PDP paragraph: **"5 – 7 jours"** is a *delivery* estimate (verified
+verbatim: "International : 5 – 7 jours"). It is a claim too, and the same rule
+applies — `GET /api/shipping/estimate/` answers per destination, and nothing is
+hardcoded.
+
+| "Complimentary carbon-neutral dispatch **across Europe**" | PDP, delivery paragraph | **Factually wrong.** The store ships across India (`shipping/page.tsx`) | **Removed.** No geography claim is rendered from markup |
+| EU legal citation ("article L. 221-18 du Code de la consommation") | returns policy page | Our own `/returns` + `/terms` copy | **Removed.** Citing French consumer law on an India-only store is a false legal claim |
+
+#### 12.D.3 Performance and provenance claims — removed under P5
+
+Every item below is a **manufacturing or performance claim about a fictional
+product**. There is no field for any of them, and P5 says: no third category
+between server truth and customer-produced numbers.
+
+| In the ref | Status | What renders instead |
+|---|---|---|
+| **"16 h"** (PDP: `16 h</span>` in the performance block; the strings `16 h-20` / `16 h-px` elsewhere are Tailwind height utilities, not claims) | **REMOVED.** A longevity claim with no data | Nothing. The pyramid (if it exists) carries note names; **no duration claim** |
+| **"10h TENUE"** | **CORRECTION: this string does NOT exist in the refs.** "10 h" matches are Tailwind height classes (`h-10`, `h-px`). **There is no tenue figure to remove** — the refs carry `Tenue` as a *label* only, with no number beside it | **Nothing to remove.** The label may render; a number never does |
+| **"120 Jours"** (PDP maturation block) | **REMOVED.** Manufacturing claim, no field | Nothing |
+| **"120 hours"** | **CORRECTION: does not exist.** The only 120 figure is `120 Jours`. I previously listed both as if both were present | as above |
+| "skin tenacity approximately **14-18 hours**" (PDP prose) | **REMOVED.** Present verbatim; a performance claim with no field | Nothing |
+| "Macerated for four months in silence at our Grasse atelier" | **REMOVED.** Present verbatim | Nothing |
+| **"Includes a complimentary 2ml matching vial to test on skin prior to breaking the wax seal"** | **REMOVED.** Present verbatim. A gift-with-purchase promise. `OrderItem` has no gift line and checkout has no gift mechanism — **the order model cannot fulfil it**, and promising it would be a commitment the backend cannot honour | Nothing |
+| "un échantillon d'essai de **2 ml** issu du même assemblage est systématiquement expédié en amont" (returns policy) | **REMOVED**, same reason | Nothing |
+| "Single batch edition · Hand-milled bronze cap · Individually numbered run" | **REMOVED.** Present verbatim | Nothing |
+| **"N° 04"**, "N° 01 – Éveil", "N° 02 – Densité", "N° 03 – Sillage" | **REMOVED as an edition number.** Present (the `N°` pattern appears 38×). There is no `edition_number` field | Nothing |
+| **"Batch 01/24 - Grasse / Paris"** | **REMOVED.** Present verbatim on the PDP. No `batch` field | Nothing |
+| ~~"BATCH DJIZA — GRASSE / PARIS"~~ | **CORRECTION: does NOT exist.** `DJIZA` has **zero** occurrences. The word `BATCH` appears as `Batch 01/24 - Grasse / Paris`, `BATCHES` (home section heading) and `Batch archive sealed` (order detail). **I invented the "DJIZA" provenance string** | Nothing — the removal stands, but on the correct citation |
+| "PARIS · GRASSE · KYOTO" (footer) | **REMOVED.** Present verbatim. A false address claim | Nothing |
+| "Notes du Formulateur — Grasse, Automne" | **REMOVED.** Present verbatim | Nothing |
+| "Archival entry recorded in the Grasse register" / "Recorded and archived in Grasse Atelier formulary ledger" | **REMOVED.** Present verbatim | Nothing |
+| "Complimentary carbon-neutral dispatch **across Europe**" | **REMOVED.** Present verbatim, twice (`carbon-neutral` ×1, `Europe` ×2) | Nothing. The store ships across India |
+| EU legal citation ("article L. 221-18 du Code de la consommation") | **REMOVED.** Present verbatim. Citing French consumer law on an India-only store is a false legal claim | Nothing |
+| Stock confirmation "In stock" / "Sold out" | **`Product.stock > 0`** (there is no `in_stock` field — §12-G14) | Never a numeric stock count. The ref's stock dots are bound to the same boolean |
+| Order lifecycle ("Dispatched", dates, steps) | **`Order.{status, payment_status, fulfilment_status, paid_at, shipped_at, delivered_at, cancelled_at, refunded_at}`** via `GET /api/orders/{id}/` | Steps with no timestamp render as unreached, with their label and **no date** |
+| Tracking reference, carrier, ETA, event trail | **`GET /api/shipping/track/{order_number}/`** — `ShipmentTrackingSerializer`'s six fields only | One block per parcel; the uniform miss verbatim (§5.6) |
+| Order reference "N° 0842" / "N° 14" | **`Order.order_number`** (`ORD-YYYY-NNNNNN`), not the sequential `id` | — |
+| Email / phone / address on order | `Order.{full_name, phone, address, city, state, pincode, guest_email}` | Rendered only for an owned order |
+| Coupon | `CouponPreview.coupon` / `Order.coupon` | See §12-G5 |
+| Product name, description, slug, category, image | `Product.{name, description, slug, category, image}` | `ProductImage`'s monogram on a null/404 image |
+
+#### 12.D.4 Features in the designs with no endpoint
+
+| In the ref | Decision |
+|---|---|
+| **"Demande d'Échantillon"** (sample request) on the PDP | **NOT SHIPPED as a form.** No endpoint exists. Per §5.7's reasoning applied here: *a form that posts nowhere is the worst outcome* — it collects an address and discards it. Becomes **§12-D6** |
+| **"CONSEGNIÈRE PARTICULIÈRE"** toggle | **NOT SHIPPED.** No preference endpoint, no checkout-section row. §12-D7 |
+| Olfactive pyramid (Top / Heart / Base) with named botanicals | `Product.description` is one free-text field; there is **no structured notes data** (§12-G10). **Default: the description as prose.** The pyramid renders **only** if structured notes exist — the three-tier layout is not built around unstructured text |
+| Size / variant selector (`.size-btn`, two states) | **NOT SHIPPED as a selector.** One SKU per product: `Product.size` and `Product.price` are single values (§12-G10, P4). The ref's own size buttons are placeholder. **Renders as a static `{size} ml` line** |
+| "Back in stock" / restock opt-in | **`POST /api/products/{slug}/restock-notifications/`** exists (§12-G6) and is **shipped** — the real functional replacement for the banned "customers also bought" carousel |
+| Stock dot + "Sold out" chip | `Product.stock > 0` |
+| Delivery estimate at checkout | **`GET /api/shipping/estimate/?state=&pincode=`** (§12-G3) |
+| Guest checkout | `POST /api/orders/checkout/` is `AllowAny` (§12-G1) |
+
+#### 12.D.5 Units and conversions
+
+The refs render dual units ("30 ml / 1.0 fl. oz."). `Product.size` is an integer
+in ml with **no conversion table and no currency of volume**. **Dual-unit display
+is removed**; the value renders as `{size} ml` from `Product.size`. A `fl. oz.`
+conversion needs a stated policy (fl. oz. US or imperial) and a rounding rule, and
+neither exists. **§12-D8.**
+
+#### 12.D.6–D.8 — new gaps raised by the refs
+
+| # | Pri | Page | What is missing | UX it blocks | Proposed contract | Current workaround |
+|---|---|---|---|---|---|---|
+| **D6** | **P2** | `/products/[slug]` | **No sample-request endpoint.** The refs' PDP offers "Demande d'Échantillon" | A sample-request form | Proposal: a rate-limited `POST /api/products/{slug}/samples/` writing to the staff support inbox, with the customer's email and the product slug | **None. No form ships** (§12.D.4) |
+| **D7** | **P2** | `/checkout` | **No preference persistence.** The refs' "CONSEIGNIÈRE PARTICULIÈRE" toggle implies a saved concierge preference; there is no field and no `/me` | The toggle | Proposal: fold into the §12-G17 `GET /api/accounts/me/` payload | **None. No toggle ships** |
+| **D8** | **P2** | `/products`, `/products/[slug]` | **No unit-conversion policy.** `fl. oz.` needs US-vs-imperial and a rounding rule | Dual-unit volume display | Proposal: a settings-level `volume_unit` + conversion policy, or simply do not render dual units | **Single unit, `{size} ml`** (§12.D.5) |
+| **D9** | **P2** | `/`, `/products`, `/products/[slug]` | **The refs link to at least 11 destinations that do not exist in the route contract**: ATELIER / L'ATELIER, OBJETS / Objets en Porcelaine, PHILOSOPHY / Philosophie, ARCHIVES, CARNET DE FORMULATION / Latelier, Concierge Digitale, Formulaire Index, Mentions Légales, Index, plus 2 in-page anchors (`#concierge`, `#lost-folio`) that resolve to nothing. **201 of the refs' `href` values are literally `href="#"`** and 9 anchors are unresolving | The nav and footer as designed cannot ship | All backend/content decisions, each listed in 12.D.7 | **Every one is decided in 12.D.7. Dead links ship as none.** |
+
+#### 12.D.7 Nav and footer destinations — every one decided
+
+**"Dead links are not acceptable."** No item below ships as a link to nowhere. Each
+resolves to a real route, becomes a **non-link**, or becomes a §12 gap.
+
+| Ref destination | Appears as | Decision | Why |
+|---|---|---|---|
+| **Parfums**, **Boutique**, **Catalogue des Parfums**, **Collection**, **Éditions**, **Éditions Limitées** | `data-path="parfums"` etc., ×24 the most-linked item | **→ `/products`** | All six are the same thing: the catalogue. Six nav items pointing at one page is a `DESIGN.md` "unprinted margins" violation in information architecture. **One nav item, `/products`.** `/products?ordering=-created_at` remains reachable as "New arrivals" |
+| **Cart** / **Panier** | `data-path="cart"` / `panier` | **→ `/cart`** | Real route |
+| **Orders** / `data-path="orders"` | — | **→ `/orders`** | Real route |
+| **Sign in** / `sign-in` | `data-path="sign-in"` | **→ `/login`** | Real route |
+| **Resend verification** | `data-path="resend-verification"` | **→ `/resend-verification`** | Real route |
+| **Terms of Service** | `data-path="terms-of-service"` | **→ `/terms`** | Real route |
+| **Privacy Policy** | `data-path="privacy-policy"` | **→ `/privacy`** | Real route |
+| **Staff portal** | `data-path="staff-portal"` | **→ `/staff/login`** | Real route, role-gated, `noindex`. Reached from `/login`'s staff link, **not** from the main nav |
+| **ATELIER** / **L'Atelier** / **Latelier** | `data-path="latelier"`, `#atelier` ×5 **unresolving** | **NON-LINK for now; §12-D10** | It is the house's atelier page. There is no route and no content. A nav item that goes nowhere is the failure this table exists to prevent |
+| **OBJETS** / **Objets en Porcelaine** | `data-path="objets"` | **NON-LINK; §12-D10** | Same. Also: the store sells perfume, not porcelain — a link implies a product line that does not exist |
+| **PHILOSOPHY** / **Philosophie** / **À Propos** | `data-path="propos"`, `philosophie`, `a-propos`, `#philosophy` | **NON-LINK as nav; the content is absorbed into `/` §5.1's house-position block** | There is no philosophy page in the contract, and spec §3.2's "brand story" section is home-page content. **Two nav items (`philosophie` and `a-propos`) are the same page twice** — collapse to one, on `/` |
+| **ARCHIVES** | `#archives` **unresolving** | **NON-LINK; §12-D10** | No route, no content. "Archives" in a fragrance store implies a catalogue history we do not have |
+| **CARNET DE FORMULATION** | `data-path="latelier"` footer link, different label | **NON-LINK; §12-D10** | A formulation notebook. It is editorial content that does not exist, and it shares a `data-path` with ATELIER — so **two different labels already point at one placeholder** |
+| **Concierge Digitale** | `#concierge` **unresolving** | **NON-LINK; §12-D11** | A concierge chat service. We have WhatsApp/phone/email via `getContactSettings()`. The equivalent is `/contact`, which exists — so the **footer keeps "Contact"** and the concierge item is dropped rather than duplicated |
+| **Formulaire Index** | in the recovery design | **DROPPED** | It is a registration form. That is `/register`, which exists and is linked from `/login`. No separate destination |
+| **Mentions Légales** | `data-path="legal-notice"` | **→ `/terms`** | In this store "legal notice" is the terms page. Same as `terms-of-service`, so it is **one link, not two** |
+| **Index** | `#index` | **DROPPED** | A site index has no meaning on a 17-route storefront |
+
+**Result: the nav is 4 items** — Parfums `/products`, New arrivals
+`/products?ordering=-created_at`, Bag `/cart`, and Orders `/login|/orders` by
+auth state — plus the overlay menu. **The footer keeps Shop / Help / Contact /
+Legal, all real routes.** Every href is either a real route or a real in-page
+anchor; `href="#"` count goes from **201 to zero.**
+
+**Rule: a nav or footer item is added only with a route behind it.** If the route
+does not exist, the item does not render. There is no third option and no
+"coming soon".
+
+#### 12.D.8–D.11 — the gaps those decisions create
+
+| # | Pri | Page | What is missing | UX it blocks | Proposed contract | Current workaround |
+|---|---|---|---|---|---|---|
+| **D10** | **P2** | `/`, nav, footer | **No editorial-content route for ATELIER / OBJETS / ARCHIVES / CARNET DE FORMULATION.** Four distinct editorial destinations named by the design, none with a route or a content source | Four nav/footer destinations the design clearly wants | Proposal: a minimal CMS-backed page model (spec §6.10 is admin-side) exposing a public read, or static content in-repo behind one dynamic route with a slug | **Rendered as non-links.** The nav is 4 items. This is a **product decision**, not a design one — if the house wants an atelier page, that is a content project |
+| **D11** | **P2** | `/contact` | **No concierge/chat service.** "Concierge Digitale" implies staffed live chat | A concierge affordance | Proposal: the existing WhatsApp deep link from `getContactSettings()` already *is* the concierge channel, and it is the strongest one available to a small house | **`/contact` renders the real channels** — WhatsApp, phone, email, Instagram — each only if configured (§5.8). The concierge *label* is dropped; the *capability* is already there |
+| **D12** | **P3** | all | **`#concierge`, `#lost-folio`, `#signin` and 6 more unresolving in-page anchors** across the designs | Nothing once §12.D.7 lands | None | Every one is resolved to a real route or dropped. Any anchor without a target is **removed from the markup**, not left as `href="#"` |
+
 ---
 
 ## 13. Assumptions
@@ -2172,6 +2812,170 @@ luminance formula applied to the literal hex values in `globals.css`.
 | **A-15** | **`SearchAction` uses `?search=`, not `?q=`.** §8.4 proposes it as a judgement call | `filters.ts` and `products/views.py:37` both use `search` | If `q` is not accepted, the JSON-LD is not a valid `SearchAction`. **Recommendation: omit `SearchAction` entirely rather than emit a non-functional one.** Google has deprecated the `q` autocomplete parameter anyway |
 | **A-16** | **The e2e helpers are genuinely broken, not merely stale-looking** (§9.2) | `lib/tokens.ts` stores no `aurel.refresh`; `accounts/urls.py` documents `login/` as the staff door | If some middleware still injects that key, the helpers work. **I did not run the suite** (no frontend `node_modules`, and running the app requires a live backend). The fix is small either way and the specs must move with the redesign regardless |
 | ~~A-17~~ | **Superseded and merged** into A-17 above (2026-10-03). The original "no Lighthouse, axe or bundle-size run was performed" note is retained there in struck form; **the part that remains true is that *our own app* has still never been built, bundled or measured.** `MOTION-3D-ANALYSIS.md` §7.4 lists exactly what is still unverified |
+
+### 13.3 Round 4 — the selected refs: assumptions and measurement limits
+
+The user selected 17 Stitch designs by hand on 2026-10-03. They are now the
+authority for the visual direction (§0b). What I measured, what I did not, and
+what remains unverifiable.
+
+**A-26 — the 17 designs are the complete set, and no 18th will arrive.**
+Verified: the extraction contains exactly **17 `code.html` + `screen.png` pairs**
+and one `DESIGN.md`. **If the user later runs more Stitch generations, the drift
+table in §2.1.1 must be re-run** — a new design is a new drift risk, and §5.12.4
+rule 5 says so explicitly.
+
+**A-27 — the canonical set is `#FCF9F3` / `#1C1C18` / `#1E1B19` / `#E5E2DC`, chosen
+from markup frequency over `DESIGN.md`'s stated paper.** I verified the
+stakeholder's measurement independently and it matched exactly, including
+`#F7F4EE` in **zero** files. **Basis: frequency, not judgement** — 17/17 for paper,
+16/17 for the other three. **If a later design re-introduces a drifted value, the
+canonical set wins** and the drifter is normalised, because P1's whole argument is
+that the system must not drift.
+
+**A-28 — `#1C1C18` and `#1E1B19` are two intentional inks, not a duplicate.**
+Both appear 16/17. Read as `--color-ink` (body) and `--color-ink-deep` (buttons,
+header), matching the refs' own `on-surface` / `primary-container` naming.
+**Alternative considered:** collapse to one ink. Rejected — the refs use the deep
+value specifically on solid buttons and the header, and collapsing would lose the
+slight elevation the design is built on. If wrong, the fix is a one-token change.
+
+**A-29 — `--color-hairline-hover #857C72` is a new token, not `DESIGN.md`'s
+`#B8AF9F`.** Measured 2.07:1 / 2.17:1 for `#B8AF9F` on paper/surface — fails 3:1
+for **both** focus and hover. `#857C72` measures **3.90:1 / 4.10:1**. Chosen for
+worst-case margin among candidates. **If the house wants a warmer hover tint**,
+`#8A8177` (3.64/3.83) also passes, with less margin.
+
+**A-30 — `--color-ink-secondary #78716A` passes at 4.57:1, by 0.07.** This is the
+**tightest-passing text token in the system.** It failed at 4.38:1 on the stale
+`#F7F4EE` paper and only passes because the canonical paper is lighter. **Any
+darkening of `--color-paper` breaks it silently.** The §7.8 check-5 contrast sweep
+is the only thing that catches this; A-4's general "measure it" warning applies
+with extra force here.
+
+**A-31 — the Playfair + Plus Jakarta payload is UNMEASURED.** No build exists, so
+no `woff2` size could be obtained. §10.4 records **no number** rather than
+recycling the Fraunces/Source Sans estimate as if it were measured. **Resolve with
+one build:** `npm run build`, then inspect `_next/static/media/*.woff2`. Until then
+§10.4 is a specification, not a figure.
+
+**A-32 — radius judgements are made on element type, not on a blanket rule.** I
+enumerated all 21 non-`rounded-none` instances and identified each by what it
+renders (§2.3). **The judgement that a radio must stay circular overrides
+`DESIGN.md` line 199** ("sharp square geometries"), because shape *is* the
+affordance for a radio. **If the house prefers a square radio, that is one
+component** — it does not affect the other five circle exceptions.
+
+**A-33 — six radius exceptions survive against `DESIGN.md`'s one.** Counted and
+named in §2.3: five status dots, one radio, one avatar, one account monogram, one
+count badge. **`DESIGN.md` line 188 permits only the count badge.** I widened the
+allowance because all six are circles that would render as ellipses if squared, and
+each is recorded with its element. **This is a deliberate, visible departure from
+the refs' stated rule**, and it is the one place where "make it square" would have
+produced a worse design.
+
+**A-34 — the 21-instance radius census and the 6-value duration census are
+measured, not eyeballed.** Verified independently: `rounded-none` 86,
+`rounded-full` 23, `rounded-lg` 9, `rounded-xl` 6, `rounded-2xl` 3,
+`rounded-[2px]` 2; `duration-200` 98, `duration-150` 25, `duration-300` 20,
+`duration-500` 15, `duration-700` 5, `duration-1000` 2, `duration-100` 2. **Every
+count matched the stakeholder's ground truth exactly.**
+
+**A-35 — no autoplay exists in any of the 17 files.** Verified by search: **no
+`setInterval`, no autoplay, no auto-advance timer.** The home carousel is manual
+(prev/next with `disabled:` at the ends, four dots, an `01`/`04` counter, one
+500ms `transform` track). It therefore does **not** fail WCAG 2.2.2 and stays.
+**Recorded as a forward constraint: autoplay must never be added**, and if it
+ever is, a visible pause control is required first.
+
+**A-36 — the settle animation is specified as `animation-timeline: view()`, not as
+the refs' `IntersectionObserver`.** Two options were available per the override:
+declarative timeline, or gate the hidden state behind a class script must add.
+**Timeline chosen** because it removes script entirely rather than making script
+responsible for the default state — 0 KB, no listener, no failure mode. **If
+`animation-timeline` support is a problem for a target browser, the second option
+is the fallback** and it must keep the same reduced-motion end state. Recorded
+because the choice is not free: it trades a guaranteed-working threshold
+(`threshold: 0.12`, `rootMargin: -40px`, which I am approximating with
+`animation-range: entry 0% entry 40%`) for zero script.
+
+**A-37 — the carousel curve is kept as one token on one component, not retired.**
+`cubic-bezier(0.25, 1, 0.5, 1)` is not a page-wide curve; it is tuned to a
+large-horizontal slide. Retiring it was considered and rejected. **If a future
+review decides one curve should govern everything**, the carousel is the only
+component affected.
+
+**A-38 — I could not reconcile two things, and both are recorded rather than
+papered over.**
+
+1. **`DESIGN.md` vs the markup on paper colour.** `DESIGN.md` says `#F7F4EE` /
+   `#F4EFEB`; the 17 pages all use `#FCF9F3`. Resolved in favour of the markup
+   (§2.1.1) and `DESIGN.md`'s value is recorded as **stale**, not silently
+   dropped — because a future reader will go back to `DESIGN.md` and need to know
+   why their build differs.
+2. **`DESIGN.md`'s own exclusions are broken by its PDP.** The PDP ships
+   `backdrop-blur-sm`, `rounded-lg/xl/2xl` and three card shadows against
+   `DESIGN.md` lines 210, 186 and 178 respectively (§0b.4). Resolved in favour of
+   `DESIGN.md` on all three. **I could not determine whether the PDP is a
+   different generation with a relaxed system, or a Stitch artefact** — so the
+   safer reading was taken and the PDP is brought into line.
+
+**A-39 — derived pages are specified by me, not selected by the user.** §5.12.2's
+five DERIVED routes (`/contact`, `/terms`, `/privacy`, `not-found`, `error`) and
+§5.12.3's three INFERRED routes (`/forgot-password`, `/forgot-username`,
+`/resend-verification`) **have no design**. The stakeholder authorised
+improvising. They are built from §2's tokens and are consistent with the
+*designed* auth pages — which the user selected and which contain no motion — so
+the derived pages inherit that silence. **If the user would rather see them in
+Stitch first, these are the 8 routes to run.**
+
+**A-40 — CORRECTION ROUND. Two round-4 transcriptions were false and are now
+corrected. The rule this creates is the important part.**
+
+The user independently verified my currency claim against the source bytes and it
+was **wrong**. I had written that "the refs price in yen" and that "the yen glyph is
+WRONG FOR THIS STORE" — a claim I derived from misreading the console, not from the
+source. The truth, measured by codepoint across all 17 files:
+
+| | U+00A5 YEN SIGN | U+20B9 INDIAN RUPEE SIGN |
+|---|---|---|
+| **refs, all 17 `code.html`** | **0** | **53** |
+| **this spec, before correction** | **16** | 8 |
+| **this spec, now** | **0** | 28 |
+
+**Root cause:** I read the refs through a PowerShell console that was mangling
+U+20B9 into `?`, so I misidentified the glyph and then wrote the misidentification
+into the spec **as fact**, including two amounts (`₹ 245`, `₹ 380`) that do not
+exist in the source at all. **The conclusion survived — money must be bound to the
+API — but the reasoning was fabricated, and a commerce spec that mis-states its
+currency is worse than no spec.**
+
+**The corrected claim:** the refs price in **INR using U+20B9, which is correct for
+this store**. There is **no currency defect**. The defect is that **the amounts are
+hardcoded literals** — 16 distinct values (`₹ 0`, `15,000`, `18,500`, `18,800`,
+`19,200`, `19,500`, `19,800` ×9, `20,400`, `21,500` ×9, `22,000`, `23,000`,
+`24,000` ×4, `25,500`, `26,000`, `41,300` ×9, `62,800`) which must be bound to
+`Product.price` → `formatINR()`.
+
+**Re-checking every other transcription found three more fabrications, now
+corrected in place with the verified string:**
+
+| I had written | Truth | Correction |
+|---|---|---|
+| "10h TENUE" | **Does not exist.** `10 h` matches are Tailwind height classes (`h-10`, `h-px`). The `Tenue` **label** exists on the PDP with no number | Row now says so explicitly; the label may render, a number never does |
+| "120 hours" maturation | **Does not exist.** The only 120 figure is `120 Jours` | Removed from the claim list; `120 Jours` retained |
+| "BATCH DJIZA — GRASSE / PARIS" | **Does not exist.** `DJIZA` has **zero** occurrences. `BATCH` appears as `Batch 01/24 - Grasse / Paris`, `BATCHES`, `Batch archive sealed` | Cited as the verified strings; the two §0b rows that repeated the fabrication are corrected |
+| `₹ 245`, `₹ 380` | **Do not exist** | Removed; replaced with the 16 verified amounts |
+
+**The rule, now binding on every transcription in this file:** any string quoted
+from the refs — a glyph, an amount, a figure, a label — must be **located in the
+source by search and its codepoints checked** before it is written down. A
+console-mangled read is not a reading. **Where a claim cannot be located, the claim
+is dropped, not softened.**
+
+This is the second time in four rounds that an unverified reading has produced a
+false statement in a section a builder will act on (the first was the CSP
+retraction in §11.5.1, which I caught myself). Both are recorded.
 
 ---
 
