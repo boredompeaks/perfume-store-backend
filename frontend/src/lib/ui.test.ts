@@ -65,7 +65,53 @@ const NOT_A_COLOUR = new Set([
   "uppercase", "lowercase", "capitalize",
   "normal", "tight", "tighter", "loose", "looser", "widest",
   "inset", "inner", "thin", "medium", "thick", "offset", "ghost",
+  // Shadow sizes: every one of xs / sm / lg / xl / 2xl is already above, so
+  // `md` was the single omission — `shadow-md` read as `--color-md`.
+  "md",
+  // `text-shadow`, which puts a shadow size under the `text-` prefix.
+  "shadow",
+  // Background and caret keywords that share a colour prefix: position, size,
+  // attachment, repeat.
+  "auto", "top", "bottom", "cover", "contain", "fixed", "local", "scroll",
+  "repeat", "no-repeat", "repeat-x", "repeat-y", "repeat-round",
+  "repeat-space",
+  // `decoration-clone` / `decoration-slice` — box-decoration-break.
+  "clone", "slice",
 ]);
+
+/**
+ * Families rather than single words, for the same reason: these follow a colour
+ * prefix but belong to another Tailwind namespace. Every pattern is anchored
+ * and matches nothing that could be a colour token, because no name in
+ * `@theme` contains a digit or one of these keywords.
+ *
+ * The first entry is the one that made `ring-2` fail. Tailwind's numeric step
+ * scale is shared by width, position and spacing utilities, so `ring-2`,
+ * `border-x-2`, `ring-offset-2`, `border-spacing-2`, `outline-2`, `stroke-2`
+ * and `from-0` all produce a bare number where a colour name would sit. Only
+ * the prefixes in `COLOUR_PREFIXES` can reach this check, which is why
+ * `rounded-2`, `gap-2` and the rest of the scale were never at risk.
+ */
+const NOT_A_COLOUR_PATTERNS = [
+  /^(?:spacing-|offset-|[trblexy]-)?\d+(?:\.\d+)?$/,
+  /^(?:linear|radial|conic)(?:-to-[a-z]+)?$/, // bg-linear-to-r, bg-radial
+  /^(?:linecap|linejoin)-[a-z]+$/, // stroke-linecap-round
+  /^rule-(?:evenodd|nonzero)$/, // fill-rule-evenodd
+];
+
+/**
+ * Whether `prefix`-`name` is asking for a colour token at all. Anything this
+ * returns `true` for is a colour name, so a name that resolves to nothing in
+ * `@theme` is a real defect rather than a layout utility.
+ */
+export function isColourCandidate(prefix: string, name: string): boolean {
+  return (
+    COLOUR_PREFIXES.has(prefix) &&
+    !BUILTIN_COLOURS.has(name) &&
+    !NOT_A_COLOUR.has(name) &&
+    !NOT_A_COLOUR_PATTERNS.some((pattern) => pattern.test(name))
+  );
+}
 
 function* sourceFiles(dir: string): Generator<string> {
   for (const entry of readdirSync(dir, { withFileTypes: true })) {
@@ -86,14 +132,9 @@ function unresolvedColourTokens(): string[] {
     for (const [, prefix, name] of source.matchAll(
       /(?:[a-z-]+:)*([a-z]+)-([a-z0-9-]+)/g,
     )) {
-      if (
-        !COLOUR_PREFIXES.has(prefix) ||
-        BUILTIN_COLOURS.has(name) ||
-        NOT_A_COLOUR.has(name)
-      ) {
-        continue;
+      if (isColourCandidate(prefix, name) && !themeColours.has(`--color-${name}`)) {
+        missing.add(name);
       }
-      if (!themeColours.has(`--color-${name}`)) missing.add(name);
     }
   }
   return [...missing].sort();
@@ -134,5 +175,70 @@ describe("theme tokens", () => {
     // which was true — rather than that the class resolved to any CSS at all.
     // This asserts resolution.
     expect(unresolvedColourTokens()).toEqual([]);
+  });
+});
+
+/**
+ * The guard above is only useful while it is neither blind nor trigger-happy,
+ * and both failure modes are silent: a colour name wrongly classified as
+ * layout passes an unresolved token through, and a layout utility wrongly
+ * classified as a colour fails the suite on a legitimate class. These pin both
+ * directions, because the vocabulary they cover is Tailwind's, not ours, and
+ * it grows without anyone editing this file.
+ */
+describe("isColourCandidate", () => {
+  it("reads a colour-prefixed width, offset or position as a width", () => {
+    for (const [prefix, name] of [
+      ["ring", "2"], // the case that broke the guard
+      ["ring", "offset-2"],
+      ["border", "2"],
+      ["border", "x-2"],
+      ["border", "t-4"],
+      ["outline", "2"],
+      ["stroke", "2"],
+      ["from", "0"],
+      ["divide", "2"],
+    ] as const) {
+      expect([prefix, name, isColourCandidate(prefix, name)]).toEqual([
+        prefix,
+        name,
+        false,
+      ]);
+    }
+  });
+
+  it("reads a same-prefix keyword from another namespace as not a colour", () => {
+    for (const [prefix, name] of [
+      ["shadow", "md"],
+      ["text", "shadow"],
+      ["caret", "auto"],
+      ["bg", "top"],
+      ["bg", "no-repeat"],
+      ["bg", "linear-to-r"],
+      ["bg", "radial"],
+      ["stroke", "linecap-round"],
+      ["fill", "rule-evenodd"],
+      ["decoration", "clone"],
+    ] as const) {
+      expect([prefix, name, isColourCandidate(prefix, name)]).toEqual([
+        prefix,
+        name,
+        false,
+      ]);
+    }
+  });
+
+  it("still treats every declared colour token as a colour token", () => {
+    for (const token of themeColours) {
+      const name = token.replace("--color-", "");
+      expect([name, isColourCandidate("bg", name)]).toEqual([name, true]);
+    }
+  });
+
+  it("still treats a misspelt colour as a colour, so it can fail", () => {
+    // If this ever returns false the blocklist has swallowed the namespace and
+    // `bg-bronze` typos would ship silently.
+    expect(isColourCandidate("bg", "bronz")).toBe(true);
+    expect(isColourCandidate("text", "hairline-hover")).toBe(true);
   });
 });

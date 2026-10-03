@@ -48,17 +48,22 @@ const jakarta = Plus_Jakarta_Sans({
   subsets: ["latin"],
   variable: "--font-jakarta",
   display: "swap",
-  // §10.4's measured lever, triggered. `_next/static/media/*.woff2` totals
-  // 243,728 B with a 104,620 B preloaded critical path (Playfair normal
-  // 38,460 + Playfair italic 38,888 + Jakarta 27,272) — over the ~110 KB
-  // threshold §10.4 names. Its stated remedy is `preload: false` here, to
-  // protect the Playfair headline. Jakarta still swaps in on arrival against
-  // a metric-adjusted fallback (`src: local(Arial)`, size-adjust 104.98%,
-  // ascent-override 98.88%, descent-override 21.15%), so the delay costs a
-  // typeface and no layout shift. The body face is the right thing to
-  // de-prioritise: `display: "optional"` is rejected for the display face in
-  // §2.2.5 because a late Playfair swap reads as a flash, and that reasoning
-  // does not transfer to running text.
+  // §10.4's measured lever, triggered. §10.4 applies its ~110 KB threshold to
+  // the TOTAL `_next/static/media/*.woff2` payload, not to the preloaded
+  // subset, and that total is 243,728 B across 12 files in this tree's build —
+  // 2.2x the threshold. Measured on this build: the three latin-subset faces
+  // are Playfair normal 38,460 B, Playfair italic 38,888 B and Jakarta
+  // 27,272 B (104,620 B together), of which exactly two are preloaded.
+  //
+  // The preloaded critical path is therefore 77,348 B — those two Playfair
+  // faces — and protecting that headline is the point of the lever. Jakarta
+  // still swaps in on arrival against a metric-adjusted fallback
+  // (`src: local(Arial)`, size-adjust 104.98%, ascent-override 98.88%,
+  // descent-override 21.15%, all four present in the emitted @font-face), so
+  // the delay costs a typeface and no layout shift. The body face is the
+  // right thing to de-prioritise: `display: "optional"` is rejected for the
+  // display face in §2.2.5 because a late Playfair swap reads as a flash, and
+  // that reasoning does not transfer to running text.
   preload: false,
 });
 
@@ -94,7 +99,7 @@ export default function RootLayout({
         <Providers>
           <a
             href="#main"
-            className="sr-only focus:not-sr-only focus:absolute focus:left-4 focus:top-4 focus:z-50 focus:bg-ink focus:px-4 focus:py-2 focus:text-sm focus:text-paper"
+            className="sr-only focus:not-sr-only focus:absolute focus:left-4 focus:top-4 focus:z-(--z-skip) focus:bg-ink focus:px-4 focus:py-2 focus:text-sm focus:text-paper"
           >
             Skip to content
           </a>

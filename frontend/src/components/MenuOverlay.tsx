@@ -72,7 +72,7 @@ export default function MenuOverlay({
       role="dialog"
       aria-modal="true"
       aria-label="Menu"
-      className="fixed inset-0 z-50 flex flex-col bg-paper"
+      className="fixed inset-0 z-(--z-overlay) flex flex-col bg-paper"
     >
       <div className="flex h-16 items-center justify-between border-b border-hairline px-4 sm:px-6">
         <span className="font-display text-xl tracking-tight">

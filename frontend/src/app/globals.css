@@ -189,18 +189,33 @@
 
   /* ---- §2.3 Elevation — the complete list, and it is two -----------
      A shadow says "floating", and nothing on this site floats. Every other
-     surface is separated by a hairline. Neither of these animates. */
-  --elevation-bar: 0 2px 12px -6px rgb(28 25 23 / 0.15); /* header, once scrolled */
-  --elevation-modal: 0 24px 48px -24px rgb(28 25 23 / 0.28); /* menu overlay only */
+     surface is separated by a hairline. Neither of these animates.
+
+     Both tint off `--color-ink` (#1c1c18) through `color-mix` instead of
+     repeating the hex, so the retired #1c1917 these literals used to carry
+     cannot come back unnoticed. `color-mix` against `transparent` is a
+     premultiplied mix, so 15% is exactly `rgb(28 28 24 / 0.15)` — which the
+     build emits as its own `#1c1c1826` fallback — and 28% is exactly
+     `rgb(28 28 24 / 0.28)`. `.card-lift` below reads the same colour the same
+     way. */
+  --elevation-bar: 0 2px 12px -6px color-mix(in srgb, var(--color-ink) 15%, transparent); /* header, once scrolled — Header.tsx */
+  --elevation-modal: 0 24px 48px -24px color-mix(in srgb, var(--color-ink) 28%, transparent); /* menu overlay only — no consumer yet */
 
   /* ---- §2.3 Z-index — 5 steps, no exceptions ------------------------
-     Replaces three `z-50`s that were ordered correctly only by DOM accident.
+     The four raw z-index utilities that used to sit in `src/**` now read
+     these tokens through Tailwind's `z-(--z-*)` variable shorthand, so the
+     stacking order is a property of the values below instead of an accident
+     of DOM position — which is all it was while the menu overlay and the
+     toast container sat on the same step. Written without literal class names
+     on purpose: Tailwind's source detection scans the project's text files,
+     `docs/design/*.md` included, so a utility name quoted in the spec still
+     emits a dead rule — whereas this file's own comments are not scanned.
      A new z-index is a new token, or it is a bug. */
-  --z-sticky: 30; /* sticky purchase / summary panels */
-  --z-header: 40; /* <header> */
-  --z-overlay: 50; /* menu overlay, any modal */
-  --z-toast: 60; /* above the overlay: a confirmation must not hide behind it */
-  --z-skip: 70; /* skip link, visible over everything */
+  --z-sticky: 30; /* sticky purchase / summary panels — no consumer yet */
+  --z-header: 40; /* <header> — Header.tsx */
+  --z-overlay: 50; /* menu overlay, any modal — MenuOverlay.tsx */
+  --z-toast: 60; /* above the overlay: a confirmation must not hide behind it — toast.tsx */
+  --z-skip: 70; /* skip link, visible over everything — layout.tsx */
 
   /* ---- §2.2.4 Measure -----------------------------------------------
      34–40 characters per line, which is the only measure that survives a
@@ -237,23 +252,36 @@
   --motion-state-dur: 200ms; /* colour and border changes need no motion */
   --motion-enter-dur: 200ms; /* arrival; appears at final position */
   --motion-exit-dur: 160ms; /* the refs' ease-out */
-  --motion-hover-dur: 250ms; /* live-target feedback; the 240ms ceiling in P3 */
+
+  /* §2.4's `hover` row sets this at **250ms**, from `DESIGN.md` line 183's
+     card lift. P3's prose (`UI-UX-SPEC.md:326-329`) says "retained at 240ms
+     and 1.03 scale", which contradicts that row; the token follows the row,
+     so this is 250ms and not the 240ms an earlier comment here claimed. */
+  --motion-hover-dur: 250ms; /* live-target feedback */
+
   --motion-narrative-dur: 600ms; /* one accent moment per page */
   --motion-progress-dur: 200ms; /* checkout step hairline */
   --motion-track-dur: 500ms; /* carousel / large horizontal slide only */
   --motion-loading-dur: 1200ms; /* skeleton shimmer, infinite, linear */
   --motion-toast-dur: 200ms; /* reduced-motion: opacity only */
 
-  /* §2.4.2: the refs' `group-hover:scale-[1.02]`. Beyond this it stops being
-     feedback that the target is live and becomes decoration. */
+  /* `--hover-scale: 1.02` is stated at the end of §2.4.2
+     (`UI-UX-SPEC.md:862`), taking the refs' 1.02 hover scale. Beyond it a
+     hover scale stops being feedback that the target is live and becomes
+     decoration. P3's prose asks for 1.03 (`UI-UX-SPEC.md:327`); the token
+     follows §2.4.2's 1.02. */
   --hover-scale: 1.02;
 }
 
 /* ==========================================================================
    §7.3 Focus visibility.
-   `#8a5a24` — the value this rule used to carry — computes 2.97:1 on the
-   solid-ink button, under the 3:1 floor of WCAG 1.4.11. `#9C6A2E` is the
-   highest minimum across paper (4.43), white (4.65) and deep ink (3.68).
+   `#8a5a24` — the value this rule used to carry — is under the 3:1 floor of
+   WCAG 1.4.11 against both dark surfaces this block still declares: 2.91:1 on
+   `--color-ink-deep` (#1e1b19) and 2.90:1 on `--color-ink` (#1c1c18), which is
+   what solid buttons are painted with. (The "2.97:1" quoted by an earlier
+   version of this comment was measured against #1c1917, an ink value this block
+   no longer declares.) `--color-focus` #9C6A2E is the highest minimum across
+   paper (4.43), white (4.65) and deep ink (3.68).
    The opaque outline is the indicator; the 22%-alpha halo only separates the
    ring from the button edge. `outline: transparent` is never used to remove a
    ring, and under forced-colors the halo correctly vanishes — which is why
@@ -347,7 +375,7 @@
 }
 .card-lift:hover {
   transform: translateY(-3px);
-  box-shadow: 0 14px 32px -14px rgb(28 25 23 / 0.22);
+  box-shadow: 0 14px 32px -14px color-mix(in srgb, var(--color-ink) 22%, transparent);
 }
 
 /* Ghost watermark text (outlined, decorative only — exemption E1). */

@@ -61,8 +61,8 @@ export default function Header() {
   return (
     <>
       <header
-        className={`sticky top-0 z-40 border-b border-hairline bg-paper transition-shadow ${
-          scrolled ? "shadow-[0_2px_12px_-6px_rgb(28_25_23/0.15)]" : ""
+        className={`sticky top-0 z-(--z-header) border-b border-hairline bg-paper transition-shadow ${
+          scrolled ? "shadow-(--elevation-bar)" : ""
         }`}
       >
         <div className="relative mx-auto flex h-16 max-w-6xl items-center justify-between px-4 sm:px-6">

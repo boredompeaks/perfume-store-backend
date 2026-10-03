@@ -23,7 +23,7 @@ export default function ProductCard({
           alt={product.name}
           priority={priority}
           sizes="(min-width: 1024px) 25vw, (min-width: 640px) 33vw, 50vw"
-          className="transition-transform duration-500 group-hover:scale-[1.04]"
+          className="transition-transform duration-(--motion-hover-dur) group-hover:scale-(--hover-scale)"
         />
         {soldOut && (
           <span className="absolute left-3 top-3 bg-ink px-2 py-1 text-xs uppercase tracking-wide text-paper">
