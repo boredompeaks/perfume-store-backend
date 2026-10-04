@@ -74,7 +74,7 @@ only, by user instruction. The promotion PR remains the RE's exclusive act.
 | GATE-4 | Branch coverage, not just line | P1 | .coveragerc | SHIPPED @ 3bf8eaa (auditor RE-AUDIT c2, pushed d0afdd4..3bf8eaa) |
 | GATE-5 | Put the 167 orphan scripts/tests cases into the gate | P1 | backend-tests.yml | SHIPPED @ d0afdd4 (auditor RE-AUDIT c2, pushed 89aa7a5..d0afdd4) |
 | GATE-6 | Nightly full-corpus doc_claims scheduled job | P2 | .github/workflows/doc-claims-nightly.yml | SHIPPED @ d0afdd4 (auditor RE-AUDIT c2, pushed 89aa7a5..d0afdd4) |
-| GATE-7 | Script-printed changelog figures, no transcribed numbers | P1 | scripts/changelog_figures.py, conventions.md | PENDING |
+| GATE-7 | Script-printed changelog figures, no transcribed numbers | P1 | scripts/changelog_figures.py, conventions.md | SHIPPED @ 875091c (auditor RE-AUDIT c2, pushed 3bf8eaa..875091c) |
 
 ## TIER 0 — gate integrity and the P0. Nothing below is trustworthy until these land.
 
