@@ -484,6 +484,23 @@ EMAIL_USE_TLS = os.getenv('EMAIL_USE_TLS', 'true').lower() == 'true'
 # (common.notifications.send_email raises; dispatch and the alerts path log
 # and continue) instead of hanging.
 EMAIL_TIMEOUT = _env_positive_int("EMAIL_TIMEOUT", 10)
+# ASYNC-2c1: how long a queued notification row is allowed to sit before the
+# purge command treats it as spent.
+#
+# This bound exists because the outbox payload deliberately does NOT go through
+# the audit trail's credential-field scrubber: a password-reset or
+# email-verification notification is built out of exactly the one-time token
+# material that scrubber drops, so dropping it here would break the mail. The
+# consequence of not dropping it is that a queued payload can hold live token
+# material, and the mitigation for THAT is deletion on a clock rather than
+# redaction at write time. The default is three days: comfortably longer than
+# any mail queue backlog or provider retry window, and short enough that a
+# stranded row holding a token does not outlive the reason it was queued.
+# ``PASSWORD_RESET_TIMEOUT`` (Django's own default, 3 days) bounds the token's
+# validity independently, so this is the second of two bounds, not the only one.
+NOTIFICATION_OUTBOX_TTL_SECONDS = _env_positive_int(
+    "NOTIFICATION_OUTBOX_TTL_SECONDS", 3 * 24 * 60 * 60
+)
 DEFAULT_FROM_EMAIL = os.getenv('DEFAULT_FROM_EMAIL', EMAIL_HOST_USER)
 FRONTEND_URL = os.getenv('FRONTEND_URL', 'http://localhost:3000').rstrip('/')
 # SPEC-20-13: where the admin login page sends an account that MFA has

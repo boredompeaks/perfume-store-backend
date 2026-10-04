@@ -23,8 +23,11 @@ write that earned it.
 """
 
 import logging
+from datetime import timedelta
 
+from django.conf import settings
 from django.db import models
+from django.utils import timezone
 
 from common.audit import clean_audit_payload
 from common.middleware import (
@@ -37,6 +40,25 @@ from common.middleware import (
 # route or filter the business trail in log tooling independently of model
 # noise; settings.LOGGING pins it at INFO (SPEC-7-02).
 audit_logger = logging.getLogger("common.audit")
+
+# A queued notification's expiry is a property of writing one, not something
+# each caller should be able to forget, so it is a field default rather than a
+# required argument: ``NotificationOutbox.objects.create()`` cannot produce a
+# row that never expires. The bound is deployment-shaped (it decides how long a
+# copy of a one-time token may sit in this table), so it is env-driven through
+# settings rather than written here.
+NOTIFICATION_OUTBOX_DEFAULT_TTL_SECONDS = 3 * 24 * 60 * 60
+
+
+def default_notification_outbox_expiry():
+    """When a freshly written outbox row stops being worth keeping."""
+    return timezone.now() + timedelta(
+        seconds=getattr(
+            settings,
+            "NOTIFICATION_OUTBOX_TTL_SECONDS",
+            NOTIFICATION_OUTBOX_DEFAULT_TTL_SECONDS,
+        )
+    )
 
 
 class AuditEvent(models.Model):
@@ -250,11 +272,23 @@ class NotificationOutbox(models.Model):
     stores no template name and no subject: the handler builds those, from
     live state, when it runs.
 
-    ``dedup_key`` is the at-least-once guard, discussed at
-    ``notifications._dedup_key``. The queue is at-least-once, not
-    exactly-once: a worker that dies between sending and marking the row
-    done must send again, and the key is what lets the retry see that this
-    notification was already handled.
+    ``dedup_key`` is the **enqueue-time** idempotence guard, discussed at
+    ``notifications._dedup_key``: it collapses two paths that fire for one
+    business event, so the same notification is queued once. It is NOT the
+    send-side at-least-once guard and cannot be - it is derived only from the
+    event type and the payload, is byte-identical before and after any send,
+    and is unique, so it carries no send state and can never match a second
+    row. What actually makes the queue at-least-once is this row's own
+    ``status``/``sent_at`` under a claim that locks the row: a worker that
+    dies between sending and stamping re-sends *this* row. That is ASYNC-2c2's
+    work and it does not exist yet.
+
+    ``expires_at`` bounds how long the row — and any token material in its
+    payload — may sit, and is what makes the table safe to fill with
+    notifications built from one-time codes: the payload is deliberately not
+    scrubbed, so deletion on a clock is the compensating control. The deletion
+    owner is named and in-tree (``manage.py purge_notification_outbox``);
+    nothing schedules it yet, which is stated in that command's docstring.
 
     State is only what storage needs — ``PENDING`` until some later task
     claims, sends and stamps the row. There is deliberately no claim lease,
@@ -272,12 +306,13 @@ class NotificationOutbox(models.Model):
     # names the registry keys on. db_indexed because the drain query filters
     # and groups on it.
     event_type = models.CharField(max_length=50, db_index=True)
-    # TextField, not a bounded CharField: the key is DERIVED (event type plus
-    # the primary keys the event references), so a length cap would either
-    # truncate a key into a collision — silently swallowing a distinct
-    # notification — or demand a bound on payload scalars that has no honest
-    # justification. Still unique, so the database enforces idempotence
-    # rather than a convention.
+    # TextField, not a bounded CharField: the key is DERIVED (a canonical
+    # encoding of the event type, the payload and any caller-supplied
+    # occurrence discriminator), so a length cap would either truncate a key
+    # into a collision — silently swallowing a distinct notification — or
+    # demand a bound on payload scalars that has no honest justification.
+    # Still unique, so the database enforces idempotence rather than a
+    # convention.
     dedup_key = models.TextField(unique=True)
     payload = models.JSONField(default=dict, blank=True)
     # db_indexed: the worker's claim query is "oldest PENDING row".
@@ -292,6 +327,15 @@ class NotificationOutbox(models.Model):
     # which is not the same as PENDING — a row can fail and be retried — so it
     # is a nullable stamp rather than a status value.
     sent_at = models.DateTimeField(null=True, blank=True)
+    # Written at enqueue from settings.NOTIFICATION_OUTBOX_TTL_SECONDS (via
+    # the field default, so it cannot be omitted) and db_indexed because the
+    # purge command's only query is "everything past this instant". A row that
+    # outlives it has either been drained or stranded; either way its payload is
+    # no longer needed and may hold credential material that should not still
+    # be sitting in a table.
+    expires_at = models.DateTimeField(
+        db_index=True, default=default_notification_outbox_expiry
+    )
 
     class Meta:
         # FIFO drain order, with the pk as the tiebreak so two rows written

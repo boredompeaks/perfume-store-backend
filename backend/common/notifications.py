@@ -38,8 +38,14 @@ empty and inert as shipped, and the two later tasks are what make it move:
 converting a site is ASYNC-2c3, and a row written by a converted site sits
 undelivered until ASYNC-2c2 lands the loop that drains it. Converting before
 that would be a silent, permanent loss.
+
+What the queue's delivery guarantee is, precisely, because it was previously
+overstated here: ``dedup_key`` stops the same notification being QUEUED twice,
+and ``status``/``sent_at`` on a row-locked claim are what make it at-least-
+once. Only the first exists today.
 """
 
+import json
 import logging
 
 from django.apps import apps
@@ -180,10 +186,33 @@ def dispatch_on_commit(event_type, context=None):
 
 # A stored context value is an identifier, not prose. A notification context
 # names rows and settings; nothing in this project puts a paragraph in one.
-# Bounded for the same reason the audit trail bounds its values
-# (common/audit.py): a long value here is something nobody meant to queue,
-# and it would ride along in every log line that prints the row.
+#
+# This bound is a REFUSAL, not a truncation. The audit trail truncates over-long
+# values and marks the cut, because an audit record must survive its source
+# row's later correction. A queued notification has the opposite obligation:
+# a value cut at an arbitrary boundary renders as a plausible-looking but
+# broken email — a verification URL missing the last third of its token still
+# starts with the right scheme and still reads as a link, and fails at the
+# customer, which is the worst place to discover it. So an over-long
+# non-reference value raises instead, and the caller finds out at the call site
+# rather than in a customer's inbox.
+#
+# Note this marker is deliberately NOT the audit trail's (that one is a literal
+# "." appended by common/audit.py), because the two mechanisms are opposites:
+# one records that it cut, this one refuses to cut at all.
 PAYLOAD_VALUE_MAX_LENGTH = 200
+
+
+class NotificationPayloadError(ValueError):
+    """A dispatch context carries something that must not be queued.
+
+    Raised by :func:`serialize_context` for a value that is not a model
+    reference and is longer than ``PAYLOAD_VALUE_MAX_LENGTH``. Two things
+    land here and both are call-site bugs: prose nobody meant to put in a
+    notification, and credential material (a password-reset URL, a one-time
+    token) that a silent cut would turn into a broken link that still looks
+    like a link.
+    """
 
 
 class UnresolvableNotification(LookupError):
@@ -195,6 +224,14 @@ class UnresolvableNotification(LookupError):
     crash: a notification about an order that has since been deleted has no
     recipient and nothing to render, so a drain loop must be able to catch
     this and close the row out rather than die mid-batch on it.
+
+    Every failure mode is mapped onto this ONE exception. That is not
+    decoration: ``apps.get_model`` signals a label it cannot parse with
+    ``ValueError``, not ``LookupError``, so a hand-edited or malformed label
+    such as ``"a.b.c"`` used to escape as an uncaught ``ValueError`` — which
+    is the one thing a drain loop cannot catch by looking for this class, and
+    so it died mid-batch on exactly the row its docstring said it would
+    survive.
     """
 
 
@@ -216,9 +253,11 @@ def _describe(value):
       recipient's request was in. Resolving at enqueue pins the text to the
       request that asked for the notification; anything that must be re-derived
       against live state belongs behind a reference instead, not in a payload.
-    - A ``str`` goes through the same text path as everything else, so the
-      length bound below applies to strings too rather than only to values
-      that happened to arrive as objects.
+    - A ``set``/``frozenset`` is described and then SORTED, not rendered by
+      ``str()``. Python's ``str()`` of a set walks it in hash order, which
+      varies with ``PYTHONHASHSEED`` — so the same context enqueued by two
+      different gunicorn workers produced two different ``dedup_key`` values
+      and the duplicate suppression silently did not happen across workers.
     """
     if isinstance(value, models.Model):
         return {"label": value._meta.label_lower, "pk": value.pk}
@@ -226,11 +265,21 @@ def _describe(value):
         return {str(key): _describe(item) for key, item in value.items()}
     if isinstance(value, (list, tuple)):
         return [_describe(item) for item in value]
+    if isinstance(value, (set, frozenset)):
+        # Sorted by its canonical JSON form, so the order does not depend on
+        # which process is describing it.
+        return sorted((_describe(item) for item in value), key=_canonical)
     if value is None or isinstance(value, (bool, int)):
         return value
     text = str(value)
     if len(text) > PAYLOAD_VALUE_MAX_LENGTH:
-        return text[:PAYLOAD_VALUE_MAX_LENGTH] + "…"
+        raise NotificationPayloadError(
+            f"context value is {len(text)} characters; a queued notification "
+            f"value is an identifier and must be at most "
+            f"{PAYLOAD_VALUE_MAX_LENGTH} characters. Refusing rather than "
+            f"truncating: a cut credential renders as a plausible-looking "
+            f"broken link."
+        )
     return text
 
 
@@ -245,15 +294,30 @@ def serialize_context(context):
     The audit trail must never hold a one-time code, but a notification
     legitimately does — the accounts verification and reset emails are built
     out of exactly that material, and dropping it would break the mail this
-    queue exists to deliver. The cost of that decision is real and belongs in
-    the open: a queued notification payload can contain a token or personal
-    data, so outbox rows need a retention/deletion story of their own rather
-    than inheriting the audit trail's. That lands with the call-site
-    conversions in ASYNC-2c3, not here.
+    queue exists to deliver. So the compensating control is NOT redaction at
+    write time; it is deletion on a clock, and it exists now rather than being
+    deferred: every row carries ``expires_at``, written from
+    ``settings.NOTIFICATION_OUTBOX_TTL_SECONDS``, and the deletion owner is
+    the in-tree ``purge_notification_outbox`` management command. Two bounds
+    therefore protect the token, and only one of them is this repo's:
+    ``PASSWORD_RESET_TIMEOUT`` caps its validity, and ``expires_at`` caps how
+    long the copy in the queue outlives the reason it was written.
     """
     if not isinstance(context, dict):
         return {}
     return {str(key): _describe(value) for key, value in context.items()}
+
+
+def _canonical(value):
+    """The canonical JSON text of a described value, for keying and ordering.
+
+    ``sort_keys=True`` is what makes the encoding independent of the order the
+    caller happened to build the context in, and the default stringifier is
+    what makes it independent of ``PYTHONHASHSEED``. Two contexts describing
+    the same notification now produce byte-identical text whatever order they
+    were assembled in.
+    """
+    return json.dumps(value, sort_keys=True, default=str, separators=(",", ":"))
 
 
 def _is_reference(value):
@@ -262,6 +326,12 @@ def _is_reference(value):
     Both keys must be present and the label must be a dotted model label, so
     a caller's own two-key mapping is never mistaken for a reference and
     re-read out of the registry by accident.
+
+    The label is NOT shape-validated beyond that. A stricter check would be
+    worse: a multi-dot or truncated label would then fail this test and be
+    handed back to the caller as an ordinary mapping, which is silent. Every
+    malformed label instead reaches ``apps.get_model`` and comes back as
+    :class:`UnresolvableNotification`.
     """
     return (
         isinstance(value, dict)
@@ -271,38 +341,58 @@ def _is_reference(value):
     )
 
 
-def _dedup_key(event_type, payload):
-    """The idempotency key for one queued notification.
+def _dedup_key(event_type, payload, occurrence=None):
+    """The identity of one queued notification, encoded canonically.
 
-    The event type plus the model label and primary key of every reference the
-    context carries — the facts that identify the business event itself.
-    ``order.paid`` about ``orders.order:7`` is the same notification forever:
-    neither half can change while the event is being queued, so a re-enqueue
-    (a retried hook, the webhook path firing for a payment the callback path
-    already handled) names the identical key and the unique constraint turns
-    it into a no-op instead of a second email.
+    **What this is for: stopping the same notification being QUEUED twice.**
+    Two paths in this project fire for one payment — the browser callback in
+    the order views and the gateway webhook — and a retried hook is the same
+    case again. Both would otherwise queue two rows for one customer's
+    confirmation, so ``enqueue`` writes the first and refuses the second.
 
-    Stability is the whole point, and it is why mutable state is excluded: a
-    key built from the order's total or its rendered subject would change the
-    moment anything about the order was corrected between the enqueue and the
-    retry, and the duplicate would sail through as a second row. Scalar
-    context values are included (they are part of what distinguishes one
-    notification from another — a recipient, say), and are rendered in
-    insertion order, which is fixed for any given call site.
+    **What this is NOT for: stopping it being SENT twice.** A previous version
+    of this docstring claimed the key was the drain loop's "already handled"
+    guard, and that was false. The key is derived only from the event type and
+    the payload, is byte-identical before and after any send, and is
+    ``unique=True`` — so it can never match a second row and carries no send
+    state whatsoever. What makes the queue at-least-once is the row's own
+    ``status``/``sent_at`` under a claim that locks it: a worker that dies
+    between sending and stamping re-sends *that row*. That is ASYNC-2c2's work
+    and it does not exist yet.
 
-    The queue is at-least-once, not exactly-once. A drain loop that dies
-    between sending and stamping ``sent_at`` must send again, so this key is
-    what the worker uses to see it already handled a row, not a promise that
-    each customer receives exactly one email.
+    **Stability, which is what makes the enqueue-side use safe.** The two
+    halves are the event type and the identity of the rows it concerns —
+    ``order.paid`` about ``orders.order:7`` names the same notification
+    forever, because neither half can change while the event is being queued.
+    Mutable state is excluded on purpose: a key built from the order's total
+    or its rendered subject would change the moment anything was corrected,
+    and the duplicate would sail through.
+
+    **Canonical, not concatenated.** Earlier this was a ``":".join`` of
+    rendered fragments, which was injective only in the author's imagination:
+    an unescaped separator meant ``{"a": "1", "b": "2"}`` collided with
+    ``{"a": "1:b=2"}``, and a caller's insertion order changed the result, so
+    the same context built by two different sites produced two keys. It is now
+    a length-free structured encoding of the whole payload with sorted keys,
+    which is order-independent, collision-free for the value types
+    :func:`_describe` can produce, and stable across processes.
+
+    **At-least-once, and a repeat has to be asked for.** ``occurrence`` is the
+    deliberate escape hatch. Left ``None``, the key says "this business event
+    owes exactly one notification" and a second enqueue collapses — which is
+    right for a confirmation and wrong for a resend or a second reminder. A
+    caller that genuinely means to notify again passes a discriminator it
+    already holds: the reminder's own sequence number, or the id of the
+    resend request. That value goes into the key, so the repeat is a NEW row
+    with its own send state rather than a mutation of the first — which is
+    what "this notification is still owed" actually means.
     """
-    references = []
-    scalars = []
-    for key, value in payload.items():
-        if _is_reference(value):
-            references.append(f"{key}={value['label']}:{value['pk']}")
-        else:
-            scalars.append(f"{key}={value}")
-    return ":".join([str(event_type), *sorted(references), *scalars])
+    identity = {
+        "event_type": str(event_type),
+        "payload": payload,
+        "occurrence": occurrence,
+    }
+    return _canonical(identity)
 
 
 def resolve_context(payload):
@@ -352,12 +442,19 @@ def _load_reference(key, label, pk):
     longer addresses the column it was stored for (a hand-edited or migrated
     row). The last two are ``DoesNotExist``/``ValueError`` from the ORM, which
     a drain loop must not have to know the difference between.
+
+    ``ValueError`` is caught from ``apps.get_model`` for the same reason and
+    it is not hypothetical: a stored label of ``"a.b.c"`` unpacks into three
+    parts there and raises ``ValueError: too many values to unpack``, which is
+    not a ``LookupError``. Catching only ``LookupError`` let that one escape
+    as an uncaught ``ValueError`` — the single failure a drain loop filtering
+    on this exception cannot survive.
     """
     try:
         model = apps.get_model(label)
-    except LookupError:
+    except (LookupError, ValueError):
         raise UnresolvableNotification(
-            f"no model registered for {label} (context key {key!r})"
+            f"no model registered for {label!r} (context key {key!r})"
         ) from None
     try:
         return model._default_manager.get(pk=pk)
@@ -367,7 +464,7 @@ def _load_reference(key, label, pk):
         ) from None
 
 
-def enqueue(event_type, context=None):
+def enqueue(event_type, context=None, occurrence=None):
     """Record the intent to notify, in the caller's transaction. ASYNC-2c1.
 
     Returns the ``NotificationOutbox`` row it wrote, or ``None`` when there is
@@ -375,6 +472,22 @@ def enqueue(event_type, context=None):
     ``dispatch`` makes, so converting a call site cannot turn a working
     no-op into a silently-undelivered row), or a notification that is already
     queued under the same ``dedup_key``.
+
+    ``occurrence`` is how a caller asks for the same notification TWICE. Left
+    ``None``, the key says one business event owes one notification and a
+    repeat collapses to ``None`` — correct for a confirmation, and wrong for a
+    resend after a mis-send or a second reminder, which were structurally
+    impossible before this parameter existed. Pass a discriminator the caller
+    already holds (a reminder's sequence number, a resend request id) and the
+    repeat becomes its own row with its own send state. See
+    :func:`_dedup_key` for why the key cannot serve as the send-side guard.
+
+    Every row gets ``expires_at`` from the model's own field default, which
+    reads ``settings.NOTIFICATION_OUTBOX_TTL_SECONDS``. The payload is
+    deliberately not scrubbed of one-time tokens (see
+    :func:`serialize_context`), so that bound plus the in-tree
+    ``purge_notification_outbox`` command are what stop credential material
+    outliving the queue.
 
     **Inside the transaction, deliberately — not via ``transaction.on_commit``,
     which is what ``dispatch_on_commit`` does.** The two operations have
@@ -418,7 +531,7 @@ def enqueue(event_type, context=None):
         logger.debug("enqueue %s: no notification registered", event_type)
         return None
     payload = serialize_context(context or {})
-    dedup_key = _dedup_key(event_type, payload)
+    dedup_key = _dedup_key(event_type, payload, occurrence)
     try:
         with transaction.atomic():
             return NotificationOutbox.objects.create(
@@ -430,10 +543,12 @@ def enqueue(event_type, context=None):
         # Already queued under this key: either a retried hook or the second
         # of two paths that both fire for one event (the browser callback and
         # the webhook). The customer should receive one email, so the existing
-        # row stands and nothing new is written.
+        # row stands and nothing new is written. This says nothing about
+        # whether that row was ever SENT — see _dedup_key.
         logger.info(
-            "notification already queued event=%s dedup_key=%s",
+            "notification already queued event=%s occurrence=%s dedup_key=%s",
             event_type,
+            occurrence,
             dedup_key,
         )
         return None

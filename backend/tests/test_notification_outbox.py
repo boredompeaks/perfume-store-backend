@@ -29,20 +29,40 @@ What is pinned, and against which plausible wrong implementation:
   deliberate and is argued in ``notifications.enqueue``; if it is ever
   reverted to log-and-swallow, the dual-write this substrate removes comes
   back.
+- **The dedup key is injective and order-independent.** Two distinct contexts
+  must not collide on a separator, and the same context built in a different
+  key order must produce the same key. Both were false of a ``":".join`` key.
+- **A repeat is expressible.** ``occurrence`` is the deliberate escape hatch;
+  without it a resend or a second reminder was structurally impossible.
+- **An over-long value is refused, not cut.** A silently truncated token or
+  URL renders as a working-looking link and fails at the customer.
+- **The unsanitised payload has a control now.** ``expires_at`` is a field
+  default, so no code path can omit it, and ``purge_notification_outbox`` is
+  the named deletion owner. Both are asserted, not assumed.
 """
 
 import json
+from datetime import timedelta
 from decimal import Decimal
+from io import StringIO
 from unittest import mock
 
+from django.conf import settings
 from django.core import mail
+from django.core.management import call_command
 from django.db import DatabaseError, connection, transaction
-from django.test import TransactionTestCase, tag
+from django.test import TransactionTestCase, override_settings, tag
+from django.utils import timezone
 from django.utils.translation import gettext_lazy
 
 from common import notifications
-from common.models import AuditEvent, NotificationOutbox
-from common.notifications import UnresolvableNotification
+from common.models import (
+    NOTIFICATION_OUTBOX_DEFAULT_TTL_SECONDS,
+    AuditEvent,
+    NotificationOutbox,
+    default_notification_outbox_expiry,
+)
+from common.notifications import NotificationPayloadError, UnresolvableNotification
 from common.testing import ApiTestCase
 from orders.models import Order
 
@@ -112,15 +132,49 @@ class OutboxSerialisationTests(ApiTestCase):
         )
         self.assertEqual(row.payload["extra"]["nested"], "1.50")
 
-    def test_an_over_long_value_is_bounded_and_marked_as_cut(self):
+    def test_an_over_long_value_is_refused_rather_than_truncated(self):
+        # The defect this replaces: an over-long value was cut at an arbitrary
+        # boundary and stored, which a probe could not detect (a bare "…" is
+        # indistinguishable from a real one the author wrote) and which landed
+        # mid-token - a 233-character reset URL was stored at 201 characters,
+        # still starting "https://" and still containing "token=", so it
+        # rendered as a working link and failed at the customer. Refusing puts
+        # the failure at the call site instead.
+        order = _make_order(self.make_user("outboxlong"))
+        long_url = "https://shop.example/reset/" + "t" * 233
+        with self.assertRaises(NotificationPayloadError) as caught:
+            notifications.enqueue(
+                AuditEvent.EventType.ORDER_PAID,
+                {"order": order, "url": long_url},
+            )
+        self.assertIn(
+            str(notifications.PAYLOAD_VALUE_MAX_LENGTH), str(caught.exception)
+        )
+        # Nothing was written: the refusal happens before the insert, so a bad
+        # context cannot leave a half-queued row behind either.
+        self.assertEqual(NotificationOutbox.objects.count(), 0)
+
+    def test_a_value_at_the_bound_is_stored_whole(self):
+        exact = "v" * notifications.PAYLOAD_VALUE_MAX_LENGTH
         row = notifications.enqueue(
             AuditEvent.EventType.ORDER_PAID,
-            {"order": _make_order(self.make_user("outboxlong")), "note": "x" * 300},
+            {"order": _make_order(self.make_user("outboxbound")), "code": exact},
         )
-        self.assertEqual(
-            row.payload["note"],
-            "x" * notifications.PAYLOAD_VALUE_MAX_LENGTH + "…",
-        )
+        self.assertEqual(row.payload["code"], exact)
+
+    def test_a_set_context_value_is_ordered_deterministically(self):
+        # Python's str() of a set walks it in hash order, which varies with
+        # PYTHONHASHSEED - so the same context enqueued by two different
+        # gunicorn workers used to produce two different dedup keys and the
+        # duplicate suppression silently did not happen across workers. The
+        # described value is sorted by its canonical JSON form instead.
+        described = notifications.serialize_context({"tags": {"beta", "alpha"}})
+        # Hand-written expectation, not one recomputed from the code under test.
+        self.assertEqual(described, {"tags": ["alpha", "beta"]})
+
+    def test_a_repeated_element_in_a_set_is_described_once(self):
+        described = notifications.serialize_context({"tags": {"alpha", "alpha"}})
+        self.assertEqual(described, {"tags": ["alpha"]})
 
     def test_a_non_mapping_context_is_stored_as_an_empty_payload(self):
         # Matches AuditEvent.record's treatment of a detail: a context is
@@ -216,7 +270,14 @@ class OutboxTransactionTests(ApiTestCase):
 
 @tag("notifications")
 class OutboxDedupTests(ApiTestCase):
-    """The at-least-once guard: one key per logical notification."""
+    """The enqueue-side guard: one queued row per notification identity.
+
+    What this key is NOT: the drain loop's "already handled" guard. It is
+    derived only from the event type and the payload, is byte-identical before
+    and after any send, and is unique, so it can never match a second row and
+    carries no send state at all. At-least-once delivery is the locked
+    status/sent_at claim, which ASYNC-2c2 has not built.
+    """
 
     def test_a_second_enqueue_of_the_same_event_is_a_no_op(self):
         order = _make_order(self.make_user("outboxdup"))
@@ -231,11 +292,11 @@ class OutboxDedupTests(ApiTestCase):
         self.assertIn("already queued", "\n".join(logs.output))
 
     def test_the_key_survives_a_change_to_the_referenced_row(self):
-        # The property that makes the key usable by ASYNC-2c2: the two facts
-        # it is built from (event type, and the label+pk of the referenced
-        # row) cannot change, so a retry after the order was corrected still
-        # collides. A key built from the order's total, its rendered subject
-        # or its repr would miss and queue a duplicate email.
+        # The property the key's stability exists for: the two facts it is
+        # built from (the event type, and the label+pk of the referenced row)
+        # cannot change, so a retry after the order was corrected still
+        # collides. A key derived from the order's total, its rendered subject
+        # or its repr would miss and queue a duplicate.
         order = _make_order(self.make_user("outboxkey"))
         first = notifications.enqueue(AuditEvent.EventType.ORDER_PAID, {"order": order})
         order.total_amount = Decimal("999.00")
@@ -243,11 +304,40 @@ class OutboxDedupTests(ApiTestCase):
         second = notifications.enqueue(
             AuditEvent.EventType.ORDER_PAID, {"order": order}
         )
+        self.assertIsNotNone(first)
         self.assertIsNone(second)
         self.assertEqual(NotificationOutbox.objects.count(), 1)
+
+    def test_the_key_names_the_event_and_the_row_it_is_about(self):
+        # A shape check by hand-written substrings, NOT by rebuilding the key
+        # from the code under test: a key naming neither the event nor its
+        # subject would still collide correctly for one event and still be
+        # useless to whoever reads the table.
+        order = _make_order(self.make_user("outboxshape"))
+        row = notifications.enqueue(AuditEvent.EventType.ORDER_PAID, {"order": order})
+        self.assertIn("order.paid", row.dedup_key)
+        self.assertIn("orders.order", row.dedup_key)
+        self.assertIn(str(order.pk), row.dedup_key)
+
+    def test_the_key_does_not_depend_on_the_order_the_context_was_built_in(self):
+        # The two paths that fire for one payment are different call sites, and
+        # a caller may build its context either way round. The previous key
+        # appended scalars in insertion order, so the same notification built
+        # differently produced two keys and both rows were queued - defeating
+        # the exact collapse the key exists for.
         self.assertEqual(
-            NotificationOutbox.objects.get().dedup_key,
-            f"order.paid:order=orders.order:{order.pk}",
+            notifications._dedup_key("order.paid", {"a": "1", "b": "2"}),
+            notifications._dedup_key("order.paid", {"b": "2", "a": "1"}),
+        )
+
+    def test_two_distinct_contexts_do_not_collide_on_a_separator(self):
+        # The previous key was a ":".join of rendered fragments, so an
+        # unescaped separator made these two different notifications share one
+        # key - and the second was silently swallowed, because the unique
+        # constraint read it as "already queued".
+        self.assertNotEqual(
+            notifications._dedup_key("order.paid", {"a": "1", "b": "2"}),
+            notifications._dedup_key("order.paid", {"a": "1:b=2"}),
         )
 
     def test_distinct_referenced_rows_get_distinct_rows(self):
@@ -263,6 +353,53 @@ class OutboxDedupTests(ApiTestCase):
                 AuditEvent.EventType.ORDER_PAID, {"order": second_order}
             )
         )
+        self.assertEqual(NotificationOutbox.objects.count(), 2)
+
+    def test_the_default_occurrence_is_the_one_off_case(self):
+        # Left at None, the key says "this business event owes one
+        # notification" - which is right for a confirmation.
+        order = _make_order(self.make_user("outboxonce"))
+        self.assertIsNotNone(
+            notifications.enqueue(AuditEvent.EventType.ORDER_PAID, {"order": order})
+        )
+        self.assertIsNone(
+            notifications.enqueue(
+                AuditEvent.EventType.ORDER_PAID, {"order": order}, occurrence=None
+            )
+        )
+        self.assertEqual(NotificationOutbox.objects.count(), 1)
+
+    def test_a_repeat_notification_is_expressible_and_gets_its_own_row(self):
+        # Before this existed, a resend after a mis-send and a second reminder
+        # were structurally impossible: same type, same row, same scalars
+        # meant enqueue returned None forever - no nonce, no attempt
+        # discriminator, no force, no key retirement. An occurrence makes the
+        # repeat a NEW row with its own send state, which is what "this
+        # notification is still owed" actually means, rather than a mutation
+        # of the first.
+        order = _make_order(self.make_user("outboxrepeat"))
+        first = notifications.enqueue(
+            AuditEvent.EventType.ORDER_PAID, {"order": order}, occurrence="reminder-1"
+        )
+        again = notifications.enqueue(
+            AuditEvent.EventType.ORDER_PAID, {"order": order}, occurrence="reminder-1"
+        )
+        second = notifications.enqueue(
+            AuditEvent.EventType.ORDER_PAID, {"order": order}, occurrence="reminder-2"
+        )
+        self.assertIsNotNone(first)
+        self.assertIsNone(again)
+        self.assertIsNotNone(second)
+        self.assertEqual(NotificationOutbox.objects.count(), 2)
+        self.assertNotEqual(first.dedup_key, second.dedup_key)
+
+    def test_a_repeat_does_not_collide_with_the_one_off_row(self):
+        order = _make_order(self.make_user("outboxmixed"))
+        notifications.enqueue(AuditEvent.EventType.ORDER_PAID, {"order": order})
+        repeat = notifications.enqueue(
+            AuditEvent.EventType.ORDER_PAID, {"order": order}, occurrence="resend-1"
+        )
+        self.assertIsNotNone(repeat)
         self.assertEqual(NotificationOutbox.objects.count(), 2)
 
     def test_a_row_is_created_pending_and_unsent(self):
@@ -284,6 +421,111 @@ class OutboxDedupTests(ApiTestCase):
 
 
 @tag("notifications")
+class OutboxRetentionTests(ApiTestCase):
+    """ASYNC-2c1 cycle 2: the control that makes the unsanitised payload safe.
+
+    The payload is deliberately NOT run through the audit trail's
+    credential-field scrubber, because a password-reset or verification
+    notification is built out of exactly the one-time token material that
+    scrubber drops. That decision is only defensible with a compensating
+    control in place, so the bound and the deletion owner exist now rather
+    than being deferred to the call-site conversions.
+    """
+
+    def test_every_row_carries_an_expiry_inside_the_configured_bound(self):
+        order = _make_order(self.make_user("outboxttl"))
+        before = timezone.now()
+        with override_settings(NOTIFICATION_OUTBOX_TTL_SECONDS=120):
+            row = notifications.enqueue(
+                AuditEvent.EventType.ORDER_PAID, {"order": order}
+            )
+        after = timezone.now()
+        # The bound is the field's own default, so no code path can create a
+        # row without one - there is nowhere to forget it.
+        self.assertGreaterEqual(row.expires_at, before + timedelta(seconds=120))
+        self.assertLessEqual(row.expires_at, after + timedelta(seconds=120))
+
+    def test_the_purge_command_deletes_expired_rows_and_keeps_live_ones(self):
+        spent = notifications.enqueue(
+            AuditEvent.EventType.ORDER_PAID,
+            {"order": _make_order(self.make_user("outboxpurged"))},
+        )
+        live = notifications.enqueue(
+            AuditEvent.EventType.ORDER_PAID,
+            {"order": _make_order(self.make_user("outboxlive"))},
+            occurrence="still-owed",
+        )
+        self._expire(spent)
+        call_command("purge_notification_outbox", verbosity=0)
+        self.assertFalse(NotificationOutbox.objects.filter(pk=spent.pk).exists())
+        # A row inside its window is a notification still owed, so the purge
+        # must never be the reason a customer stops hearing about an order.
+        self.assertTrue(NotificationOutbox.objects.filter(pk=live.pk).exists())
+
+    def test_the_purge_command_deletes_a_stranded_pending_row_too(self):
+        # Nothing drains the table until ASYNC-2c2, so an expired PENDING row
+        # is stranded rather than finished. Its payload may hold credential
+        # material, so the bound does not wait for a status to change.
+        stranded = notifications.enqueue(
+            AuditEvent.EventType.ORDER_PAID,
+            {"order": _make_order(self.make_user("outboxstranded"))},
+        )
+        self.assertEqual(stranded.status, NotificationOutbox.Status.PENDING)
+        self._expire(stranded)
+        call_command("purge_notification_outbox", verbosity=0)
+        self.assertFalse(NotificationOutbox.objects.filter(pk=stranded.pk).exists())
+
+    def test_the_purge_command_is_idempotent(self):
+        row = notifications.enqueue(
+            AuditEvent.EventType.ORDER_PAID,
+            {"order": _make_order(self.make_user("outboxidem"))},
+        )
+        self._expire(row)
+        call_command("purge_notification_outbox", verbosity=0)
+        call_command("purge_notification_outbox", verbosity=0)
+        self.assertEqual(NotificationOutbox.objects.count(), 0)
+
+    def test_the_purge_command_dry_run_deletes_nothing(self):
+        row = notifications.enqueue(
+            AuditEvent.EventType.ORDER_PAID,
+            {"order": _make_order(self.make_user("outboxdry"))},
+        )
+        self._expire(row)
+        out = StringIO()
+        call_command("purge_notification_outbox", dry_run=True, stdout=out)
+        self.assertIn("would delete 1", out.getvalue())
+        self.assertTrue(NotificationOutbox.objects.filter(pk=row.pk).exists())
+
+    def test_the_purge_command_honours_a_grace_window_and_never_subtracts(self):
+        row = notifications.enqueue(
+            AuditEvent.EventType.ORDER_PAID,
+            {"order": _make_order(self.make_user("outboxgrace"))},
+        )
+        self._expire(row)
+        # Expired, but only just: a grace window must keep it.
+        call_command("purge_notification_outbox", grace_seconds=3600, verbosity=0)
+        self.assertTrue(NotificationOutbox.objects.filter(pk=row.pk).exists())
+        # A negative grace must not reach forward in time and delete a row
+        # that has not really expired.
+        call_command("purge_notification_outbox", grace_seconds=-3600, verbosity=0)
+        self.assertFalse(NotificationOutbox.objects.filter(pk=row.pk).exists())
+
+    def test_a_missing_bound_falls_back_to_the_documented_default(self):
+        # A deployment that never sets the key still gets a bounded expiry
+        # rather than an unbounded one.
+        self.assertEqual(NOTIFICATION_OUTBOX_DEFAULT_TTL_SECONDS, 259200)
+        with override_settings():
+            del settings.NOTIFICATION_OUTBOX_TTL_SECONDS
+            expiry = default_notification_outbox_expiry()
+        self.assertGreater(expiry, timezone.now() + timedelta(seconds=259200 - 60))
+
+    def _expire(self, row):
+        NotificationOutbox.objects.filter(pk=row.pk).update(
+            expires_at=timezone.now() - timedelta(seconds=5)
+        )
+
+
+@tag("notifications")
 class OutboxResolveFailureTests(ApiTestCase):
     """A row that has since gone away fails in a defined, catchable way."""
 
@@ -300,6 +542,20 @@ class OutboxResolveFailureTests(ApiTestCase):
         with self.assertRaises(UnresolvableNotification) as caught:
             notifications.resolve_context(payload)
         self.assertIn("nosuchapp.NoSuchModel", str(caught.exception))
+
+    def test_a_label_the_registry_cannot_parse_raises_the_defined_error(self):
+        # The gap this closes. apps.get_model signals an unparseable label with
+        # ValueError, not LookupError - "a.b.c" unpacks into three parts there -
+        # so catching only LookupError let it escape uncaught. That is the one
+        # failure a drain loop filtering on UnresolvableNotification cannot
+        # survive, and it is reachable from a hand-edited or migrated row, which
+        # is exactly what _load_reference's docstring claimed was in scope.
+        payload = {"order": {"label": "a.b.c", "pk": 1}}
+        with self.assertRaises(UnresolvableNotification) as caught:
+            notifications.resolve_context(payload)
+        self.assertIn("a.b.c", str(caught.exception))
+        # And the one class a drain loop can catch, provably not a ValueError.
+        self.assertNotIsInstance(caught.exception, ValueError)
 
     def test_an_unaddressable_primary_key_raises_a_defined_error(self):
         payload = {"order": {"label": "orders.order", "pk": "not-a-pk"}}
