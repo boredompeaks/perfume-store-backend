@@ -7,8 +7,8 @@
       "id": "M1",
       "description": "REST_FRAMEWORK declares no NUM_PROXIES, so DRF falls back to keying an anonymous throttle budget on the entire X-Forwarded-For header - a value the caller itself wrote - and behind a proxy every caller also shares the proxy's REMOTE_ADDR",
       "path": "backend/config/settings.py",
-      "find": "        \"webhook\": os.getenv(\"THROTTLE_WEBHOOK_RATE\", \"120/min\"),\n    },\n    \"NUM_PROXIES\": max(0, _env_int(\"NUM_PROXIES\", 0)),\n}",
-      "replace": "        \"webhook\": os.getenv(\"THROTTLE_WEBHOOK_RATE\", \"120/min\"),\n    },\n}",
+      "find": "    \"NUM_PROXIES\": max(0, _env_int(\"NUM_PROXIES\", 0)),\n}",
+      "replace": "}",
       "expected_failing_tests": [
         "test_num_proxies_decides_whose_address_a_throttle_budget_is_keyed_on"
       ],
