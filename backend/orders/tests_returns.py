@@ -2561,7 +2561,7 @@ class ReturnEligibilityWindowTests(ReturnTestCase):
         order = self._placed("RET-2026-0052", "delivered", timedelta(days=5))
 
         with self.clock_frozen_at():
-            with patch("orders.views._return_window_days", return_value=0):
+            with patch("orders.views.return._return_window_days", return_value=0):
                 self.assertFalse(_return_eligible(order))
                 self.assertEqual(self.ask(order.order_number).status_code, 409)
             self.assertTrue(_return_eligible(order))

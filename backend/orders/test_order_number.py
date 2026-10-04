@@ -17,8 +17,14 @@ from django.test import tag
 from django.utils import timezone
 
 from common.testing import ApiTestCase
-from orders import views as order_views
 from orders.admin import OrderAdmin
+
+# The order-number minting helpers live in the checkout module, and BOTH the
+# patch targets below and the direct `_generate_order_number` call have to
+# reach the module that owns them: a function resolves its own globals, so
+# rebinding these names on the `orders.views` package facade would no longer
+# affect the code under test.
+from orders.views import checkout as checkout_views
 from orders.models import Order
 from orders.serializers import OrderSerializer
 
@@ -96,7 +102,7 @@ class OrderNumberFormatTests(OrderNumberTestBase):
         other_client = self.fresh_client()
         self.api_login("other", client=other_client)
         self.seed_session_cart([(self.product, 2)], client=other_client)
-        with mock.patch.object(order_views, "_current_year", return_value=next_year):
+        with mock.patch.object(checkout_views, "_current_year", return_value=next_year):
             res = other_client.post(
                 "/api/orders/checkout/", self.checkout_payload(), format="json"
             )
@@ -125,11 +131,11 @@ class OrderNumberRaceTests(OrderNumberTestBase):
         regenerates and commits -- never a duplicate number."""
         first_res = self.checkout()
         first = Order.objects.get(id=first_res.data["id"])
-        fresh = order_views._generate_order_number()
+        fresh = checkout_views._generate_order_number()
         self.assertNotEqual(fresh, first.order_number)
 
         with mock.patch.object(
-            order_views,
+            checkout_views,
             "_generate_order_number",
             side_effect=[first.order_number, fresh],
         ) as generate:
@@ -155,9 +161,9 @@ class OrderNumberRaceTests(OrderNumberTestBase):
         self.api_login("other", client=other_client)
         self.seed_session_cart([(self.product, 2)], client=other_client)
         with mock.patch.object(
-            order_views,
+            checkout_views,
             "_generate_order_number",
-            side_effect=[first.order_number] * order_views.ORDER_NUMBER_ATTEMPTS,
+            side_effect=[first.order_number] * checkout_views.ORDER_NUMBER_ATTEMPTS,
         ):
             with self.assertRaises(IntegrityError):
                 other_client.post(
