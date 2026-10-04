@@ -190,7 +190,17 @@ Section-7 gate: **RESOLVED (user merged)** — PR #5 was merged by the owner wit
 
 ## Escalations
 
-### ESCALATED — ASYNC-2b2 — cycle budget exhausted (3 of 3), awaiting user decision
+### ASYNC-2b2 — SHIPPED (out-of-band cycle 4, user-authorised) — product code verified 3-of-3
+
+`5af8aa5` (`changes.md` +7/-11, `products/models.py` +14/-7 docstring only). **Orchestrator-verified independently**: `ast.dump` with docstrings blanked is **byte-identical** to `37fb75e` (30947 = 30947), so no executable line changed; `doc_claims.py --base f196aff` → **58 claims, 0 error(s), exit 0**. The builder re-derived the savepoint fact and **reproduced the PG probe with a working control** (`FOR UPDATE NOWAIT` **REFUSED** inside an uncommitted atomic, **REFUSED** at savepoint exit with a callback pending, **SUCCEEDS** inside the fan-out) and agreed with the brief.
+
+**Cycle 4 deleted the Black figure class rather than correcting the digit** (Rule 5.2: unpinned, no config, no CI step, meaningless diffs on a single-quoted tree). Verified: `black` appears nowhere in `backend/requirements.txt`, no `pyproject.toml`/`.flake8`/`setup.cfg`, and none of the 4 CI workflows invokes it.
+
+**The scanner caught ME.** `5af8aa5`'s builder ran the gate, got **4 errors / exit 1**, and correctly refused to fix them because `spec-run-state.md` is orchestrator-owned. All four were **my own** escalation prose citing bare `sites.py` / `options.py` / `models.py:194` / `test_restock` as repo paths — Django's admin modules are not in the tree, and `test_restock` was read as a test name with no matching `def` (the same module-vs-method logic as the earlier scanner fix). Fixed in `89daaf6`. **The apparatus worked on the orchestrator, which is the only evidence that it is a control and not a rubber stamp.**
+
+**Two P4s deferred to the release-engineer's changelog reconciliation** (the builder stayed in scope; RE owns changelog truth): `changes.md:1655` "on either of the two paths where it is the outermost block" and `:1687` "on the two paths above" are **true but under-inclusive** — the cell also releases before the send. Not false, and not a residual-defect claim like the error cycle 4 removed, but the row now reads 3-of-3 in the title and 2-of-3 in two body sentences.
+
+### ESCALATED — ASYNC-2b2 — cycle budget exhausted (3 of 3) — RESOLVED by user authorisation
 
 **The product code is CORRECT and the fix is COMPLETE (3 of 3 call sites).** The auditor proved this on PostgreSQL 17.11, not by reading: `_save_formset`'s atomic block *is* the outermost one (`ATOMIC_REQUESTS` unset, and Django's admin site module opens none), commit hooks cannot run inside any atomic block (`run_and_clear_commit_hooks()` -> `validate_no_atomic_block()`), and a second psycopg connection **successfully acquired the product row `FOR UPDATE NOWAIT` mid-fan-out** — lock released. Control probe inside an uncommitted atomic raised `LockNotAvailable`, so the probe demonstrably works. Floor held: SQLite `1797 / OK / xf 4 / 100.00% / 8934`; Postgres `1797 / FAILED (failures=6, errors=1) / xf 4 / 8934`, the same 7, **none in the restock notification tests** (`backend/products/test_restock.py`).
 
