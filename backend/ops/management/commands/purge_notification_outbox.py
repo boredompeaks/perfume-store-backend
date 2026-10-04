@@ -65,9 +65,12 @@ class Command(BaseCommand):
             type=int,
             default=0,
             help=(
-                "add this many seconds to the expiry cutoff, for an operator "
-                "who needs a longer grace window than the configured bound. "
-                "Never subtracts."
+                "how much LONGER than the configured bound to keep an expired "
+                "row. The cutoff is moved back by this many seconds, so 3600 "
+                "deletes a row one hour after it expired rather than at the "
+                "instant it did. Clamped at zero: a negative value cannot "
+                "move the cutoff forward and delete a row that has not "
+                "expired."
             ),
         )
 

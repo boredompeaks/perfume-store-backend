@@ -295,13 +295,16 @@ def serialize_context(context):
     legitimately does — the accounts verification and reset emails are built
     out of exactly that material, and dropping it would break the mail this
     queue exists to deliver. So the compensating control is NOT redaction at
-    write time; it is deletion on a clock, and it exists now rather than being
-    deferred: every row carries ``expires_at``, written from
+    write time; it is deletion on a clock, and the mechanism exists now rather
+    than being deferred: every row carries ``expires_at``, written from
     ``settings.NOTIFICATION_OUTBOX_TTL_SECONDS``, and the deletion owner is
-    the in-tree ``purge_notification_outbox`` management command. Two bounds
-    therefore protect the token, and only one of them is this repo's:
-    ``PASSWORD_RESET_TIMEOUT`` caps its validity, and ``expires_at`` caps how
-    long the copy in the queue outlives the reason it was written.
+    the in-tree ``purge_notification_outbox`` management command. What does
+    not exist yet is anything that RUNS that command on a schedule — no cron,
+    no beat, no worker call — so scheduling it is ASYNC-2c2's, the same way
+    ``expire_reservations`` is documented as a command an operator schedules.
+    Two bounds therefore protect the token, and only one of them is this
+    repo's: ``PASSWORD_RESET_TIMEOUT`` caps its validity, and ``expires_at``
+    caps how long the copy in the queue outlives the reason it was written.
     """
     if not isinstance(context, dict):
         return {}

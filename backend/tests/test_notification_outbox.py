@@ -497,18 +497,36 @@ class OutboxRetentionTests(ApiTestCase):
         self.assertTrue(NotificationOutbox.objects.filter(pk=row.pk).exists())
 
     def test_the_purge_command_honours_a_grace_window_and_never_subtracts(self):
-        row = notifications.enqueue(
+        expired = notifications.enqueue(
             AuditEvent.EventType.ORDER_PAID,
             {"order": _make_order(self.make_user("outboxgrace"))},
         )
-        self._expire(row)
+        self._expire(expired)
         # Expired, but only just: a grace window must keep it.
         call_command("purge_notification_outbox", grace_seconds=3600, verbosity=0)
-        self.assertTrue(NotificationOutbox.objects.filter(pk=row.pk).exists())
-        # A negative grace must not reach forward in time and delete a row
-        # that has not really expired.
+        self.assertTrue(NotificationOutbox.objects.filter(pk=expired.pk).exists())
+        # A second row that is NOT expired yet, and expires in a minute. The
+        # negative grace is clamped at zero, so it cannot move the cutoff
+        # forward past this row and delete a notification that is still owed.
+        #
+        # The row's expiry is set forward explicitly because the default
+        # three-day bound is far longer than any plausible grace value: with
+        # the bound left alone, a clamped and an unclamped cutoff would both
+        # keep the row and the assertion below could not tell them apart. The
+        # previous version of this test asserted the opposite thing on an
+        # already-expired row, so its comment described one property and its
+        # assertion another.
+        live = notifications.enqueue(
+            AuditEvent.EventType.ORDER_PAID,
+            {"order": _make_order(self.make_user("outboxnotexpired"))},
+            occurrence="inside-its-window",
+        )
+        NotificationOutbox.objects.filter(pk=live.pk).update(
+            expires_at=timezone.now() + timedelta(seconds=60)
+        )
         call_command("purge_notification_outbox", grace_seconds=-3600, verbosity=0)
-        self.assertFalse(NotificationOutbox.objects.filter(pk=row.pk).exists())
+        self.assertTrue(NotificationOutbox.objects.filter(pk=live.pk).exists())
+        self.assertFalse(NotificationOutbox.objects.filter(pk=expired.pk).exists())
 
     def test_a_missing_bound_falls_back_to_the_documented_default(self):
         # A deployment that never sets the key still gets a bounded expiry
