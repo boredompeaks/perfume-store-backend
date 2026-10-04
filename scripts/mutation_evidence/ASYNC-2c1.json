@@ -11,11 +11,12 @@
       "replace": "    def _deferred():\n        return NotificationOutbox.objects.create(\n            event_type=str(event_type),\n            dedup_key=dedup_key,\n            payload=payload,\n        )\n    transaction.on_commit(_deferred)\n    return None\n    try:\n        with transaction.atomic():\n            pass",
       "expected_failing_tests": [
         "test_the_row_is_written_inside_the_caller_transaction",
-        "test_enqueue_rolls_back_with_the_business_write",
+        "test_enqueue_commits_with_the_business_write",
         "test_a_second_enqueue_of_the_same_event_is_a_no_op",
         "test_a_row_is_created_pending_and_unsent",
         "test_a_model_context_is_stored_as_a_label_and_a_primary_key"
       ],
+      "claimed_count": 10,
       "test_scope": ["tests.test_notification_outbox"]
     },
     {
@@ -30,6 +31,7 @@
         "test_a_repeat_notification_is_expressible_and_gets_its_own_row",
         "test_a_repeat_does_not_collide_with_the_one_off_row"
       ],
+      "claimed_count": 4,
       "test_scope": ["tests.test_notification_outbox"]
     },
     {
@@ -42,11 +44,12 @@
         "test_a_set_context_value_is_ordered_deterministically",
         "test_a_repeated_element_in_a_set_is_described_once"
       ],
+      "claimed_count": 2,
       "test_scope": ["tests.test_notification_outbox"]
     },
     {
       "id": "M4",
-      "description": "_load_reference catches only LookupError from apps.get_model, so a stored label it cannot parse (a.b.c raises ValueError there) escapes the documented error class and kills a drain loop mid-batch",
+      "description": "_load_reference catches only LookupError from apps.get_model, so a stored label it cannot parse (a.b.c raises ValueError there) escapes the documented error class and kills a drain loop mid-batch. Deliberately carries no claimed_count: the mutated run goes red with an UNCAUGHT ValueError, which unittest reports as an ERROR, and the replay reads failure counts only off the 'FAILED (failures=N' line on purpose - an error is not a failure and must not satisfy a count.",
       "path": "backend/common/notifications.py",
       "find": "    try:\n        model = apps.get_model(label)\n    except (LookupError, ValueError):",
       "replace": "    try:\n        model = apps.get_model(label)\n    except LookupError:",
@@ -64,6 +67,7 @@
       "expected_failing_tests": [
         "test_an_over_long_value_is_refused_rather_than_truncated"
       ],
+      "claimed_count": 1,
       "test_scope": ["tests.test_notification_outbox"]
     }
   ]
