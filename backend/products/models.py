@@ -191,13 +191,20 @@ class products(models.Model):
         rollback discards the callback, so no email can still escape an
         inventory write that did not happen.
 
-        The lock is released *because* ``adjust_stock``'s own block is the
-        OUTERMOST transaction at every call site (the changelist inline
-        cell, the bulk action and the staff REST wrapper are all
-        non-atomic; only the admin *change form* view is atomic and it is
-        not an ``adjust_stock`` caller). A future caller that wraps this in
-        a longer transaction would still hold the product row across the
-        send, and would have to defer the crossing itself to avoid that.
+        The lock is released *because* a commit hook cannot run inside an
+        open ``atomic()`` block - it runs only when the enclosing atomic
+        stack empties and autocommit is restored, which is the same commit
+        that released the row. At the changelist bulk action and the staff
+        REST wrapper ``adjust_stock``'s own block is that outermost one. At
+        the changelist inline stock cell the block is a SAVEPOINT inside
+        the ``transaction.atomic`` that ``ModelAdmin._save_formset`` wraps
+        the whole list-editable loop in, so the fan-out fires at *that*
+        block's commit instead - the same release, one block further out,
+        and further still where a deployment wraps requests in
+        ``ATOMIC_REQUESTS``. No lock survives into the send on any of the
+        three. A caller that wraps this in a longer transaction therefore
+        does not reintroduce one; what a longer transaction does change is
+        how long the armed list waits before it is claimed.
 
         Each row is CLAIMED before its send, not after. The claim is the
         conditional UPDATE whose filter is the arming predicate
