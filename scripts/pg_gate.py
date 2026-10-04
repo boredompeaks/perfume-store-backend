@@ -56,13 +56,27 @@ SUMMARY_RE = re.compile(r"^(?P<verdict>FAILED|OK)\b\s*(?:\((?P<body>[^)]*)\))?\s
 # failures=4` cannot be mistaken for `failures=4`.
 COUNT_RE = re.compile(r"^\s*(?P<key>failures|errors)\s*=\s*(?P<value>\d+)\s*$")
 
-# A failure header: `FAIL: test_x (module.Class.test_x)` or, when the runner
-# printed the bare method name, `FAIL: test_x`. The qualified id is optional on
-# purpose -- it is absent often enough that requiring it would make this gate
-# fail on a healthy tree.
+# A failure header. unittest renders three shapes, all measured on Python 3.14
+# against PostgreSQL 17.11:
+#   FAIL: test_x (module.Class.test_x)                          plain failure
+#   FAIL: test_x (module.Class.test_x) (column='razorpay_order_id')
+#                                                              a subTest case
+#   FAIL: test_x                                    a docstring-bearing test,
+#                                                              id rendered bare
+# The trailing subTest group is the second shape and it is NOT optional noise:
+# a header regex anchored with `\s*$` after the id matches 5 of a 7-problem run,
+# the anti-vacuous count cross-check then refuses the run, and the gate is red
+# on every execution (BUG-1).
+#
+# The id is required to be a DOTTED path, which is what separates shape 2 from
+# shape 3: a subTest group is rendered `key=value`, so it never matches a
+# dotted identifier, and a bare `(alpha)`-style parameter cannot be promoted to
+# a test id either. Without that restriction the regex would happily certify
+# `alpha` as a failing test id.
 HEADER_RE = re.compile(
     r"^(?P<kind>FAIL|ERROR):\s+(?P<short>[A-Za-z_][A-Za-z0-9_]*)"
-    r"(?:\s+\((?P<qualified>[A-Za-z0-9_.]+)\))?\s*$"
+    r"(?:\s+\((?P<qualified>[A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)+)\))?"
+    r"(?:\s+\((?P<params>[^)]*)\))?\s*$"
 )
 
 
@@ -226,6 +240,37 @@ def extract_failing_ids(text: str) -> tuple[set[str], list[str], int]:
     return resolved, problems, len(headers)
 
 
+def detect_engine() -> str | None:
+    """Return the live database backend's ENGINE, or None if undeterminable.
+
+    Measured, not declared: this reads ``connection.settings_dict['ENGINE']``,
+    so it reports the engine this process would actually use. That matters
+    because settings.py falls back to SQLite without complaint when
+    DATABASE_URL is unset or malformed -- a silent fallback is precisely how a
+    SQLite run could be compared against a PostgreSQL baseline.
+
+    Returns None rather than raising when Django or the settings cannot be
+    loaded: the engine is a diagnostic, and a gate that cannot measure it must
+    still be able to judge the failure set.
+    """
+    backend = pathlib.Path(__file__).resolve().parent.parent / "backend"
+    if str(backend) not in sys.path:
+        sys.path.insert(0, str(backend))
+    previous = os.getcwd()
+    try:
+        os.chdir(backend)
+        os.environ.setdefault("DJANGO_SETTINGS_MODULE", "config.settings")
+        import django
+        from django.db import connection
+
+        django.setup()
+        return str(connection.settings_dict["ENGINE"])
+    except Exception:  # noqa: BLE001 - diagnostic only, never fatal
+        return None
+    finally:
+        os.chdir(previous)
+
+
 def load_baseline(path: pathlib.Path) -> tuple[set[str], dict]:
     data = json.loads(path.read_text(encoding="utf-8"))
     ids = data.get("failing_tests")
@@ -255,7 +300,16 @@ def main(argv: list[str] | None = None) -> int:
     )
     args = parser.parse_args(argv)
 
-    text = read_source(args.log)
+    try:
+        text = read_source(args.log)
+    except OSError as exc:
+        # An unreadable log is the documented exit 2, not a traceback with exit
+        # 1: a mistyped path in CI must report "cannot be judged", the same as
+        # any other unreadable input, rather than dumping a stack (OBS-1).
+        print(
+            f"pg_gate: cannot read the suite log {args.log!r}: {exc}", file=sys.stderr
+        )
+        return 2
 
     verdict, failures, errors = parse_summary(text)
     extracted, problems, header_count = extract_failing_ids(text)
@@ -303,12 +357,34 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     baseline_path = pathlib.Path(args.baseline)
-    baseline, data = load_baseline(baseline_path)
+    try:
+        baseline, data = load_baseline(baseline_path)
+    except (OSError, ValueError, json.JSONDecodeError) as exc:
+        # Same class as the unreadable log above: a missing or corrupt baseline
+        # cannot be judged against, so it reports exit 2 instead of tracing back.
+        print(
+            f"pg_gate: cannot read the baseline {baseline_path}: {exc}",
+            file=sys.stderr,
+        )
+        return 2
 
     new = sorted(extracted - baseline)
     healed = sorted(baseline - extracted)
 
-    print(f"pg_gate: engine={data.get('engine', 'unknown')} verdict={verdict}")
+    # Two engine facts, kept apart because they answer different questions and
+    # only one of them is measured here. `baseline_engine` is a string copied
+    # out of the baseline JSON: it says what the baseline was CERTIFIED against,
+    # and printing it as `engine=` read as though this run had been measured to
+    # be on that engine (OBS-2) -- it is a claim in a file, nothing more.
+    # `connection_engine` is measured, from the live Django connection, and is
+    # the one that can catch the real mistake: pointing this gate at a SQLite
+    # log while the baseline is a PostgreSQL baseline.
+    print(f"pg_gate: verdict={verdict} (from the log)")
+    print(
+        f"pg_gate: baseline_engine={data.get('engine', 'unknown')} "
+        f"(declared in {baseline_path.name}) connection_engine="
+        f"{detect_engine() or 'undetermined'}"
+    )
     print(
         f"pg_gate: problems={reported} extracted_ids={len(extracted)} "
         f"baseline_ids={len(baseline)} new={len(new)} no_longer_failing={len(healed)}"
