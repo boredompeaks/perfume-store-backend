@@ -452,17 +452,22 @@ def _load_mutation_module():
 
 @contextlib.contextmanager
 def recording_run_tests(module):
-    """Capture each `run_tests` return value while replaying a manifest.
+    """Capture each `run_tests` call and its output while replaying a manifest.
 
     MutationOutcome carries the gate's verdict and its failure count but not the
     runner's `Ran N tests` line, and this bullet has to print that count as a
-    measured figure rather than a transcribed one. The wrapped function still
-    runs unchanged and its output is passed through untouched: the verdict and
-    the failure count in every bullet are read from that captured output, so
-    there is exactly one parse of it. Restored on the way out, including on
-    error, so the module is left as it was found.
+    measured figure rather than a transcribed one. The labels are kept with the
+    output because they are what pairs a run to its mutation: not every
+    mutation reaches a suite run -- a `find` that no longer occurs aborts before
+    one -- and pairing by position alone would then report one mutation's counts
+    under another's name.
+
+    The wrapped function still runs unchanged and its output is passed through
+    untouched, so the verdict and the failure count in every bullet are read
+    from that captured output and there is exactly one parse of it. Restored on
+    the way out, including on error, so the module is left as it was found.
     """
-    captured: list[str] = []
+    captured: list[tuple[list, str]] = []
     original = module.run_tests
     # Whether run_tests was an INSTANCE attribute before the swap decides how it
     # is put back: reassigning a class method as an instance attribute would
@@ -471,7 +476,8 @@ def recording_run_tests(module):
 
     def wrapper(*args, **kwargs):
         output = original(*args, **kwargs)
-        captured.append(output)
+        labels = args[0] if args else kwargs.get("labels", [])
+        captured.append((list(labels), output))
         return output
 
     module.run_tests = wrapper
@@ -488,25 +494,49 @@ def cmd_mutation(args: argparse.Namespace) -> int:
     """Replay a manifest and print one paste-ready bullet per mutation."""
     module = _load_mutation_module()
     try:
+        manifest = module.load_manifest(args.task)
+        mutations = list(manifest["mutations"])
         with recording_run_tests(module) as captured:
             outcomes = module.run_task(args.task)
     except module.EvidenceError as error:
         raise FigureError(str(error)) from error
 
-    if len(captured) != len(outcomes):
+    if len(outcomes) != len(mutations):
         raise FigureError(
-            f"{len(captured)} suite runs captured for {len(outcomes)} mutations; "
-            "the run/bullet pairing would be a guess"
+            f"the gate returned {len(outcomes)} outcomes for "
+            f"{len(mutations)} recorded mutations; the pairing would be a guess"
         )
 
     held = 0
     problems = 0
+    available = list(captured)
+    manifest_path = (mutation_dir() / f"{args.task}.json").relative_to(REPO_ROOT)
     print(
         f"{args.task} mutation replay -- printed by `python "
         f"scripts/changelog_figures.py mutation --task {args.task}`, manifest "
-        f"`{(mutation_dir() / f'{args.task}.json').relative_to(REPO_ROOT).as_posix()}`"
+        f"`{manifest_path.as_posix()}`"
     )
-    for outcome, output in zip(outcomes, captured):
+    for mutation, outcome in zip(mutations, outcomes):
+        if outcome.mutation_id != mutation.get("id"):
+            raise FigureError(
+                f"outcome {outcome.mutation_id!r} does not line up with recorded "
+                f"mutation {mutation.get('id')!r}; the pairing would be a guess"
+            )
+        scope = list(mutation.get("test_scope", []))
+        index = next(
+            (i for i, (labels, _) in enumerate(available) if labels == scope), None
+        )
+        if index is None:
+            # No suite ran for this one, so there is no figure to print. Saying
+            # so is the whole point: a bullet with a count on it would be a
+            # number no run produced.
+            problems += 1
+            print(
+                f"- mutation {outcome.mutation_id}: NO RUN -- {outcome.status}: "
+                f"{outcome.detail}"
+            )
+            continue
+        _, output = available.pop(index)
         run = parse_run(output)
         # The verdict and the counts below are read from the replayed run's own
         # summary, not from the manifest: claimed_count is the hand-typed figure
@@ -521,15 +551,15 @@ def cmd_mutation(args: argparse.Namespace) -> int:
             problems += 1
         print(f"- {figures} -- {outcome.status}: {outcome.detail}")
     print(
-        f"- {held}/{len(outcomes)} mutations killed (the replay ran the suite "
-        "once per mutation; no whole-suite re-run, so each bullet's test count "
-        "is that mutation's own scope)"
+        f"- {held}/{len(mutations)} mutations killed (the replay ran the suite "
+        "once per mutation that reached a run; no whole-suite re-run, so each "
+        "bullet's test count is that mutation's own scope)"
     )
     if problems:
         print(
-            f"changelog_figures: {problems} of {len(outcomes)} mutations did not "
-            "read 'held'; the bullets above carry each one's own verdict and "
-            "detail rather than a uniform claim",
+            f"changelog_figures: {problems} of {len(mutations)} mutations did not "
+            "read 'held'; each bullet above carries its own verdict and detail "
+            "rather than a uniform claim",
             file=sys.stderr,
         )
     return 0

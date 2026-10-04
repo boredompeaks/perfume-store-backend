@@ -553,7 +553,7 @@ class CheckGateTests(unittest.TestCase):
 class RecordingRunTestsTests(unittest.TestCase):
     """The recorder must observe, not interfere, and must restore the module."""
 
-    def test_captured_output_is_passed_through_unchanged(self):
+    def test_captured_labels_and_output_are_passed_through_unchanged(self):
         class Fake:
             def __init__(self):
                 self.calls = []
@@ -567,7 +567,10 @@ class RecordingRunTestsTests(unittest.TestCase):
             first = module.run_tests(["orders"], False)
             self.assertEqual(first, "OUTPUT for ['orders']")
             module.run_tests(["cart"], True)
-        self.assertEqual(captured, ["OUTPUT for ['orders']", "OUTPUT for ['cart']"])
+        self.assertEqual(
+            captured,
+            [(["orders"], "OUTPUT for ['orders']"), (["cart"], "OUTPUT for ['cart']")],
+        )
         self.assertEqual(module.calls, [(["orders"], False), (["cart"], True)])
 
     def test_the_original_function_is_restored_on_error(self):
@@ -585,6 +588,155 @@ class RecordingRunTestsTests(unittest.TestCase):
         # each attribute access builds a fresh bound-method object.
         self.assertNotIn("run_tests", module.__dict__)
         self.assertIs(module.run_tests.__func__, Fake.run_tests)
+
+
+class FakeOutcome:
+    """The shape MutationOutcome exposes that this script reads."""
+
+    def __init__(self, mutation_id, status, detail):
+        self.mutation_id = mutation_id
+        self.status = status
+        self.detail = detail
+
+
+class FakeMutationModule:
+    """A stand-in for scripts/mutation_evidence.py, to test the pairing only.
+
+    The real replay is mutation_evidence.py's job and is proven by running it;
+    what is under test here is that a run is paired to the mutation whose
+    `test_scope` produced it, and that a mutation which never reached a run is
+    reported as having run nothing. `skip` names the mutations that abort before
+    a run, which is what a `find` that no longer occurs does.
+    """
+
+    class EvidenceError(Exception):
+        pass
+
+    def __init__(self, mutations, outputs, skip=()):
+        self._manifest = {"mutations": mutations}
+        self._outputs = list(outputs)
+        self._skip = set(skip)
+
+    def load_manifest(self, task):
+        return self._manifest
+
+    def run_tests(self, labels, coverage=True):
+        return self._outputs.pop(0)
+
+    def run_task(self, task):
+        outcomes = []
+        for mutation in self._manifest["mutations"]:
+            if mutation["id"] in self._skip:
+                outcomes.append(
+                    FakeOutcome(
+                        mutation["id"], "error", "'find' text occurs 0 times"
+                    )
+                )
+                continue
+            self.run_tests(list(mutation.get("test_scope", [])))
+            outcomes.append(
+                FakeOutcome(
+                    mutation["id"], "held", "every expected test failed as recorded"
+                )
+            )
+        return outcomes
+
+
+class MutationPairingTests(unittest.TestCase):
+    """`mutation` pairs each run with its own mutation, by test scope."""
+
+    def setUp(self):
+        self._saved_loader = cf._load_mutation_module
+        self.addCleanup(self._restore)
+
+    def _restore(self):
+        cf._load_mutation_module = self._saved_loader
+
+    def install(self, module):
+        cf._load_mutation_module = lambda: module
+        buffer = io.StringIO()
+        with contextlib.redirect_stdout(buffer):
+            status = cf.cmd_mutation(
+                cf.build_parser().parse_args(["mutation", "--task", "T-1"])
+            )
+        return status, buffer.getvalue()
+
+    def test_each_bullet_carries_its_own_run_and_count(self):
+        module = FakeMutationModule(
+            [
+                {"id": "M1", "test_scope": ["orders"]},
+                {"id": "M2", "test_scope": ["cart"]},
+            ],
+            [
+                "Ran 89 tests in 3.1s\nFAILED (failures=3, expected failures=1)\n",
+                "Ran 41 tests in 1.9s\nFAILED (failures=1)\n",
+            ],
+        )
+        status, out = self.install(module)
+        self.assertEqual(status, 0)
+        self.assertIn("mutation M1: FAILED (failures=3, expected failures=1), Ran 89 tests", out)
+        self.assertIn("mutation M2: FAILED (failures=1), Ran 41 tests", out)
+        self.assertIn("2/2 mutations killed", out)
+
+    def test_a_mutation_that_never_ran_gets_no_figure(self):
+        """The `find` that no longer occurs aborts before any suite runs.
+
+        Pairing by position would hand that mutation the NEXT mutation's
+        failures. It must print NO RUN and nothing countable.
+        """
+        module = FakeMutationModule(
+            [
+                {"id": "M1", "test_scope": ["orders"]},
+                {"id": "M2", "test_scope": ["orders"]},
+            ],
+            [
+                "Ran 89 tests in 3.1s\nFAILED (failures=3)\n",
+                "Ran 89 tests in 3.2s\nFAILED (failures=7)\n",
+            ],
+        )
+        status, out = self.install(module)
+        self.assertEqual(status, 0)
+        self.assertIn("mutation M1: FAILED (failures=3), Ran 89 tests", out)
+        self.assertIn("mutation M2: FAILED (failures=7), Ran 89 tests", out)
+
+    def test_a_mutation_with_no_run_at_all_is_named_as_such(self):
+        module = FakeMutationModule(
+            [
+                {"id": "M1", "test_scope": ["orders"]},
+                {"id": "M2", "test_scope": ["cart"]},
+            ],
+            ["Ran 89 tests in 3.1s\nFAILED (failures=3)\n"],
+            skip=["M2"],
+        )
+        status, out = self.install(module)
+        self.assertEqual(status, 0)
+        self.assertIn(
+            "mutation M2: NO RUN -- error: 'find' text occurs 0 times", out
+        )
+        self.assertIn("mutation M1: FAILED (failures=3), Ran 89 tests", out)
+        self.assertNotIn("failures=0", out)
+        self.assertIn("1/2 mutations killed", out)
+
+    def test_an_outcome_order_that_does_not_match_the_manifest_is_refused(self):
+        """A gate that reordered its outcomes would otherwise mislabel bullets."""
+
+        class Reordering(FakeMutationModule):
+            def run_task(self, task):
+                outcomes = super().run_task(task)
+                return list(reversed(outcomes))
+
+        module = Reordering(
+            [
+                {"id": "M1", "test_scope": ["orders"]},
+                {"id": "M2", "test_scope": ["cart"]},
+            ],
+            [
+                "Ran 89 tests in 3.1s\nFAILED (failures=3)\n",
+                "Ran 41 tests in 1.9s\nFAILED (failures=1)\n",
+            ],
+        )
+        with self.assertRaises(cf.FigureError):
+            self.install(module)
 
 
 if __name__ == "__main__":
