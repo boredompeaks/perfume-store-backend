@@ -4,10 +4,14 @@
 # docs/changes.md) but no longer decides anything. Both halves run in
 # .github/workflows/backend-tests.yml and both must exit 0.
 #
-# Every figure in this file was produced by a command in the GATE-1 session
-# (ruff 0.16.10, run from backend/ on the tree as it stood BEFORE this file):
-#   ruff check .           -> exit 1, 362 errors across 25 distinct rules
-#   ruff format --check .  -> exit 2, 125 files would be reformatted
+# Every ruff figure below was measured with ruff 0.16.10, run from backend/ on
+# the tree as it stood BEFORE this file, so no config was in play; they were
+# re-derived from that same tree in the GATE-1 fix cycle, and the formatter
+# figure is given both ways because this file's own exclude changes it:
+#   ruff check .           -> exit 1, 362 errors across 24 distinct rules
+#   ruff format --check .  -> exit 2, 124 files would be reformatted; with the
+#                             extend-exclude below applied, exit 1 and 122 --
+#                             the 122 the reformat then rewrote
 #   black --check .        -> exit 1, 110 files would be reformatted, 82 clean
 
 [tool.ruff]
@@ -39,10 +43,12 @@ extend-exclude = ["*.md"]
 #        mutable class defaults, and those sites are Django models,
 #        serializers and test class bodies -- per-site review, not a pass a
 #        formatter can stand behind.
-#   SIM  57, BLE 10, C4 9, FURB 14, PLW 5, DTZ 2, UP 3, RET 2, ISC 1, B 2,
-#        TRY 1, PIE 1: opinionated rewrites (merge nested `with`, narrow a
-#        blind `except`, dict() -> {} literal, regex flag aliases, ...) where
-#        on this codebase "fix" and "behaviour change" are the same move.
+#   SIM  57, BLE 10, C4 9, FURB 14, PLW 5, DTZ 2, UP 3, RET 2, ISC 2, B 2,
+#        TRY 1, PIE 1 -- 275 of the 362 above, summed from the same
+#        `--statistics` output: opinionated rewrites (merge nested `with`,
+#        narrow a blind `except`, dict() -> {} literal, regex flag aliases,
+#        ...) where on this codebase "fix" and "behaviour change" are the same
+#        move.
 # Each is one config line plus its own fix commit whenever someone wants it;
 # enabling them today and ignoring them one at a time would be this same
 # exclusion written out in a longer file.
