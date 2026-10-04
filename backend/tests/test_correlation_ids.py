@@ -76,7 +76,7 @@ class UnhandledExceptionTests(ApiTestCase):
         middleware — exactly the path that drops response headers when the
         middleware only stamps the response it was handed.
         """
-        user = self.make_user("buyer")
+        self.make_user("buyer")
         _, _ = self.api_login()
         product = self.make_product(stock=10)
         self.seed_session_cart([(product, 2)])

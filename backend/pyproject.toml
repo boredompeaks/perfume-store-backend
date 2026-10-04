@@ -1,0 +1,71 @@
+# Ruff configuration -- lint AND format, one file (GATE-1, owner directive
+# 2026-10-04). `ruff format` is the formatter of record for this tree from this
+# commit on: Black's opinion is still measured (see the GATE-1 row in
+# docs/changes.md) but no longer decides anything. Both halves run in
+# .github/workflows/backend-tests.yml and both must exit 0.
+#
+# Every figure in this file was produced by a command in the GATE-1 session
+# (ruff 0.16.10, run from backend/ on the tree as it stood BEFORE this file):
+#   ruff check .           -> exit 1, 362 errors across 25 distinct rules
+#   ruff format --check .  -> exit 2, 125 files would be reformatted
+#   black --check .        -> exit 1, 110 files would be reformatted, 82 clean
+
+[tool.ruff]
+# The repo convention (docs/conventions.md: "Black-compatible formatting (88
+# cols, no tabs)") and ruff's own default, stated so the lint half and the
+# format half cannot drift apart.
+line-length = 88
+
+# A measured exclusion, not an oversight: ruff's formatter rewrites Python
+# code blocks inside Markdown as well as .py source, and on this tree it
+# cannot even read one of the docs --
+#   ruff format --check .  -> exit 2
+#   io: stream did not contain valid UTF-8
+#   --> docs/run/section-22.md:1:1        (byte 0x97 at offset 5618)
+# A gate that dies on an invalid-UTF-8 blob can never be green, and rewriting
+# prose is outside this commit's declared scope: docs/ byte integrity is a
+# separate gate (scripts/doc_claims.py, whose baseline covers
+# backend/docs/changes.md), and a code formatter churning prose produces a
+# diff no reviewer can reason about. Scope the formatter to Python source.
+extend-exclude = ["*.md"]
+
+[tool.ruff.lint]
+# Explicit, and narrower than ruff 0.16.10's out-of-the-box default. The four
+# families taken are the ones a Black-compatible Python gate is built from:
+# pycodestyle (E, W), pyflakes (F), import sorting (I). Every family NOT taken
+# is named here with its measured count -- deliberately unselected, never
+# silently dropped:
+#   RUF  167 (RUF012 151, RUF059 16): RUF012 wants ClassVar annotations on
+#        mutable class defaults, and those sites are Django models,
+#        serializers and test class bodies -- per-site review, not a pass a
+#        formatter can stand behind.
+#   SIM  57, BLE 10, C4 9, FURB 14, PLW 5, DTZ 2, UP 3, RET 2, ISC 1, B 2,
+#        TRY 1, PIE 1: opinionated rewrites (merge nested `with`, narrow a
+#        blind `except`, dict() -> {} literal, regex flag aliases, ...) where
+#        on this codebase "fix" and "behaviour change" are the same move.
+# Each is one config line plus its own fix commit whenever someone wants it;
+# enabling them today and ignoring them one at a time would be this same
+# exclusion written out in a longer file.
+select = ["E", "F", "W", "I"]
+
+# E501 only -- every other selected rule stays live. Line length belongs to
+# the FORMATTER: it took this tree from 330 lines over 88 down to 49
+# (measured with `ruff check --select E501` before and after `ruff format`).
+# The 49 it cannot reach are comments, string literals and `help_text` inside
+# migrations -- editing a historical migration to satisfy a linter is worse
+# than the violation -- e.g. accounts/tests.py section dividers,
+# accounts/views.py response payloads, ops/migrations/0002_*.py. Splitting
+# those changes user-visible strings or authored prose; that is an edit, not
+# a reformat, and it is out of this gate.
+ignore = ["E501"]
+
+[tool.ruff.lint.per-file-ignores]
+# F841 fires exactly once here, on `candidate = int(normalized)` in
+# verify(), and the line only LOOKS dead: str.isdigit() approves forms int()
+# refuses (measured: "²".isdigit() is True, int("²") raises ValueError), so
+# that conversion is the only thing separating today's 500 from a silent
+# "invalid code" for such input. Deleting the binding deletes the guard, so
+# the violation is kept with a written reason instead of being fixed by
+# removal. The follow-up that would retire this ignore is to compare
+# str(candidate) so exotic digits can match at all (proposed, not shipped).
+"common/totp.py" = ["F841"]

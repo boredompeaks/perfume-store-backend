@@ -98,6 +98,7 @@ def precondition_failures(order, new_status):
         failures.extend(check(order) or [])
     return failures
 
+
 # ——— [R-10.1] explicit lifecycle dimensions (spec 10.2) —————————————————
 # The legacy single status conflates "did they pay" with "did we ship"; the
 # two dimensions below separate those questions. The spec's example states
@@ -162,6 +163,7 @@ def payment_transition_allowed(old_payment: str, new_payment: str) -> bool:
     return new_payment == old_payment or new_payment in PAYMENT_ALLOWED_TRANSITIONS.get(
         old_payment, set()
     )
+
 
 # Total legacy→dimensions mapping: EVERY legacy status value maps to BOTH
 # dimensions — this is what the 0012 data migration backfills from, so a

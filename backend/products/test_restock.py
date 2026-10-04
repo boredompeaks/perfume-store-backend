@@ -18,7 +18,7 @@ was sent. Every send-exercising test therefore wraps its crossing in
 ``captureOnCommitCallbacks(execute=True)`` — which executes the real callback
 — and the pre-existing assertions are kept verbatim.
 """
-from decimal import Decimal
+
 from unittest import mock
 
 from django.core import mail
@@ -32,7 +32,6 @@ from products.models import RestockNotification
 
 @tag("restock")
 class RestockOptInEndpointTests(ApiTestCase):
-
     def setUp(self):
         self.user = self.make_user("optin")
         self.product = self.make_product(name="Oud Royale", stock=0)
@@ -69,9 +68,7 @@ class RestockOptInEndpointTests(ApiTestCase):
 
     def test_opt_in_is_idempotent_and_rearms(self):
         _, token = self.api_login(username=self.user.username)
-        self.assertEqual(
-            self.client.post(self._url(), format="json").status_code, 201
-        )
+        self.assertEqual(self.client.post(self._url(), format="json").status_code, 201)
         # Spend the row as the trigger would.
         RestockNotification.objects.filter(user=self.user).update(
             notified_at="2026-01-01T00:00:00Z"
@@ -123,9 +120,7 @@ class RestockOptInEndpointTests(ApiTestCase):
         """Concurrent opt-ins must race to the unique constraint and one
         row survives (the DB is the authority, not check-then-act)."""
         _, token = self.api_login(username=self.user.username)
-        RestockNotification.objects.create(
-            user=self.user, product=self.product
-        )
+        RestockNotification.objects.create(user=self.user, product=self.product)
         # Re-opt-in over an existing row = the upsert path (get_or_create
         # retried semantics): still one row, re-armed.
         res = self.client.post(self._url(), format="json")
@@ -168,9 +163,7 @@ class RestockTriggerTests(ApiTestCase):
             self.product.adjust_stock(None, 5, "restock")
         self.assertEqual(len(mail.outbox), 2)
         recipients = sorted(m.to[0] for m in mail.outbox)
-        self.assertEqual(
-            recipients, ["buyer@example.com", "other@example.com"]
-        )
+        self.assertEqual(recipients, ["buyer@example.com", "other@example.com"])
         for message in mail.outbox:
             self.assertEqual(message.subject, "Back in stock: Rose Aurum")
             self.assertIn(self.product.name, message.body)
@@ -436,10 +429,11 @@ class RestockTriggerTests(ApiTestCase):
         self._opt_in(self.buyer)
         from products.models import StockMovement
 
-        with mock.patch(
-            "common.notifications.send_email", return_value=None
-        ), mock.patch.object(
-            StockMovement.objects, "create", side_effect=Exception("db down")
+        with (
+            mock.patch("common.notifications.send_email", return_value=None),
+            mock.patch.object(
+                StockMovement.objects, "create", side_effect=Exception("db down")
+            ),
         ):
             with self.assertRaises(Exception):
                 self.product.adjust_stock(None, 5, "restock")

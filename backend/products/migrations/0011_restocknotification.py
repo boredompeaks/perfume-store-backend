@@ -6,29 +6,60 @@ from django.db import migrations, models
 
 
 class Migration(migrations.Migration):
-
     dependencies = [
-        ('products', '0010_alter_products_image'),
+        ("products", "0010_alter_products_image"),
         migrations.swappable_dependency(settings.AUTH_USER_MODEL),
     ]
 
     operations = [
         migrations.CreateModel(
-            name='RestockNotification',
+            name="RestockNotification",
             fields=[
-                ('id', models.BigAutoField(auto_created=True, primary_key=True, serialize=False, verbose_name='ID')),
-                ('active', models.BooleanField(default=True)),
-                ('notified_at', models.DateTimeField(blank=True, null=True)),
-                ('created_at', models.DateTimeField(auto_now_add=True)),
-                ('updated_at', models.DateTimeField(auto_now=True)),
-                ('product', models.ForeignKey(on_delete=django.db.models.deletion.CASCADE, related_name='restock_notifications', to='products.products')),
-                ('user', models.ForeignKey(on_delete=django.db.models.deletion.CASCADE, related_name='restock_notifications', to=settings.AUTH_USER_MODEL)),
+                (
+                    "id",
+                    models.BigAutoField(
+                        auto_created=True,
+                        primary_key=True,
+                        serialize=False,
+                        verbose_name="ID",
+                    ),
+                ),
+                ("active", models.BooleanField(default=True)),
+                ("notified_at", models.DateTimeField(blank=True, null=True)),
+                ("created_at", models.DateTimeField(auto_now_add=True)),
+                ("updated_at", models.DateTimeField(auto_now=True)),
+                (
+                    "product",
+                    models.ForeignKey(
+                        on_delete=django.db.models.deletion.CASCADE,
+                        related_name="restock_notifications",
+                        to="products.products",
+                    ),
+                ),
+                (
+                    "user",
+                    models.ForeignKey(
+                        on_delete=django.db.models.deletion.CASCADE,
+                        related_name="restock_notifications",
+                        to=settings.AUTH_USER_MODEL,
+                    ),
+                ),
             ],
             options={
-                'verbose_name': 'Restock notification',
-                'verbose_name_plural': 'Restock notifications',
-                'indexes': [models.Index(fields=['product', 'active', 'notified_at'], name='restock_trigger_idx')],
-                'constraints': [models.UniqueConstraint(fields=('user', 'product'), name='uniq_user_product_restock_optin')],
+                "verbose_name": "Restock notification",
+                "verbose_name_plural": "Restock notifications",
+                "indexes": [
+                    models.Index(
+                        fields=["product", "active", "notified_at"],
+                        name="restock_trigger_idx",
+                    )
+                ],
+                "constraints": [
+                    models.UniqueConstraint(
+                        fields=("user", "product"),
+                        name="uniq_user_product_restock_optin",
+                    )
+                ],
             },
         ),
     ]

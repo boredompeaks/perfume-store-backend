@@ -7,6 +7,7 @@ is suppressed inside its per-type cooldown, and is log-only on send
 failure (an alert can never break the flow that tripped it). locmem
 backend only — no network.
 """
+
 from datetime import timedelta
 from unittest import mock
 
@@ -41,9 +42,7 @@ def _seed_failures(count, minutes_ago=1):
     now = timezone.now()
     for i in range(count):
         marker = f"seed-{now.timestamp()}-{i}"
-        AuditEvent.record(
-            "payment.signature_rejected", detail={"seeded": marker}
-        )
+        AuditEvent.record("payment.signature_rejected", detail={"seeded": marker})
         AuditEvent.objects.filter(detail__seeded=marker).update(
             created_at=now - timedelta(minutes=minutes_ago)
         )
@@ -78,9 +77,7 @@ class LowStockAlertTests(ApiTestCase):
                 [{"id": 1, "name": "Rose Aurum", "stock": 2}]
             )
         self.assertTrue(sent)
-        self.assertEqual(
-            [m.to for m in mail.outbox], [["staff@x.com"], ["boss@x.com"]]
-        )
+        self.assertEqual([m.to for m in mail.outbox], [["staff@x.com"], ["boss@x.com"]])
         message = mail.outbox[0]
         self.assertEqual(message.subject, "Low stock alert")
         self.assertIn("Rose Aurum (id 1): 2 in stock", message.body)
@@ -141,9 +138,7 @@ class CooldownTests(ApiTestCase):
     def test_cooldown_is_per_alert_type(self):
         with alert_recipients("staff@x.com"):
             _clear_cooldowns()
-            alerts.notify_low_stock(
-                [{"id": 1, "name": "Rose Aurum", "stock": 2}]
-            )
+            alerts.notify_low_stock([{"id": 1, "name": "Rose Aurum", "stock": 2}])
             sent = alerts.notify_out_of_stock(
                 [{"id": 2, "name": "Gone One", "stock": 0}]
             )
@@ -154,30 +149,22 @@ class CooldownTests(ApiTestCase):
         with alert_recipients("staff@x.com"):
             _clear_cooldowns()
             self.assertTrue(
-                alerts.notify_low_stock(
-                    [{"id": 1, "name": "Rose Aurum", "stock": 2}]
-                )
+                alerts.notify_low_stock([{"id": 1, "name": "Rose Aurum", "stock": 2}])
             )
             # Simulate the window passing by expiring the marker directly
             # (deterministic — no sleeps, no time mocking).
             cache.delete("alerts:cooldown:low_stock")
             self.assertTrue(
-                alerts.notify_low_stock(
-                    [{"id": 1, "name": "Rose Aurum", "stock": 2}]
-                )
+                alerts.notify_low_stock([{"id": 1, "name": "Rose Aurum", "stock": 2}])
             )
         self.assertEqual(len(mail.outbox), 2)
 
     def test_suppressed_alert_is_logged_not_silent(self):
         with alert_recipients("staff@x.com"):
             _clear_cooldowns()
-            alerts.notify_low_stock(
-                [{"id": 1, "name": "Rose Aurum", "stock": 2}]
-            )
+            alerts.notify_low_stock([{"id": 1, "name": "Rose Aurum", "stock": 2}])
             with self.assertLogs("ops.alerts", level="INFO") as logs:
-                alerts.notify_low_stock(
-                    [{"id": 1, "name": "Rose Aurum", "stock": 2}]
-                )
+                alerts.notify_low_stock([{"id": 1, "name": "Rose Aurum", "stock": 2}])
         self.assertIn("suppressed", "\n".join(logs.output))
 
 
@@ -198,9 +185,7 @@ class PaymentFailureSpikeTests(ApiTestCase):
             _seed_failures(3)
             self.assertTrue(alerts.check_payment_failure_spike())
         self.assertEqual(len(mail.outbox), 1)
-        self.assertEqual(
-            mail.outbox[0].subject, "Payment failure spike alert"
-        )
+        self.assertEqual(mail.outbox[0].subject, "Payment failure spike alert")
         body = mail.outbox[0].body
         self.assertIn("3 payment attempts failed", body)
         self.assertIn("payment.signature_rejected", body)
@@ -226,9 +211,7 @@ class PaymentFailureSpikeTests(ApiTestCase):
         # Disabled alerts must not even hit the audit trail for the spike
         # check — the trigger site is hot (every verify failure).
         _clear_cooldowns()
-        with mock.patch(
-            "common.models.AuditEvent.objects.filter"
-        ) as filter_mock:
+        with mock.patch("common.models.AuditEvent.objects.filter") as filter_mock:
             self.assertFalse(alerts.check_payment_failure_spike())
         filter_mock.assert_not_called()
         self.assertEqual(len(mail.outbox), 0)
@@ -268,9 +251,7 @@ class SpikeDashboardWiringTests(ApiTestCase):
         # seam: with ALERT_RECIPIENTS empty the dashboard load must not
         # touch the audit trail at all (cheap page even when alerts are off).
         _clear_cooldowns()
-        with mock.patch(
-            "common.models.AuditEvent.objects.filter"
-        ) as filter_mock:
+        with mock.patch("common.models.AuditEvent.objects.filter") as filter_mock:
             res = self.client.get("/admin/dashboard/")
         self.assertEqual(res.status_code, 200)
         filter_mock.assert_not_called()
@@ -302,9 +283,7 @@ class SecurityChangeAlertTests(ApiTestCase):
             res = self._reset_password("resetalert")
             self.assertEqual(res.status_code, 200, res.data)
         staff_alerts = [
-            m
-            for m in mail.outbox
-            if m.subject == "Security-sensitive account change"
+            m for m in mail.outbox if m.subject == "Security-sensitive account change"
         ]
         self.assertEqual(len(staff_alerts), 1)
         self.assertEqual(staff_alerts[0].to, ["staff@x.com"])
@@ -376,9 +355,7 @@ class SendFailureContractTests(ApiTestCase):
         the dashboard/health flow that tripped the alert."""
         with alert_recipients("staff@x.com"):
             _clear_cooldowns()
-            with mock.patch.object(
-                cache, "get", side_effect=Exception("cache down")
-            ):
+            with mock.patch.object(cache, "get", side_effect=Exception("cache down")):
                 sent = alerts.notify_low_stock(
                     [{"id": 1, "name": "Rose Aurum", "stock": 2}]
                 )

@@ -7,6 +7,7 @@ The same subprocess pattern pins the env-driven DATABASE_URL behaviour
 (SPEC-2-01); its parser is additionally tested as a pure function so every
 branch is covered in-process.
 """
+
 import os
 import subprocess
 import sys
@@ -16,13 +17,14 @@ from pathlib import Path
 from unittest import mock
 from urllib.parse import unquote
 
-import config.settings as config_settings
 from django.conf import settings
 from django.core.exceptions import ImproperlyConfigured
 from django.core.mail import send_mail
 from django.test import SimpleTestCase, override_settings
 from django.urls import resolve
 from django.views.static import serve as serve_media
+
+import config.settings as config_settings
 
 BACKEND_DIR = Path(__file__).resolve().parent.parent
 
@@ -56,7 +58,7 @@ _DEV_ENV = {"DJANGO_DEBUG": "true"}
 # production settings logic. Add a name here whenever a test pins a
 # documented default for it.
 _LEAKED_ENV_NAMES = frozenset(
-{
+    {
         "CSRF_COOKIE_SECURE",
         # Outside the DJANGO_ family, and a documented default this module
         # pins: without the scrub, an untracked local .env value reached the
@@ -83,7 +85,9 @@ _LEAKED_ENV_NAMES = frozenset(
 )
 
 
-def run_settings_import(env_overrides, snippet="import config.settings; print('IMPORT_OK')"):
+def run_settings_import(
+    env_overrides, snippet="import config.settings; print('IMPORT_OK')"
+):
     env = {
         k: v
         for k, v in os.environ.items()
@@ -433,135 +437,132 @@ class DatabaseUrlParsingTests(SimpleTestCase):
 
     def _fallback(self):
         return {
-            'ENGINE': 'django.db.backends.sqlite3',
-            'NAME': config_settings.BASE_DIR / 'db.sqlite3',
+            "ENGINE": "django.db.backends.sqlite3",
+            "NAME": config_settings.BASE_DIR / "db.sqlite3",
         }
 
     def test_missing_url_falls_back_to_sqlite_dev_db(self):
         self.assertEqual(config_settings._database_from_url(None), self._fallback())
 
     def test_empty_url_falls_back_to_sqlite_dev_db(self):
-        self.assertEqual(config_settings._database_from_url(''), self._fallback())
+        self.assertEqual(config_settings._database_from_url(""), self._fallback())
 
     def test_postgres_url_maps_all_connection_fields(self):
         db = config_settings._database_from_url(
-            'postgres://user:p%40ss@db.example.com:5432/perfume_store'
+            "postgres://user:p%40ss@db.example.com:5432/perfume_store"
         )
-        self.assertEqual(db['ENGINE'], 'django.db.backends.postgresql')
-        self.assertEqual(db['NAME'], 'perfume_store')
-        self.assertEqual(db['USER'], 'user')
+        self.assertEqual(db["ENGINE"], "django.db.backends.postgresql")
+        self.assertEqual(db["NAME"], "perfume_store")
+        self.assertEqual(db["USER"], "user")
         # Expected password derived from the fixture URL's percent-encoded
         # fragment via the stdlib instead of a standalone decoded literal,
         # so no password-shaped string exists in source (secret scanner
         # false positive on the previous hardcoded value). If the parser
         # ever stopped unquoting, the raw 'p%40ss' would fail this assert.
-        self.assertEqual(db['PASSWORD'], unquote('p%40ss'))
-        self.assertEqual(db['HOST'], 'db.example.com')
-        self.assertEqual(db['PORT'], '5432')
+        self.assertEqual(db["PASSWORD"], unquote("p%40ss"))
+        self.assertEqual(db["HOST"], "db.example.com")
+        self.assertEqual(db["PORT"], "5432")
 
     def test_postgresql_scheme_maps_minimal_url(self):
-        db = config_settings._database_from_url('postgresql://localhost/appdb')
-        self.assertEqual(db['ENGINE'], 'django.db.backends.postgresql')
-        self.assertEqual(db['NAME'], 'appdb')
-        self.assertEqual(db['HOST'], 'localhost')
-        self.assertNotIn('USER', db)
-        self.assertNotIn('PASSWORD', db)
-        self.assertNotIn('PORT', db)
+        db = config_settings._database_from_url("postgresql://localhost/appdb")
+        self.assertEqual(db["ENGINE"], "django.db.backends.postgresql")
+        self.assertEqual(db["NAME"], "appdb")
+        self.assertEqual(db["HOST"], "localhost")
+        self.assertNotIn("USER", db)
+        self.assertNotIn("PASSWORD", db)
+        self.assertNotIn("PORT", db)
 
     def test_postgres_url_forwards_sslmode_into_options(self):
         # SPEC-22-01: sslmode travels in the URL query and reaches psycopg
         # through OPTIONS. Dropping it (the previous behaviour) left a remote
         # production database connecting unencrypted.
         db = config_settings._database_from_url(
-            'postgres://u:p@db.example.com:5432/perfume_store?sslmode=require'
+            "postgres://u:p@db.example.com:5432/perfume_store?sslmode=require"
         )
-        self.assertEqual(db['OPTIONS'], {'sslmode': 'require'})
+        self.assertEqual(db["OPTIONS"], {"sslmode": "require"})
 
     def test_postgres_url_forwards_multiple_options_with_last_value_winning(self):
         # Repeated keys: libpq takes the last occurrence, so the parser does
         # too instead of letting dict-construction order decide.
         db = config_settings._database_from_url(
-            'postgres://u:p@h/db?sslmode=disable&connect_timeout=10'
-            '&sslmode=require'
+            "postgres://u:p@h/db?sslmode=disable&connect_timeout=10&sslmode=require"
         )
         self.assertEqual(
-            db['OPTIONS'],
-            {'sslmode': 'require', 'connect_timeout': '10'},
+            db["OPTIONS"],
+            {"sslmode": "require", "connect_timeout": "10"},
         )
 
     def test_postgres_url_options_are_url_decoded(self):
         db = config_settings._database_from_url(
-            'postgres://u:p@h/db?options=-c%20statement_timeout%3D5000'
+            "postgres://u:p@h/db?options=-c%20statement_timeout%3D5000"
         )
-        self.assertEqual(
-            db['OPTIONS'], {'options': '-c statement_timeout=5000'}
-        )
+        self.assertEqual(db["OPTIONS"], {"options": "-c statement_timeout=5000"})
 
     def test_postgres_url_without_query_omits_options_entirely(self):
         # No empty OPTIONS dict: a backend with an empty OPTIONS is a
         # different connection-setup path than one with none at all, so the
         # key stays absent when the URL carries no params.
-        db = config_settings._database_from_url('postgres://u:p@h:5432/db')
-        self.assertNotIn('OPTIONS', db)
+        db = config_settings._database_from_url("postgres://u:p@h:5432/db")
+        self.assertNotIn("OPTIONS", db)
 
     def test_malformed_query_params_are_ignored_not_guessed_at(self):
         # A bare flag (no '='), an empty pair and an empty key carry no
         # value to forward; they are dropped rather than turned into a
         # parameter the operator never wrote.
         db = config_settings._database_from_url(
-            'postgres://u:p@h/db?sslmode=&novalue&&=orphan&sslmode=require'
+            "postgres://u:p@h/db?sslmode=&novalue&&=orphan&sslmode=require"
         )
-        self.assertEqual(db['OPTIONS'], {'sslmode': 'require'})
+        self.assertEqual(db["OPTIONS"], {"sslmode": "require"})
 
     def test_sqlite_url_query_params_are_not_turned_into_options(self):
         # Only the Postgres branch takes connection params: a sqlite URL
         # with a stray query must stay a plain file configuration.
-        db = config_settings._database_from_url('sqlite:///db.sqlite3?timeout=5')
-        self.assertNotIn('OPTIONS', db)
+        db = config_settings._database_from_url("sqlite:///db.sqlite3?timeout=5")
+        self.assertNotIn("OPTIONS", db)
 
     def test_postgres_url_without_host_keeps_name_only(self):
         # Socket-style URL: no credentials or host to map onto the config.
-        db = config_settings._database_from_url('postgres:///appdb')
+        db = config_settings._database_from_url("postgres:///appdb")
         self.assertEqual(
-            db, {'ENGINE': 'django.db.backends.postgresql', 'NAME': 'appdb'}
+            db, {"ENGINE": "django.db.backends.postgresql", "NAME": "appdb"}
         )
 
     def test_postgres_url_without_name_falls_back(self):
-        db = config_settings._database_from_url('postgres://db.example.com')
+        db = config_settings._database_from_url("postgres://db.example.com")
         self.assertEqual(db, self._fallback())
 
     def test_postgres_url_with_malformed_port_falls_back(self):
-        db = config_settings._database_from_url('postgres://u@h:notaport/db')
+        db = config_settings._database_from_url("postgres://u@h:notaport/db")
         self.assertEqual(db, self._fallback())
 
     def test_unparseable_url_falls_back(self):
-        db = config_settings._database_from_url('postgres://[::1')
+        db = config_settings._database_from_url("postgres://[::1")
         self.assertEqual(db, self._fallback())
 
     def test_sqlite_relative_path_resolves_against_base_dir(self):
-        db = config_settings._database_from_url('sqlite:///custom/db.sqlite3')
-        self.assertEqual(db['ENGINE'], 'django.db.backends.sqlite3')
-        self.assertEqual(db['NAME'], config_settings.BASE_DIR / 'custom' / 'db.sqlite3')
+        db = config_settings._database_from_url("sqlite:///custom/db.sqlite3")
+        self.assertEqual(db["ENGINE"], "django.db.backends.sqlite3")
+        self.assertEqual(db["NAME"], config_settings.BASE_DIR / "custom" / "db.sqlite3")
 
     def test_sqlite_url_without_leading_slash_is_relative(self):
-        db = config_settings._database_from_url('sqlite:db.sqlite3')
-        self.assertEqual(db['NAME'], config_settings.BASE_DIR / 'db.sqlite3')
+        db = config_settings._database_from_url("sqlite:db.sqlite3")
+        self.assertEqual(db["NAME"], config_settings.BASE_DIR / "db.sqlite3")
 
     def test_sqlite_four_slash_absolute_path_is_used_verbatim(self):
-        db = config_settings._database_from_url('sqlite:////var/lib/app/db.sqlite3')
-        self.assertEqual(db['NAME'], Path('/var/lib/app/db.sqlite3'))
-        self.assertNotIn(str(config_settings.BASE_DIR), str(db['NAME']))
+        db = config_settings._database_from_url("sqlite:////var/lib/app/db.sqlite3")
+        self.assertEqual(db["NAME"], Path("/var/lib/app/db.sqlite3"))
+        self.assertNotIn(str(config_settings.BASE_DIR), str(db["NAME"]))
 
     def test_sqlite_drive_path_is_used_verbatim(self):
-        db = config_settings._database_from_url('sqlite:///C:/data/db.sqlite3')
-        self.assertEqual(db['NAME'], Path('C:/data/db.sqlite3'))
+        db = config_settings._database_from_url("sqlite:///C:/data/db.sqlite3")
+        self.assertEqual(db["NAME"], Path("C:/data/db.sqlite3"))
 
     def test_sqlite_url_without_name_falls_back(self):
-        db = config_settings._database_from_url('sqlite:///')
+        db = config_settings._database_from_url("sqlite:///")
         self.assertEqual(db, self._fallback())
 
     def test_unsupported_scheme_falls_back(self):
-        db = config_settings._database_from_url('mysql://u:p@h/db')
+        db = config_settings._database_from_url("mysql://u:p@h/db")
         self.assertEqual(db, self._fallback())
 
 
@@ -619,9 +620,7 @@ class DatabaseUrlImportTests(SimpleTestCase):
         res = run_settings_import(
             {
                 **self._BOOT_ENV,
-                "DATABASE_URL": (
-                    "postgres://u:p@h:5432/db?sslmode=require"
-                ),
+                "DATABASE_URL": ("postgres://u:p@h:5432/db?sslmode=require"),
             },
             snippet=(
                 "import config.settings as s; "
@@ -696,9 +695,7 @@ class NonDebugFailClosedTests(SimpleTestCase):
         )
 
     def test_unparseable_database_url_refuses_to_boot(self):
-        self._refuses(
-            {**self._BASE, "DATABASE_URL": "postgres://[::1"}, "DATABASE_URL"
-        )
+        self._refuses({**self._BASE, "DATABASE_URL": "postgres://[::1"}, "DATABASE_URL")
 
     def test_unsupported_database_scheme_refuses_to_boot(self):
         # The message names the scheme, never the URL: it carries a password.
@@ -751,17 +748,13 @@ class NonDebugFailClosedTests(SimpleTestCase):
 
     def test_unknown_environment_name_refuses_to_boot(self):
         # A typo must not quietly become "whatever the default was".
-        self._refuses(
-            {**self._BASE, "DJANGO_ENV": "productionn"}, "productionn"
-        )
+        self._refuses({**self._BASE, "DJANGO_ENV": "productionn"}, "productionn")
 
     def test_non_debug_without_allowed_hosts_refuses_to_boot(self):
         self._refuses(self._without("DJANGO_ALLOWED_HOSTS"), "DJANGO_ALLOWED_HOSTS")
 
     def test_non_debug_without_csrf_trusted_origins_refuses_to_boot(self):
-        self._refuses(
-            self._without("CSRF_TRUSTED_ORIGINS"), "CSRF_TRUSTED_ORIGINS"
-        )
+        self._refuses(self._without("CSRF_TRUSTED_ORIGINS"), "CSRF_TRUSTED_ORIGINS")
 
     def test_every_declared_environment_boots(self):
         # The isolation story is only useful if each environment is a
@@ -885,9 +878,7 @@ class StaticFilesProductionTests(SimpleTestCase):
 
     def test_whitenoise_is_wired_behind_security_and_before_session(self):
         middleware = settings.MIDDLEWARE
-        self.assertIn(
-            "whitenoise.middleware.WhiteNoiseMiddleware", middleware
-        )
+        self.assertIn("whitenoise.middleware.WhiteNoiseMiddleware", middleware)
         # Documented slot: SecurityMiddleware may rewrite the response first,
         # so whitenoise must not run above it; and nothing that touches the
         # session or the request body should sit between them.
@@ -897,9 +888,7 @@ class StaticFilesProductionTests(SimpleTestCase):
         )
         self.assertLess(
             middleware.index("whitenoise.middleware.WhiteNoiseMiddleware"),
-            middleware.index(
-                "django.contrib.sessions.middleware.SessionMiddleware"
-            ),
+            middleware.index("django.contrib.sessions.middleware.SessionMiddleware"),
         )
 
     def test_static_serving_is_not_gated_on_debug(self):
@@ -952,9 +941,7 @@ class MediaServingProductionTests(SimpleTestCase):
             "MEDIA_ROOT " + str(config_settings.BASE_DIR / "media"), res.stdout
         )
         self.assertIn("MEDIA_URL /media/", res.stdout)
-        self.assertIn(
-            "DEFAULT django.core.files.storage.FileSystemStorage", res.stdout
-        )
+        self.assertIn("DEFAULT django.core.files.storage.FileSystemStorage", res.stdout)
         # whitenoise serves what collectstatic gathered, so the staticfiles
         # backend stays the plain one: a manifest-hashing storage would
         # rewrite every collected asset URL.
@@ -1119,9 +1106,7 @@ class TransportHardeningTests(SimpleTestCase):
             ),
         )
         self.assertEqual(res.returncode, 0, res.stderr)
-        self.assertIn(
-            "PROXYHDR ('X-Forwarded-Proto', 'https')", res.stdout
-        )
+        self.assertIn("PROXYHDR ('X-Forwarded-Proto', 'https')", res.stdout)
 
     def test_proxy_header_half_configured_is_unconfigured(self):
         # One part without the other is treated as unconfigured: a scheme
@@ -1160,8 +1145,7 @@ class TransportHardeningTests(SimpleTestCase):
         res = run_settings_import(
             {**self._BOOT_ENV, "SECURE_HSTS_SECONDS": "one-year"},
             snippet=(
-                "import config.settings as s; "
-                "print('HSTS', s.SECURE_HSTS_SECONDS)"
+                "import config.settings as s; print('HSTS', s.SECURE_HSTS_SECONDS)"
             ),
         )
         self.assertEqual(res.returncode, 0, res.stderr)
@@ -1176,7 +1160,9 @@ class TransportHardeningTests(SimpleTestCase):
         # result itself is pinned by the subprocess tests above (SUBD True).
         os.environ["SECURE_SSL_REDIRECT_TEST"] = "garbage"
         try:
-            self.assertFalse(config_settings._env_bool("SECURE_SSL_REDIRECT_TEST", False))
+            self.assertFalse(
+                config_settings._env_bool("SECURE_SSL_REDIRECT_TEST", False)
+            )
         finally:
             del os.environ["SECURE_SSL_REDIRECT_TEST"]
 

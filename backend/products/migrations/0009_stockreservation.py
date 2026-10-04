@@ -6,32 +6,82 @@ from django.db import migrations, models
 
 
 class Migration(migrations.Migration):
-
     dependencies = [
-        ('orders', '0014_order_payment_method_alter_orderstatusevent_trigger'),
-        ('products', '0008_products_products_category_idx'),
+        ("orders", "0014_order_payment_method_alter_orderstatusevent_trigger"),
+        ("products", "0008_products_products_category_idx"),
         migrations.swappable_dependency(settings.AUTH_USER_MODEL),
     ]
 
     operations = [
         migrations.CreateModel(
-            name='StockReservation',
+            name="StockReservation",
             fields=[
-                ('id', models.BigAutoField(auto_created=True, primary_key=True, serialize=False, verbose_name='ID')),
-                ('quantity', models.PositiveBigIntegerField()),
-                ('status', models.CharField(choices=[('active', 'Active'), ('converted', 'Converted'), ('released', 'Released'), ('expired', 'Expired')], default='active', max_length=20)),
-                ('expires_at', models.DateTimeField()),
-                ('created_at', models.DateTimeField(auto_now_add=True)),
-                ('updated_at', models.DateTimeField(auto_now=True)),
-                ('order', models.ForeignKey(on_delete=django.db.models.deletion.CASCADE, related_name='stock_reservations', to='orders.order')),
-                ('owner', models.ForeignKey(on_delete=django.db.models.deletion.CASCADE, related_name='stock_reservations', to=settings.AUTH_USER_MODEL)),
-                ('product', models.ForeignKey(on_delete=django.db.models.deletion.CASCADE, related_name='stock_reservations', to='products.products')),
+                (
+                    "id",
+                    models.BigAutoField(
+                        auto_created=True,
+                        primary_key=True,
+                        serialize=False,
+                        verbose_name="ID",
+                    ),
+                ),
+                ("quantity", models.PositiveBigIntegerField()),
+                (
+                    "status",
+                    models.CharField(
+                        choices=[
+                            ("active", "Active"),
+                            ("converted", "Converted"),
+                            ("released", "Released"),
+                            ("expired", "Expired"),
+                        ],
+                        default="active",
+                        max_length=20,
+                    ),
+                ),
+                ("expires_at", models.DateTimeField()),
+                ("created_at", models.DateTimeField(auto_now_add=True)),
+                ("updated_at", models.DateTimeField(auto_now=True)),
+                (
+                    "order",
+                    models.ForeignKey(
+                        on_delete=django.db.models.deletion.CASCADE,
+                        related_name="stock_reservations",
+                        to="orders.order",
+                    ),
+                ),
+                (
+                    "owner",
+                    models.ForeignKey(
+                        on_delete=django.db.models.deletion.CASCADE,
+                        related_name="stock_reservations",
+                        to=settings.AUTH_USER_MODEL,
+                    ),
+                ),
+                (
+                    "product",
+                    models.ForeignKey(
+                        on_delete=django.db.models.deletion.CASCADE,
+                        related_name="stock_reservations",
+                        to="products.products",
+                    ),
+                ),
             ],
             options={
-                'verbose_name': 'Stock reservation',
-                'verbose_name_plural': 'Stock reservations',
-                'indexes': [models.Index(fields=['status', 'expires_at'], name='stockres_status_expires_idx')],
-                'constraints': [models.UniqueConstraint(fields=('order', 'product'), name='uniq_order_product_reservation')],
+                "verbose_name": "Stock reservation",
+                "verbose_name_plural": "Stock reservations",
+                "indexes": [
+                    models.Index(
+                        fields=["status", "expires_at"],
+                        name="stockres_status_expires_idx",
+                    )
+                ],
+                "constraints": [
+                    models.UniqueConstraint(
+                        fields=("order", "product"),
+                        name="uniq_order_product_reservation",
+                    )
+                ],
             },
         ),
     ]

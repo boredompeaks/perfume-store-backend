@@ -20,8 +20,11 @@ exclude_lines =
     pragma: no cover
     if TYPE_CHECKING:
     # the DEBUG/SECRET_KEY guard below is exercised in a subprocess
-    # (tests/test_settings_security.py); in-process coverage cannot see it
-    if not DEBUG and not os.getenv\('DJANGO_SECRET_KEY'\)
+    # (tests/test_settings_security.py); in-process coverage cannot see it.
+    # Quote-agnostic: ruff format normalizes string literals to double quotes,
+    # so a single-quoted pattern silently stops matching after a reformat and
+    # the unexercisable raise starts counting as a coverage miss.
+    if not DEBUG and not os.getenv\(["']DJANGO_SECRET_KEY["']\)
 
 [html]
 directory = htmlcov

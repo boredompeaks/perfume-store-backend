@@ -6,6 +6,7 @@ from django.http import JsonResponse
 from django.shortcuts import render
 
 from common.permissions import capability_required
+
 from . import alerts
 from .alerts import check_payment_failure_spike
 from .services import (
@@ -122,9 +123,9 @@ def dashboard(request):
         user = users.get(row["user_id"])
         recent_orders.append({**row, "username": user.username if user else "—"})
 
-    recent_movements = StockMovement.objects.select_related(
-        "product", "created_by"
-    )[:10]
+    recent_movements = StockMovement.objects.select_related("product", "created_by")[
+        :10
+    ]
 
     low_stock_items = products.objects.filter(
         stock__gt=0, stock__lte=health["low_stock_threshold"]

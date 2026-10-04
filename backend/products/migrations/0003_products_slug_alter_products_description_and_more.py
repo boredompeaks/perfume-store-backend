@@ -4,30 +4,29 @@ from django.db import migrations, models
 
 
 class Migration(migrations.Migration):
-
     dependencies = [
-        ('products', '0002_products_description_products_size_and_more'),
+        ("products", "0002_products_description_products_size_and_more"),
     ]
 
     operations = [
         migrations.AddField(
-            model_name='products',
-            name='slug',
+            model_name="products",
+            name="slug",
             field=models.SlugField(blank=True, max_length=100, null=True),
         ),
         migrations.AlterField(
-            model_name='products',
-            name='description',
+            model_name="products",
+            name="description",
             field=models.TextField(),
         ),
         migrations.AlterField(
-            model_name='products',
-            name='size',
+            model_name="products",
+            name="size",
             field=models.PositiveBigIntegerField(),
         ),
         migrations.AlterField(
-            model_name='products',
-            name='stock',
+            model_name="products",
+            name="stock",
             field=models.PositiveBigIntegerField(default=0),
         ),
     ]

@@ -18,7 +18,7 @@ from decimal import Decimal
 from django.contrib.auth.models import Group, User
 
 from accounts.models import TOTPDevice
-from common.admin import CONFIRMATION_YES, CONFIRM_FIELD
+from common.admin import CONFIRM_FIELD, CONFIRMATION_YES
 from common.audit import (
     AUDIT_VALUE_MAX_LENGTH,
     clean_audit_payload,

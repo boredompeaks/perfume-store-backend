@@ -1,60 +1,22 @@
+import logging
+import secrets
 from datetime import timedelta
 from decimal import Decimal
 
+import razorpay
+from django.conf import settings
 from django.contrib.admin.models import ADDITION, CHANGE
+from django.contrib.auth.models import User
 from django.core.exceptions import ValidationError
 from django.core.paginator import Paginator
 from django.core.validators import validate_email
 from django.db import IntegrityError, transaction
 from django.db.models import Q
 from django.utils import timezone
-
+from rest_framework import status
 from rest_framework.decorators import api_view, permission_classes, throttle_scope
 from rest_framework.permissions import AllowAny, IsAuthenticated
 from rest_framework.response import Response
-from rest_framework import status
-
-# [R-10.1] The order machine (transition table, gate, fulfilment step map)
-# lives in orders.state — the single source; views only consume it.
-from .models import Order, OrderItem, Coupon
-# [R-1.14] SPEC-1-05: the refund row and the gateway seam the refund writer
-# drives. Own import lines so every hunk in this file stays insertion-only.
-from .models import Refund
-from .refunds import RefundGatewayError, refund_payment
-from .serializers import OrderSerializer
-from .serializers import ReturnRequestSerializer
-from .state import (
-    ADMIN_FULFILMENT_NEXT,
-    ALLOWED_TRANSITIONS,
-    FULFILMENT_QUEUE_STATUSES,
-    precondition_failures,
-    transition_allowed,
-)
-# [R-10.16] SPEC-10-05: the per-transition side-effect contract (one
-# dispatch point, shared with the admin writers).
-from .events import notify_transition
-# [R-10.1] SPEC-10-01b: dimension mappings for the writers. Kept as its own
-# line so every hunk in this file stays insertion-only.
-from .state import CAPTURED_MONEY_PAYMENT_STATUSES
-from .state import fulfilment_for_status, payment_for_status
-# [R-10.12] SPEC-10-02: transition-audit writers. Own import lines so every
-# hunk in this file stays insertion-only.
-from .models import OrderStatusEvent
-# [R-1.16] SPEC-1-B07a: the return-request row and the open-status tuple its
-# duplicate guard reads. Own import line so every hunk above stays
-# insertion-only.
-from .models import RETURN_OPEN_STATUSES, ReturnRequest
-from .state import (
-    TRIGGER_ADMIN_API_CANCEL,
-    TRIGGER_ADMIN_API_FULFIL,
-    TRIGGER_ORDER_CREATE,
-    TRIGGER_PAYMENT_VERIFY,
-)
-# [R-10.4] SPEC-10-04: the failed-verify audit trigger + the
-# payment-dimension transition gate. Own import lines so every hunk in
-# this file stays insertion-only.
-from .state import TRIGGER_PAYMENT_FAILED
-from .state import payment_transition_allowed
 
 from cart.models import Cart
 from common import notifications
@@ -68,15 +30,7 @@ from common.permissions import (
     HasRefundsCreate,
     user_has_capability,
 )
-# [SPEC-12-02] StockReservation rides the existing products.models import
-# line (insertion-only style): the checkout lifecycle mints them in
-# create_order and transitions them in verify_payment / admin_order_cancel.
-from products.models import StockMovement, StockReservation, products
-# [R-1.07] SPEC-1-B05: the server-side shipping price. Imported as its own
-# line so every hunk in this file stays insertion-only. The client may name a
-# delivery OPTION here and nothing else - never an amount - which is what keeps
-# the shipping cost out of the client's hands.
-from shipping.pricing import ShippingUnavailable, quote_shipping
+
 # [R-1.16] SPEC-1-B07d: the merchant-configurable return window the
 # eligibility gate honours. ops.models imports nothing from orders, so this is
 # a leaf import and cannot cycle; it is named in full rather than aliased so
@@ -86,11 +40,63 @@ from shipping.pricing import ShippingUnavailable, quote_shipping
 # against it BEFORE it does any date arithmetic.
 from ops.models import CLOSED_RETURN_WINDOW_DAYS, SiteSettings
 
-import logging
-import razorpay
-import secrets
-from django.conf import settings
-from django.contrib.auth.models import User
+# [SPEC-12-02] StockReservation rides the existing products.models import
+# line (insertion-only style): the checkout lifecycle mints them in
+# create_order and transitions them in verify_payment / admin_order_cancel.
+from products.models import StockMovement, StockReservation, products
+
+# [R-1.07] SPEC-1-B05: the server-side shipping price. Imported as its own
+# line so every hunk in this file stays insertion-only. The client may name a
+# delivery OPTION here and nothing else - never an amount - which is what keeps
+# the shipping cost out of the client's hands.
+from shipping.pricing import ShippingUnavailable, quote_shipping
+
+# [R-10.16] SPEC-10-05: the per-transition side-effect contract (one
+# dispatch point, shared with the admin writers).
+from .events import notify_transition
+
+# [R-10.1] The order machine (transition table, gate, fulfilment step map)
+# lives in orders.state — the single source; views only consume it.
+# [R-1.14] SPEC-1-05: the refund row and the gateway seam the refund writer
+# drives. Own import lines so every hunk in this file stays insertion-only.
+# [R-10.12] SPEC-10-02: transition-audit writers. Own import lines so every
+# hunk in this file stays insertion-only.
+# [R-1.16] SPEC-1-B07a: the return-request row and the open-status tuple its
+# duplicate guard reads. Own import line so every hunk above stays
+# insertion-only.
+from .models import (
+    RETURN_OPEN_STATUSES,
+    Coupon,
+    Order,
+    OrderItem,
+    OrderStatusEvent,
+    Refund,
+    ReturnRequest,
+)
+from .refunds import RefundGatewayError, refund_payment
+from .serializers import OrderSerializer, ReturnRequestSerializer
+
+# [R-10.1] SPEC-10-01b: dimension mappings for the writers. Kept as its own
+# line so every hunk in this file stays insertion-only.
+# [R-10.4] SPEC-10-04: the failed-verify audit trigger + the
+# payment-dimension transition gate. Own import lines so every hunk in
+# this file stays insertion-only.
+from .state import (
+    ADMIN_FULFILMENT_NEXT,
+    ALLOWED_TRANSITIONS,
+    CAPTURED_MONEY_PAYMENT_STATUSES,
+    FULFILMENT_QUEUE_STATUSES,
+    TRIGGER_ADMIN_API_CANCEL,
+    TRIGGER_ADMIN_API_FULFIL,
+    TRIGGER_ORDER_CREATE,
+    TRIGGER_PAYMENT_FAILED,
+    TRIGGER_PAYMENT_VERIFY,
+    fulfilment_for_status,
+    payment_for_status,
+    payment_transition_allowed,
+    precondition_failures,
+    transition_allowed,
+)
 
 logger = logging.getLogger(__name__)
 # ==================================
@@ -312,45 +318,41 @@ def _checkout_response(order, status_code, disclose_guest_token):
     return Response(data, status=status_code)
 
 
-@api_view(['GET'])
+@api_view(["GET"])
 @permission_classes([IsAuthenticated])
 def order_list(request):
 
-    orders = Order.objects.filter(
-        user=request.user
-    ).order_by('-created_at')
+    orders = Order.objects.filter(user=request.user).order_by("-created_at")
 
     # SPEC-9-04: the unique id tiebreaker makes the sort total, so a
     # paginated partition never repeats or skips a row across requests
     # (same reasoning as the products listing's F-12 fix).
-    orders = orders.order_by('-created_at', '-id')
+    orders = orders.order_by("-created_at", "-id")
 
     paginator = Paginator(
-        orders, _history_page_size(
-            request.query_params.get(HISTORY_PAGE_SIZE_QUERY_PARAM)
-        )
+        orders,
+        _history_page_size(request.query_params.get(HISTORY_PAGE_SIZE_QUERY_PARAM)),
     )
     # get_page never raises: an unparsable page falls back to 1, a page
     # past the end to the last page — no 404 for a stale page link.
-    page = paginator.get_page(request.query_params.get('page', 1))
+    page = paginator.get_page(request.query_params.get("page", 1))
 
-    serializer = OrderSerializer(
-        page.object_list,
-        many=True
-    )
+    serializer = OrderSerializer(page.object_list, many=True)
 
     # House page-number envelope (products-listing parity).
-    return Response({
-        'count': paginator.count,
-        'total_pages': paginator.num_pages,
-        'current_page': page.number,
-        'next_page': page.has_next(),
-        'previous_page': page.has_previous(),
-        'results': serializer.data,
-    })
+    return Response(
+        {
+            "count": paginator.count,
+            "total_pages": paginator.num_pages,
+            "current_page": page.number,
+            "next_page": page.has_next(),
+            "previous_page": page.has_previous(),
+            "results": serializer.data,
+        }
+    )
 
 
-@api_view(['GET'])
+@api_view(["GET"])
 @permission_classes([IsAuthenticated])
 def order_detail(request, order_id):
     """[R-9.2.15] GET /account/orders/:id — the caller's OWN order only.
@@ -360,22 +362,14 @@ def order_detail(request, order_id):
     pin) and never a 403 that would confirm the id's existence
     (conventions.md: no existence leaks)."""
     try:
-        order = Order.objects.get(
-            id=order_id,
-            user=request.user
-        )
+        order = Order.objects.get(id=order_id, user=request.user)
 
     except Order.DoesNotExist:
-        return Response(
-            {"error": "Order not found"},
-            status=status.HTTP_404_NOT_FOUND
-        )
+        return Response({"error": "Order not found"}, status=status.HTTP_404_NOT_FOUND)
 
     serializer = OrderSerializer(order)
 
-    return Response(
-        serializer.data
-    )
+    return Response(serializer.data)
 
 
 # ==================================
@@ -610,7 +604,7 @@ def _mint_order_reservations(order, lines, user):
             reservation.save(update_fields=["quantity", "expires_at", "status"])
 
 
-@api_view(['POST'])
+@api_view(["POST"])
 # [R-1.13] SPEC-1-B04: opened deliberately (conventions.md:26). Spec line 74
 # ("optionally check out without an account") and 9.3's guest-session binding
 # both require it, and the authorization the endpoint used to lean on is not
@@ -641,8 +635,7 @@ def create_order(request):
         and len(idempotency_key) > IDEMPOTENCY_KEY_MAX_LENGTH
     ):
         return Response(
-            {"error": "Idempotency-Key is too long"},
-            status=status.HTTP_400_BAD_REQUEST
+            {"error": "Idempotency-Key is too long"}, status=status.HTTP_400_BAD_REQUEST
         )
 
     # [R-1.13] Who this submission belongs to, settled once and reused by
@@ -659,10 +652,7 @@ def create_order(request):
     # =========================
 
     if not request.session.session_key:
-        return Response(
-            {"error": "Cart not found"},
-            status=status.HTTP_404_NOT_FOUND
-        )
+        return Response({"error": "Cart not found"}, status=status.HTTP_404_NOT_FOUND)
 
     session_id = request.session.session_key
 
@@ -671,52 +661,37 @@ def create_order(request):
     # =========================
 
     try:
-        cart = Cart.objects.get(
-            session_id=session_id
-        )
+        cart = Cart.objects.get(session_id=session_id)
 
     except Cart.DoesNotExist:
-        return Response(
-            {"error": "Cart not found"},
-            status=status.HTTP_404_NOT_FOUND
-        )
+        return Response({"error": "Cart not found"}, status=status.HTTP_404_NOT_FOUND)
 
     # =========================
     # Get cart items
     # =========================
 
-    cart_items = cart.items.select_related(
-        'product'
-    ).all()
+    cart_items = cart.items.select_related("product").all()
 
     if not cart_items.exists():
-        return Response(
-            {"error": "Cart is empty"},
-            status=status.HTTP_400_BAD_REQUEST
-        )
+        return Response({"error": "Cart is empty"}, status=status.HTTP_400_BAD_REQUEST)
 
     # =========================
     # Validate checkout data
     # =========================
 
     required_fields = [
-        'full_name',
-        'phone',
-        'address',
-        'city',
-        'state',
-        'pincode',
+        "full_name",
+        "phone",
+        "address",
+        "city",
+        "state",
+        "pincode",
     ]
 
     for field in required_fields:
-
         if not request.data.get(field):
-
             return Response(
-                {
-                    "error": f"{field} is required"
-                },
-                status=status.HTTP_400_BAD_REQUEST
+                {"error": f"{field} is required"}, status=status.HTTP_400_BAD_REQUEST
             )
 
     # [R-1.13] The same varchar-width trap the guest email had, on the rest
@@ -725,11 +700,9 @@ def create_order(request):
     # DataError on the production Postgres. Refused here, before the atomic
     # block opens and therefore before any row exists.
     for field in _SHIPPING_FIELDS:
-
         length_rejection = _field_length_rejection(field, request.data[field])
 
         if length_rejection is not None:
-
             return length_rejection
 
     # =========================
@@ -743,14 +716,12 @@ def create_order(request):
     # row lock before decrementing; that remains the authoritative backstop.
     unavailable = []
 
-    subtotal_amount = Decimal('0.00')
+    subtotal_amount = Decimal("0.00")
 
     for cart_item in cart_items:
-
         product = cart_item.product
 
         if cart_item.quantity > product.stock:
-
             unavailable.append(
                 {
                     "name": product.name,
@@ -759,15 +730,12 @@ def create_order(request):
                 }
             )
 
-        subtotal_amount += (
-            product.price * cart_item.quantity
-        )
+        subtotal_amount += product.price * cart_item.quantity
 
     if unavailable:
-
         details = ", ".join(
             f'"{item["name"]}" (requested {item["requested"]}, '
-            f'only {item["available"]} in stock)'
+            f"only {item['available']} in stock)"
             for item in unavailable
         )
 
@@ -781,7 +749,7 @@ def create_order(request):
                 "error": f"Not enough stock for {details}. {action}",
                 "products": unavailable,
             },
-            status=status.HTTP_400_BAD_REQUEST
+            status=status.HTTP_400_BAD_REQUEST,
         )
 
     # =========================
@@ -789,9 +757,9 @@ def create_order(request):
     # =========================
 
     coupon = None
-    discount_amount = Decimal('0.00')
+    discount_amount = Decimal("0.00")
 
-    coupon_code = request.data.get('coupon_code')
+    coupon_code = request.data.get("coupon_code")
 
     # [R-9.3.5/R-9.3.6] The coupon applied to the cart persists as cart
     # state: when the checkout payload posts no explicit code, the
@@ -804,93 +772,69 @@ def create_order(request):
         coupon_code = cart.coupon.code
 
     if coupon_code:
-
         try:
-            coupon = Coupon.objects.get(
-                code__iexact=coupon_code
-            )
+            coupon = Coupon.objects.get(code__iexact=coupon_code)
 
         except Coupon.DoesNotExist:
-
             return Response(
-                {"error": "Invalid coupon code"},
-                status=status.HTTP_400_BAD_REQUEST
+                {"error": "Invalid coupon code"}, status=status.HTTP_400_BAD_REQUEST
             )
 
         # Check active
         if not coupon.active:
-
             return Response(
-                {"error": "This coupon is inactive"},
-                status=status.HTTP_400_BAD_REQUEST
+                {"error": "This coupon is inactive"}, status=status.HTTP_400_BAD_REQUEST
             )
 
         # Check validity dates
         now = timezone.now()
 
         if now < coupon.valid_from:
-
             return Response(
                 {"error": "This coupon is not active yet"},
-                status=status.HTTP_400_BAD_REQUEST
+                status=status.HTTP_400_BAD_REQUEST,
             )
 
         if now > coupon.valid_until:
-
             return Response(
-                {"error": "This coupon has expired"},
-                status=status.HTTP_400_BAD_REQUEST
+                {"error": "This coupon has expired"}, status=status.HTTP_400_BAD_REQUEST
             )
 
         # Check usage limit
-        if (
-            coupon.usage_limit is not None
-            and coupon.used_count >= coupon.usage_limit
-        ):
-
+        if coupon.usage_limit is not None and coupon.used_count >= coupon.usage_limit:
             return Response(
                 {"error": "This coupon has reached its usage limit"},
-                status=status.HTTP_400_BAD_REQUEST
+                status=status.HTTP_400_BAD_REQUEST,
             )
 
         # Check minimum order amount
         if subtotal_amount < coupon.minimum_order_amount:
-
             return Response(
                 {
                     "error": "Minimum order amount is required",
-                    "minimum_order_amount": coupon.minimum_order_amount
+                    "minimum_order_amount": coupon.minimum_order_amount,
                 },
-                status=status.HTTP_400_BAD_REQUEST
+                status=status.HTTP_400_BAD_REQUEST,
             )
 
         # Calculate discount
-        if coupon.discount_type == 'percentage':
-
+        if coupon.discount_type == "percentage":
             # Quantize before any comparison or storage: the raw division
             # carries extra decimal places, and an unquantized discount
             # drifts the display, the audit trail and the stored 2-dp
             # order amount apart (F-11).
             discount_amount = quantize_money(
-                (subtotal_amount * coupon.discount_value) / Decimal('100')
+                (subtotal_amount * coupon.discount_value) / Decimal("100")
             )
 
             if coupon.maximum_discount is not None:
-
-                discount_amount = min(
-                    discount_amount,
-                    coupon.maximum_discount
-                )
+                discount_amount = min(discount_amount, coupon.maximum_discount)
 
         else:
-
             discount_amount = coupon.discount_value
 
         # Never discount more than subtotal
-        discount_amount = min(
-            discount_amount,
-            subtotal_amount
-        )
+        discount_amount = min(discount_amount, subtotal_amount)
 
     # =========================
     # Final total
@@ -900,9 +844,7 @@ def create_order(request):
     # added inside the atomic block below, once the collapse guards have had
     # their say, so a replay never reprices an order that already exists.
 
-    merchandise_total = (
-        subtotal_amount - discount_amount
-    )
+    merchandise_total = subtotal_amount - discount_amount
 
     # =========================
     # Create order
@@ -916,7 +858,6 @@ def create_order(request):
     # a free shipment).
     try:
         with transaction.atomic():
-
             # [R-21.2.6] Serialize same-session submissions on the cart row: two
             # rapid POSTs queue here, so the loser re-runs the dedup lookup after
             # the winner has committed and collapses onto the same order instead
@@ -1026,8 +967,8 @@ def create_order(request):
             # committing mid-checkout cannot tear the amount the order is
             # charged.
             shipping_quote = quote_shipping(
-                region=request.data.get('state'),
-                postal_code=request.data.get('pincode'),
+                region=request.data.get("state"),
+                postal_code=request.data.get("pincode"),
                 merchandise_total=merchandise_total,
                 method_code=_requested_shipping_code(request.data),
                 lock=True,
@@ -1037,9 +978,7 @@ def create_order(request):
             # all - a real zero charge recorded as one, never a rate of zero
             # standing in for "we could not price this".
             shipping_amount = (
-                shipping_quote.amount
-                if shipping_quote is not None
-                else Decimal('0.00')
+                shipping_quote.amount if shipping_quote is not None else Decimal("0.00")
             )
             shipping_method_id = (
                 shipping_quote.method_id if shipping_quote is not None else None
@@ -1092,12 +1031,12 @@ def create_order(request):
                             user=user,
                             guest_email=guest_email,
                             guest_token=guest_token,
-                            full_name=request.data.get('full_name'),
-                            phone=request.data.get('phone'),
-                            address=request.data.get('address'),
-                            city=request.data.get('city'),
-                            state=request.data.get('state'),
-                            pincode=request.data.get('pincode'),
+                            full_name=request.data.get("full_name"),
+                            phone=request.data.get("phone"),
+                            address=request.data.get("address"),
+                            city=request.data.get("city"),
+                            state=request.data.get("state"),
+                            pincode=request.data.get("pincode"),
                             coupon=coupon,
                             discount_amount=discount_amount,
                             shipping_method_id=shipping_method_id,
@@ -1144,13 +1083,12 @@ def create_order(request):
             # cannot reject here.
             if idempotency_key is not None:
                 order.idempotency_key = idempotency_key
-                order.save(update_fields=['idempotency_key'])
+                order.save(update_fields=["idempotency_key"])
 
             # Snapshot cart items. Inventory, coupon usage, and cart cleanup occur
             # only after the payment provider confirms this specific order.
 
             for cart_item in cart_items:
-
                 product = cart_item.product
                 quantity = cart_item.quantity
 
@@ -1168,11 +1106,11 @@ def create_order(request):
                     # product carries no product-level SKU, so sku snapshots
                     # empty and variant_name mirrors the product name. Set once
                     # here; no later save path mutates them.
-                    sku='',
+                    sku="",
                     variant_name=product.name,
                     price=price,
                     quantity=quantity,
-                    subtotal=item_subtotal
+                    subtotal=item_subtotal,
                 )
 
             # [R-12.6] SPEC-12-02 §12.1 step 3: mint the checkout's time-limited
@@ -1275,6 +1213,7 @@ def guest_order_detail(request, order_number=None):
 # Coupon preview (public)
 # ==================================
 
+
 def _uniform_coupon_rejection():
     """Every coupon failure on the public preview returns this same body and
     status, so the response never reveals whether a code exists or why it
@@ -1282,8 +1221,7 @@ def _uniform_coupon_rejection():
     feedback stays on the authenticated checkout, where callers are not
     brute-forcing the code space."""
     return Response(
-        {"error": "Invalid coupon code"},
-        status=status.HTTP_400_BAD_REQUEST
+        {"error": "Invalid coupon code"}, status=status.HTTP_400_BAD_REQUEST
     )
 
 
@@ -1301,9 +1239,7 @@ def validate_redeemable_coupon(code, cart):
     back because the preview needs the exact figure the minimum check used
     for its discount math -- or (None, None, rejection) otherwise."""
     try:
-        coupon = Coupon.objects.get(
-            code__iexact=code
-        )
+        coupon = Coupon.objects.get(code__iexact=code)
 
     except Coupon.DoesNotExist:
         return None, None, _uniform_coupon_rejection()
@@ -1314,20 +1250,15 @@ def validate_redeemable_coupon(code, cart):
         not coupon.active
         or now < coupon.valid_from
         or now > coupon.valid_until
-        or (
-            coupon.usage_limit is not None
-            and coupon.used_count >= coupon.usage_limit
-        )
+        or (coupon.usage_limit is not None and coupon.used_count >= coupon.usage_limit)
     ):
         return None, None, _uniform_coupon_rejection()
 
     # Calculate cart subtotal
-    subtotal = Decimal('0.00')
+    subtotal = Decimal("0.00")
 
-    for item in cart.items.select_related('product'):
-        subtotal += (
-            item.product.price * item.quantity
-        )
+    for item in cart.items.select_related("product"):
+        subtotal += item.product.price * item.quantity
 
     # Check minimum order amount
     if subtotal < coupon.minimum_order_amount:
@@ -1336,16 +1267,15 @@ def validate_redeemable_coupon(code, cart):
     return coupon, subtotal, None
 
 
-@api_view(['POST'])
-@throttle_scope('coupon')
+@api_view(["POST"])
+@throttle_scope("coupon")
 def apply_coupon(request):
 
-    code = request.data.get('code')
+    code = request.data.get("code")
 
     if not code:
         return Response(
-            {"error": "Coupon code is required"},
-            status=status.HTTP_400_BAD_REQUEST
+            {"error": "Coupon code is required"}, status=status.HTTP_400_BAD_REQUEST
         )
 
     # Resolve the cart before the coupon: otherwise a caller with no cart
@@ -1353,23 +1283,15 @@ def apply_coupon(request):
     # instead of the cart error. With the cart first, every cartless caller
     # gets the same answer for every code.
     if not request.session.session_key:
-        return Response(
-            {"error": "Cart not found"},
-            status=status.HTTP_404_NOT_FOUND
-        )
+        return Response({"error": "Cart not found"}, status=status.HTTP_404_NOT_FOUND)
 
     session_id = request.session.session_key
 
     try:
-        cart = Cart.objects.get(
-            session_id=session_id
-        )
+        cart = Cart.objects.get(session_id=session_id)
 
     except Cart.DoesNotExist:
-        return Response(
-            {"error": "Cart not found"},
-            status=status.HTTP_404_NOT_FOUND
-        )
+        return Response({"error": "Cart not found"}, status=status.HTTP_404_NOT_FOUND)
 
     # From here on every rejection shares one uniform response: unknown,
     # inactive, not-yet-valid, expired, usage limit, and below minimum.
@@ -1379,87 +1301,69 @@ def apply_coupon(request):
         return rejection
 
     # Calculate discount
-    if coupon.discount_type == 'percentage':
-
+    if coupon.discount_type == "percentage":
         # Same quantize parity as checkout (F-11): the preview must show
         # the exact 2-dp discount the order will store.
-        discount = quantize_money(
-            (subtotal * coupon.discount_value) / Decimal('100')
-        )
+        discount = quantize_money((subtotal * coupon.discount_value) / Decimal("100"))
 
         if coupon.maximum_discount is not None:
-            discount = min(
-                discount,
-                coupon.maximum_discount
-            )
+            discount = min(discount, coupon.maximum_discount)
 
     else:
-
         discount = coupon.discount_value
 
     # Never allow discount greater than subtotal
-    discount = min(
-        discount,
-        subtotal
-    )
+    discount = min(discount, subtotal)
 
     final_total = subtotal - discount
 
-    return Response({
-        "coupon": coupon.code,
-        "subtotal": subtotal,
-        "discount": discount,
-        "final_total": final_total
-    })
+    return Response(
+        {
+            "coupon": coupon.code,
+            "subtotal": subtotal,
+            "discount": discount,
+            "final_total": final_total,
+        }
+    )
+
+
 # ==================================
 # Create Razorpay Payment
 # ==================================
 
-@api_view(['POST'])
+
+@api_view(["POST"])
 @permission_classes([IsAuthenticated])
-@throttle_scope('payment')
+@throttle_scope("payment")
 def create_payment(request):
 
-    order_id = request.data.get('order_id')
+    order_id = request.data.get("order_id")
 
     if not order_id:
         return Response(
-            {"error": "order_id is required"},
-            status=status.HTTP_400_BAD_REQUEST
+            {"error": "order_id is required"}, status=status.HTTP_400_BAD_REQUEST
         )
 
     # Find user's order
     try:
-        order = Order.objects.get(
-            id=order_id,
-            user=request.user
-        )
+        order = Order.objects.get(id=order_id, user=request.user)
 
     except Order.DoesNotExist:
-        return Response(
-            {"error": "Order not found"},
-            status=status.HTTP_404_NOT_FOUND
-        )
+        return Response({"error": "Order not found"}, status=status.HTTP_404_NOT_FOUND)
 
     # Payment may only be started for an unpaid order.
-    if order.status != 'pending':
+    if order.status != "pending":
         return Response(
-            {"error": "This order cannot be paid"},
-            status=status.HTTP_400_BAD_REQUEST
+            {"error": "This order cannot be paid"}, status=status.HTTP_400_BAD_REQUEST
         )
 
     # Razorpay client
     client = razorpay.Client(
-        auth=(
-            settings.RAZORPAY_KEY_ID,
-            settings.RAZORPAY_KEY_SECRET
-        )
+        auth=(settings.RAZORPAY_KEY_ID, settings.RAZORPAY_KEY_SECRET)
     )
 
     # Amount must be in paise
-    amount = int(
-        order.total_amount * Decimal('100')
-    )
+    amount = int(order.total_amount * Decimal("100"))
 
     if order.razorpay_order_id:
         razorpay_order_id = order.razorpay_order_id
@@ -1467,20 +1371,20 @@ def create_payment(request):
         try:
             # [R-8.11] The gateway is charged in the denomination the order
             # was minted with, read off the row — never a hardcoded code.
-            razorpay_order = client.order.create({
-                'amount': amount,
-                'currency': order.currency,
-                'receipt': f'order_{order.id}',
-            })
+            razorpay_order = client.order.create(
+                {
+                    "amount": amount,
+                    "currency": order.currency,
+                    "receipt": f"order_{order.id}",
+                }
+            )
         except Exception:
             # [SPEC-7-02] Without this, a gateway/network failure surfaces
             # only as a bare 500 with no order reference; the re-raise
             # preserves the 500 semantics exactly.
-            logger.exception(
-                "Payment intent creation failed for order %s", order.id
-            )
+            logger.exception("Payment intent creation failed for order %s", order.id)
             raise
-        razorpay_order_id = razorpay_order['id']
+        razorpay_order_id = razorpay_order["id"]
         # [R-7.20] First persistence of the gateway intent is a payment
         # event: the intent and its trail row commit together, so a crash
         # between the two cannot leave an intent the trail never saw. The
@@ -1501,7 +1405,7 @@ def create_payment(request):
                         razorpay_order_id = locked.razorpay_order_id
                         break
                     locked.razorpay_order_id = razorpay_order_id
-                    locked.save(update_fields=['razorpay_order_id'])
+                    locked.save(update_fields=["razorpay_order_id"])
                     AuditEvent.record(
                         AuditEvent.EventType.PAYMENT_INITIATED,
                         actor=request.user,
@@ -1520,63 +1424,55 @@ def create_payment(request):
                     raise
                 continue
 
-    return Response({
-        "order_id": order.id,
-        "razorpay_order_id": razorpay_order_id,
-        "amount": amount,
-        "amount_in_rupees": order.total_amount,
-        # [R-8.11] Same currency the gateway payload used: the order's own.
-        "currency": order.currency,
-        "key_id": settings.RAZORPAY_KEY_ID,
-    })
+    return Response(
+        {
+            "order_id": order.id,
+            "razorpay_order_id": razorpay_order_id,
+            "amount": amount,
+            "amount_in_rupees": order.total_amount,
+            # [R-8.11] Same currency the gateway payload used: the order's own.
+            "currency": order.currency,
+            "key_id": settings.RAZORPAY_KEY_ID,
+        }
+    )
+
+
 # ==================================
 # Verify Razorpay Payment
 # ==================================
 
-@api_view(['POST'])
+
+@api_view(["POST"])
 @permission_classes([IsAuthenticated])
 def verify_payment(request):
 
-    razorpay_order_id = request.data.get(
-        'razorpay_order_id'
-    )
+    razorpay_order_id = request.data.get("razorpay_order_id")
 
-    razorpay_payment_id = request.data.get(
-        'razorpay_payment_id'
-    )
+    razorpay_payment_id = request.data.get("razorpay_payment_id")
 
-    razorpay_signature = request.data.get(
-        'razorpay_signature'
-    )
+    razorpay_signature = request.data.get("razorpay_signature")
 
-    if not all([
-        razorpay_order_id,
-        razorpay_payment_id,
-        razorpay_signature
-    ]):
+    if not all([razorpay_order_id, razorpay_payment_id, razorpay_signature]):
         return Response(
             {"error": "Payment details are required"},
-            status=status.HTTP_400_BAD_REQUEST
+            status=status.HTTP_400_BAD_REQUEST,
         )
 
     # Verify payment signature
     client = razorpay.Client(
-        auth=(
-            settings.RAZORPAY_KEY_ID,
-            settings.RAZORPAY_KEY_SECRET
-        )
+        auth=(settings.RAZORPAY_KEY_ID, settings.RAZORPAY_KEY_SECRET)
     )
 
     try:
-
-        client.utility.verify_payment_signature({
-            'razorpay_order_id': razorpay_order_id,
-            'razorpay_payment_id': razorpay_payment_id,
-            'razorpay_signature': razorpay_signature
-        })
+        client.utility.verify_payment_signature(
+            {
+                "razorpay_order_id": razorpay_order_id,
+                "razorpay_payment_id": razorpay_payment_id,
+                "razorpay_signature": razorpay_signature,
+            }
+        )
 
     except razorpay.errors.SignatureVerificationError:
-
         # [R-7.20] A rejected signature is a verify failure with no other
         # side effect to share a transaction with: the single insert is
         # atomic on its own, and the claimed gateway references ride in
@@ -1651,25 +1547,21 @@ def verify_payment(request):
                 ).update(status=StockReservation.Status.RELEASED)
 
         return Response(
-            {"error": "Payment verification failed"},
-            status=status.HTTP_400_BAD_REQUEST
+            {"error": "Payment verification failed"}, status=status.HTTP_400_BAD_REQUEST
         )
 
-    order_id = request.data.get('order_id')
+    order_id = request.data.get("order_id")
     if not order_id:
         return Response(
-            {"error": "order_id is required"},
-            status=status.HTTP_400_BAD_REQUEST
+            {"error": "order_id is required"}, status=status.HTTP_400_BAD_REQUEST
         )
 
     with transaction.atomic():
         try:
             order = Order.objects.select_for_update().get(
-                id=order_id,
-                user=request.user
+                id=order_id, user=request.user
             )
         except Order.DoesNotExist:
-
             # [R-7.20] The verify attempt names an order the caller does not
             # own: there is no FK target, so the claimed id rides in detail.
             AuditEvent.record(
@@ -1684,12 +1576,10 @@ def verify_payment(request):
             )
 
             return Response(
-                {"error": "Order not found"},
-                status=status.HTTP_404_NOT_FOUND
+                {"error": "Order not found"}, status=status.HTTP_404_NOT_FOUND
             )
 
-        if order.status != 'pending' or order.razorpay_payment_id:
-
+        if order.status != "pending" or order.razorpay_payment_id:
             AuditEvent.record(
                 AuditEvent.EventType.PAYMENT_ALREADY_PROCESSED,
                 actor=request.user,
@@ -1711,11 +1601,10 @@ def verify_payment(request):
 
             return Response(
                 {"error": "This order has already been processed"},
-                status=status.HTTP_400_BAD_REQUEST
+                status=status.HTTP_400_BAD_REQUEST,
             )
 
         if order.razorpay_order_id != razorpay_order_id:
-
             AuditEvent.record(
                 AuditEvent.EventType.PAYMENT_REFERENCE_MISMATCH,
                 actor=request.user,
@@ -1727,8 +1616,7 @@ def verify_payment(request):
             )
 
             logger.warning(
-                "Payment verify failed: order %s is bound to gateway "
-                "order %s, not %s",
+                "Payment verify failed: order %s is bound to gateway order %s, not %s",
                 order.id,
                 order.razorpay_order_id,
                 razorpay_order_id,
@@ -1736,7 +1624,7 @@ def verify_payment(request):
 
             return Response(
                 {"error": "Payment does not belong to this order"},
-                status=status.HTTP_400_BAD_REQUEST
+                status=status.HTTP_400_BAD_REQUEST,
             )
 
         order_items = list(order.items.all())
@@ -1757,7 +1645,6 @@ def verify_payment(request):
         for item in order_items:
             product = locked_products.get(item.product_id)
             if product is None or product.stock < item.quantity:
-
                 AuditEvent.record(
                     AuditEvent.EventType.PAYMENT_STOCK_CONFLICT,
                     actor=request.user,
@@ -1791,8 +1678,10 @@ def verify_payment(request):
                 ).update(status=StockReservation.Status.RELEASED)
 
                 return Response(
-                    {"error": "An item is no longer available in the requested quantity"},
-                    status=status.HTTP_409_CONFLICT
+                    {
+                        "error": "An item is no longer available in the requested quantity"
+                    },
+                    status=status.HTTP_409_CONFLICT,
                 )
 
         # The coupon is located by its id on the already-locked Order row
@@ -1816,9 +1705,11 @@ def verify_payment(request):
                 not coupon.active
                 or now < coupon.valid_from
                 or now > coupon.valid_until
-                or (coupon.usage_limit is not None and coupon.used_count >= coupon.usage_limit)
+                or (
+                    coupon.usage_limit is not None
+                    and coupon.used_count >= coupon.usage_limit
+                )
             ):
-
                 AuditEvent.record(
                     AuditEvent.EventType.PAYMENT_COUPON_INVALID,
                     actor=request.user,
@@ -1828,8 +1719,7 @@ def verify_payment(request):
 
                 # Same race shape as the stock conflict: INFO.
                 logger.info(
-                    "Payment verify failed: order %s coupon %s no longer "
-                    "valid",
+                    "Payment verify failed: order %s coupon %s no longer valid",
                     order.id,
                     coupon.pk,
                 )
@@ -1844,7 +1734,7 @@ def verify_payment(request):
 
                 return Response(
                     {"error": "The coupon is no longer valid"},
-                    status=status.HTTP_409_CONFLICT
+                    status=status.HTTP_409_CONFLICT,
                 )
 
         # [R-12.7] SPEC-12-02 §12.1 step 5: confirmation converts the
@@ -1859,14 +1749,14 @@ def verify_payment(request):
         # lapsed TTL is deliberately NOT a conversion gate — the captured
         # payment proceeds on the re-checked stock; expiry belongs to the
         # SPEC-12-03 reconciler.
-        order.stock_reservations.filter(
-            status=StockReservation.Status.ACTIVE
-        ).update(status=StockReservation.Status.CONVERTED)
+        order.stock_reservations.filter(status=StockReservation.Status.ACTIVE).update(
+            status=StockReservation.Status.CONVERTED
+        )
 
         for item in order_items:
             product = locked_products[item.product_id]
             product.stock -= item.quantity
-            product.save(update_fields=['stock'])
+            product.save(update_fields=["stock"])
             # [6.5.17] No silent inventory edits: a paid sale is an inventory
             # mutation like any other, so every decrement lands in the ledger
             # with the order as its reference and no actor (system). The row
@@ -1883,7 +1773,7 @@ def verify_payment(request):
 
         if coupon:
             coupon.used_count += 1
-            coupon.save(update_fields=['used_count'])
+            coupon.save(update_fields=["used_count"])
 
         # [R-8.16] paid_at is the business-event timestamp of exactly this
         # transition, so it is written beside it inside the same atomic
@@ -1895,9 +1785,9 @@ def verify_payment(request):
         # 8-04 region below is untouched).
         previous_status = order.status
         order.paid_at = order.paid_at or timezone.now()
-        order.status = 'confirmed'
+        order.status = "confirmed"
         order.razorpay_payment_id = razorpay_payment_id
-        order.save(update_fields=['status', 'razorpay_payment_id', 'paid_at'])
+        order.save(update_fields=["status", "razorpay_payment_id", "paid_at"])
         # [R-10.1] SPEC-10-01b: the payment dimension is captured by the
         # same confirmed-payment event (the only payment-dimension writer
         # in this batch — COD/failure states are SPEC-10-04). The save
@@ -1905,8 +1795,8 @@ def verify_payment(request):
         # this second persistence of the already-locked row in the SAME
         # atomic block: both UPDATEs commit or roll back together, and the
         # already-processed gate keeps this path unreachable on replay.
-        order.payment_status = payment_for_status('confirmed')
-        order.save(update_fields=['payment_status'])
+        order.payment_status = payment_for_status("confirmed")
+        order.save(update_fields=["payment_status"])
         # [R-10.12]/[R-10.17] SPEC-10-02: the transition's audit row rides
         # this same atomic block — a rolled-back verify leaves no event
         # behind (pinned). No admin acts on this path, so the trigger
@@ -1963,12 +1853,14 @@ def verify_payment(request):
             {"order": order},
         )
 
-    return Response({
-        "message": "Payment verified successfully",
-        "order_id": order.id,
-        "status": order.status,
-        "razorpay_payment_id": razorpay_payment_id
-    })
+    return Response(
+        {
+            "message": "Payment verified successfully",
+            "order_id": order.id,
+            "status": order.status,
+            "razorpay_payment_id": razorpay_payment_id,
+        }
+    )
 
 
 # ==================================
@@ -1981,7 +1873,7 @@ def verify_payment(request):
 # live in orders.state — [R-10.1] single source.
 
 
-@api_view(['GET'])
+@api_view(["GET"])
 @permission_classes([HasOrdersRead])
 def admin_order_list(request):
     """[R-9.4.8] GET /api/admin/orders/ — every order, staff eyes only.
@@ -1994,24 +1886,25 @@ def admin_order_list(request):
     orders = Order.objects.select_related("coupon").order_by("-created_at", "-id")
 
     paginator = Paginator(
-        orders, _history_page_size(
-            request.query_params.get(HISTORY_PAGE_SIZE_QUERY_PARAM)
-        )
+        orders,
+        _history_page_size(request.query_params.get(HISTORY_PAGE_SIZE_QUERY_PARAM)),
     )
-    page = paginator.get_page(request.query_params.get('page', 1))
+    page = paginator.get_page(request.query_params.get("page", 1))
 
     serializer = OrderSerializer(page.object_list, many=True)
-    return Response({
-        'count': paginator.count,
-        'total_pages': paginator.num_pages,
-        'current_page': page.number,
-        'next_page': page.has_next(),
-        'previous_page': page.has_previous(),
-        'results': serializer.data,
-    })
+    return Response(
+        {
+            "count": paginator.count,
+            "total_pages": paginator.num_pages,
+            "current_page": page.number,
+            "next_page": page.has_next(),
+            "previous_page": page.has_previous(),
+            "results": serializer.data,
+        }
+    )
 
 
-@api_view(['GET'])
+@api_view(["GET"])
 @permission_classes([HasOrdersRead])
 def admin_order_detail(request, order_id):
     """[R-9.4.9] GET /api/admin/orders/:id/ — one order, staff eyes only.
@@ -2022,10 +1915,7 @@ def admin_order_detail(request, order_id):
     try:
         order = Order.objects.select_related("coupon").get(id=order_id)
     except Order.DoesNotExist:
-        return Response(
-            {"error": "Order not found"},
-            status=status.HTTP_404_NOT_FOUND
-        )
+        return Response({"error": "Order not found"}, status=status.HTTP_404_NOT_FOUND)
 
     return Response(OrderSerializer(order).data)
 
@@ -2056,7 +1946,7 @@ def _may_fulfil(user, order):
     )
 
 
-@api_view(['POST'])
+@api_view(["POST"])
 @permission_classes([HasOrdersFulfill])
 def admin_order_fulfill(request, order_id):
     """[R-9.4.10] POST /api/admin/orders/:id/fulfill — advance one step.
@@ -2086,8 +1976,7 @@ def admin_order_fulfill(request, order_id):
             order = Order.objects.select_for_update().get(id=order_id)
         except Order.DoesNotExist:
             return Response(
-                {"error": "Order not found"},
-                status=status.HTTP_404_NOT_FOUND
+                {"error": "Order not found"}, status=status.HTTP_404_NOT_FOUND
             )
 
         if not _may_fulfil(request.user, order):
@@ -2100,11 +1989,10 @@ def admin_order_fulfill(request, order_id):
             allowed = ", ".join(sorted(ALLOWED_TRANSITIONS.get(order.status, set())))
             return Response(
                 {
-                    "error": f"Order cannot be fulfilled from status "
-                             f"'{order.status}'",
+                    "error": f"Order cannot be fulfilled from status '{order.status}'",
                     "allowed": allowed,
                 },
-                status=status.HTTP_409_CONFLICT
+                status=status.HTTP_409_CONFLICT,
             )
 
         # [R-10.19]/[R-10.14] SPEC-10-03: the fulfil seam advances
@@ -2117,11 +2005,10 @@ def admin_order_fulfill(request, order_id):
         if precondition_reasons:
             return Response(
                 {
-                    "error": f"Order cannot be fulfilled from status "
-                             f"'{order.status}'",
+                    "error": f"Order cannot be fulfilled from status '{order.status}'",
                     "preconditions": precondition_reasons,
                 },
-                status=status.HTTP_409_CONFLICT
+                status=status.HTTP_409_CONFLICT,
             )
 
         # [R-10.12] SPEC-10-02: capture the pre-transition status for the
@@ -2133,8 +2020,8 @@ def admin_order_fulfill(request, order_id):
         # byte-identical), so the dimension persists via a second
         # same-transaction write to the row locked above.
         order.fulfilment_status = fulfilment_for_status(target)
-        order.save(update_fields=['status'])
-        order.save(update_fields=['fulfilment_status'])
+        order.save(update_fields=["status"])
+        order.save(update_fields=["fulfilment_status"])
         # [R-10.12]/[R-10.18] SPEC-10-02: the audit row lands in this same
         # transaction — a rolled-back fulfil never leaves a phantom event.
         OrderStatusEvent.objects.create(
@@ -2151,18 +2038,22 @@ def admin_order_fulfill(request, order_id):
         # [6.12.6] API-side staff write: land the privileged-action record
         # the admin surface would have written (audit-log route reads it).
         log_api_action(
-            request, order, CHANGE,
+            request,
+            order,
+            CHANGE,
             f"Fulfilled via API: status moved to {target}.",
         )
 
-    return Response({
-        "message": f"Order status advanced to {target}",
-        "order_id": order.id,
-        "status": order.status,
-    })
+    return Response(
+        {
+            "message": f"Order status advanced to {target}",
+            "order_id": order.id,
+            "status": order.status,
+        }
+    )
 
 
-@api_view(['POST'])
+@api_view(["POST"])
 @permission_classes([HasOrdersCancel])
 def admin_order_cancel(request, order_id):
     """[R-9.4.11] POST /api/admin/orders/:id/cancel — cancel an unpaid order.
@@ -2181,27 +2072,28 @@ def admin_order_cancel(request, order_id):
             order = Order.objects.select_for_update().get(id=order_id)
         except Order.DoesNotExist:
             return Response(
-                {"error": "Order not found"},
-                status=status.HTTP_404_NOT_FOUND
+                {"error": "Order not found"}, status=status.HTTP_404_NOT_FOUND
             )
 
         if order.status == "cancelled":
             # The machine's self-transition: a replay, not a change.
-            return Response({
-                "message": "Order is already cancelled",
-                "order_id": order.id,
-                "status": order.status,
-            })
+            return Response(
+                {
+                    "message": "Order is already cancelled",
+                    "order_id": order.id,
+                    "status": order.status,
+                }
+            )
 
         if not transition_allowed(order.status, "cancelled"):
             return Response(
                 {
                     "error": f"Order cannot be cancelled from status "
-                             f"'{order.status}'. A paid order cannot be "
-                             f"cancelled — issue a refund instead "
-                             f"(POST /api/admin/orders/<id>/refund/).",
+                    f"'{order.status}'. A paid order cannot be "
+                    f"cancelled — issue a refund instead "
+                    f"(POST /api/admin/orders/<id>/refund/).",
                 },
-                status=status.HTTP_409_CONFLICT
+                status=status.HTTP_409_CONFLICT,
             )
 
         # [R-10.12] SPEC-10-02: capture the pre-transition status for the
@@ -2212,8 +2104,8 @@ def admin_order_cancel(request, order_id):
         # [R-10.1] SPEC-10-01b: fulfilment dimension rides the cancel
         # transition (insertion-only; second same-transaction write).
         order.fulfilment_status = fulfilment_for_status("cancelled")
-        order.save(update_fields=['status', 'cancelled_at'])
-        order.save(update_fields=['fulfilment_status'])
+        order.save(update_fields=["status", "cancelled_at"])
+        order.save(update_fields=["fulfilment_status"])
         # [R-10.12]/[R-10.18] SPEC-10-02: the audit row lands in this same
         # transaction; the idempotent replay above returns before reaching
         # it, so a re-cancel never appends a second event.
@@ -2229,20 +2121,22 @@ def admin_order_cancel(request, order_id):
         # available-to-sell immediately, not at the TTL sweep. The
         # idempotent replay above returns before this site, and the
         # active-only filter is a no-op on already-released holds.
-        order.stock_reservations.filter(
-            status=StockReservation.Status.ACTIVE
-        ).update(status=StockReservation.Status.RELEASED)
+        order.stock_reservations.filter(status=StockReservation.Status.ACTIVE).update(
+            status=StockReservation.Status.RELEASED
+        )
         # [R-10.16] SPEC-10-05: the side-effect hook rides the same
         # atomic block; the idempotent replay above returns before this
         # site, so a re-cancel never notifies twice (insertion-only hunk).
         notify_transition(order, previous_status, "cancelled")
         log_api_action(request, order, CHANGE, "Cancelled via API.")
 
-    return Response({
-        "message": "Order cancelled",
-        "order_id": order.id,
-        "status": order.status,
-    })
+    return Response(
+        {
+            "message": "Order cancelled",
+            "order_id": order.id,
+            "status": order.status,
+        }
+    )
 
 
 # ==================================
@@ -2271,7 +2165,7 @@ def _refund_payload(refund):
     }
 
 
-@api_view(['POST'])
+@api_view(["POST"])
 @permission_classes([HasRefundsCreate])
 def admin_order_refund(request, order_id):
     """[R-1.14] POST /api/admin/orders/:id/refund — refund a captured payment.
@@ -2308,8 +2202,7 @@ def admin_order_refund(request, order_id):
         and len(idempotency_key) > IDEMPOTENCY_KEY_MAX_LENGTH
     ):
         return Response(
-            {"error": "Idempotency-Key is too long"},
-            status=status.HTTP_400_BAD_REQUEST
+            {"error": "Idempotency-Key is too long"}, status=status.HTTP_400_BAD_REQUEST
         )
 
     reason = (request.data.get("reason") or "").strip()
@@ -2318,8 +2211,7 @@ def admin_order_refund(request, order_id):
         # explain later, so the operator's words are required input, not an
         # optional nicety (the admin cancel path asks for the same reason).
         return Response(
-            {"error": "A refund reason is required"},
-            status=status.HTTP_400_BAD_REQUEST
+            {"error": "A refund reason is required"}, status=status.HTTP_400_BAD_REQUEST
         )
 
     try:
@@ -2328,8 +2220,7 @@ def admin_order_refund(request, order_id):
                 order = Order.objects.select_for_update().get(id=order_id)
             except Order.DoesNotExist:
                 return Response(
-                    {"error": "Order not found"},
-                    status=status.HTTP_404_NOT_FOUND
+                    {"error": "Order not found"}, status=status.HTTP_404_NOT_FOUND
                 )
 
             # This order's refund rows, locked beside the order row, and
@@ -2340,9 +2231,7 @@ def admin_order_refund(request, order_id):
             # its commit. This list serves the replay probe below; the balance itself
             # comes from refundable_remaining's aggregate, and the Order lock
             # is what keeps that read consistent.
-            order_refunds = list(
-                Refund.objects.select_for_update().filter(order=order)
-            )
+            order_refunds = list(Refund.objects.select_for_update().filter(order=order))
 
             if idempotency_key is not None:
                 replay = next(
@@ -2362,15 +2251,17 @@ def admin_order_refund(request, order_id):
                         replay.id,
                         order.pk,
                     )
-                    return Response({
-                        "message": "Refund already issued",
-                        "order_id": order.id,
-                        "status": order.status,
-                        "payment_status": order.payment_status,
-                        "refunded_total": Refund.refunded_total(order),
-                        "refundable_remaining": order.refundable_remaining,
-                        "refund": _refund_payload(replay),
-                    })
+                    return Response(
+                        {
+                            "message": "Refund already issued",
+                            "order_id": order.id,
+                            "status": order.status,
+                            "payment_status": order.payment_status,
+                            "refunded_total": Refund.refunded_total(order),
+                            "refundable_remaining": order.refundable_remaining,
+                            "refund": _refund_payload(replay),
+                        }
+                    )
 
             # The balance gate comes first because it is the reason a fully
             # refunded order cannot be refunded again; the payment-status gate
@@ -2379,7 +2270,7 @@ def admin_order_refund(request, order_id):
             if remaining <= Decimal("0.00"):
                 return Response(
                     {"error": "Order has no refundable balance left"},
-                    status=status.HTTP_409_CONFLICT
+                    status=status.HTTP_409_CONFLICT,
                 )
 
             # [R-10.1] Eligibility is asked of the machine, not restated
@@ -2396,9 +2287,9 @@ def admin_order_refund(request, order_id):
                 return Response(
                     {
                         "error": f"Order payment is '{order.payment_status}'; "
-                                 f"only a captured payment can be refunded."
+                        f"only a captured payment can be refunded."
                     },
-                    status=status.HTTP_409_CONFLICT
+                    status=status.HTTP_409_CONFLICT,
                 )
 
             if not order.razorpay_payment_id:
@@ -2406,9 +2297,8 @@ def admin_order_refund(request, order_id):
                 # reverse, and the seam has nothing to call: refuse rather
                 # than write a refund row no money moved behind.
                 return Response(
-                    {"error": "Order has no captured payment to refund at "
-                              "the gateway"},
-                    status=status.HTTP_409_CONFLICT
+                    {"error": "Order has no captured payment to refund at the gateway"},
+                    status=status.HTTP_409_CONFLICT,
                 )
 
             requested = request.data.get("amount")
@@ -2426,7 +2316,7 @@ def admin_order_refund(request, order_id):
                 except (ArithmeticError, TypeError, ValueError):
                     return Response(
                         {"error": "amount must be a decimal amount"},
-                        status=status.HTTP_400_BAD_REQUEST
+                        status=status.HTTP_400_BAD_REQUEST,
                     )
                 # NaN/Infinity parse as Decimals but are not money, and
                 # comparing one raises - so they are refused before the
@@ -2435,15 +2325,15 @@ def admin_order_refund(request, order_id):
                 if not amount.is_finite() or amount <= Decimal("0.00"):
                     return Response(
                         {"error": "amount must be a positive decimal amount"},
-                        status=status.HTTP_400_BAD_REQUEST
+                        status=status.HTTP_400_BAD_REQUEST,
                     )
                 if amount > remaining:
                     return Response(
                         {
                             "error": f"Refund of {amount} exceeds the "
-                                     f"refundable balance of {remaining}"
+                            f"refundable balance of {remaining}"
                         },
-                        status=status.HTTP_409_CONFLICT
+                        status=status.HTTP_409_CONFLICT,
                     )
 
             refund = Refund.objects.create(
@@ -2452,11 +2342,7 @@ def admin_order_refund(request, order_id):
                 reason=reason,
                 # FULL means "this attempt cleared what was left"; the order's
                 # payment dimension below is the authority on what is left.
-                kind=(
-                    Refund.Kind.FULL
-                    if amount == remaining
-                    else Refund.Kind.PARTIAL
-                ),
+                kind=(Refund.Kind.FULL if amount == remaining else Refund.Kind.PARTIAL),
                 status=Refund.Status.PENDING,
                 actor=request.user,
                 idempotency_key=idempotency_key,
@@ -2472,9 +2358,13 @@ def admin_order_refund(request, order_id):
 
             refund.gateway_refund_id = gateway_refund_id
             refund.status = Refund.Status.PROCESSED
-            refund.save(update_fields=[
-                "gateway_refund_id", "status", "updated_at",
-            ])
+            refund.save(
+                update_fields=[
+                    "gateway_refund_id",
+                    "status",
+                    "updated_at",
+                ]
+            )
 
             refunded_total = Refund.refunded_total(order)
             # [R-10.1] The balance gate is what chooses between the two refund
@@ -2500,7 +2390,9 @@ def admin_order_refund(request, order_id):
             # joining the refund row. It rides this same transaction, so a
             # rolled-back refund leaves no record of itself.
             log_api_action(
-                request, refund, ADDITION,
+                request,
+                refund,
+                ADDITION,
                 f"Refund {amount} {order.currency} ({refund.kind}) issued "
                 f"via API for order #{order.id} "
                 f"(gateway refund {gateway_refund_id}).",
@@ -2517,18 +2409,22 @@ def admin_order_refund(request, order_id):
         )
         return Response(
             {"error": "The payment gateway could not complete this refund"},
-            status=status.HTTP_502_BAD_GATEWAY
+            status=status.HTTP_502_BAD_GATEWAY,
         )
 
-    return Response({
-        "message": "Refund issued",
-        "order_id": order.id,
-        "status": order.status,
-        "payment_status": order.payment_status,
-        "refunded_total": Refund.refunded_total(order),
-        "refundable_remaining": order.refundable_remaining,
-        "refund": _refund_payload(refund),
-    }, status=status.HTTP_201_CREATED)
+    return Response(
+        {
+            "message": "Refund issued",
+            "order_id": order.id,
+            "status": order.status,
+            "payment_status": order.payment_status,
+            "refunded_total": Refund.refunded_total(order),
+            "refundable_remaining": order.refundable_remaining,
+            "refund": _refund_payload(refund),
+        },
+        status=status.HTTP_201_CREATED,
+    )
+
 
 # ==================================
 # [R-1.16] SPEC-1-B07a: the customer's return request

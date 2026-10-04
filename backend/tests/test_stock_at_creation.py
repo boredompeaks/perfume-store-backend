@@ -16,6 +16,7 @@ response status and the audit log (e.g. tests/test_audit_log.py posts
 `stock: 3` and checks 201 + LogEntry), so a persisted zero would have passed
 every one of them.
 """
+
 from django.contrib.auth.models import Group, User
 from django.test import tag
 

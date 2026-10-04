@@ -17,11 +17,10 @@ amount uses in ``create_payment``, so paying and refunding cannot disagree
 about one amount.
 """
 
+import razorpay
 from django.conf import settings
 
 from common.money import quantize_money
-
-import razorpay
 
 
 class RefundGatewayError(Exception):

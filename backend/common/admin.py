@@ -46,6 +46,7 @@ one confirmation contract, one template and one commit gate. SPEC-20-5
 reason/note, declared per action (``confirmation_reason_actions``) and read
 back off the same POST by the action body.
 """
+
 from dataclasses import replace
 from functools import wraps
 

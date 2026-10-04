@@ -6,29 +6,64 @@ from django.db import migrations, models
 
 
 class Migration(migrations.Migration):
-
     dependencies = [
-        ('products', '0004_make_product_slug_unique'),
+        ("products", "0004_make_product_slug_unique"),
         migrations.swappable_dependency(settings.AUTH_USER_MODEL),
     ]
 
     operations = [
         migrations.CreateModel(
-            name='StockMovement',
+            name="StockMovement",
             fields=[
-                ('id', models.BigAutoField(auto_created=True, primary_key=True, serialize=False, verbose_name='ID')),
-                ('delta', models.IntegerField()),
-                ('stock_after', models.PositiveBigIntegerField()),
-                ('reason', models.CharField(choices=[('restock', 'Restock'), ('correction', 'Stock correction'), ('damage', 'Damaged / write-off'), ('returned', 'Customer return'), ('other', 'Other')], max_length=20)),
-                ('note', models.CharField(blank=True, default='', max_length=200)),
-                ('created_at', models.DateTimeField(auto_now_add=True)),
-                ('created_by', models.ForeignKey(blank=True, null=True, on_delete=django.db.models.deletion.SET_NULL, related_name='stock_movements', to=settings.AUTH_USER_MODEL)),
-                ('product', models.ForeignKey(on_delete=django.db.models.deletion.CASCADE, related_name='stock_movements', to='products.products')),
+                (
+                    "id",
+                    models.BigAutoField(
+                        auto_created=True,
+                        primary_key=True,
+                        serialize=False,
+                        verbose_name="ID",
+                    ),
+                ),
+                ("delta", models.IntegerField()),
+                ("stock_after", models.PositiveBigIntegerField()),
+                (
+                    "reason",
+                    models.CharField(
+                        choices=[
+                            ("restock", "Restock"),
+                            ("correction", "Stock correction"),
+                            ("damage", "Damaged / write-off"),
+                            ("returned", "Customer return"),
+                            ("other", "Other"),
+                        ],
+                        max_length=20,
+                    ),
+                ),
+                ("note", models.CharField(blank=True, default="", max_length=200)),
+                ("created_at", models.DateTimeField(auto_now_add=True)),
+                (
+                    "created_by",
+                    models.ForeignKey(
+                        blank=True,
+                        null=True,
+                        on_delete=django.db.models.deletion.SET_NULL,
+                        related_name="stock_movements",
+                        to=settings.AUTH_USER_MODEL,
+                    ),
+                ),
+                (
+                    "product",
+                    models.ForeignKey(
+                        on_delete=django.db.models.deletion.CASCADE,
+                        related_name="stock_movements",
+                        to="products.products",
+                    ),
+                ),
             ],
             options={
-                'verbose_name': 'Stock movement',
-                'verbose_name_plural': 'Stock movements',
-                'ordering': ('-created_at',),
+                "verbose_name": "Stock movement",
+                "verbose_name_plural": "Stock movements",
+                "ordering": ("-created_at",),
             },
         ),
     ]

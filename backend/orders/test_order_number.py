@@ -7,6 +7,7 @@ IntegrityError retry, never check-then-act) plus a unique-constraint pin --
 both deterministic -- instead of wall-clock thread scheduling. Razorpay is
 always mocked; no test touches the network.
 """
+
 import re
 from decimal import Decimal
 from unittest import mock
@@ -165,9 +166,7 @@ class OrderNumberRaceTests(OrderNumberTestBase):
 
         # the losing transaction rolled back: the winner's row is intact
         self.assertEqual(Order.objects.count(), 1)
-        self.assertEqual(
-            Order.objects.get().order_number, first.order_number
-        )
+        self.assertEqual(Order.objects.get().order_number, first.order_number)
 
 
 @tag("orders")

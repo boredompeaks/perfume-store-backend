@@ -146,8 +146,9 @@ class EmailSendProbeSafetyTests(TestCase):
             "django.core.mail.backends.console.EmailBackend",
             "django.core.mail.backends.dummy.EmailBackend",
         ):
-            with self.subTest(backend=backend), override_settings(
-                EMAIL_BACKEND=backend
+            with (
+                self.subTest(backend=backend),
+                override_settings(EMAIL_BACKEND=backend),
             ):
                 with self.assertRaises(CommandError) as caught:
                     run_probe("--send")

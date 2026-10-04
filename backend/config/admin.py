@@ -15,6 +15,7 @@ put the configured enrollment URL (and whether MFA is the reason the last
 attempt failed) into the template context — the enforcement half of this
 feature is untouched.
 """
+
 from django.conf import settings
 from django.contrib.admin import AdminSite
 from django.contrib.admin.apps import AdminConfig

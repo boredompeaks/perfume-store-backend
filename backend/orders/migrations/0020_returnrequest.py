@@ -5,28 +5,79 @@ from django.db import migrations, models
 
 
 class Migration(migrations.Migration):
-
     dependencies = [
-        ('orders', '0019_order_shipping_method_code'),
+        ("orders", "0019_order_shipping_method_code"),
     ]
 
     operations = [
         migrations.CreateModel(
-            name='ReturnRequest',
+            name="ReturnRequest",
             fields=[
-                ('id', models.BigAutoField(auto_created=True, primary_key=True, serialize=False, verbose_name='ID')),
-                ('status', models.CharField(choices=[('requested', 'Requested'), ('approved', 'Approved'), ('rejected', 'Rejected'), ('received', 'Received'), ('inspected', 'Inspected'), ('closed', 'Closed')], default='requested', max_length=20)),
-                ('reason_code', models.CharField(choices=[('damaged', 'Damaged in transit'), ('defective', 'Defective product'), ('wrong_item', 'Wrong item received'), ('not_as_described', 'Not as described'), ('changed_mind', 'Changed mind')], max_length=30)),
-                ('reason_note', models.TextField(blank=True, default='')),
-                ('created_at', models.DateTimeField(auto_now_add=True)),
-                ('updated_at', models.DateTimeField(auto_now=True)),
-                ('order', models.ForeignKey(on_delete=django.db.models.deletion.CASCADE, related_name='return_requests', to='orders.order')),
+                (
+                    "id",
+                    models.BigAutoField(
+                        auto_created=True,
+                        primary_key=True,
+                        serialize=False,
+                        verbose_name="ID",
+                    ),
+                ),
+                (
+                    "status",
+                    models.CharField(
+                        choices=[
+                            ("requested", "Requested"),
+                            ("approved", "Approved"),
+                            ("rejected", "Rejected"),
+                            ("received", "Received"),
+                            ("inspected", "Inspected"),
+                            ("closed", "Closed"),
+                        ],
+                        default="requested",
+                        max_length=20,
+                    ),
+                ),
+                (
+                    "reason_code",
+                    models.CharField(
+                        choices=[
+                            ("damaged", "Damaged in transit"),
+                            ("defective", "Defective product"),
+                            ("wrong_item", "Wrong item received"),
+                            ("not_as_described", "Not as described"),
+                            ("changed_mind", "Changed mind"),
+                        ],
+                        max_length=30,
+                    ),
+                ),
+                ("reason_note", models.TextField(blank=True, default="")),
+                ("created_at", models.DateTimeField(auto_now_add=True)),
+                ("updated_at", models.DateTimeField(auto_now=True)),
+                (
+                    "order",
+                    models.ForeignKey(
+                        on_delete=django.db.models.deletion.CASCADE,
+                        related_name="return_requests",
+                        to="orders.order",
+                    ),
+                ),
             ],
             options={
-                'verbose_name': 'return request',
-                'verbose_name_plural': 'return requests',
-                'ordering': ('-created_at', '-id'),
-                'constraints': [models.UniqueConstraint(condition=models.Q(('status__in', ('requested', 'approved', 'received', 'inspected'))), fields=('order',), name='orders_returnrequest_open_uidx')],
+                "verbose_name": "return request",
+                "verbose_name_plural": "return requests",
+                "ordering": ("-created_at", "-id"),
+                "constraints": [
+                    models.UniqueConstraint(
+                        condition=models.Q(
+                            (
+                                "status__in",
+                                ("requested", "approved", "received", "inspected"),
+                            )
+                        ),
+                        fields=("order",),
+                        name="orders_returnrequest_open_uidx",
+                    )
+                ],
             },
         ),
     ]

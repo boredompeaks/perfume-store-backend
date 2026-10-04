@@ -1,6 +1,7 @@
 from django.contrib import admin
 
 from common.admin import RoleAwareModelAdmin
+
 from .models import (
     CLOSED_RETURN_WINDOW_DAYS,
     DEFAULT_RETURN_WINDOW_DAYS,

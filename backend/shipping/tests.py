@@ -819,7 +819,6 @@ class ShippingCostAtomicityTests(ApiTestCase):
 
         from django.db.models.query import QuerySet
 
-        standard = self.standard
         observed = []
         original = QuerySet.order_by
 

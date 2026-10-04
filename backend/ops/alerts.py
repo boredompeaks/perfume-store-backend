@@ -83,9 +83,7 @@ def _in_cooldown(alert_key):
             timeout=settings.ALERT_COOLDOWN_SECONDS,
         )
     except Exception:
-        logger.exception(
-            "alert %s cooldown check failed; failing open", alert_key
-        )
+        logger.exception("alert %s cooldown check failed; failing open", alert_key)
     return False
 
 
@@ -105,9 +103,7 @@ def _send(alert_key, context, subject):
             logger.info("alert %s suppressed (cooldown)", alert_key)
             return False
         for recipient in _recipients():
-            notifications.send_email(
-                f"alert_{alert_key}", context, subject, recipient
-            )
+            notifications.send_email(f"alert_{alert_key}", context, subject, recipient)
             sent = True
     except Exception:
         # Log-only, like dispatch: the alert must never break the flow
@@ -119,9 +115,7 @@ def _send(alert_key, context, subject):
 def _product_lines(rows):
     lines = []
     for row in rows:
-        lines.append(
-            f"- {row['name']} (id {row['id']}): {row['stock']} in stock"
-        )
+        lines.append(f"- {row['name']} (id {row['id']}): {row['stock']} in stock")
     return lines
 
 

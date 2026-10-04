@@ -41,9 +41,9 @@ import urllib.error
 from pathlib import Path
 from unittest.mock import patch
 
-import config.settings as config_settings
 from django.test import SimpleTestCase
 
+import config.settings as config_settings
 from tests.test_settings_security import run_settings_import
 
 BACKEND_DIR = Path(__file__).resolve().parent.parent

@@ -35,13 +35,13 @@ from django.contrib.auth.models import Group, Permission, User
 from django.core.exceptions import PermissionDenied
 from django.test import RequestFactory, tag
 
-from common.admin import CONFIRMATION_YES, CONFIRM_FIELD
+from common.admin import CONFIRM_FIELD, CONFIRMATION_YES
 from common.permissions import user_has_capability
 from common.roles import (
     ROLE_ADMIN,
     ROLE_MARKETING,
-    ROLE_SUPPORT,
     ROLE_SUPERADMIN,
+    ROLE_SUPPORT,
     STAFF_ROLES,
 )
 from common.testing import ApiTestCase

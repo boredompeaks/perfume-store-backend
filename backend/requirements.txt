@@ -29,3 +29,10 @@ whitenoise==6.11.0
 python-dotenv==1.2.3
 Pillow==12.3.0
 coverage==7.16.1
+# GATE-1 (2026-10-04): ruff is both the linter and the FORMATTER OF RECORD
+# for this tree (config: backend/pyproject.toml; gate: the `lint` job in
+# .github/workflows/backend-tests.yml). Pinned like everything else above
+# because formatter output is version-sensitive -- the pin is what makes a
+# local run and a CI run agree byte for byte, and dropping it would let the
+# gate silently start reformatting on whatever ruff is current.
+ruff==0.16.10

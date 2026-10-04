@@ -11,19 +11,31 @@ from common.admin import RoleAwareModelAdmin
 from common.audit import log_mutation, model_field_changes
 from common.models import AuditEvent
 from common.saved_filters import SavedFilterMixin
-# [R-10.1] The order machine lives in orders.state (single source); this
-# module only consumes it.
-from .models import Coupon, Order, OrderItem, OrderStatusEvent, Refund
-# [R-1.16] SPEC-1-B07a: the return-request row and its own machine. Kept on
-# its own import line so every hunk above stays insertion-only, and kept out
-# of orders.state on purpose (that module is capability-scoped and audited).
-from .models import ReturnRequest, _allowed_from, return_transition_allowed
-# [R-10.16] SPEC-10-05: the per-transition side-effect contract (one
-# dispatch point, shared with the JSON seam).
-from .events import notify_transition
+
 # [R-12.8] SPEC-12-02: the admin cancel writers release the checkout's
 # stock holds with the same vocabulary the API twin uses.
 from products.models import StockReservation
+
+# [R-10.16] SPEC-10-05: the per-transition side-effect contract (one
+# dispatch point, shared with the JSON seam).
+from .events import notify_transition
+
+# [R-10.1] The order machine lives in orders.state (single source); this
+# module only consumes it.
+# [R-1.16] SPEC-1-B07a: the return-request row and its own machine. Kept on
+# its own import line so every hunk above stays insertion-only, and kept out
+# of orders.state on purpose (that module is capability-scoped and audited).
+from .models import (
+    Coupon,
+    Order,
+    OrderItem,
+    OrderStatusEvent,
+    Refund,
+    ReturnRequest,
+    _allowed_from,
+    return_transition_allowed,
+)
+
 # [R-10.1] SPEC-10-01b: the fulfilment-dimension mapping for the writers.
 # [R-10.12] SPEC-10-02: the trigger vocabulary for the audit writers.
 from .state import (
@@ -247,7 +259,13 @@ class OrderAdmin(SavedFilterMixin, RoleAwareModelAdmin):
     ordering = ("-created_at",)
     list_per_page = 25
     inlines = (OrderItemInline,)
-    actions = ("mark_confirmed", "mark_shipped", "mark_delivered", "cancel_pending", "export_csv")
+    actions = (
+        "mark_confirmed",
+        "mark_shipped",
+        "mark_delivered",
+        "cancel_pending",
+        "export_csv",
+    )
     readonly_fields = (
         "created_at",
         "updated_at",
@@ -481,7 +499,9 @@ class OrderAdmin(SavedFilterMixin, RoleAwareModelAdmin):
         )
 
     def _bulk_set_status(self, request, queryset, new_status):
-        allowed_from = [s for s, targets in ALLOWED_TRANSITIONS.items() if new_status in targets]
+        allowed_from = [
+            s for s, targets in ALLOWED_TRANSITIONS.items() if new_status in targets
+        ]
         matched_pks = list(
             queryset.filter(status__in=allowed_from).values_list("pk", flat=True)
         )
@@ -722,7 +742,9 @@ class OrderAdmin(SavedFilterMixin, RoleAwareModelAdmin):
                 self.get_queryset(request).filter(pk__in=unpaid_pks),
                 self._cancel_change_message(request),
             )
-            self.message_user(request, f"{count} unpaid order(s) cancelled.", messages.SUCCESS)
+            self.message_user(
+                request, f"{count} unpaid order(s) cancelled.", messages.SUCCESS
+            )
         if skipped:
             self.message_user(
                 request,
@@ -849,10 +871,7 @@ class CouponAdmin(RoleAwareModelAdmin):
         if not change:
             return
         stored = (
-            type(obj)
-            .objects.filter(pk=obj.pk)
-            .values_list(*self.list_editable)
-            .first()
+            type(obj).objects.filter(pk=obj.pk).values_list(*self.list_editable).first()
         )
         before = dict(zip(self.list_editable, stored or ()))
         super().save_model(request, obj, form, change)

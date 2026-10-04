@@ -1,4 +1,5 @@
 """Shared logic for the admin dashboard and the /health/ endpoint."""
+
 from datetime import timedelta
 from decimal import Decimal
 
@@ -152,16 +153,12 @@ def get_health() -> dict:
     out_of_stock = 0
     threshold = _low_stock_threshold()
     if checks["database"]:
-        low_stock = products.objects.filter(
-            stock__gt=0, stock__lte=threshold
-        ).count()
+        low_stock = products.objects.filter(stock__gt=0, stock__lte=threshold).count()
         out_of_stock = products.objects.filter(stock=0).count()
 
     return {
         "status": (
-            "ok"
-            if checks["database"] and checks["media_writable"]
-            else "degraded"
+            "ok" if checks["database"] and checks["media_writable"] else "degraded"
         ),
         "checks": checks,
         "pending_orders": pending_orders,
@@ -179,10 +176,7 @@ def get_health() -> dict:
 
 def _alert_rows(queryset):
     """Render low/out-of-stock products as the alert payload dicts."""
-    return [
-        {"id": row.id, "name": row.name, "stock": row.stock}
-        for row in queryset
-    ]
+    return [{"id": row.id, "name": row.name, "stock": row.stock} for row in queryset]
 
 
 def check_stock_alerts():
@@ -199,9 +193,7 @@ def check_stock_alerts():
 
     threshold = _low_stock_threshold()
     notify_low_stock(
-        _alert_rows(
-            products.objects.filter(stock__gt=0, stock__lte=threshold)
-        )
+        _alert_rows(products.objects.filter(stock__gt=0, stock__lte=threshold))
     )
     notify_out_of_stock(_alert_rows(products.objects.filter(stock=0)))
 

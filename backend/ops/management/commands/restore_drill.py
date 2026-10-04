@@ -233,7 +233,7 @@ class Command(BaseCommand):
         # counts is a truthful pass -- so that case is reported plainly
         # instead of being dressed up as a failure.
         self.stdout.write(
-            f"Simulated failure: removed one {removed} row from the restored " f"copy"
+            f"Simulated failure: removed one {removed} row from the restored copy"
             if removed
             else (
                 "Simulated failure: the restored copy holds no rows, so there "

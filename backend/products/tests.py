@@ -1,6 +1,7 @@
 """Products unit tests - docs/test-gaps.md items 15-22, plus the manual
 stock-adjustment feature (``adjust_stock`` / ``StockMovement``) and its
 admin surface."""
+
 import base64
 import math
 import os
@@ -13,7 +14,6 @@ from unittest.mock import patch
 from django.conf import settings
 from django.contrib.auth.models import AnonymousUser, User
 from django.core.files.uploadedfile import SimpleUploadedFile
-from config.settings import _env_int
 from django.db import (
     IntegrityError,
     connection,
@@ -23,7 +23,6 @@ from django.db import (
 from django.db.models import Sum
 from django.test import override_settings, tag
 from django.utils import timezone
-from orders.models import Order
 from rest_framework.exceptions import PermissionDenied
 from rest_framework.request import Request
 from rest_framework.test import APIRequestFactory
@@ -38,6 +37,8 @@ from common.roles import (
     sync_role_groups,
 )
 from common.testing import ApiTestCase
+from config.settings import _env_int
+from orders.models import Order
 from products.admin import ProductAdmin
 from products.models import StockMovement, StockReservation, products
 from products.serializers import ProductSerializer
@@ -53,14 +54,20 @@ TINY_PNG = base64.b64decode(
 class ProductListFilterTests(ApiTestCase):
     def setUp(self):
         self.staff = self.make_staff()
-        self.p_rose = self.make_product(name="Rose Water", category="Floral", price="100.00")
+        self.p_rose = self.make_product(
+            name="Rose Water", category="Floral", price="100.00"
+        )
         self.p_oud = self.make_product(
-            name="Oud Royale", category="Oriental", price="200.00",
+            name="Oud Royale",
+            category="Oriental",
+            price="200.00",
             description="Smoky oud with saffron.",
         )
         # description matches "rose" even though the name does not
         self.p_jasmine = self.make_product(
-            name="Jasmine Mist", category="Floral", price="300.00",
+            name="Jasmine Mist",
+            category="Floral",
+            price="300.00",
             description="A rose and jasmine blend.",
         )
 
@@ -78,14 +85,16 @@ class ProductListFilterTests(ApiTestCase):
     # 15. search across name/description/category ---------------------------------------
     def test_search_across_name_description_and_category(self):
         cases = {
-            "Rose Water": {self.p_rose.id},          # name match
-            "jasmine blend": {self.p_jasmine.id},    # description match
-            "oriental": {self.p_oud.id},             # category match
+            "Rose Water": {self.p_rose.id},  # name match
+            "jasmine blend": {self.p_jasmine.id},  # description match
+            "oriental": {self.p_oud.id},  # category match
             "ROSE": {self.p_rose.id, self.p_jasmine.id},  # icase across fields
         }
         for term, expected in cases.items():
             with self.subTest(term=term):
-                self.assertEqual({row["id"] for row in self._list_all({"search": term})}, expected)
+                self.assertEqual(
+                    {row["id"] for row in self._list_all({"search": term})}, expected
+                )
 
     def test_search_without_match_returns_empty_page(self):
         res = self.client.get("/api/products/", {"search": "zzz-nothing-like-this"})
@@ -97,10 +106,16 @@ class ProductListFilterTests(ApiTestCase):
     def test_category_filter_is_case_insensitive(self):
         res = self.client.get("/api/products/", {"category": "FLORAL"})
         self.assertEqual(res.status_code, 200, res.data)
-        self.assertEqual({row["id"] for row in res.data["results"]}, {self.p_rose.id, self.p_jasmine.id})
+        self.assertEqual(
+            {row["id"] for row in res.data["results"]},
+            {self.p_rose.id, self.p_jasmine.id},
+        )
 
     def test_price_filters_combine_with_category(self):
-        res = self.client.get("/api/products/", {"category": "floral", "min_price": "150", "max_price": "250"})
+        res = self.client.get(
+            "/api/products/",
+            {"category": "floral", "min_price": "150", "max_price": "250"},
+        )
         self.assertEqual(res.status_code, 200, res.data)
         self.assertEqual(res.data["count"], 0)  # florals cost 100 and 300
 
@@ -108,15 +123,23 @@ class ProductListFilterTests(ApiTestCase):
         self.assertEqual(res.data["count"], 2)
         res = self.client.get("/api/products/", {"max_price": "250"})
         self.assertEqual(res.data["count"], 2)
-        res = self.client.get("/api/products/", {"min_price": "150", "max_price": "250"})
+        res = self.client.get(
+            "/api/products/", {"min_price": "150", "max_price": "250"}
+        )
         self.assertEqual({row["id"] for row in res.data["results"]}, {self.p_oud.id})
 
     def test_invalid_price_filter_returns_400(self):
-        for params in ({"min_price": "abc"}, {"max_price": "1.2.3"}, {"min_price": "abc", "max_price": "5"}):
+        for params in (
+            {"min_price": "abc"},
+            {"max_price": "1.2.3"},
+            {"min_price": "abc", "max_price": "5"},
+        ):
             with self.subTest(params=params):
                 res = self.client.get("/api/products/", params)
                 self.assertEqual(res.status_code, 400, res.data)
-                self.assertEqual(res.data["error"], "Price filters must be valid numbers")
+                self.assertEqual(
+                    res.data["error"], "Price filters must be valid numbers"
+                )
 
     # 17. ordering whitelist (invalid value ignored, not 500) ------------------------------
     # Page 2 is requested explicitly below, so the size-2 override keeps the
@@ -138,12 +161,21 @@ class ProductListFilterTests(ApiTestCase):
         )
 
         rows = self._list_all({"ordering": "name"})
-        self.assertEqual([row["name"] for row in rows], sorted(row["name"] for row in rows))
+        self.assertEqual(
+            [row["name"] for row in rows], sorted(row["name"] for row in rows)
+        )
 
     def test_invalid_ordering_values_ignored_not_500(self):
         """Whitelist only: unknown, related-field and injection-ish values are
         ignored, never raise (no 500, no field leak)."""
-        for ordering in ("user", "password", "nonexistent", "price,name", "-; DROP", "stock"):
+        for ordering in (
+            "user",
+            "password",
+            "nonexistent",
+            "price,name",
+            "-; DROP",
+            "stock",
+        ):
             with self.subTest(ordering=ordering):
                 res = self.client.get("/api/products/", {"ordering": ordering})
                 self.assertEqual(res.status_code, 200, res.data)
@@ -156,7 +188,14 @@ class ProductListFilterTests(ApiTestCase):
     def test_pagination_envelope_shape(self):
         res = self.client.get("/api/products/")
         self.assertEqual(res.status_code, 200, res.data)
-        for key in ("count", "total_pages", "current_page", "next_page", "previous_page", "results"):
+        for key in (
+            "count",
+            "total_pages",
+            "current_page",
+            "next_page",
+            "previous_page",
+            "results",
+        ):
             self.assertIn(key, res.data)
         self.assertEqual(res.data["count"], 3)
         self.assertEqual(res.data["total_pages"], 2)
@@ -207,7 +246,9 @@ class ProductListFilterTests(ApiTestCase):
         from django.utils import timezone
 
         fixed = timezone.make_aware(timezone.datetime(2026, 1, 1, 12, 0, 0))
-        products.objects.update(created_at=fixed)  # identical timestamps -> id must break ties
+        products.objects.update(
+            created_at=fixed
+        )  # identical timestamps -> id must break ties
         res = self.client.get("/api/products/")
         self.assertEqual(
             [row["id"] for row in res.data["results"]],
@@ -276,18 +317,27 @@ class ProductWritePermissionTests(ApiTestCase):
         self.product = self.make_product(name="Rose Water")
 
     def _forbidden_for_anon_and_customer(self, method, payload=None):
-        for client_name, client in (("anon", self.fresh_client()), ("customer", self.fresh_client())):
+        for client_name, client in (
+            ("anon", self.fresh_client()),
+            ("customer", self.fresh_client()),
+        ):
             if client_name == "customer":
                 self.api_login("customer", client=client)
-            res = getattr(client, method.lower())(f"/api/products/{self.product.slug}/", payload, format="json")
+            res = getattr(client, method.lower())(
+                f"/api/products/{self.product.slug}/", payload, format="json"
+            )
             self.assertEqual(res.status_code, 403, (client_name, res.status_code))
             self.assertEqual(res.data["error"], "Administrator access is required.")
         self.product.refresh_from_db()
 
     def test_create_requires_staff(self):
         payload = {
-            "name": "New Perfume", "description": "desc", "price": "10.00",
-            "size": 30, "stock": 1, "category": "Floral",
+            "name": "New Perfume",
+            "description": "desc",
+            "price": "10.00",
+            "size": 30,
+            "stock": 1,
+            "category": "Floral",
         }
         res = self.fresh_client().post("/api/products/", payload, format="json")
         self.assertEqual(res.status_code, 403)
@@ -305,8 +355,12 @@ class ProductWritePermissionTests(ApiTestCase):
 
     def test_put_requires_staff(self):
         payload = {
-            "name": "Rose Water", "description": "updated", "price": "111.00",
-            "size": 50, "stock": 9, "category": "Floral",
+            "name": "Rose Water",
+            "description": "updated",
+            "price": "111.00",
+            "size": 50,
+            "stock": 9,
+            "category": "Floral",
         }
         self._forbidden_for_anon_and_customer("PUT", payload)
         client = self.fresh_client()
@@ -319,7 +373,9 @@ class ProductWritePermissionTests(ApiTestCase):
         self._forbidden_for_anon_and_customer("PATCH", {"price": "111.00"})
         client = self.fresh_client()
         self.api_login("staff", client=client)
-        res = client.patch(f"/api/products/{self.product.slug}/", {"price": "111.00"}, format="json")
+        res = client.patch(
+            f"/api/products/{self.product.slug}/", {"price": "111.00"}, format="json"
+        )
         self.assertEqual(res.status_code, 200, res.data)
         self.product.refresh_from_db()
         self.assertEqual(self.product.price, Decimal("111.00"))
@@ -339,17 +395,23 @@ class ProductWritePermissionTests(ApiTestCase):
         res = client.post("/api/products/", {"name": ""}, format="json")
         self.assertEqual(res.status_code, 400, res.data)
         self.assertIn("name", res.data["details"])
-        res = client.post("/api/products/", {"name": "X", "price": "not-a-number"}, format="json")
+        res = client.post(
+            "/api/products/", {"name": "X", "price": "not-a-number"}, format="json"
+        )
         self.assertEqual(res.status_code, 400, res.data)
         self.assertIn("price", res.data["details"])
 
     def test_staff_put_and_patch_invalid_payload_rejected_400(self):
         client = self.fresh_client()
         self.api_login("staff", client=client)
-        res = client.put(f"/api/products/{self.product.slug}/", {"name": ""}, format="json")
+        res = client.put(
+            f"/api/products/{self.product.slug}/", {"name": ""}, format="json"
+        )
         self.assertEqual(res.status_code, 400, res.data)
         self.assertIn("name", res.data["details"])
-        res = client.patch(f"/api/products/{self.product.slug}/", {"price": "nope"}, format="json")
+        res = client.patch(
+            f"/api/products/{self.product.slug}/", {"price": "nope"}, format="json"
+        )
         self.assertEqual(res.status_code, 400, res.data)
         self.assertIn("price", res.data["details"])
 
@@ -379,13 +441,25 @@ class ProductDetailTests(ApiTestCase):
         res = self.client.get(f"/api/products/{product.slug}/")
         self.assertEqual(
             set(res.data.keys()),
-            {"id", "name", "slug", "description", "price", "size", "stock", "category", "image", "created_at"},
+            {
+                "id",
+                "name",
+                "slug",
+                "description",
+                "price",
+                "size",
+                "stock",
+                "category",
+                "image",
+                "created_at",
+            },
         )
 
 
 # =====================================================================================
 # Manual stock adjustment feature (adjust_stock / StockMovement ledger)
 # =====================================================================================
+
 
 @tag("products")
 class AdjustStockTests(ApiTestCase):
@@ -618,16 +692,28 @@ class ProductAdminTests(ApiTestCase):
     """The customised product admin renders and its actions work."""
 
     def setUp(self):
-        User.objects.create_superuser("padmin", "padmin@example.com", "S3cure-Passphrase!")
-        self.assertTrue(self.client.login(username="padmin", password="S3cure-Passphrase!"))
+        User.objects.create_superuser(
+            "padmin", "padmin@example.com", "S3cure-Passphrase!"
+        )
+        self.assertTrue(
+            self.client.login(username="padmin", password="S3cure-Passphrase!")
+        )
         self.with_image = products.objects.create(
-            name="Imaged Rose", description="d", price="50.00", size=30,
-            stock=0, category="Floral",
+            name="Imaged Rose",
+            description="d",
+            price="50.00",
+            size=30,
+            stock=0,
+            category="Floral",
             image=SimpleUploadedFile("rose.png", TINY_PNG, content_type="image/png"),
         )
         self.plain = products.objects.create(
-            name="Plain Oud", description="d", price="60.00", size=30,
-            stock=3, category="Oriental",
+            name="Plain Oud",
+            description="d",
+            price="60.00",
+            size=30,
+            stock=3,
+            category="Oriental",
         )
 
     def _run_action(self, action, product, extra=None):
@@ -643,9 +729,9 @@ class ProductAdminTests(ApiTestCase):
         res = self.client.get("/admin/products/products/")
         self.assertEqual(res.status_code, 200)
         self.assertContains(res, self.with_image.name)
-        self.assertContains(res, "out of stock")   # stock 0 -> red flag branch
-        self.assertContains(res, "low (3)")        # stock 3 -> amber branch
-        self.assertContains(res, "rose_")          # thumbnail from the ImageField
+        self.assertContains(res, "out of stock")  # stock 0 -> red flag branch
+        self.assertContains(res, "low (3)")  # stock 3 -> amber branch
+        self.assertContains(res, "rose_")  # thumbnail from the ImageField
 
     def test_changelist_renders_inline_stock_next_to_price(self):
         """SPEC-20-11 [R-20.35]: `stock` is inline-editable beside `price`.
@@ -654,9 +740,9 @@ class ProductAdminTests(ApiTestCase):
         self.assertIn("stock", ProductAdmin.list_editable)
         res = self.client.get("/admin/products/products/")
         self.assertEqual(res.status_code, 200)
-        self.assertContains(res, 'name="form-0-price"')     # price still editable
-        self.assertContains(res, 'name="form-0-stock"')     # ... and stock with it
-        self.assertContains(res, 'class="field-stock"')     # column still labelled
+        self.assertContains(res, 'name="form-0-price"')  # price still editable
+        self.assertContains(res, 'name="form-0-stock"')  # ... and stock with it
+        self.assertContains(res, 'class="field-stock"')  # column still labelled
 
     def test_changelist_bulk_save_of_price_leaves_stock_ledger_free(self):
         """A price-only inline save never touches inventory: the stock cell is
@@ -683,8 +769,8 @@ class ProductAdminTests(ApiTestCase):
         self.assertEqual(res.status_code, 200)
         self.plain.refresh_from_db()
         self.assertEqual(self.plain.price, Decimal("77.00"))  # sanctioned edit applied
-        self.assertEqual(self.plain.stock, 3)                 # stock untouched
-        self.assertEqual(StockMovement.objects.count(), 0)    # no mutation, no movement
+        self.assertEqual(self.plain.stock, 3)  # stock untouched
+        self.assertEqual(StockMovement.objects.count(), 0)  # no mutation, no movement
 
     def test_change_page_stock_is_display_only_add_page_keeps_input(self):
         """SPEC-6-02 (audit cycle-2 probe): the change page's `stock` input
@@ -721,18 +807,22 @@ class ProductAdminTests(ApiTestCase):
         self.assertEqual(res.status_code, 200)
         self.plain.refresh_from_db()
         self.assertEqual(self.plain.price, Decimal("88.00"))  # sanctioned edit applied
-        self.assertEqual(self.plain.stock, 3)                 # stock untouched
-        self.assertEqual(StockMovement.objects.count(), 0)    # no mutation, no movement
+        self.assertEqual(self.plain.stock, 3)  # stock untouched
+        self.assertEqual(StockMovement.objects.count(), 0)  # no mutation, no movement
 
     def test_change_page_renders_with_movement_inline_and_preview(self):
-        self.with_image.adjust_stock(None, 7, StockMovement.Reason.RESTOCK, "initial fill")
+        self.with_image.adjust_stock(
+            None, 7, StockMovement.Reason.RESTOCK, "initial fill"
+        )
 
         # with an image: preview renders the stored file
         res = self.client.get(f"/admin/products/products/{self.with_image.id}/change/")
         self.assertEqual(res.status_code, 200)
         self.assertContains(res, "Inventory history (all mutations)")
         self.assertContains(res, "rose_")
-        self.assertContains(res, "Imaged Rose: +7 (restock)")  # movement __str__ in the inline
+        self.assertContains(
+            res, "Imaged Rose: +7 (restock)"
+        )  # movement __str__ in the inline
 
         # without an image: the empty-preview branch
         res = self.client.get(f"/admin/products/products/{self.plain.id}/change/")
@@ -750,7 +840,12 @@ class ProductAdminTests(ApiTestCase):
         res = self._run_action(
             "adjust_stock",
             self.plain,
-            {"apply": "1", "delta": "20", "reason": "restock", "note": "supplier delivery"},
+            {
+                "apply": "1",
+                "delta": "20",
+                "reason": "restock",
+                "note": "supplier delivery",
+            },
         )
         self.assertEqual(res.status_code, 200)
         self.plain.refresh_from_db()
@@ -796,8 +891,16 @@ class ProductAdminTests(ApiTestCase):
 # =====================================================================================
 
 EXPECTED_PRODUCT_FIELDS = [
-    "id", "name", "slug", "description", "price", "size", "stock",
-    "category", "image", "created_at",
+    "id",
+    "name",
+    "slug",
+    "description",
+    "price",
+    "size",
+    "stock",
+    "category",
+    "image",
+    "created_at",
 ]
 
 
@@ -835,9 +938,7 @@ class IsAdminUserOrReadOnlyUnitTests(ApiTestCase):
                         str(ctx.exception), "Administrator access is required."
                     )
                 staff_request = self._request(method, self.staff)
-                self.assertTrue(
-                    self.permission.has_permission(staff_request, None)
-                )
+                self.assertTrue(self.permission.has_permission(staff_request, None))
 
 
 @tag("products")
@@ -942,9 +1043,7 @@ class ProductCapabilityGateRoleTests(ApiTestCase):
         self.assertEqual(
             client.get(f"/api/products/{self.product.slug}/").status_code, 200
         )
-        res = client.post(
-            "/api/products/", self._write_payload("Sneak"), format="json"
-        )
+        res = client.post("/api/products/", self._write_payload("Sneak"), format="json")
         self.assertEqual(res.status_code, 403, res.data)
         self.assertEqual(res.data["error"], "Administrator access is required.")
         self.assertFalse(products.objects.filter(name="Sneak").exists())
@@ -1036,9 +1135,9 @@ class ProductSerializerFieldsTests(ApiTestCase):
         product = self.make_product()
         self.assertTrue(ProductSerializer(product).fields["stock"].read_only)
         self.assertTrue(
-            ProductSerializer(
-                product, data={"name": "Renamed"}, partial=True
-            ).fields["stock"].read_only
+            ProductSerializer(product, data={"name": "Renamed"}, partial=True)
+            .fields["stock"]
+            .read_only
         )
 
 
@@ -1060,22 +1159,26 @@ class ProductStockEditLedgerGuardTests(ApiTestCase):
         )
         self.assertEqual(res.status_code, 200, res.data)
         self.product.refresh_from_db()
-        self.assertEqual(self.product.stock, 10)             # edit ignored
-        self.assertEqual(StockMovement.objects.count(), 0)   # no mutation, no row
+        self.assertEqual(self.product.stock, 10)  # edit ignored
+        self.assertEqual(StockMovement.objects.count(), 0)  # no mutation, no row
 
     def test_put_with_stock_is_ignored_and_writes_no_movement(self):
         res = self.client.put(
             f"/api/products/{self.product.slug}/",
             {
-                "name": "Rose Water", "description": "desc", "price": "499.99",
-                "size": 50, "stock": 999, "category": "Floral",
+                "name": "Rose Water",
+                "description": "desc",
+                "price": "499.99",
+                "size": 50,
+                "stock": 999,
+                "category": "Floral",
             },
             format="json",
         )
         self.assertEqual(res.status_code, 200, res.data)
         self.product.refresh_from_db()
-        self.assertEqual(self.product.stock, 10)             # edit ignored
-        self.assertEqual(StockMovement.objects.count(), 0)   # no mutation, no row
+        self.assertEqual(self.product.stock, 10)  # edit ignored
+        self.assertEqual(StockMovement.objects.count(), 0)  # no mutation, no row
 
     def test_update_response_still_reports_stock(self):
         """`stock` keeps its place in the public payload; only its
@@ -1092,8 +1195,12 @@ class ProductStockEditLedgerGuardTests(ApiTestCase):
         res = self.client.post(
             "/api/products/",
             {
-                "name": "Opening Balance", "description": "desc",
-                "price": "10.00", "size": 30, "stock": 42, "category": "Floral",
+                "name": "Opening Balance",
+                "description": "desc",
+                "price": "10.00",
+                "size": 30,
+                "stock": 42,
+                "category": "Floral",
             },
             format="json",
         )
@@ -1256,9 +1363,7 @@ class StockReservationModelTests(ApiTestCase):
         field = StockReservation._meta.get_field("status")
         self.assertEqual(field.choices, StockReservation.Status.choices)
         self.assertEqual(field.get_default(), StockReservation.Status.ACTIVE)
-        self.assertEqual(
-            self.make_reservation().status, StockReservation.Status.ACTIVE
-        )
+        self.assertEqual(self.make_reservation().status, StockReservation.Status.ACTIVE)
 
     def test_fk_targets_follow_the_cross_app_string_pattern(self):
         """product resolves in-app; order and owner use the file's existing
@@ -1336,9 +1441,7 @@ class StockReservationModelTests(ApiTestCase):
         expiry, are all out of scope — only the stale active hold is
         matched. This is the query shape the (status, expires_at) index
         serves."""
-        stale = self.make_reservation(
-            expires_at=timezone.now() - timedelta(seconds=1)
-        )
+        stale = self.make_reservation(expires_at=timezone.now() - timedelta(seconds=1))
         self.make_reservation(expires_at=timezone.now() + timedelta(hours=1))
         for status in (
             StockReservation.Status.CONVERTED,
@@ -1440,8 +1543,12 @@ class ImageUploadSizeCapTests(ApiTestCase):
 
     def test_oversized_api_upload_is_rejected_400(self):
         payload = {
-            "name": "Too Big", "description": "d", "price": "10.00",
-            "size": 30, "stock": 1, "category": "Floral",
+            "name": "Too Big",
+            "description": "d",
+            "price": "10.00",
+            "size": 30,
+            "stock": 1,
+            "category": "Floral",
             "image": self._png(settings.MAX_UPLOAD_MB * 1024 * 1024 + 1),
         }
         res = self.client.post("/api/products/", payload, format="multipart")
@@ -1452,8 +1559,12 @@ class ImageUploadSizeCapTests(ApiTestCase):
 
     def test_boundary_api_upload_passes(self):
         payload = {
-            "name": "Exactly At Cap", "description": "d", "price": "10.00",
-            "size": 30, "stock": 1, "category": "Floral",
+            "name": "Exactly At Cap",
+            "description": "d",
+            "price": "10.00",
+            "size": 30,
+            "stock": 1,
+            "category": "Floral",
             # Cap minus the TINY_PNG header already in the buffer: the file
             # body lands exactly at the limit, and `>` (not `>=`) admits it.
             "image": self._png(settings.MAX_UPLOAD_MB * 1024 * 1024 - len(TINY_PNG)),
@@ -1464,8 +1575,12 @@ class ImageUploadSizeCapTests(ApiTestCase):
 
     def test_no_image_payload_still_passes(self):
         payload = {
-            "name": "No Image", "description": "d", "price": "10.00",
-            "size": 30, "stock": 1, "category": "Floral",
+            "name": "No Image",
+            "description": "d",
+            "price": "10.00",
+            "size": 30,
+            "stock": 1,
+            "category": "Floral",
         }
         res = self.client.post("/api/products/", payload, format="multipart")
         self.assertEqual(res.status_code, 201, res.data)
@@ -1481,8 +1596,12 @@ class ImageUploadSizeCapTests(ApiTestCase):
     def test_env_override_tightens_the_cap(self):
         with override_settings(MAX_UPLOAD_MB=1):
             payload = {
-                "name": "Tighter Cap", "description": "d", "price": "10.00",
-                "size": 30, "stock": 1, "category": "Floral",
+                "name": "Tighter Cap",
+                "description": "d",
+                "price": "10.00",
+                "size": 30,
+                "stock": 1,
+                "category": "Floral",
                 "image": self._png(1024 * 1024 + 1),
             }
             res = self.client.post("/api/products/", payload, format="multipart")
@@ -1496,8 +1615,12 @@ class ImageUploadSizeCapTests(ApiTestCase):
         res = admin_client.post(
             f"/admin/products/products/{product.id}/change/",
             {
-                "name": "Admin Rose", "description": "d", "price": "10.00",
-                "size": 30, "stock": 1, "category": "Floral",
+                "name": "Admin Rose",
+                "description": "d",
+                "price": "10.00",
+                "size": 30,
+                "stock": 1,
+                "category": "Floral",
                 "products-stockmovement_set-TOTAL_FORMS": "0",
                 "products-stockmovement_set-INITIAL_FORMS": "0",
                 "products-stockmovement_set-MIN_NUM_FORMS": "0",

@@ -6,7 +6,6 @@ from django.db import migrations, models
 
 
 class Migration(migrations.Migration):
-
     dependencies = [
         ("orders", "0014_order_payment_method_alter_orderstatusevent_trigger"),
         migrations.swappable_dependency(settings.AUTH_USER_MODEL),

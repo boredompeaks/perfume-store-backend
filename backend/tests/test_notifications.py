@@ -17,6 +17,7 @@
   total, frontend URL) on ``verify_payment`` success, with a failing send
   leaving the captured payment confirmed. locmem backend only — no network.
 """
+
 from decimal import Decimal
 from unittest import mock
 

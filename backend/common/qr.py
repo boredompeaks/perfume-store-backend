@@ -20,6 +20,7 @@ Rendering parameters are code constants, not env config (same reasoning as
 the TOTP step/digits in totp.py): they change how big the picture is, and a
 deployment that could mis-tune them could ship an unscannable code.
 """
+
 import base64
 import io
 

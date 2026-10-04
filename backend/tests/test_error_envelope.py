@@ -8,6 +8,7 @@ consistency, not a literal shape, so the single envelope shape
 backend emits: ad-hoc ``{"error": ...}`` view returns, DRF exception bodies
 (``{"detail": ...}``) and serializer field-error mappings alike.
 """
+
 import json
 from decimal import Decimal
 from unittest.mock import patch

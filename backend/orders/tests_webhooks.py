@@ -24,7 +24,6 @@ from django.core import mail
 from django.db import IntegrityError
 from django.test import override_settings
 from django.utils import timezone
-
 from rest_framework.permissions import AllowAny
 
 from common.models import AuditEvent
@@ -557,7 +556,9 @@ class RefundEventTests(WebhookTestCase):
         self.assertIsNone(order.refunded_at)
 
     def test_provider_spelling_of_a_settled_refund_is_also_recorded(self):
-        order = self.make_pending_order(gateway_payment="pay_TEST9")
+        # The pending order is the fixture this delivery is delivered TO; the
+        # binding was never read, so the call stays and the name goes.
+        self.make_pending_order(gateway_payment="pay_TEST9")
 
         response = self.deliver(
             {
@@ -674,7 +675,7 @@ class MalformedDeliveryTests(WebhookTestCase):
         self.assertIsNone(order.razorpay_payment_id)
 
     def test_oversized_refund_reference_is_recorded_with_no_reference(self):
-        order = self.make_pending_order(gateway_payment="pay_TEST9")
+        self.make_pending_order(gateway_payment="pay_TEST9")
         oversized = "pay_" + (
             "Z" * PaymentEvent._meta.get_field("gateway_payment_id").max_length
         )

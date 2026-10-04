@@ -1,4 +1,5 @@
 """Cart unit tests - docs/test-gaps.md items 23-29."""
+
 import unittest
 from datetime import timedelta
 from decimal import Decimal
@@ -12,7 +13,12 @@ from rest_framework.settings import api_settings
 from rest_framework.throttling import ScopedRateThrottle
 
 from cart.models import Cart, CartItem
-from cart.views import CartMutationRateThrottle, cart_coupon, cart_detail, cart_item_detail
+from cart.views import (
+    CartMutationRateThrottle,
+    cart_coupon,
+    cart_detail,
+    cart_item_detail,
+)
 from common.testing import ApiTestCase
 from orders.models import Order
 
@@ -44,7 +50,10 @@ class CartAddItemTests(ApiTestCase):
     def _add(self, quantity, product_id=None):
         return self.client.post(
             "/api/cart/",
-            {"product_id": product_id if product_id is not None else self.product.id, "quantity": quantity},
+            {
+                "product_id": product_id if product_id is not None else self.product.id,
+                "quantity": quantity,
+            },
             format="json",
         )
 
@@ -64,7 +73,9 @@ class CartAddItemTests(ApiTestCase):
         self.assertEqual(res.data["items"][0]["product"]["name"], self.product.name)
 
     def test_add_item_defaults_to_quantity_one(self):
-        res = self.client.post("/api/cart/", {"product_id": self.product.id}, format="json")
+        res = self.client.post(
+            "/api/cart/", {"product_id": self.product.id}, format="json"
+        )
         self.assertEqual(res.status_code, 201, res.data)
         self.assertEqual(CartItem.objects.get().quantity, 1)
 
@@ -99,9 +110,21 @@ class CartAddItemTests(ApiTestCase):
             ({"quantity": 1}, 400, "product_id is required"),
             ({"product_id": 999999}, 404, "Product not found"),
             ({"product_id": "not-a-number"}, 404, "Product not found"),
-            ({"product_id": self.product.id, "quantity": "abc"}, 400, "Quantity must be a number"),
-            ({"product_id": self.product.id, "quantity": 0}, 400, "Quantity must be greater than 0"),
-            ({"product_id": self.product.id, "quantity": -2}, 400, "Quantity must be greater than 0"),
+            (
+                {"product_id": self.product.id, "quantity": "abc"},
+                400,
+                "Quantity must be a number",
+            ),
+            (
+                {"product_id": self.product.id, "quantity": 0},
+                400,
+                "Quantity must be greater than 0",
+            ),
+            (
+                {"product_id": self.product.id, "quantity": -2},
+                400,
+                "Quantity must be greater than 0",
+            ),
         ]
         for payload, expected_status, expected_error in cases:
             with self.subTest(payload=payload):
@@ -166,7 +189,9 @@ class CartItemDeleteTests(ApiTestCase):
 
         self.assertEqual(res.status_code, 200, res.data)
         self.assertEqual(CartItem.objects.count(), 1)
-        self.assertEqual([row["product"]["id"] for row in res.data["items"]], [self.other.id])
+        self.assertEqual(
+            [row["product"]["id"] for row in res.data["items"]], [self.other.id]
+        )
 
     def test_delete_unknown_item_returns_404(self):
         res = self.client.delete("/api/cart/999999/")
@@ -190,9 +215,13 @@ class CrossSessionIsolationTests(ApiTestCase):
         owned_item = CartItem.objects.get()
 
         attacker = self.fresh_client()
-        self.assertEqual(attacker.get("/api/cart/").status_code, 200)  # own session/cart
+        self.assertEqual(
+            attacker.get("/api/cart/").status_code, 200
+        )  # own session/cart
 
-        res = attacker.patch(f"/api/cart/{owned_item.id}/", {"quantity": 1}, format="json")
+        res = attacker.patch(
+            f"/api/cart/{owned_item.id}/", {"quantity": 1}, format="json"
+        )
         self.assertEqual(res.status_code, 404, res.data)
         self.assertEqual(res.data["error"], "Cart item not found")
 

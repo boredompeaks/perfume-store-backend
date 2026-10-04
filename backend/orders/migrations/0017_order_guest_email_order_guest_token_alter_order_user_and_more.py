@@ -6,34 +6,58 @@ from django.db import migrations, models
 
 
 class Migration(migrations.Migration):
-
     dependencies = [
-        ('orders', '0016_alter_orderstatusevent_trigger_paymentevent'),
+        ("orders", "0016_alter_orderstatusevent_trigger_paymentevent"),
         migrations.swappable_dependency(settings.AUTH_USER_MODEL),
     ]
 
     operations = [
         migrations.AddField(
-            model_name='order',
-            name='guest_email',
-            field=models.EmailField(blank=True, default='', max_length=254),
+            model_name="order",
+            name="guest_email",
+            field=models.EmailField(blank=True, default="", max_length=254),
         ),
         migrations.AddField(
-            model_name='order',
-            name='guest_token',
+            model_name="order",
+            name="guest_token",
             field=models.CharField(blank=True, max_length=64, null=True, unique=True),
         ),
         migrations.AlterField(
-            model_name='order',
-            name='user',
-            field=models.ForeignKey(blank=True, null=True, on_delete=django.db.models.deletion.CASCADE, related_name='orders', to=settings.AUTH_USER_MODEL),
+            model_name="order",
+            name="user",
+            field=models.ForeignKey(
+                blank=True,
+                null=True,
+                on_delete=django.db.models.deletion.CASCADE,
+                related_name="orders",
+                to=settings.AUTH_USER_MODEL,
+            ),
         ),
         migrations.AddConstraint(
-            model_name='order',
-            constraint=models.UniqueConstraint(condition=models.Q(('user__isnull', True)), fields=('guest_email', 'idempotency_key'), name='orders_guest_idem_key_uidx'),
+            model_name="order",
+            constraint=models.UniqueConstraint(
+                condition=models.Q(("user__isnull", True)),
+                fields=("guest_email", "idempotency_key"),
+                name="orders_guest_idem_key_uidx",
+            ),
         ),
         migrations.AddConstraint(
-            model_name='order',
-            constraint=models.CheckConstraint(condition=models.Q(models.Q(('guest_email__gt', ''), ('guest_token__isnull', False), ('user__isnull', True)), models.Q(('guest_email', ''), ('guest_token__isnull', True), ('user__isnull', False)), _connector='OR'), name='orders_account_xor_guest_ck'),
+            model_name="order",
+            constraint=models.CheckConstraint(
+                condition=models.Q(
+                    models.Q(
+                        ("guest_email__gt", ""),
+                        ("guest_token__isnull", False),
+                        ("user__isnull", True),
+                    ),
+                    models.Q(
+                        ("guest_email", ""),
+                        ("guest_token__isnull", True),
+                        ("user__isnull", False),
+                    ),
+                    _connector="OR",
+                ),
+                name="orders_account_xor_guest_ck",
+            ),
         ),
     ]

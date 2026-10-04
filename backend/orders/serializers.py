@@ -1,49 +1,49 @@
 from rest_framework import serializers
 
-from .models import Order, OrderItem, Coupon, ReturnRequest
-
+from .models import Coupon, Order, OrderItem, ReturnRequest
 
 # ==================================
 # Order Item Serializer
 # ==================================
 
-class OrderItemSerializer(serializers.ModelSerializer):
 
+class OrderItemSerializer(serializers.ModelSerializer):
     subtotal = serializers.ReadOnlyField()
 
     class Meta:
         model = OrderItem
 
         fields = [
-            'id',
-            'product',
-            'product_name',
-            'sku',
-            'variant_name',
-            'price',
-            'quantity',
-            'subtotal',
+            "id",
+            "product",
+            "product_name",
+            "sku",
+            "variant_name",
+            "price",
+            "quantity",
+            "subtotal",
             # [R-8.11] Denomination of price/subtotal — the label rides the
             # money wherever the money is exposed. Read-only: currency is
             # minted at creation from store config, never client-chosen.
-            'currency',
+            "currency",
         ]
 
         read_only_fields = [
-            'id',
-            'product',
-            'product_name',
-            'sku',
-            'variant_name',
-            'price',
-            'subtotal',
-            'currency',
+            "id",
+            "product",
+            "product_name",
+            "sku",
+            "variant_name",
+            "price",
+            "subtotal",
+            "currency",
         ]
 
 
 # ==================================
 # Order Serializer
 # ==================================
+
 
 class OrderSerializer(serializers.ModelSerializer):
     """[R-8.5] Identifier-exposure strategy: the sequential ``id`` stays the
@@ -61,13 +61,8 @@ class OrderSerializer(serializers.ModelSerializer):
     detail or admin read.
     """
 
-    items = OrderItemSerializer(
-        many=True,
-        read_only=True
-    )
-    coupon = serializers.StringRelatedField(
-        read_only=True
-    )
+    items = OrderItemSerializer(many=True, read_only=True)
+    coupon = serializers.StringRelatedField(read_only=True)
     # [R-1.07] SPEC-1-B05: the delivery option by its client-facing CODE, so
     # the storefront can echo the option it priced and never learns a row id.
     # Read-only like the money it rides with: checkout prices the option and
@@ -81,42 +76,41 @@ class OrderSerializer(serializers.ModelSerializer):
         model = Order
 
         fields = [
-            'id',
-            'order_number',
-            'user',
+            "id",
+            "order_number",
+            "user",
             # [R-1.13] The guest's own address, so a guest order names a
             # customer on the staff reads that a customer order gets. Read
             # only like `user`: identity is settled at checkout, never
             # client-chosen afterwards. Empty string on an account order.
             "guest_email",
-            'full_name',
-            'phone',
-            'address',
-            'city',
-            'state',
-            'pincode',
-            'status',
+            "full_name",
+            "phone",
+            "address",
+            "city",
+            "state",
+            "pincode",
+            "status",
             # [R-10.1] The explicit lifecycle dimensions (spec 10.2) ride
             # every order read beside the legacy ``status`` they mirror.
             # Read-only like status itself: dimensions are machine-maintained.
-            'payment_status',
-            'fulfilment_status',
+            "payment_status",
+            "fulfilment_status",
             # [R-10.2] SPEC-10-04: how the order intends to pay rides every
             # order read beside the dimensions. Read-only: the marker is
             # machine-maintained (checkout's COD input is a checkout-
             # section row; nothing client-writable today).
-            'payment_method',
-
-            'coupon',
-            'discount_amount',
-            'total_amount',
+            "payment_method",
+            "coupon",
+            "discount_amount",
+            "total_amount",
             # [R-1.07] SPEC-1-B05: what this order was charged to deliver it.
             # The amount is the money record (it stays exactly as priced even
             # if the method is retired later); the method is the label, and it
             # is null on an order priced when the store had no shipping
             # configured - which is a real zero charge, never a missing one.
-            'shipping_method',
-            'shipping_amount',
+            "shipping_method",
+            "shipping_amount",
             # [R-8.13] The frozen delivery-option label. It rides every order
             # read so a hard-deleted ShippingMethod does not make a historical
             # order unreadable: `shipping_method` goes null, this keeps naming
@@ -127,53 +121,53 @@ class OrderSerializer(serializers.ModelSerializer):
             # [R-8.11] The denomination of total_amount/discount_amount is
             # exposed beside them (checkout, dedup replay, and order reads
             # all serialize through here). Read-only like the money itself.
-            'currency',
-
-            'items',
-            'created_at',
-            'updated_at',
+            "currency",
+            "items",
+            "created_at",
+            "updated_at",
             # [R-8.16] The business-event timeline rides every order read
             # (checkout, dedup replay, list/detail). Read-only like the
             # events themselves: a client can never claim an event happened.
-            'paid_at',
-            'fulfilled_at',
-            'shipped_at',
-            'delivered_at',
-            'cancelled_at',
-            'refunded_at',
+            "paid_at",
+            "fulfilled_at",
+            "shipped_at",
+            "delivered_at",
+            "cancelled_at",
+            "refunded_at",
         ]
 
         read_only_fields = [
-            'id',
-            'order_number',
-            'user',
+            "id",
+            "order_number",
+            "user",
             "guest_email",
-            'status',
-            'payment_status',
-            'fulfilment_status',
-            'payment_method',
-            'coupon',
-            'discount_amount',
-            'total_amount',
-            'shipping_method',
-            'shipping_amount',
+            "status",
+            "payment_status",
+            "fulfilment_status",
+            "payment_method",
+            "coupon",
+            "discount_amount",
+            "total_amount",
+            "shipping_method",
+            "shipping_amount",
             "shipping_method_code",
-            'currency',
-            'items',
-            'created_at',
-            'updated_at',
-            'paid_at',
-            'fulfilled_at',
-            'shipped_at',
-            'delivered_at',
-            'cancelled_at',
-            'refunded_at',
+            "currency",
+            "items",
+            "created_at",
+            "updated_at",
+            "paid_at",
+            "fulfilled_at",
+            "shipped_at",
+            "delivered_at",
+            "cancelled_at",
+            "refunded_at",
         ]
 
 
 # ==================================
 # Return Request Serializer
 # ==================================
+
 
 class ReturnRequestSerializer(serializers.ModelSerializer):
     """[R-1.16] SPEC-1-B07b: ONE customer-facing projection of a return request.
@@ -233,21 +227,21 @@ class ReturnRequestSerializer(serializers.ModelSerializer):
 # Coupon Serializer
 # ==================================
 
-class CouponSerializer(serializers.ModelSerializer):
 
+class CouponSerializer(serializers.ModelSerializer):
     class Meta:
         model = Coupon
 
         fields = [
-            'id',
-            'code',
-            'discount_type',
-            'discount_value',
-            'minimum_order_amount',
-            'maximum_discount',
-            'active',
-            'valid_from',
-            'valid_until',
-            'usage_limit',
-            'used_count',
+            "id",
+            "code",
+            "discount_type",
+            "discount_value",
+            "minimum_order_amount",
+            "maximum_discount",
+            "active",
+            "valid_from",
+            "valid_until",
+            "usage_limit",
+            "used_count",
         ]
