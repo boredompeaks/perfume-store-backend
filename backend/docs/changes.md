@@ -1685,3 +1685,61 @@ Two existing tests were adjusted rather than added to: every crossing is wrapped
 **P2, latent test-harness defect.** `orders.tests.CurrencyBackfillMigrationTests` and `LifecycleBackfillMigrationTests` run `migrate orders 0007` / `0011`, which unapplies `products/0009+` through its dependency on `orders/0014`; the full `migrate` they restore with does not put those tables back, so afterwards `products_restocknotification` **does not exist**. Any `products` test that runs in the same invocation after them fails in `setUp` with `no such table: products_restocknotification`. Nothing in the suite was affected before this change only because every `products` test is a `TestCase`, and those all run before the `TransactionTestCase` group. The direct instrument for "no transaction spans the send" (a real commit, i.e. a `TransactionTestCase`) is therefore unavailable in this suite, which is why the lock assertion is made against Django's atomic stack instead. Fixing it means changing `orders/tests.py`, outside this task's scope and against the certified PostgreSQL floor.
 
 **Accepted trade, stated in the code.** A process killed between the claim and the send leaves the row spent with no mail behind it; the next sell-out re-arms it. Closing that window needs a real worker with its own retry (ASYNC-2c). And `on_commit` still fires inside the request/response cycle, so this response's own latency is unchanged: on the two paths above, what is gone is other requests blocking behind our locks.
+
+## ASYNC-2c1 (2026-10-04) — the durable notification outbox: substrate only, no site converted
+
+ASYNC-2b2's own limit was the reason this task exists: `on_commit` releases the locks but still fires **inside the request/response cycle**, a send failure is still swallowed with no retry, and a process that dies between commit and callback loses the notification outright with nothing raised. This is the first half of the fix — the queue. **There is no worker yet, and no live call site was converted.**
+
+### The sizing decision that shapes everything else
+
+`dispatch` and `dispatch_on_commit` are untouched, and so is every caller. Converting a site to `enqueue` before a drain loop exists would mean the notification is **silently never delivered** — a dark regression a green suite would not catch, because the test asserting "an email was sent" would have had to be rewritten to count queue rows instead. So the substrate is landed unused and fully tested, and the conversion is ASYNC-2c3, which only becomes safe once ASYNC-2c2 adds the worker. The last test class in the new module pins exactly this: the payment path still delivers mail **and** leaves the outbox empty.
+
+### What a row holds, and how it is re-read
+
+A queue row outlives the request that wrote it, so nothing instance-shaped can go in it. `serialize_context` reduces every context value to a **model label plus primary key** for a model, and to JSON-native scalars otherwise: a `Decimal` becomes its **string** form (never a float), a lazily-evaluated translation string is forced at enqueue rather than resolved against whatever language the draining process runs with, and over-long text is bounded and marked as cut. `resolve_context` does the reverse at drain time, re-reading each reference from the database.
+
+**The subject is built at drain, never at enqueue.** Nothing pre-rendered is stored — no subject, no template name, no `settings.FRONTEND_URL` snapshot — so the handler receives a live row and builds the subject from current state, exactly as on the inline path. A queue that stored a rendered subject would freeze the order number and total as of the request, and would freeze the configured frontend URL too.
+
+**A row that has since been deleted, or whose label left the registry, or whose stored primary key no longer addresses its column, raises `UnresolvableNotification`** — a `LookupError` subclass, one defined outcome for all three, so a drain loop can catch it and close the row out instead of dying mid-batch on a notification whose subject no longer exists.
+
+### In the caller's transaction, and why that is the opposite of `dispatch_on_commit`'s placement
+
+`enqueue` writes the row **inside** the caller's `transaction.atomic()` block. `dispatch_on_commit` defers because a *send* is external and cannot be undone, so emailing before commit would notify about a transaction that may still roll back. `enqueue` only writes a row, and deferring that write would reintroduce the exact window the task exists to remove: commit succeeds, the process dies before the callback runs, the row is never created, and the customer is owed a confirmation that exists nowhere. The insert holds no socket and adds no lock wait, so there is nothing to gain by deferring it.
+
+**A failed enqueue propagates — deliberately the opposite of `dispatch`, which logs and swallows.** `dispatch` swallows because an SMTP outage cannot be rolled back with the transaction; a failure to write this row means the transaction cannot record what it owes, and swallowing it would produce precisely the dual write being removed. The honest cost: an unapplied outbox table turns every converted call site into a visible 500 until migrations run, which is the trade this task makes.
+
+### The at-least-once guard, and what it is not
+
+`dedup_key` is the event type plus the label and primary key of every referenced row — `order.paid` about `orders.order:7` is the same notification forever, so a retried hook or the second of two paths firing for one event collides on the unique constraint instead of emailing twice. Mutable state is excluded on purpose: a key built from the order's total or its rendered subject would change the moment anything was corrected between the enqueue and the retry, and the duplicate would sail through. **The queue is at-least-once, not exactly-once** — a drain loop that dies between sending and stamping must send again, and this key is how it recognises a row it already handled, not a promise of one email per customer.
+
+### Floors (both engines; failures read from the `FAILED (failures=N)` line)
+
+| | SQLite | PostgreSQL 17 |
+|---|---|---|
+| before this change | `Ran 1797 / OK / xf 4 / 100.00% / 8934 stmts` | `Ran 1797 / FAILED (failures=6, errors=1) / xf 4 / 8934 stmts` |
+| after this change | `Ran 1819 / OK / xf 4 / 100.00% / 9015 stmts` | `Ran 1819 / FAILED (failures=6, errors=1) / xf 4 / 9015 stmts` |
+
+Both floors re-measured in this session, before and after. `expected failures=4` on both, unmoved. `makemigrations --check` prints "No changes detected", exit 0. The `scripts` gate: `Ran 167`, `OK`.
+
+### Tests that can fail, and how that was checked
+
+Two mutations were run against the new module and reverted, and each was caught by the test that names the mechanism:
+
+- **Enqueue moved onto `transaction.on_commit`** — `FAILED (failures=7, errors=5)`, among them `test_the_row_is_written_inside_the_caller_transaction`, which asserts the row is visible *before* the block exits and deliberately does not wrap itself in `captureOnCommitCallbacks`.
+- **The dedup key derived from the serialised payload** (so it moves when the order is corrected) — `FAILED (errors=2)`, exactly the two dedup tests.
+
+A third defect was found without any mutation: the reference check in the resolver originally sat *after* the generic mapping recursion, so a reference was walked through and handed back unresolved. The first run gave `FAILED (failures=5, errors=2)`; five of those failures and one of those errors were this, and the other error was a missing field in the new fixture, not the defect. The check now runs first, and a nested-reference test drives both recursion branches — those two lines were the only part of the new code the first coverage run left uncovered.
+
+The committed-row proof uses `TransactionTestCase`, because `TestCase`'s wrapper rolls everything back and cannot show a row that survived a real COMMIT. ASYNC-2b2 recorded a P2 in which the migration-drill `TransactionTestCase` classes unapply a table a later suite depends on; the group ordering means a further `TransactionTestCase` cannot make that worse, and both engines were run end to end after this one was added.
+
+Three of the new tests are weaker than the rest and are named here rather than left to read as more than they are. The pending-state test pins the storage defaults and the row's string form; it cannot fail against a wrong *enqueue*, only against a wrong default. The distinct-rows test guards against over-collapsing keys, not against a key carrying a per-row nonce. The non-mapping test asserts the serialiser directly, because `enqueue` normalises its argument before calling it and would otherwise be unreachable with a broken context.
+
+### Found, not fixed
+
+**P3, the payload is not sanitised and that is a decision, not an oversight.** The outbox payload deliberately does **not** go through the audit trail's credential-field scrubber: the accounts verification and reset emails are built out of exactly the token material that scrubber drops, and dropping it would break the mail this queue exists to deliver. The consequence is that a queued payload can hold a one-time token or personal data, so outbox rows need a retention and deletion story of their own rather than inheriting the audit trail's. That belongs with the call-site conversions in ASYNC-2c3.
+
+**P3, the table is inert until the next two tasks.** Nothing calls `enqueue` yet — the conversion is ASYNC-2c3 — so as shipped the table is empty and no notification is waiting anywhere. Once a site is converted, its rows sit undelivered until ASYNC-2c2 lands the drain loop, which is why the conversion is not part of this change. An event with no registered handler writes no row at all, so that backlog is limited to events that already have a handler.
+
+**Formatting.** `black --check` (26.5.1, not `--quiet`) on the three hand-written files this change adds or edits prints "3 files would be left unchanged", exit 0. The generated migration would be reformatted, exit 1, and was left as Django emitted it — the same pre-existing condition as the other generated migrations in the repo, and not charged here.
+
+| 2026-10-04 | ASYNC-2c1 | builder | `common/models.py`, `common/notifications.py`, `common/migrations/0007_notificationoutbox.py`, one new test module under `backend/tests/`, `backend/docs/changes.md` | Add the durable `NotificationOutbox` model and the `enqueue`/`serialize_context`/`resolve_context` substrate so a committed order leaves a notification row behind, storing only labels, primary keys and scalars and re-reading them at drain time; deliberately no live call site converted, so nothing is silently undelivered before the ASYNC-2c2 worker exists | 1819 tests OK (xf 4), cov 100.00% | frontend: n/a | shipped |

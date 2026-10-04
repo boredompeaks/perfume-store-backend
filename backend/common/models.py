@@ -14,6 +14,12 @@ Events are written by ``AuditEvent.record`` inside the same
 ``transaction.atomic()`` block as the side effect they record (the
 ``StockMovement`` ledger pattern from SPEC-6-02), so trail and effect
 commit or roll back together and can never disagree.
+
+``NotificationOutbox`` joins it in ASYNC-2c1 on the same principle, for the
+other half of a business event: the notification a customer is owed. The
+audit trail records what the system did; the outbox records what it still
+owes a person, and — for the same reason — commits or rolls back with the
+write that earned it.
 """
 
 import logging
@@ -221,6 +227,82 @@ class AuditEvent(models.Model):
         raise ValueError(
             "AuditEvent rows are append-only: deleting an event is forbidden."
         )
+
+
+class NotificationOutbox(models.Model):
+    """One durable, not-yet-sent customer notification (ASYNC-2c1).
+
+    The substrate the post-commit sends in this project still lack. Rows are
+    written by ``common.notifications.enqueue`` INSIDE the transaction of the
+    business write they describe, so an order that commits leaves its
+    notification behind and an order that rolls back leaves nothing — the
+    dual-write window (business effect committed, notification lost) that
+    ``dispatch_on_commit`` still has is closed by storing the intent rather
+    than performing the send.
+
+    What a row holds is deliberately thin. ``payload`` carries identifiers
+    and scalars only — a model reference is its label plus primary key, never
+    the instance — because the request that enqueued the row is gone by the
+    time anything reads it, and an instance or a lazily-evaluated string
+    would hold that request's values rather than the row's. The worker
+    re-reads each reference at drain time through
+    ``common.notifications.resolve_context``, which is also why the row
+    stores no template name and no subject: the handler builds those, from
+    live state, when it runs.
+
+    ``dedup_key`` is the at-least-once guard, discussed at
+    ``notifications._dedup_key``. The queue is at-least-once, not
+    exactly-once: a worker that dies between sending and marking the row
+    done must send again, and the key is what lets the retry see that this
+    notification was already handled.
+
+    State is only what storage needs — ``PENDING`` until some later task
+    claims, sends and stamps the row. There is deliberately no claim lease,
+    attempt counter, backoff or dead-letter here: those are ASYNC-2c2 (the
+    worker) and ASYNC-2d (retry/dead-letter), and until ASYNC-2c2 lands
+    **nothing drains this table, so rows accumulate**.
+    """
+
+    class Status(models.TextChoices):
+        PENDING = "pending", "Pending"
+        SENT = "sent", "Sent"
+        FAILED = "failed", "Failed"
+
+    # An AuditEvent.EventType value (``order.paid``) or the bare transition
+    # names the registry keys on. db_indexed because the drain query filters
+    # and groups on it.
+    event_type = models.CharField(max_length=50, db_index=True)
+    # TextField, not a bounded CharField: the key is DERIVED (event type plus
+    # the primary keys the event references), so a length cap would either
+    # truncate a key into a collision — silently swallowing a distinct
+    # notification — or demand a bound on payload scalars that has no honest
+    # justification. Still unique, so the database enforces idempotence
+    # rather than a convention.
+    dedup_key = models.TextField(unique=True)
+    payload = models.JSONField(default=dict, blank=True)
+    # db_indexed: the worker's claim query is "oldest PENDING row".
+    status = models.CharField(
+        max_length=10,
+        choices=Status.choices,
+        default=Status.PENDING,
+        db_index=True,
+    )
+    created_at = models.DateTimeField(auto_now_add=True)
+    # Stamped by the worker when it sends. NULL means "never confirmed sent",
+    # which is not the same as PENDING — a row can fail and be retried — so it
+    # is a nullable stamp rather than a status value.
+    sent_at = models.DateTimeField(null=True, blank=True)
+
+    class Meta:
+        # FIFO drain order, with the pk as the tiebreak so two rows written
+        # in the same clock tick still have a total order (a worker's LIMIT
+        # claim needs one).
+        ordering = ("created_at", "pk")
+        verbose_name = "Notification outbox row"
+        verbose_name_plural = "Notification outbox rows"
+
+    def __str__(self):
+        return f"{self.created_at:%Y-%m-%d %H:%M:%S} {self.event_type} ({self.status})"
 
 
 class SavedFilter(models.Model):
