@@ -14,15 +14,20 @@ import sys
 import tempfile
 from datetime import timedelta
 from pathlib import Path
+from types import SimpleNamespace
 from unittest import mock
 from urllib.parse import unquote
 
 from django.conf import settings
+from django.contrib.auth.models import AnonymousUser
+from django.core.cache import cache
 from django.core.exceptions import ImproperlyConfigured
 from django.core.mail import send_mail
 from django.test import SimpleTestCase, override_settings
 from django.urls import resolve
 from django.views.static import serve as serve_media
+from rest_framework.test import APIRequestFactory
+from rest_framework.throttling import ScopedRateThrottle
 
 import config.settings as config_settings
 
@@ -73,6 +78,7 @@ _LEAKED_ENV_NAMES = frozenset(
         "LOW_STOCK_THRESHOLD",
         "MAX_UPLOAD_MB",
         "MFA_TRUST_DAYS",
+        "NUM_PROXIES",
         "SECURE_HSTS_INCLUDE_SUBDOMAINS",
         "SECURE_HSTS_PRELOAD",
         "SECURE_HSTS_SECONDS",
@@ -81,6 +87,7 @@ _LEAKED_ENV_NAMES = frozenset(
         "SECURE_SSL_REDIRECT",
         "SESSION_COOKIE_SAMESITE",
         "SESSION_COOKIE_SECURE",
+        "USE_X_FORWARDED_HOST",
     }
 )
 
@@ -1125,6 +1132,158 @@ class TransportHardeningTests(SimpleTestCase):
                 )
                 self.assertEqual(res.returncode, 0, res.stderr)
                 self.assertIn("PROXYHDR None", res.stdout)
+
+    def test_num_proxies_decides_whose_address_a_throttle_budget_is_keyed_on(
+        self,
+    ):
+        # Anonymous callers are budgeted per IP address, and behind a proxy
+        # every one of them arrives carrying the SAME REMOTE_ADDR - the proxy's
+        # - so the number of trusted hops is what makes those budgets per
+        # caller or per deployment. It applies to every scope declared in
+        # DEFAULT_THROTTLE_RATES at once, because they share one keying
+        # decision. Left unset it is worse than a shared budget: DRF then
+        # trusts the WHOLE X-Forwarded-For header, which the caller itself
+        # wrote, so varying that header bought a fresh budget per request.
+        # The default therefore trusts nothing (keyed on REMOTE_ADDR); a
+        # deployment behind N appending proxies sets NUM_PROXIES=N and the
+        # budget follows the real client address.
+        for env_overrides, expected in (
+            ({}, "NUMPROXIES 0"),
+            ({"NUM_PROXIES": "1"}, "NUMPROXIES 1"),
+            ({"NUM_PROXIES": "3"}, "NUMPROXIES 3"),
+            # Neither an unparseable count nor a negative one - which would
+            # count back through the forwarded-for list from the wrong end -
+            # may take startup down; both fall back to the documented default.
+            ({"NUM_PROXIES": "two"}, "NUMPROXIES 0"),
+            ({"NUM_PROXIES": "-1"}, "NUMPROXIES 0"),
+        ):
+            with self.subTest(env=sorted(env_overrides)):
+                res = run_settings_import(
+                    {**self._BOOT_ENV, **env_overrides},
+                    snippet=(
+                        "import config.settings as s; "
+                        "print('NUMPROXIES', s.REST_FRAMEWORK['NUM_PROXIES'])"
+                    ),
+                )
+                self.assertEqual(res.returncode, 0, res.stderr)
+                self.assertIn(expected, res.stdout)
+
+        # The host half of the same proxy question, off by default for the
+        # same reason the scheme header above is: a forwarded host is only as
+        # trustworthy as the proxy that sets it, so it stays opt-in.
+        for env_overrides, expected in (
+            ({}, "XFHOST False"),
+            ({"USE_X_FORWARDED_HOST": "true"}, "XFHOST True"),
+        ):
+            with self.subTest(x_forwarded_host=sorted(env_overrides)):
+                res = run_settings_import(
+                    {**self._BOOT_ENV, **env_overrides},
+                    snippet=(
+                        "import config.settings as s; "
+                        "print('XFHOST', s.USE_X_FORWARDED_HOST)"
+                    ),
+                )
+                self.assertEqual(res.returncode, 0, res.stderr)
+                self.assertIn(expected, res.stdout)
+
+        # The forwarded-for headers below are what an APPENDING proxy chain
+        # leaves behind: it appends the address it saw, so the entry a proxy
+        # added is the caller itself and any earlier entry is whatever the
+        # caller claimed. The budget follows the resolved address, not the
+        # proxy and not the claim.
+        proxy_ip = "198.18.0.1"  # RFC 2544 benchmarking range, unique to this test
+        factory = APIRequestFactory()
+        view = SimpleNamespace(throttle_scope="auth")
+
+        def probe(throttle, forwarded_for):
+            """(throttle key, allowed?) for one anonymous request."""
+            request = factory.post("/api/accounts/register/")
+            request.META["REMOTE_ADDR"] = proxy_ip
+            request.META["HTTP_X_FORWARDED_FOR"] = forwarded_for
+            request.user = AnonymousUser()
+            return throttle.get_ident(request), throttle.allow_request(request, view)
+
+        # Each case is a PAIR of requests against a one-request budget, and it
+        # deletes its own keys before it runs (from DRF's own cache_format, not
+        # a key spelled out here). That is what makes the table order-
+        # independent: the previous shape let each case spend the budget the
+        # next one read, so running this method twice in one process failed on
+        # the second run - a green test that could not be re-run.
+        #   (NUM_PROXIES, first XFF, second XFF, first key, second key, 2nd ok?)
+        cases = (
+            # Trusting nothing: two different callers both resolve to the
+            # PROXY, so the second shares the first's budget and is refused -
+            # one budget for the whole deployment, and nothing the caller
+            # writes into the header moves it.
+            (
+                0,
+                "198.51.100.7, 203.0.113.5",
+                "198.51.100.8, 203.0.113.6",
+                proxy_ip,
+                proxy_ip,
+                False,
+            ),
+            # ... including a header that names no proxy-appended shape at all.
+            (0, "203.0.113.99", "203.0.113.98", proxy_ip, proxy_ip, False),
+            # One trusted hop: two callers resolve to two addresses, so each
+            # keeps its own budget and the second is served. A throttle keyed on
+            # the proxy instead would refuse it here, which is the regression
+            # this table exists to catch.
+            (
+                1,
+                "198.51.100.7, 203.0.113.5",
+                "198.51.100.8, 203.0.113.6",
+                "203.0.113.5",
+                "203.0.113.6",
+                True,
+            ),
+            # The same caller twice is refused, so the finer keying is the
+            # throttle working and not the throttle being off; and forging the
+            # leading entry - the part the caller writes - resolves to the same
+            # address, so it buys no budget either.
+            (
+                1,
+                "198.51.100.7, 203.0.113.5",
+                "198.51.100.99, 203.0.113.5",
+                "203.0.113.5",
+                "203.0.113.5",
+                False,
+            ),
+            # Two trusted hops count back two entries, per caller again.
+            (
+                2,
+                "198.51.100.12, 203.0.113.7, 192.0.2.8",
+                "198.51.100.13, 203.0.113.8, 192.0.2.9",
+                "203.0.113.7",
+                "203.0.113.8",
+                True,
+            ),
+        )
+        for case in cases:
+            num_proxies, first_xff, second_xff, first_key, second_key, second_ok = case
+            with self.subTest(num_proxies=num_proxies, pair=case[1:3]):
+                with override_settings(
+                    REST_FRAMEWORK={
+                        **settings.REST_FRAMEWORK,
+                        "NUM_PROXIES": num_proxies,
+                    }
+                ):
+                    # DRF binds THROTTLE_RATES into the throttle class at
+                    # import, so the rate is patched on the class rather than
+                    # declared here.
+                    with mock.patch.object(
+                        ScopedRateThrottle, "THROTTLE_RATES", {"auth": "1/min"}
+                    ):
+                        throttle = ScopedRateThrottle()
+                        for ident in {first_key, second_key}:
+                            cache.delete(
+                                throttle.cache_format
+                                % {"scope": "auth", "ident": ident}
+                            )
+                        self.assertEqual(probe(throttle, first_xff), (first_key, True))
+                        self.assertEqual(
+                            probe(throttle, second_xff), (second_key, second_ok)
+                        )
 
     def test_cookie_secure_flags_follow_debug_for_local_dev(self):
         # DJANGO_DEBUG=true keeps both Secure flags off, so plain-HTTP local

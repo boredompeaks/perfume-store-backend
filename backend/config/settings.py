@@ -810,6 +810,23 @@ REST_FRAMEWORK = {
         # only bounds the parsing work an unsigned caller can ask for.
         "webhook": os.getenv("THROTTLE_WEBHOOK_RATE", "120/min"),
     },
+    # How many reverse proxies stand in front of the app, which decides whose
+    # address an anonymous throttle budget is keyed on - for every scope above
+    # at once, since they share this one decision. Behind a proxy every caller
+    # arrives carrying the proxy's REMOTE_ADDR, so without a hop count the
+    # budgets of the whole deployment collapse into one; and when the count is
+    # left unset DRF trusts the WHOLE X-Forwarded-For header, which the caller
+    # itself wrote, so varying that header bought a fresh budget per request.
+    # The default trusts nothing and keys on REMOTE_ADDR - fail-closed, the
+    # same direction as the V-02 DEBUG reading above. Set it to the real hop
+    # count only behind a proxy that APPENDS the address it saw and
+    # overwrites any client-supplied copy, which is what makes the resolved
+    # address the caller's rather than a claim. Read as a DRF API setting
+    # (hence inside REST_FRAMEWORK, not alongside SECURE_PROXY_SSL_HEADER:
+    # Django has no consumer for it). A non-integer value, or a negative one
+    # that would count back through the forwarded-for list from the wrong
+    # end, falls back to the documented default like every _env_int knob.
+    "NUM_PROXIES": max(0, _env_int("NUM_PROXIES", 0)),
 }
 
 # SPEC-17-01 [R-17.5/R-17.8/R-17.10] JWT lifecycle: the access token is a
@@ -1113,6 +1130,17 @@ SECURE_PROXY_SSL_HEADER = (
     if _proxy_header_name and _proxy_header_value
     else None
 )
+
+# The host half of the same proxy question: behind a proxy the Host header a
+# client sent is usually the proxy's own name, and the host the proxy actually
+# served is in X-Forwarded-Host. This makes request.get_host() read that
+# header instead. Off by default, for the reason the scheme header above gives:
+# a forwarded host is only as trustworthy as the proxy that sets it, and
+# turning this on without one lets a caller dictate the host Django validates
+# against ALLOWED_HOSTS. Set it only alongside a proxy that overwrites the
+# header on every request. NOTE this resolves the HOST; REST_FRAMEWORK's
+# NUM_PROXIES is what keys an anonymous throttle budget on the caller's IP.
+USE_X_FORWARDED_HOST = _env_bool("USE_X_FORWARDED_HOST", False)
 
 # Session (cart identity / admin login) and CSRF cookies: Secure by
 # default whenever DEBUG is off, mirroring the JWT refresh cookie's
