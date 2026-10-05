@@ -88,12 +88,27 @@ jobs:
       # UnicodeDecodeError. This repo has already been bitten by that exact
       # byte class once (see the byte-safe grep in doc-claims-nightly.yml).
       PYTHONIOENCODING: utf-8
-      # Unset on purpose: settings.py falls back to SQLite when DATABASE_URL is
-      # absent, and a mutation score is only comparable run-to-run if the
+      # DATABASE_URL is unset on purpose: settings.py falls back to SQLite when
+      # it is absent, and a mutation score is only comparable run-to-run if the
       # engine is pinned rather than inherited from the runner's environment.
       # The mutation score therefore describes the SQLite engine; the Postgres
       # pair is the suite's concern, not this job's.
-      SANDBOX: ${{ runner.temp }}/mutation-sandbox
+      #
+      # SANDBOX is NOT set here. The `runner` context is not available to a
+      # job-level `env:` -- GitHub's context-availability table allows only
+      # github/inputs/matrix/needs/secrets/strategy/vars there -- so naming it
+      # made this file fail semantic validation: GitHub refused to create the
+      # job, and PyYAML could not see it because the refusal is not a parse
+      # error. Each step that needs the path declares it in its OWN env, which
+      # is a scope where `runner` resolves, so the one step that builds the
+      # sandbox sets it itself.
+      #
+      # WHY actionlint AND NOT PyYAML IS THE GATE. This file parsed cleanly
+      # under PyYAML while GitHub refused to create the job, because the refusal
+      # is SEMANTIC (which context may be read where) and not syntactic. No test
+      # in this repo parses YAML -- deliberately, PyYAML is not a dependency --
+      # so actionlint is the only oracle for the class, and it is what a
+      # reviewer should run before pushing any workflow change here.
     steps:
       # SPEC-22-11: full commit SHA, tag in a trailing comment. Never widen a
       # pin back to a tag. These are the same three SHAs backend-tests.yml
@@ -167,8 +182,13 @@ jobs:
       # mutations/ and html/ out of the repository. Copied with the version
       # control directory NOT carried over, so nothing in the sandbox can
       # commit, push or otherwise reach the real tree.
+      #
+      # SANDBOX is declared HERE rather than at job level: `runner.temp` is a
+      # legal expression in a step's own `env:` and an illegal one in the job's.
       - name: Copy backend/ into an out-of-tree sandbox
         if: steps.changed.outputs.changed == '1'
+        env:
+          SANDBOX: ${{ runner.temp }}/mutation-sandbox
         run: |
           set -euo pipefail
           mkdir -p "${SANDBOX}"
