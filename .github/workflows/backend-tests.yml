@@ -172,15 +172,58 @@ jobs:
           fi
           python scripts/doc_claims.py --head HEAD
 
-      # GATE-5: scripts/tests/ holds 167 unit tests for the pipeline's own
+      # GATE-7's `check` subcommand, wired here (TIER-2 cycle 2, BUG-4). The
+      # changelog's floor and `failures=N` figures were, until
+      # scripts/changelog_figures.py existed, typed by hand -- which is the
+      # mechanism behind every stale-figure finding in this repo's history --
+      # and the tool that PRINTS them was in no workflow at all, so nothing
+      # ever CHECKED them. The printer and the checker earn their place
+      # differently: the printer stops a figure being invented, this step stops
+      # one being published without a measurement behind it.
+      #
+      # A SIBLING of the claim scan above, for the same reason: neither step
+      # wraps the runner, because a wrapper around the coverage-gated suite
+      # risks perturbing the measurement it is about to report on. It is also
+      # diff-scoped against the SAME base, so both steps judge the rows this
+      # change added and neither judges the whole corpus every run.
+      #
+      # `check` returns 1 naming the row and the figure when a changelog row
+      # carries a floor or `failures=N` figure with no artifact recording it.
+      # That is a real failure and is not baselined away: the artifact is the
+      # evidence, and a figure with none is exactly the defect this catches.
+      # Rows that predate the artifacts are the auditor's to certify, not this
+      # step's to excuse -- so if this ever goes red on a pre-existing row,
+      # report it rather than relaxing the gate.
+      - name: Changelog figure gate (changelog_figures check)
+        working-directory: ${{ github.workspace }}
+        # `--base` is REQUIRED by the subcommand, so it cannot be left to a
+        # default the way the claim scan's is: the same variable, and the same
+        # branch-creation fallback, or the two steps would judge different row
+        # sets and a green run would mean nothing.
+        env:
+          DOC_CLAIMS_BASE: ${{ github.event.pull_request.base.sha || github.event.before }}
+        run: |
+          set -euo pipefail
+          if [ -z "${DOC_CLAIMS_BASE}" ] || [ "${DOC_CLAIMS_BASE}" = "0000000000000000000000000000000000000000" ]; then
+            echo "changelog_figures: no usable diff base (branch creation); falling back to the previous tip of this ref."
+            DOC_CLAIMS_BASE="HEAD"
+          fi
+          python scripts/changelog_figures.py check --base "${DOC_CLAIMS_BASE}"
+
+      # GATE-5: scripts/tests/ holds the unit tests for the pipeline's own
       # tooling (doc_claims.py's parser, mutation_evidence.py's format), and
       # until this step they were run by nobody -- they were orphaned the day
       # they were written, which is the exact defect scripts/tests/__init__.py
       # exists to document: without its package marker, discover descends into
       # no subdirectory and reports "Ran 0 tests / NO TESTS RAN". That file
       # records the empty run as exiting 0; measured here on the pinned
-      # Python 3.14 it exits 5. The guard below therefore does not trust the
-      # exit code either way -- it asserts the COUNT, so an absent suite is
+      # Python 3.14 it exits 5. The COUNT is deliberately not written into this
+      # comment: it moves every time a case is added to any module under
+      # scripts/tests/, and a pinned figure here is a figure that will be wrong
+      # again. The step below prints both counts on every run and requires them
+      # to agree, which is the property that actually matters. The guard
+      # therefore does not trust the exit code either way -- it asserts the
+      # COUNT, so an absent suite is
       # red with an explicit reason whatever the runner's exit convention is,
       # and a suite that merely SHRANK is caught too (an exit code cannot
       # tell those two apart).
