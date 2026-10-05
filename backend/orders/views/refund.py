@@ -26,9 +26,6 @@ from common.audit import log_api_action
 from common.money import quantize_money
 from common.permissions import HasRefundsCreate
 
-# The header-keyed idempotency contract is defined once, in checkout, and
-# reused here rather than restated.
-from .checkout import IDEMPOTENCY_KEY_HEADER, IDEMPOTENCY_KEY_MAX_LENGTH
 from ..models import Order, Refund
 
 # [R-1.14] SPEC-1-05: the refund row and the gateway seam the refund writer
@@ -38,6 +35,10 @@ from ..refunds import RefundGatewayError, refund_payment
 
 # [R-10.1] Eligibility is asked of the machine, not restated here.
 from ..state import payment_transition_allowed
+
+# The header-keyed idempotency contract is defined once, in checkout, and
+# reused here rather than restated.
+from .checkout import IDEMPOTENCY_KEY_HEADER, IDEMPOTENCY_KEY_MAX_LENGTH
 
 logger = logging.getLogger(__name__)
 

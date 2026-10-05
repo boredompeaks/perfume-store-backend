@@ -18,6 +18,8 @@ from django.utils import timezone
 
 from common.testing import ApiTestCase
 from orders.admin import OrderAdmin
+from orders.models import Order
+from orders.serializers import OrderSerializer
 
 # The order-number minting helpers live in the checkout module, and BOTH the
 # patch targets below and the direct `_generate_order_number` call have to
@@ -25,8 +27,6 @@ from orders.admin import OrderAdmin
 # rebinding these names on the `orders.views` package facade would no longer
 # affect the code under test.
 from orders.views import checkout as checkout_views
-from orders.models import Order
-from orders.serializers import OrderSerializer
 
 
 class OrderNumberTestBase(ApiTestCase):

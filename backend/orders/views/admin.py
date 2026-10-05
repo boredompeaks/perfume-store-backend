@@ -36,11 +36,6 @@ from products.models import StockReservation
 # dispatch point, shared with the payment writer).
 from ..events import notify_transition
 from ..models import Order, OrderStatusEvent
-
-# Same house page-number envelope and page-size config as the customer
-# history - the paginator cap exists so no caller, staff included, can
-# request an unbounded page.
-from .order import HISTORY_PAGE_SIZE_QUERY_PARAM, _history_page_size
 from ..serializers import OrderSerializer
 
 # [R-10.1] The order machine (transition table, gate, fulfilment step map)
@@ -55,6 +50,11 @@ from ..state import (
     precondition_failures,
     transition_allowed,
 )
+
+# Same house page-number envelope and page-size config as the customer
+# history - the paginator cap exists so no caller, staff included, can
+# request an unbounded page.
+from .order import HISTORY_PAGE_SIZE_QUERY_PARAM, _history_page_size
 
 # ==================================
 # Admin orders JSON seam (SPEC-9-07, spec 9.4 Orders module)

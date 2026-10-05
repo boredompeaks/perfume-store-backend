@@ -38,16 +38,16 @@ from ops.models import CLOSED_RETURN_WINDOW_DAYS, SiteSettings
 # [R-1.16] SPEC-1-B07a: the return-request row and the open-status tuple its
 # duplicate guard reads.
 from ..models import RETURN_OPEN_STATUSES, Order, ReturnRequest
-
-# The returns listing answers in the same envelope under the same query-param
-# name as the order history; the CAP differs (own configured default), so the
-# resolver is separate but the param name is one.
-from .order import HISTORY_PAGE_SIZE_QUERY_PARAM
 from ..serializers import ReturnRequestSerializer
 
 # [R-10.1] The money half of eligibility is membership of the captured-money
 # set, itself derived from the machine's transition table.
 from ..state import CAPTURED_MONEY_PAYMENT_STATUSES
+
+# The returns listing answers in the same envelope under the same query-param
+# name as the order history; the CAP differs (own configured default), so the
+# resolver is separate but the param name is one.
+from .order import HISTORY_PAGE_SIZE_QUERY_PARAM
 
 # ==================================
 # [R-1.16] SPEC-1-B07a: the customer's return request

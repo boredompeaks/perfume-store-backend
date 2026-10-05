@@ -2,7 +2,7 @@
   "kind": "floor",
   "task": "VIEWS-SPLIT",
   "tool": "scripts/changelog_figures.py",
-  "measured_at": "2026-10-05T03:35:58+05:30",
+  "measured_at": "2026-10-05T06:24:11+05:30",
   "pair_complete": false,
   "engines": [
     {
@@ -20,7 +20,7 @@
         "expected_failures": 4
       },
       "coverage": {
-        "statements": 9127,
+        "statements": 9128,
         "missed": 0,
         "coverage_percent": "99.79",
         "branches": 1310,
