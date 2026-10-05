@@ -49,11 +49,13 @@ ruff==0.16.10
 #
 # Config is [tool.mutmut] in backend/pyproject.toml. Two gotchas measured while
 # wiring this up, both of which cost a run before they were understood:
-#   - `runner` in that config file is SILENTLY IGNORED. mutmut's config merge
-#     only consults the file for options whose CLI default is falsy, and
-#     `runner` defaults to a non-empty string, so the runner must be passed as
-#     a --runner flag. paths_to_mutate and the boolean flags below ARE read
-#     from the file.
+#   - `runner` IS read from that config file. mutmut declares `--runner` with
+#     no default, so the value click passes is None (falsy) and the config
+#     merge substitutes the file's value; the non-empty pytest runner is only
+#     that merge's Python fallback. `--runner` on the command line is therefore
+#     an OVERRIDE of the file's value, not a requirement. paths_to_mutate and
+#     the boolean flags below are read from the file for the same reason: their
+#     defaults are falsy too.
 #   - `simple_output` does not disable the progress spinner; `no_progress`
 #     does. With only simple_output set, mutmut dies on a cp1252 console with
 #     UnicodeEncodeError on the braille character it writes to stdout.

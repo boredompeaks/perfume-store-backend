@@ -190,11 +190,14 @@ jobs:
             orders common accounts products shipping --verbosity 0
           test -f .coverage
 
-      # `--runner` is a FLAG, not the config-file key, and that is measured: the
-      # config merge only consults the file for options whose CLI default is
-      # falsy, and `runner` defaults to a non-empty string, so a `runner` key in
-      # [tool.mutmut] is silently ignored. paths_to_mutate, use_coverage,
-      # simple_output and no_progress all default falsy and ARE read from
+      # `--runner` here OVERRIDES the config-file key rather than being
+      # required, and that is measured, not assumed: mutmut declares `--runner`
+      # with no default, so the value click passes is None (falsy) and the
+      # config merge substitutes the file's value. The non-empty pytest runner
+      # is only that merge's Python fallback. Executed both ways against mutmut
+      # 2.5.1: with no flag the config-file value reached the callback, with the
+      # flag the command line won. paths_to_mutate, use_coverage, simple_output
+      # and no_progress all default falsy too, so the same rule reads them from
       # backend/pyproject.toml.
       #
       # The label list is the scope's cost, stated rather than hidden. This is
@@ -222,9 +225,11 @@ jobs:
 
       # mutmut's own HTML report is the machine's verdict; the step summary
       # quotes it rather than recomputing it. The row regex does NOT anchor on
-      # </tr>: mutmut's writer omits the closing tag on the final row, which is
-      # measured, not assumed, and an anchored pattern silently drops the last
-      # file -- the exact shape of "a green gate that read nothing".
+      # </tr>: mutmut's writer emits no closing </tr> on ANY row - not the last
+      # one, not any other; the table is closed once, after the loop. Measured on
+      # real output rather than assumed: a </tr>-anchored pattern matches nothing
+      # at all, where the unanchored one used here matches every data row - the
+      # exact shape of "a green gate that read nothing".
       - name: Publish the mutation summary
         if: always()
         working-directory: ${{ runner.temp }}/mutation-sandbox
