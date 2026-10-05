@@ -3,7 +3,20 @@
 # Do not add pins here for libraries the application does not import directly:
 # that is what requirements.lock is for. Edit this file, then regenerate:
 #
-#     pip-compile --output-file=requirements.lock requirements.in
+#     pip-compile --generate-hashes --no-emit-index-url --no-emit-trusted-host \
+#         --output-file=requirements.lock requirements.in
+#
+# TIER-2 cycle 2 (BUG-5): pip-compile is the GENERATOR of requirements.lock and
+# was documented here, in requirements.txt and in the lock's own header while
+# being pinned in none of them -- so the file that decides every transitive
+# version had no declared version. pip-tools is pinned below for the same
+# reason ruff is: its output is what CI installs, and a floating generator
+# resolves a different set each time it runs. The three command lines that
+# document this now agree; the lock's own header still prints a `--no-index`
+# that pip-compile adds to its internal invocation and that this command does
+# NOT pass, so do not copy the header -- copy this one. (The header line is
+# generated, not hand-written; it is recorded here so the discrepancy is not
+# rediscovered as a mystery.)
 #
 # requirements.txt is a POINTER to that lock (it contains `-r requirements.lock`
 # and nothing else), so `pip install -r requirements.txt` and
@@ -66,6 +79,13 @@ pre-commit==4.6.2
 # are, and a floating pin would let the gate start reporting on whatever mypy
 # happens to be current.
 mypy==2.4.0
+# TIER-2 cycle 2 (BUG-5): pip-tools, which PROVIDES the `pip-compile` that
+# generates requirements.lock. Pinned here for the same reason everything else
+# on this list is: the lock is the file CI installs from, so the tool that
+# writes it is part of the dependency contract -- an unpinned generator resolves
+# a different transitive set every time it is run, which is the exact failure
+# mode the lock exists to prevent, reintroduced one level up.
+pip-tools==7.6.1
 # MUT-1: mutmut, the automated mutation runner behind
 # .github/workflows/mutation-weekly.yml. Weekly and workflow_dispatch only --
 # it never runs on a pull_request, so it cannot gate one.

@@ -28,7 +28,7 @@ writers. No consumer is forced onto the new fields in this batch.
 from collections.abc import Callable
 from typing import TYPE_CHECKING
 
-if TYPE_CHECKING:  # pragma: no cover - import guard, never executed at runtime
+if TYPE_CHECKING:
     from orders.models import Order
 
 # ——— legacy single status (compat surface) ———————————————————————————

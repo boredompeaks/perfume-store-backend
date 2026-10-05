@@ -27,23 +27,33 @@ repos:
   # ruff: `local` hooks that run the SAME two commands the `lint` job runs,
   # from the SAME directory it runs them in.
   #
-  # Not the ruff-pre-commit `language: python` hooks, and the reason is
-  # measured rather than stylistic. pre-commit runs `language: python` hooks
-  # from the repository ROOT and passes filenames explicitly; ruff resolves its
-  # `src` root from the WORKING DIRECTORY, so from the root it never sees
-  # backend/ as the project directory. The in-repo packages (`accounts`,
-  # `common`, `orders`, ...) then stop being first-party and every import block
-  # is "wrong". On this tree, with everything else identical: the `lint` job
-  # reports `All checks passed!` (exit 0) while the identical config invoked
-  # from the root reports **88 errors, 87 of them `I001` unsorted-imports**, and
-  # `pre-commit run --all-files` REWRITES 85 files to satisfy a classification
-  # mistake that does not exist. `src` cannot be declared in
-  # backend/pyproject.toml to fix it either -- a relative `src` resolves against
-  # the working directory too, so `["."]` from the root is still the root, and
-  # `["backend"]` was measured to BREAK the gate that runs from backend/. There
-  # is no single `src` value correct from both directories, which is why the fix
-  # is to stop changing directory: `cd backend` makes the hook's working
-  # directory the gate's.
+  # Not the ruff-pre-commit `language: python` hooks, and the reason is measured
+  # rather than stylistic. Ruff resolves its configuration PER FILE, walking up
+  # from that file's own directory, so a file with no config above it falls back
+  # to ruff's stock default rule set. `scripts/` has no `pyproject.toml` or
+  # `ruff.toml` of its own -- measured: `ls scripts/pyproject.toml` and the two
+  # ruff.toml spellings are all absent -- so `ruff check .` from the repository
+  # root lints `scripts/` against the DEFAULTS, while the `lint` job runs from
+  # `backend/` where every file it sees does have a config, and passes. Measured
+  # on this tree: `ruff check .` from the root reports **43 errors, all 43 under
+  # `scripts/`, none under `backend/`**, mostly rules this repo does not select
+  # (`RUF012` 16, `SIM117` 8, `RUF100` 6, `PLW1510` 5, `RUF059` 2, `I001` 2,
+  # `UP035`/`ISC004`/`FURB188`/`SIM114` 1 each). Forcing this repo's config on
+  # that directory drops it to **4** (`ruff check --config backend/pyproject.toml
+  # scripts/`), which is the real size of the disagreement -- and a `--fix` hook
+  # would rewrite 43-error-worth of files the gate has already accepted.
+  #
+  # An earlier version of this comment blamed `src` resolution and quoted "88
+  # errors, 87 `I001`, 85 files rewritten". Those did not reproduce and came from
+  # a `src` experiment rather than from `ruff check .`; `src` is not the
+  # mechanism, hierarchical per-file config discovery is. Corrected at TIER-2
+  # cycle 2 (BUG-2). The `cd backend` below is unchanged and still right: it is
+  # what makes every file the hook reaches carry a config, which is the whole of
+  # the problem.
+  #
+  # `pass_filenames: false` is required, not cosmetic: pre-commit hands hooks
+  # repository-root-relative paths, so a hook running from `backend/` would
+  # resolve them against the wrong directory -- the same defect, reintroduced.
   #
   # Interpreter discovery is the fiddly part, and it is here because a hook that
   # silently checks nothing is worse than no hook. What was measured on this
@@ -70,10 +80,6 @@ repos:
   # in-repo layout, and `../venv/Scripts/python.exe` covers a venv one level up.
   # Both are tested with `[ -x ]` so a missing one falls through instead of
   # aborting the hook, and `PY=python` is the last resort for CI.
-  #
-  # `pass_filenames: false` is required, not cosmetic: handed repo-root-relative
-  # paths from a backend/ working directory, ruff would resolve them wrongly
-  # again -- which is the whole problem above, reintroduced.
   - repo: local
     hooks:
       - id: ruff-check

@@ -233,9 +233,13 @@ jobs:
           retention-days: 7
 
   # GATE-1: ruff lints AND formats this tree. Config lives in
-  # backend/pyproject.toml; the version is pinned in backend/requirements.txt
-  # (one source for it, so this job and a local run cannot disagree about
-  # which ruff ran). A separate job rather than more steps inside `test`: a
+  # backend/pyproject.toml; the version is pinned in backend/requirements.in
+  # (ruff==0.16.10, carried into backend/requirements.lock, which is what this
+  # job installs) -- one source for it, so this job and a local run cannot
+  # disagree about which ruff ran. TIER-2 cycle 2 (BUG-3): this comment named
+  # backend/requirements.txt, which since TIER-2-LOCK is a one-line POINTER
+  # holding no pins of its own, so it named a file that no longer decides
+  # anything. A separate job rather than more steps inside `test`: a
   # dirty tree should be reported without waiting on the full suite, and a
   # red suite should never be what hides an unformatted commit.
   lint:
