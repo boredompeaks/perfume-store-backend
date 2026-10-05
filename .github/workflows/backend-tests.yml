@@ -296,6 +296,24 @@ jobs:
       - name: pre-commit run --all-files
         run: pre-commit run --all-files --show-diff-on-failure
 
+      # TIER-2 item 4: mypy, scoped by [tool.mypy] in backend/pyproject.toml to
+      # common/ and orders/state.py -- the RBAC capability maps and the order
+      # lifecycle machine, i.e. the two files where a wrong value is a security
+      # or money defect rather than a cosmetic one, and orders/state.py is also
+      # what the weekly mutation job targets.
+      #
+      # The paths are passed on the command line rather than left to a config
+      # `files` setting, so this step and a local run cannot disagree about what
+      # is in scope; the config carries the RULES (ignore_missing_imports,
+      # check_untyped_defs, the two measured per-module suppressions) and this
+      # line carries the SCOPE. A new module is added to the gate by editing
+      # this line, which is a visible diff in the workflow rather than a
+      # silently-widening default.
+      #
+      # Exit 0 is the whole gate: mypy exits non-zero on any reported error.
+      - name: mypy (scoped: common/ + orders/state.py)
+        run: mypy common/ orders/state.py
+
   # GATE-3: the suite is read on TWO engines, and until this job only one of
   # them ran here. PostgreSQL is the engine that matters -- SQLite serialises
   # writes and has no row-level locking, so the oversell/double-spend/TOCTOU

@@ -53,6 +53,19 @@ coverage==7.16.1
 # local run and a CI run agree byte for byte, and dropping it would let the
 # gate silently start reformatting on whatever ruff is current.
 ruff==0.16.10
+# TIER-2 item 3: pre-commit, the runner for .pre-commit-config.yaml (ruff +
+# trailing-whitespace + check-yaml, all on pinned revs). A DEVELOPMENT tool,
+# not a runtime one, but it is pinned here for the same reason ruff is: the
+# hooks' behaviour is version-sensitive, and an unpinned runner is how a
+# commit passes locally and fails in CI. It resolves into requirements.lock like
+# every other pin, so the CI step installs it from the same resolved set.
+pre-commit==4.6.2
+# TIER-2 item 4: mypy, scoped by [tool.mypy] in backend/pyproject.toml to
+# common/ and orders/state.py. Pinned like everything else here: a type
+# checker's findings are version-sensitive in exactly the way a formatter's
+# are, and a floating pin would let the gate start reporting on whatever mypy
+# happens to be current.
+mypy==2.4.0
 # MUT-1: mutmut, the automated mutation runner behind
 # .github/workflows/mutation-weekly.yml. Weekly and workflow_dispatch only --
 # it never runs on a pull_request, so it cannot gate one.
