@@ -60,7 +60,18 @@ therefore held to the same standard as code.
   artifact behind it, naming the row. It holds itself to the rules above: a
   green run's failure count is absent rather than zero, a floor measured on one
   engine is labelled `SINGLE-ENGINE`, and a figure it cannot measure is an
-  error rather than a number.
+  error rather than a number. Two decisions about what it judges are worth
+  stating here, because both were arrived at by making it red on correct prose:
+  it reads an **agent-run row** as a table line whose first cell is a date, so
+  the floors tables and before/after engine comparisons embedded in a section's
+  prose are reported and counted rather than failed — failing them demanded
+  artifacts named after table cells, which nothing can produce; and a figure that
+  **no artifact can ever back** is exempted only by the committed inventory at
+  `scripts/changelog_figures_baseline.json`, one entry per task carrying a
+  written reason. The inventory is written only by an explicit
+  `check --update-baseline`, never by the gate, and an entry whose reason does
+  not clear a length floor is a hard error — so regenerating the file cannot
+  turn a red gate green, and a **new** hand-typed figure is still red.
 - **Never transcribe a number you were given.** When a review hands you the
   correct value, that value is a *hypothesis*, not the answer. Reproduce it or
   contradict it; either outcome is a fine report. This is not a formality — in

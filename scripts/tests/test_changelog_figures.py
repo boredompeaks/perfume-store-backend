@@ -368,8 +368,21 @@ class AddedLinesTests(unittest.TestCase):
         self.assertEqual(cf.added_lines(self.base, "backend/docs/changes.md"), {})
 
 
-class CheckGateTests(unittest.TestCase):
-    """`check` flags a figure with no artifact and stays quiet about prose."""
+class CheckFixture:
+    """A git repository in a temp directory, for exercising `check` end to end.
+
+    NOT a TestCase, and deliberately so. `scripts/tests`'s CI guard counts the
+    test-function declarations in these sources with a grep and compares that
+    number with the count the runner reports, requiring them to be equal,
+    because that equality is what proves discovery found every file. It is a
+    line grep, so prose in a docstring that quotes a declaration would be
+    counted as one -- this docstring names the rule in words for that reason.
+    Subclassing a TestCase to reuse its setUp is worse: it re-collects every
+    test the parent declares under the subclass, so collected rises, declared
+    does not, and the guard goes red on a suite that has lost nothing. This
+    mixin holds the fixture and no test method, so several concrete TestCases
+    share it and each contributes only the cases it declares itself.
+    """
 
     def setUp(self):
         self._saved_root = cf.REPO_ROOT
@@ -437,6 +450,10 @@ class CheckGateTests(unittest.TestCase):
         (self.root / "scripts" / "figures" / f"{task}.json").write_text(
             json.dumps(payload), encoding="utf-8"
         )
+
+
+class CheckGateTests(CheckFixture, unittest.TestCase):
+    """`check` flags a figure with no artifact and stays quiet about prose."""
 
     def test_a_floor_figure_without_an_artifact_fails_with_its_row_number(self):
         self.append("| 2026-10-04 | GATE-7 | builder | a | b | 1836 tests | s |")
@@ -547,6 +564,242 @@ class CheckGateTests(unittest.TestCase):
             )
         self.assertEqual(status, 0)
         self.assertIn("honest zero", buffer.getvalue())
+
+
+class ProseTableTests(unittest.TestCase):
+    """A sub-table in a section's prose is not an agent-run row.
+
+    Read out of ``docs/changes.md`` verbatim (cells trimmed): the before/after
+    engine comparison and the floors table that sit inside a section, none of
+    which names a task in the position a row keeps its date.
+    """
+
+    SUBTABLES = (
+        "| before (`92139d0`) | `1790 / OK / xf 4 / 100.00% / 8828 stmts` | `1790"
+        " / FAILED (failures=6, errors=1) / xf 4 / 100.00% / 8828 stmts` |",
+        "| after | `Ran 1797 / OK / xf 4 / 100.00% / 8934 stmts` | `Ran 1797 /"
+        " FAILED (failures=6, errors=1) / xf 4 / 100.00% / 8934 stmts` |",
+        "| cycle 2 | `Ran 1836 / OK / xf 4 / 100.00% / 9043 stmts` | `Ran 1836 /"
+        " FAILED (failures=6, errors=1) / xf 4 / 9043 stmts` |",
+        "|---|---|---|",
+        "| `test_send_runs_with_the_stock_lock_block_already_popped` | while the send"
+        " runs, the callback has not fired | `FAILED (failures=2)` |",
+    )
+
+    def test_every_sub_table_shape_is_recognised_as_prose(self):
+        for row in self.SUBTABLES:
+            self.assertTrue(cf.is_prose_table_row(row), row)
+
+    def test_an_agent_run_row_is_not_prose(self):
+        row = "| 2026-10-04 | GATE-7 | builder | a | 1836 tests | s |"
+        self.assertFalse(cf.is_prose_table_row(row))
+
+    def test_a_blank_first_cell_is_not_prose(self):
+        """A figure-bearing line with no date is a malformed ROW, not prose.
+
+        It stays a failure, because a figure nobody can attribute to a task
+        cannot be given a backing artifact either -- the alternative would let a
+        row drop its date and walk out of the gate. The floors table's own
+        header, `| | SQLite | PostgreSQL 17 |`, is the same shape and carries no
+        figure, so it never reaches this test at all.
+        """
+        self.assertFalse(cf.is_prose_table_row("| | | | `Ran 1836 tests` | |"))
+        self.assertFalse(cf.is_prose_table_row("| | SQLite | PostgreSQL 17 |"))
+
+    def test_a_prose_line_is_not_a_table_line_at_all(self):
+        self.assertFalse(cf.is_prose_table_row("a paragraph quoting 1836 tests"))
+
+    def test_a_task_id_is_not_read_out_of_a_sub_table_cell(self):
+        """The defect this class exists to fix, named as a unit.
+
+        `1790` is a test count. Read as a task id it demanded an artifact called
+        ``scripts/figures/1790.json``, which nothing can produce.
+        """
+        row = self.SUBTABLES[0]
+        self.assertEqual(cf.task_id_of(row), "1790")
+        self.assertTrue(cf.is_prose_table_row(row))
+
+
+class ExemptionInventoryTests(CheckFixture, unittest.TestCase):
+    """The committed inventory, and the shapes it must not accept.
+
+    Inherits the git fixture, so these are end-to-end through `cmd_check`: an
+    exemption that only looks right to a reader of the JSON is not an exemption
+    the gate honours.
+    """
+
+    INVENTORY = "backend/docs/changes.md"
+    GOOD_REASON = (
+        "A DOC-ONLY row: it records that no suite re-run happened, so no floor "
+        "artifact can record what the row says."
+    )
+
+    def write_inventory(self, entries, name="changelog_figures_baseline.json"):
+        target = self.root / "scripts" / name
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(json.dumps({self.INVENTORY: entries}), encoding="utf-8")
+        return target
+
+    def exemption(self, reason=None):
+        """One entry naming `OLD-1`'s 1836-test figure, reason optional."""
+        return {
+            "task": "OLD-1",
+            "reason": self.GOOD_REASON if reason is None else reason,
+            "figures": [["tests", "1836 tests"]],
+        }
+
+    def test_a_figure_no_artifact_can_back_is_exempted_only_when_listed(self):
+        self.append("| 2026-10-04 | OLD-1 | builder | a | b | 1836 tests | s |")
+        self.assertEqual(self.run_check()[0], 1)
+        self.write_inventory([self.exemption()])
+        status, out = self.run_check()
+        self.assertEqual(status, 0, out)
+        self.assertIn("1 exempted", out)
+
+    def test_a_figure_the_inventory_does_not_name_still_fails(self):
+        """The whole point: a NEW hand-typed figure is not the old debt."""
+        self.write_inventory([self.exemption()])
+        self.append("| 2026-10-04 | OLD-1 | builder | a | b | 9001 tests | s |")
+        status, out = self.run_check()
+        self.assertEqual(status, 1, out)
+        self.assertIn("9001 tests", out)
+
+    def test_an_exemption_for_one_kind_does_not_exempt_another(self):
+        self.write_inventory([self.exemption()])
+        self.append(
+            "| 2026-10-04 | OLD-1 | builder | a | b | 1836 tests, cov 99.80% | s |"
+        )
+        status, out = self.run_check()
+        self.assertEqual(status, 1, out)
+        self.assertIn("cov 99.80%", out)
+
+    def test_an_exemption_with_no_written_reason_is_rejected(self):
+        """An entry that cannot say why is indistinguishable from an oversight."""
+        self.write_inventory(
+            [{"task": "OLD-1", "reason": "", "figures": [["tests", "1836 tests"]]}]
+        )
+        self.append("| 2026-10-04 | OLD-1 | builder | a | b | 1836 tests | s |")
+        with self.assertRaises(cf.FigureError) as caught:
+            self.run_check()
+        self.assertIn("no reason", str(caught.exception))
+
+    def test_a_reason_too_short_to_be_a_sentence_is_rejected(self):
+        self.write_inventory(
+            [{"task": "OLD-1", "reason": "stale", "figures": [["tests", "1836 tests"]]}]
+        )
+        self.append("| 2026-10-04 | OLD-1 | builder | a | b | 1836 tests | s |")
+        with self.assertRaises(cf.FigureError):
+            self.run_check()
+
+    def test_an_unreadable_inventory_is_an_error_not_an_empty_one(self):
+        """Silently reading it as empty would turn every exemption off at once."""
+        (self.root / "scripts").mkdir(parents=True, exist_ok=True)
+        (self.root / "scripts" / "changelog_figures_baseline.json").write_text(
+            "{not json", encoding="utf-8"
+        )
+        self.append("| 2026-10-04 | OLD-1 | builder | a | b | 1836 tests | s |")
+        with self.assertRaises(cf.FigureError):
+            self.run_check()
+
+    def test_a_figure_pair_of_the_wrong_shape_is_rejected(self):
+        self.write_inventory(
+            [{"task": "OLD-1", "reason": self.GOOD_REASON, "figures": ["tests"]}]
+        )
+        self.append("| 2026-10-04 | OLD-1 | builder | a | b | 1836 tests | s |")
+        with self.assertRaises(cf.FigureError):
+            self.run_check()
+
+    def test_a_sub_table_of_floors_is_not_an_artifact_shortfall(self):
+        """The red gate this closes, end to end on a verbatim sub-table."""
+        self.append(
+            "| after this change | `Ran 1819 / OK / xf 4 / 100.00% / 9015 stmts` |"
+            " `Ran 1819 / FAILED (failures=6, errors=1) / xf 4 / 9015 stmts` |"
+        )
+        status, out = self.run_check()
+        self.assertEqual(status, 0, out)
+        self.assertIn("PROSE TABLE", out)
+        self.assertIn("1 prose sub-table line(s) skipped", out)
+        self.assertNotIn("scripts/figures/after.json", out)
+
+
+class UpdateBaselineTests(CheckFixture, unittest.TestCase):
+    """`--update-baseline` records; it must never be able to excuse."""
+
+    INVENTORY = "backend/docs/changes.md"
+
+    def run_update(self):
+        buffer = io.StringIO()
+        with contextlib.redirect_stdout(buffer):
+            cf.cmd_check(
+                cf.build_parser().parse_args(
+                    [
+                        "check",
+                        "--base",
+                        self.base,
+                        "--path",
+                        self.INVENTORY,
+                        "--update-baseline",
+                    ]
+                )
+            )
+        return buffer.getvalue()
+
+    def inventory(self):
+        return json.loads(
+            (self.root / "scripts" / "changelog_figures_baseline.json").read_text(
+                encoding="utf-8"
+            )
+        )
+
+    def test_a_new_task_is_recorded_with_NO_reason_and_stays_red(self):
+        """Regenerating the inventory cannot buy a figure its way past."""
+        self.append("| 2026-10-04 | OLD-1 | builder | a | b | 1836 tests | s |")
+        out = self.run_update()
+        self.assertIn("NO reason", out)
+        entry = self.inventory()[self.INVENTORY][0]
+        self.assertEqual(entry["task"], "OLD-1")
+        self.assertEqual(entry["reason"], "")
+        self.assertEqual(entry["figures"], [["tests", "1836 tests"]])
+        # And the next plain run refuses the inventory rather than excusing it.
+        with self.assertRaises(cf.FigureError):
+            self.run_check()
+
+    def test_an_existing_reason_is_carried_over_not_overwritten(self):
+        target = self.root / "scripts" / "changelog_figures_baseline.json"
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(
+            json.dumps(
+                {
+                    self.INVENTORY: [
+                        {
+                            "task": "OLD-1",
+                            "reason": "kept from the previous inventory: this"
+                            " row records a scoped run, not a floor",
+                            "figures": [["tests", "9001 tests"]],
+                        }
+                    ]
+                }
+            ),
+            encoding="utf-8",
+        )
+        self.append("| 2026-10-04 | OLD-1 | builder | a | b | 9001 tests | s |")
+        out = self.run_update()
+        self.assertNotIn("NO reason", out)
+        entry = self.inventory()[self.INVENTORY][0]
+        self.assertEqual(
+            entry["reason"],
+            "kept from the previous inventory: this"
+            " row records a scoped run, not a floor",
+        )
+
+    def test_a_backed_figure_is_not_recorded_as_debt(self):
+        self.append("| 2026-10-04 | OLD-1 | builder | a | b | 1836 tests | s |")
+        (self.root / "scripts" / "figures").mkdir(parents=True)
+        (self.root / "scripts" / "figures" / "OLD-1.json").write_text(
+            json.dumps({"task": "OLD-1", "kind": "floor"}), encoding="utf-8"
+        )
+        self.run_update()
+        self.assertEqual(self.inventory()[self.INVENTORY], [])
 
 
 class RecordingRunTestsTests(unittest.TestCase):

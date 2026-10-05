@@ -19,6 +19,20 @@ figure is the mechanism behind every "stale figures" finding in this repo's
 history -- the number survives in prose long after the thing it described has
 moved, and nothing in the suite notices.
 
+Two things about `check` that are decisions rather than accidents:
+
+  * a figure-bearing table line whose first cell is not a date is a SUB-TABLE
+    -- one of the floors tables or before/after engine comparisons embedded in
+    a section's prose -- not an agent-run row. It is reported and counted, never
+    failed. Reading a task id out of a table cell asked for an artifact named
+    `before.json`, which nothing can produce;
+  * a figure in a ROW that no artifact can ever back is exempted only by the
+    committed inventory at scripts/changelog_figures_baseline.json, one entry
+    per task carrying a written reason, and only that. The inventory is never
+    written by the gate itself, and an entry whose reason does not clear a
+    length floor is a hard error, so regenerating the file cannot turn a red
+    gate green.
+
 Stdlib only, so it can run in a CI step with no install and cannot disagree
 with requirements.txt about what it imports.
 
@@ -71,6 +85,16 @@ def figures_dir() -> pathlib.Path:
 def mutation_dir() -> pathlib.Path:
     """Where `check` looks for the manifest behind a mutation figure."""
     return REPO_ROOT / "scripts" / "mutation_evidence"
+
+
+def baseline_path() -> pathlib.Path:
+    """Where `check` reads its committed exemption inventory from.
+
+    Resolved per call for the reason `figures_dir` is: a module-level constant
+    would be frozen against the tree this file was imported from, which is
+    exactly what a unit test cannot then point at a fixture.
+    """
+    return REPO_ROOT / "scripts" / "changelog_figures_baseline.json"
 
 # An explicit sqlite URL rather than the absence of DATABASE_URL:
 # settings._databases_from_url() cannot tell "unset" from "malformed" -- both
@@ -603,6 +627,44 @@ def added_lines(base: str, path: str) -> dict[int, str]:
     return added
 
 
+def _cells(row: str) -> list[str]:
+    """Split a markdown table line into trimmed cells, [] when it is not one."""
+    if not row.startswith("|"):
+        return []
+    return [cell.strip() for cell in row.strip().strip("|").split("|")]
+
+
+# The first cell of an agent-run row is its date, and no other table in this
+# changelog carries one: the floors tables, the before/after engine comparisons
+# and the assertion tables all open with a task name, a label, or a bare pipe.
+# That is what tells a row from prose, and it is a shape test rather than a
+# whitelist of ids, so a sub-table nobody has written yet is classified by the
+# same rule instead of producing a task id read out of a table cell.
+DATE_CELL_RE = re.compile(r"\d{4}-\d{2}-\d{2}")
+
+
+def is_prose_table_row(row: str) -> bool:
+    """True for a table line that belongs to a sub-table, not to a row.
+
+    Without this, `check` took the first cell it could parse as a task id, so a
+    before/after comparison of two engine floors demanded an artifact named
+    `scripts/figures/before.json` and a sub-table of measured floors demanded one
+    named after the first digit of the figure inside it. Neither can be
+    satisfied honestly: a sub-table's cell is not a task, and `floor --task`
+    cannot be pointed at one.
+
+    An EMPTY first cell is deliberately not prose. `| | SQLite | PostgreSQL 17 |`
+    is a header carrying no figure, and a figure-bearing line shaped like an
+    agent-run row with a blank date is a malformed ROW -- which stays a failure,
+    because a figure nobody can attribute to a task cannot be given an artifact
+    either.
+    """
+    cells = _cells(row)
+    if not cells or not cells[0]:
+        return False
+    return not DATE_CELL_RE.match(cells[0])
+
+
 def task_id_of(row: str) -> str:
     """Return the task id a changelog row belongs to, or '' when it has none.
 
@@ -611,9 +673,7 @@ def task_id_of(row: str) -> str:
     figure and names no task cannot be given a backing artifact by anyone, which
     is why an empty result is a finding rather than a silent skip.
     """
-    if not row.startswith("|"):
-        return ""
-    cells = [cell.strip() for cell in row.strip().strip("|").split("|")]
+    cells = _cells(row)
     if len(cells) < 2:
         return ""
     match = TASK_ID_RE.match(cells[1].lstrip("*` "))
@@ -670,6 +730,126 @@ def artifact_records_failures(path: pathlib.Path, count: int) -> bool:
     )
 
 
+def artifact_for(kind: str, figure: str, task: str) -> tuple[pathlib.Path, bool]:
+    """Return the artifact that backs this figure, and whether it does.
+
+    A `failures=N` figure is satisfied by a mutation manifest, or by a floor
+    artifact recording the SAME count -- stricter than the existence test the
+    other classes get, and what lets a row quote a red engine's failure count
+    from the run that measured it.
+    """
+    floor = figures_dir() / f"{task}.json"
+    if kind != "mutation":
+        return floor, floor.exists()
+    manifest = mutation_dir() / f"{task}.json"
+    match = MUTATION_FIGURE_RE.search(figure)
+    count = int(match.group(1)) if match else None
+    if manifest.exists() or (
+        count is not None and artifact_records_failures(floor, count)
+    ):
+        return manifest, True
+    return manifest, False
+
+
+# A reason has to be a sentence, because the inventory is a suppression list and
+# a suppression list whose entries cannot say why is indistinguishable from a
+# list of things nobody looked at. The floor is a cost, not a proof that
+# anyone followed the trail; the review is the control, exactly as it is for the
+# counter-examples in scripts/doc_claims.py.
+MIN_REASON = 40
+
+
+def load_baseline(path: str) -> dict[tuple[str, str, str], str]:
+    """Read the committed exemptions for `path` as (task, kind, figure) -> reason.
+
+    A missing file is an empty inventory rather than an error: the inventory
+    records debt, and a repository with none has nothing to exempt. An entry that
+    is malformed, or whose reason does not clear the floor, is a hard error --
+    an inventory that cannot be read must not quietly exempt nothing, and one
+    that cannot explain itself must not quietly exempt something.
+    """
+    file = baseline_path()
+    if not file.exists():
+        return {}
+    try:
+        data = json.loads(file.read_text(encoding="utf-8"))
+    except ValueError as error:
+        raise FigureError(
+            f"{file.relative_to(REPO_ROOT).as_posix()} is not valid JSON: {error}"
+        ) from error
+    entries = data.get(path) if isinstance(data, dict) else None
+    if entries is None:
+        return {}
+    if not isinstance(entries, list):
+        raise FigureError(
+            f"{file.relative_to(REPO_ROOT).as_posix()}: the entry for {path} is not "
+            "a list of exemptions"
+        )
+    shown = file.relative_to(REPO_ROOT).as_posix()
+    exemptions: dict[tuple[str, str, str], str] = {}
+    for entry in entries:
+        if not isinstance(entry, dict):
+            raise FigureError(f"{shown}: an exemption is not an object: {entry!r}")
+        task = entry.get("task")
+        reason = entry.get("reason")
+        figures = entry.get("figures")
+        if not isinstance(task, str) or not task:
+            raise FigureError(f"{shown}: an exemption names no task: {entry!r}")
+        if not isinstance(reason, str) or len(reason.strip()) < MIN_REASON:
+            raise FigureError(
+                f"{shown}: the exemption for {task} has no reason clearing "
+                f"{MIN_REASON} characters. An exemption is a claim that the figure "
+                "can never be backed, and that claim has to be written down: fill "
+                "the reason in, or remove the exemption and back the figure."
+            )
+        if not isinstance(figures, list) or not figures:
+            raise FigureError(f"{shown}: the exemption for {task} lists no figures")
+        for figure in figures:
+            if not isinstance(figure, list) or len(figure) != 2:
+                raise FigureError(
+                    f"{shown}: {task} has a figure that is not a [kind, figure] pair: "
+                    f"{figure!r}"
+                )
+            exemptions[(task, figure[0], figure[1])] = reason.strip()
+    return exemptions
+
+
+def write_baseline(path: str, unbacked: set[tuple[str, str, str]]) -> pathlib.Path:
+    """Fold this run's unbacked figures into the committed inventory.
+
+    Never called by the gate itself: a baseline that updated itself would record
+    whatever the prose happened to claim, which is the defect this script exists
+    to catch -- the rule scripts/doc_claims.py follows for the same reason. An
+    existing reason is carried over untouched and a task with no entry yet is
+    written with an EMPTY one, which `load_baseline` rejects. Regenerating the
+    inventory therefore cannot buy a figure its way past the gate: a new task
+    stays red until somebody writes down why it can never be backed.
+    """
+    existing = load_baseline(path)
+    reasons: dict[str, str] = {}
+    for (task, _, _), reason in existing.items():
+        reasons[task] = reason
+    grouped: dict[str, list[list[str]]] = {}
+    for task, kind, figure in sorted(unbacked):
+        grouped.setdefault(task, []).append([kind, figure])
+    entries = []
+    for task in sorted(grouped):
+        entries.append(
+            {
+                "task": task,
+                "reason": reasons.get(task, ""),
+                "figures": grouped[task],
+            }
+        )
+    file = baseline_path()
+    file.parent.mkdir(parents=True, exist_ok=True)
+    payload = {path: entries}
+    file.write_text(
+        json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8"
+    )
+    return file
+
+
 def cmd_check(args: argparse.Namespace) -> int:
     """Fail on any figure in the rows added since `args.base` with no artifact."""
     added = added_lines(args.base, args.path)
@@ -682,14 +862,31 @@ def cmd_check(args: argparse.Namespace) -> int:
         )
         return 0
 
+    exemptions = load_baseline(args.path)
     rows = 0
+    prose_rows = 0
     flagged = 0
+    exempted = 0
+    unbacked: set[tuple[str, str, str]] = set()
     for number in sorted(added):
         row = added[number]
         if not row.startswith("|"):
             continue
         figures = figures_in(row)
         if not figures:
+            continue
+        if is_prose_table_row(row):
+            # Reported and counted, never failed. The rule this enforces is about
+            # ROWS: a section's floors table or before/after table is prose that
+            # happens to be tabulated, and failing it would demand an artifact
+            # named after a table cell. Counting it keeps the figure visible to a
+            # reviewer without inventing a requirement nobody can meet.
+            prose_rows += 1
+            print(
+                f"{args.path}:{number}  PROSE TABLE  {len(figures)} figure(s)  -- "
+                "a sub-table in a section's prose, not an agent-run row; no "
+                "artifact is required and none is reported missing"
+            )
             continue
         rows += 1
         task = task_id_of(row)
@@ -702,30 +899,43 @@ def cmd_check(args: argparse.Namespace) -> int:
                 )
             continue
         for kind, figure in figures:
-            if kind == "mutation":
-                mutation_figure = MUTATION_FIGURE_RE.search(figure)
-                count = int(mutation_figure.group(1)) if mutation_figure else None
-                manifest = mutation_dir() / f"{task}.json"
-                floor = figures_dir() / f"{task}.json"
-                if manifest.exists() or (
-                    count is not None and artifact_records_failures(floor, count)
-                ):
-                    continue
-                artifact = manifest
-            else:
-                artifact = figures_dir() / f"{task}.json"
-                if artifact.exists():
-                    continue
+            artifact, backed = artifact_for(kind, figure, task)
+            if backed:
+                continue
+            unbacked.add((task, kind, figure))
+            if (task, kind, figure) in exemptions:
+                exempted += 1
+                continue
             flagged += 1
             print(
                 f"{args.path}:{number}  {task}  {kind}  {figure!r}  -- no backing "
-                f"artifact recording it ({artifact.relative_to(REPO_ROOT).as_posix()})"
+                "artifact recording it "
+                f"({artifact.relative_to(REPO_ROOT).as_posix()})"
+            )
+
+    if args.update_baseline:
+        pending = sorted(
+            {task for task, _, _ in unbacked} - {task for task, _, _ in exemptions}
+        )
+        file = write_baseline(args.path, unbacked)
+        tasks = {task for task, _, _ in unbacked}
+        print(
+            f"changelog_figures: recorded {len(unbacked)} unbacked figure(s) across "
+            f"{len(tasks)} task(s) in "
+            f"{file.relative_to(REPO_ROOT).as_posix()}"
+        )
+        if pending:
+            print(
+                "changelog_figures: these task(s) have NO reason, and the gate "
+                "rejects the inventory until each one is written down: "
+                f"{', '.join(pending)}"
             )
 
     print(
         f"changelog_figures: {rows} row(s) with figures among the {len(added)} "
         f"line(s) {args.path} gained since {args.base}; {flagged} figure(s) with "
-        "no backing artifact"
+        f"no backing artifact; {exempted} exempted by the committed inventory; "
+        f"{prose_rows} prose sub-table line(s) skipped"
     )
     return 1 if flagged else 0
 
@@ -771,6 +981,19 @@ def build_parser() -> argparse.ArgumentParser:
     )
     check.add_argument("--base", required=True, help="base ref, e.g. origin/spec-comp")
     check.add_argument("--path", default=CHANGELOG, help="changelog path")
+    check.add_argument(
+        "--update-baseline",
+        action="store_true",
+        help=(
+            "record this run's unbacked figures in the committed exemption "
+            "inventory and exit. Never runs automatically: an inventory that "
+            "updated itself would record whatever the prose happened to claim, "
+            "which is the defect this script exists to catch. A task with no "
+            "reason yet is written with an empty one, which `check` rejects, so "
+            "regenerating the inventory cannot buy a figure its way past the "
+            "gate."
+        ),
+    )
     check.set_defaults(handler=cmd_check)
 
     return parser
