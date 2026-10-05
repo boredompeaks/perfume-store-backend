@@ -311,7 +311,16 @@ jobs:
       # silently-widening default.
       #
       # Exit 0 is the whole gate: mypy exits non-zero on any reported error.
-      - name: mypy (scoped: common/ + orders/state.py)
+      #
+      # The step name is QUOTED because it contains a colon. Unquoted,
+      # `name: mypy (scoped: common/ ...)` is a YAML mapping value and the file
+      # does not parse at all -- which GitHub rejects at push time, so the
+      # workflow never runs and every gate in it silently stops existing. The
+      # pre-commit check-yaml hook caught exactly this, which is the argument
+      # for having it: the failure was in a file three commits had already
+      # touched and no test in this repo parses YAML (deliberately -- PyYAML is
+      # not a dependency, see tests/test_deployment_contract.py).
+      - name: "mypy (scoped: common/ + orders/state.py)"
         run: mypy common/ orders/state.py
 
   # GATE-3: the suite is read on TWO engines, and until this job only one of
