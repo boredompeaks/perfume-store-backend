@@ -269,6 +269,33 @@ jobs:
       - name: ruff format --check (format)
         run: ruff format --check .
 
+      # TIER-2 item 3: the same rules, plus check-yaml, as the hooks in
+      # .pre-commit-config.yaml. This is REDUNDANT with the two steps above on
+      # purpose and is not a stronger version of them: it runs the identical
+      # pinned ruff (the hook rev is v0.16.10 to match the pin in
+      # requirements.in, so the two cannot disagree about formatting) and adds
+      # the YAML parse and the whitespace/secret checks on files the `lint`
+      # job's working-directory never sees -- the workflow files, Procfile,
+      # docker-compose.yml, and every other tracked file in the repository.
+      #
+      # `--all-files` rather than a changed-files list, because a check scoped
+      # to the diff is a check that only ever sees the last commit: the whole
+      # point of check-yaml is that a workflow which does not PARSE cannot be
+      # pushed at all, and the push that would carry the broken file is
+      # precisely the one a diff-scoped run would have to notice.
+      #
+      # The hook store is cached because each of these revs is installed into
+      # its own virtualenv on a cold cache; the config is committed and the
+      # revs are commit SHAs, so the cache key tracks the real inputs.
+      - uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: ~/.cache/pre-commit
+          key: pre-commit-${{ github.sha }}
+          restore-keys: pre-commit-
+
+      - name: pre-commit run --all-files
+        run: pre-commit run --all-files --show-diff-on-failure
+
   # GATE-3: the suite is read on TWO engines, and until this job only one of
   # them ran here. PostgreSQL is the engine that matters -- SQLite serialises
   # writes and has no row-level locking, so the oversell/double-spend/TOCTOU

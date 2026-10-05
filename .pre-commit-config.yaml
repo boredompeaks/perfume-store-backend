@@ -1,0 +1,139 @@
+# pre-commit hooks (TIER-2, item 3).
+#
+# Every `rev` is a full commit SHA, the same supply-chain rule
+# .github/workflows/backend-tests.yml applies to its actions: a tag is a
+# remote-controlled pointer, so pinning to the SHA is what makes a local run
+# and a CI run run the same code. The tag is written in a trailing comment so
+# the next person can resolve a bump with `git ls-remote` rather than guess.
+#
+# WHAT THIS IS NOT: a replacement for the `lint` job in
+# .github/workflows/backend-tests.yml. That job stays the gate. pre-commit runs
+# the same checks before a commit is made, so a violation is caught while the
+# author still has the context. Two gates on one rule is deliberate redundancy:
+# a pre-commit hook can be bypassed with --no-verify, and a gate that can be
+# bypassed is not a gate.
+#
+# A NOTE ON RUNNING THESE ON WINDOWS, because it cost more runs than the rest of
+# this task combined and the failure is silent-looking. `language: system` hooks
+# execute whatever `bash` resolves to FIRST on PATH. On this machine that is
+# `C:\windows\system32\bash.EXE` -- WSL -- which is a different filesystem with
+# its own `python`, so a hook that looks correct runs in the wrong place and
+# fails on things that are not wrong (measured: `No module named ruff`, exit 1,
+# and a shell where even `PY=python` left `$PY` empty). Git-for-Windows' bash
+# (`C:\Program Files\Git\bin`) runs the same config green. If a hook here fails
+# with exit 127 or reports a missing module that is plainly installed, check
+# which bash answered before changing this file -- the config is not the bug.
+repos:
+  # ruff: `local` hooks that run the SAME two commands the `lint` job runs,
+  # from the SAME directory it runs them in.
+  #
+  # Not the ruff-pre-commit `language: python` hooks, and the reason is
+  # measured rather than stylistic. pre-commit runs `language: python` hooks
+  # from the repository ROOT and passes filenames explicitly; ruff resolves its
+  # `src` root from the WORKING DIRECTORY, so from the root it never sees
+  # backend/ as the project directory. The in-repo packages (`accounts`,
+  # `common`, `orders`, ...) then stop being first-party and every import block
+  # is "wrong". On this tree, with everything else identical: the `lint` job
+  # reports `All checks passed!` (exit 0) while the identical config invoked
+  # from the root reports **88 errors, 87 of them `I001` unsorted-imports**, and
+  # `pre-commit run --all-files` REWRITES 85 files to satisfy a classification
+  # mistake that does not exist. `src` cannot be declared in
+  # backend/pyproject.toml to fix it either -- a relative `src` resolves against
+  # the working directory too, so `["."]` from the root is still the root, and
+  # `["backend"]` was measured to BREAK the gate that runs from backend/. There
+  # is no single `src` value correct from both directories, which is why the fix
+  # is to stop changing directory: `cd backend` makes the hook's working
+  # directory the gate's.
+  #
+  # Interpreter discovery is the fiddly part, and it is here because a hook that
+  # silently checks nothing is worse than no hook. What was measured on this
+  # machine, in order:
+  #   bare `ruff`               not on PATH -> `command not found` (exit 127)
+  #   `python -m ruff`          the hook's `bash` on this machine resolves to
+  #                              `C:\windows\system32\bash.EXE`, which is WSL --
+  #                              a DIFFERENT filesystem with a different
+  #                              `python`. Measured: `No module named ruff`
+  #                              (exit 1), and a shell where even a plain
+  #                              `PY=python` assignment left `$PY` empty.
+  #   `${RUFF_PYTHON:-python}`  Git-for-Windows' bash collapses the default
+  #                              expansion to a literal `<value>:-python`.
+  #   `${RUFF_PYTHON}`          pre-commit shlex-splits `entry` before bash sees
+  #                              it, stripping the quotes that keep a path one
+  #                              word -> `-m: command not found` (127).
+  # So the hooks locate an interpreter themselves, preferring this repo's own
+  # venv, and `-m ruff` in every branch so the ruff that runs is the one
+  # installed in that environment -- in CI that is the pinned ruff==0.16.10
+  # from requirements.lock, the same package the `lint` job uses.
+  #
+  # Two candidate layouts, because a worktree need not contain a venv while the
+  # checkout it was made from does: `backend/venv/Scripts/python.exe` is the
+  # in-repo layout, and `../venv/Scripts/python.exe` covers a venv one level up.
+  # Both are tested with `[ -x ]` so a missing one falls through instead of
+  # aborting the hook, and `PY=python` is the last resort for CI.
+  #
+  # `pass_filenames: false` is required, not cosmetic: handed repo-root-relative
+  # paths from a backend/ working directory, ruff would resolve them wrongly
+  # again -- which is the whole problem above, reintroduced.
+  - repo: local
+    hooks:
+      - id: ruff-check
+        name: ruff check (lint)
+        entry: >-
+          bash -c 'cd backend &&
+          PY=venv/Scripts/python.exe;
+          [ -x "$PY" ] || PY=../venv/Scripts/python.exe;
+          [ -x "$PY" ] || PY=python;
+          "$PY" -m ruff check .'
+        language: system
+        types: [python]
+        pass_filenames: false
+        require_serial: true
+
+      - id: ruff-format
+        name: ruff format (format)
+        entry: >-
+          bash -c 'cd backend &&
+          PY=venv/Scripts/python.exe;
+          [ -x "$PY" ] || PY=../venv/Scripts/python.exe;
+          [ -x "$PY" ] || PY=python;
+          "$PY" -m ruff format --check .'
+        language: system
+        types: [python]
+        pass_filenames: false
+        require_serial: true
+
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: 3e8a8703264a2f4a69428a0aa4dcb512790b2c8c # v6.0.0
+    hooks:
+      # A single trailing space is invisible in review and survives every
+      # editor, so it accumulates until a diff is unreviewable.
+      - id: trailing-whitespace
+        # Two measured exclusions, each for a reason that is not convenience:
+        #
+        # backend/docs/changes.md -- APPEND-ONLY, and its byte facts are a
+        # baseline in scripts/doc_claims_baseline.json. Measured on this tree:
+        # the hook has exactly two real targets in the whole repository and
+        # both are historical rows in this file. Stripping them would edit rows
+        # ABOVE the current one, which this changelog's own rules forbid, and
+        # would rewrite a byte-gated file to fix something no reader can see.
+        #
+        # Binary files -- a PNG test fixture decodes differently if a byte
+        # moves, and this hook cannot distinguish an image from a text file
+        # that happens to contain no newline. backend/products carries a real
+        # 3.7 MB one. The exclusion states the intent instead of relying on
+        # the hook's type detection to infer it.
+        exclude: ^(backend/docs/changes\.md|.*\.(png|jpg|jpeg|gif|ico|webp))$
+
+      # A workflow file that parses is the minimum this gate can promise, and
+      # the failure it prevents is the expensive one: a YAML syntax error in
+      # .github/workflows/*.yml makes GitHub REJECT the push, so no gate runs at
+      # all and the commit lands unverified.
+      - id: check-yaml
+
+      # A committed merge-conflict marker is the other way a file arrives
+      # half-written, caught before review rather than by whoever resolves it.
+      - id: check-merge-conflict
+
+      # A private key in a diff is worth stopping for. This repo also has a
+      # gitleaks config; that one is the gate, this is the fast local half.
+      - id: detect-private-key
