@@ -20,6 +20,7 @@ from urllib.parse import unquote
 
 from django.conf import settings
 from django.contrib.auth.models import AnonymousUser
+from django.core.cache import cache
 from django.core.exceptions import ImproperlyConfigured
 from django.core.mail import send_mail
 from django.test import SimpleTestCase, override_settings
@@ -1193,29 +1194,74 @@ class TransportHardeningTests(SimpleTestCase):
         proxy_ip = "198.18.0.1"  # RFC 2544 benchmarking range, unique to this test
         factory = APIRequestFactory()
         view = SimpleNamespace(throttle_scope="auth")
-        # (NUM_PROXIES, X-Forwarded-For, throttle key, allowed?) - ORDERED,
-        # because each case spends the one-request budget the next one reads.
+
+        def probe(throttle, forwarded_for):
+            """(throttle key, allowed?) for one anonymous request."""
+            request = factory.post("/api/accounts/register/")
+            request.META["REMOTE_ADDR"] = proxy_ip
+            request.META["HTTP_X_FORWARDED_FOR"] = forwarded_for
+            request.user = AnonymousUser()
+            return throttle.get_ident(request), throttle.allow_request(request, view)
+
+        # Each case is a PAIR of requests against a one-request budget, and it
+        # deletes its own keys before it runs (from DRF's own cache_format, not
+        # a key spelled out here). That is what makes the table order-
+        # independent: the previous shape let each case spend the budget the
+        # next one read, so running this method twice in one process failed on
+        # the second run - a green test that could not be re-run.
+        #   (NUM_PROXIES, first XFF, second XFF, first key, second key, 2nd ok?)
         cases = (
-            # Trusting nothing: every caller shares the proxy's budget ...
-            (0, "198.51.100.7, 203.0.113.5", proxy_ip, True),
-            # ... so a forged header earns no fresh attempt.
-            (0, "203.0.113.99", proxy_ip, False),
-            # One trusted hop resolves to the address the proxy appended.
-            (1, "198.51.100.7, 203.0.113.5", "203.0.113.5", True),
-            # A second caller gets its own budget ...
-            (1, "198.51.100.11, 203.0.113.6", "203.0.113.6", True),
-            # ... while the first is throttled, so the finer keying is not the
-            # throttle being switched off, and forging the leading entry of
-            # the header (the part the caller writes) does not buy a budget
-            # either - it resolves to the same address either way.
-            (1, "198.51.100.99, 203.0.113.5", "203.0.113.5", False),
-            # Two trusted hops count back two entries.
-            (2, "198.51.100.12, 203.0.113.7, 192.0.2.8", "203.0.113.7", True),
+            # Trusting nothing: two different callers both resolve to the
+            # PROXY, so the second shares the first's budget and is refused -
+            # one budget for the whole deployment, and nothing the caller
+            # writes into the header moves it.
+            (
+                0,
+                "198.51.100.7, 203.0.113.5",
+                "198.51.100.8, 203.0.113.6",
+                proxy_ip,
+                proxy_ip,
+                False,
+            ),
+            # ... including a header that names no proxy-appended shape at all.
+            (0, "203.0.113.99", "203.0.113.98", proxy_ip, proxy_ip, False),
+            # One trusted hop: two callers resolve to two addresses, so each
+            # keeps its own budget and the second is served. A throttle keyed on
+            # the proxy instead would refuse it here, which is the regression
+            # this table exists to catch.
+            (
+                1,
+                "198.51.100.7, 203.0.113.5",
+                "198.51.100.8, 203.0.113.6",
+                "203.0.113.5",
+                "203.0.113.6",
+                True,
+            ),
+            # The same caller twice is refused, so the finer keying is the
+            # throttle working and not the throttle being off; and forging the
+            # leading entry - the part the caller writes - resolves to the same
+            # address, so it buys no budget either.
+            (
+                1,
+                "198.51.100.7, 203.0.113.5",
+                "198.51.100.99, 203.0.113.5",
+                "203.0.113.5",
+                "203.0.113.5",
+                False,
+            ),
+            # Two trusted hops count back two entries, per caller again.
+            (
+                2,
+                "198.51.100.12, 203.0.113.7, 192.0.2.8",
+                "198.51.100.13, 203.0.113.8, 192.0.2.9",
+                "203.0.113.7",
+                "203.0.113.8",
+                True,
+            ),
         )
-        for num_proxies, forwarded_for, expected_key, expected_allowed in cases:
-            with self.subTest(
-                num_proxies=num_proxies, forwarded_for=forwarded_for
-            ):
+        for case in cases:
+            num_proxies, first_xff, second_xff, first_key, second_key, second_ok = case
+            with self.subTest(num_proxies=num_proxies, pair=case[1:3]):
                 with override_settings(
                     REST_FRAMEWORK={
                         **settings.REST_FRAMEWORK,
@@ -1228,14 +1274,15 @@ class TransportHardeningTests(SimpleTestCase):
                     with mock.patch.object(
                         ScopedRateThrottle, "THROTTLE_RATES", {"auth": "1/min"}
                     ):
-                        request = factory.post("/api/accounts/register/")
-                        request.META["REMOTE_ADDR"] = proxy_ip
-                        request.META["HTTP_X_FORWARDED_FOR"] = forwarded_for
-                        request.user = AnonymousUser()
                         throttle = ScopedRateThrottle()
-                        self.assertEqual(throttle.get_ident(request), expected_key)
+                        for ident in {first_key, second_key}:
+                            cache.delete(
+                                throttle.cache_format
+                                % {"scope": "auth", "ident": ident}
+                            )
+                        self.assertEqual(probe(throttle, first_xff), (first_key, True))
                         self.assertEqual(
-                            throttle.allow_request(request, view), expected_allowed
+                            probe(throttle, second_xff), (second_key, second_ok)
                         )
 
     def test_cookie_secure_flags_follow_debug_for_local_dev(self):

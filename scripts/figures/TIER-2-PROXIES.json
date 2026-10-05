@@ -2,7 +2,7 @@
   "kind": "floor",
   "task": "TIER-2-PROXIES",
   "tool": "scripts/changelog_figures.py",
-  "measured_at": "2026-10-05T01:13:24+05:30",
+  "measured_at": "2026-10-05T07:45:19+05:30",
   "pair_complete": true,
   "engines": [
     {
