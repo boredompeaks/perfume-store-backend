@@ -504,8 +504,11 @@ def _is_dotted_module_segment(text: str, span: tuple[int, int]) -> bool:
         after += 1
     # A non-final segment is exactly one that is followed by a dot and at least
     # one more word character.
-    return after < len(text) and text[after] == "." and after + 1 < len(text) and (
-        text[after + 1].isalnum() or text[after + 1] == "_"
+    return (
+        after < len(text)
+        and text[after] == "."
+        and after + 1 < len(text)
+        and (text[after + 1].isalnum() or text[after + 1] == "_")
     )
 
 

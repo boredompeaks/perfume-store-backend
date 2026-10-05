@@ -605,15 +605,16 @@ class DottedTestIdModuleVersusMethodTests(unittest.TestCase):
     a quoted method name -- every "still an error" test below is that guard.
     """
 
-    KNOWN = {
-        "backend/tests/test_correlation_ids.py": 200,
-        "backend/tests/test_backup_db.py": 900,
-    }
+    # A tuple of pairs rather than a dict: `ruff check` flags a mutable class
+    # attribute (RUF012), and the sibling classes below carry that flag already
+    # -- this one does not add to it.
+    KNOWN = (
+        ("backend/tests/test_correlation_ids.py", 200),
+        ("backend/tests/test_backup_db.py", 900),
+    )
 
     def _method_names(self, prose):
-        return [
-            c.value for c in extract_claims(prose, DOC) if c.kind == "test_name"
-        ]
+        return [c.value for c in extract_claims(prose, DOC) if c.kind == "test_name"]
 
     def _errors(self, prose):
         errors, _ = verify_claims(extract_claims(prose, DOC), set(), self.KNOWN)
@@ -653,9 +654,9 @@ class DottedTestIdModuleVersusMethodTests(unittest.TestCase):
             self._method_names("killed `test_never_existed` today"),
             ["test_never_existed"],
         )
-        self.assertEqual([c.kind for c in self._errors("`test_never_existed`")], [
-            "test_name"
-        ])
+        self.assertEqual(
+            [c.kind for c in self._errors("`test_never_existed`")], ["test_name"]
+        )
 
     def test_a_final_segment_after_a_dot_is_still_a_claim(self):
         # `pkg.module.Class.test_x` -- the trailing `test_x` is the method.
