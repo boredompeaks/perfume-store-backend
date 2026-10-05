@@ -75,3 +75,40 @@ ignore = ["E501"]
 # removal. The follow-up that would retire this ignore is to compare
 # str(candidate) so exotic digits can match at all (proposed, not shipped).
 "common/totp.py" = ["F841"]
+
+[tool.mutmut]
+# Mutation-runner config for the weekly job (.github/workflows/mutation-weekly.yml). The hand-written prose evidence this complements lives in
+# scripts/mutation_evidence.py + scripts/mutation_evidence/*.json: that script
+# REPLAYS mutations a human already recorded and checks the figures the
+# changelog printed. Nothing there picks a mutant on its own, so a claim can
+# only ever be about a mutation somebody thought to write down. mutmut generates
+# its own, so the question "which of these lines has no test" gets an answer
+# nobody had to remember to ask.
+#
+# Two files, named exactly. mutmut 2.5.1's `paths_to_mutate` is a real
+# per-file allow-list (measured, not assumed: it is what narrowed this to
+# orders/state.py + common/permissions.py). The rejected alternative is
+# recorded in the workflow header because the reason is not obvious.
+paths_to_mutate = "orders/state.py,common/permissions.py"
+
+# Mutate only lines a test actually executes. Measured on this tree at the
+# pinned runner: 246 mutants without it, 186 with it. The 60 dropped are on
+# lines no test in the scoped runner reaches, so they are guaranteed survivors
+# -- they would report as test-suite weakness when they are in fact untested
+# LINES. mutmut reads the same .coverage database either way, so this narrows
+# what is mutated and never what runs.
+use_coverage = true
+
+# Emoji progress bars are unreadable in a CI log and crash on a cp1252 console
+# (this repo has already had to work around a 0x97 byte emitted to a pipe --
+# see the byte-safe grep in doc-claims-nightly.yml). Plain text only.
+simple_output = true
+
+# ...and the progress INDICATOR itself has to go, which simple_output does not
+# do. Measured on this repo: with only simple_output above, the run dies at
+#   UnicodeEncodeError: 'charmap' codec can't encode character '\u280b'
+# from mutmut's braille spinner on the first baseline run, because mutmut
+# writes it straight to sys.stdout. This is the key that fixes it -- the
+# spinner is gated on no_progress, not on simple_output. Both keys default to
+# false, so both are read from here; they are set together deliberately.
+no_progress = true

@@ -36,3 +36,25 @@ coverage==7.16.1
 # local run and a CI run agree byte for byte, and dropping it would let the
 # gate silently start reformatting on whatever ruff is current.
 ruff==0.16.10
+# MUT-1: mutmut, the automated mutation runner behind
+# .github/workflows/mutation-weekly.yml. Weekly and workflow_dispatch only --
+# it never runs on a pull_request, so it cannot gate one.
+#
+# 2.5.1 and NOT the current 3.8.0, and the reason is not age. mutmut 3 takes
+# `pytest>=6.2.5` as a HARD requirement (its own metadata), and this repo's
+# floor is measured by `manage.py test`; adopting 3.x would mean carrying a
+# second test runner whose result is not the number the changelog prints.
+# 2.5.1 takes any command as its runner, so the project's own runner is used
+# unchanged. Its base install is also pytest-free (pytest is only an extra).
+#
+# Config is [tool.mutmut] in backend/pyproject.toml. Two gotchas measured while
+# wiring this up, both of which cost a run before they were understood:
+#   - `runner` in that config file is SILENTLY IGNORED. mutmut's config merge
+#     only consults the file for options whose CLI default is falsy, and
+#     `runner` defaults to a non-empty string, so the runner must be passed as
+#     a --runner flag. paths_to_mutate and the boolean flags below ARE read
+#     from the file.
+#   - `simple_output` does not disable the progress spinner; `no_progress`
+#     does. With only simple_output set, mutmut dies on a cp1252 console with
+#     UnicodeEncodeError on the braille character it writes to stdout.
+mutmut==2.5.1
