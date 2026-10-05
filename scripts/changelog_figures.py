@@ -640,6 +640,14 @@ def _cells(row: str) -> list[str]:
 # That is what tells a row from prose, and it is a shape test rather than a
 # whitelist of ids, so a sub-table nobody has written yet is classified by the
 # same rule instead of producing a task id read out of a table cell.
+#
+# The date is searched for anywhere in the cell, never matched at its start. An
+# anchored match is the fail-open defect this replaced: `**2026-10-05**` is
+# still an agent-run row, but it does not match at offset 0, so the row was
+# classified as a sub-table in a section's prose and every figure in it escaped
+# a gate that catches the same row undecorated. Decoration is the cheapest way
+# to walk a row out of this check, so the test now survives it: the ONLY way to
+# leave the row path is to delete the date, which is visible in the diff.
 DATE_CELL_RE = re.compile(r"\d{4}-\d{2}-\d{2}")
 
 
@@ -653,6 +661,15 @@ def is_prose_table_row(row: str) -> bool:
     satisfied honestly: a sub-table's cell is not a task, and `floor --task`
     cannot be pointed at one.
 
+    Prose is therefore "the first cell carries no date at all", which is
+    decidable and total: a row cannot leave the row path by being decorated,
+    only by dropping its date. It is deliberately NOT "the first cell carries no
+    date AND the second cell is not task-shaped", because the sub-tables this
+    file really contains have task-shaped second cells -- `1784`, `1790`,
+    `Ran 1797`, `SQLite` -- so that conjunction would reclassify every one of
+    them as a row and demand an artifact named after a table cell, which is the
+    defect the conjunction was meant to close.
+
     An EMPTY first cell is deliberately not prose. `| | SQLite | PostgreSQL 17 |`
     is a header carrying no figure, and a figure-bearing line shaped like an
     agent-run row with a blank date is a malformed ROW -- which stays a failure,
@@ -662,7 +679,22 @@ def is_prose_table_row(row: str) -> bool:
     cells = _cells(row)
     if not cells or not cells[0]:
         return False
-    return not DATE_CELL_RE.match(cells[0])
+    return not DATE_CELL_RE.search(cells[0])
+
+
+def has_decorated_date_cell(row: str) -> bool:
+    """True when the first cell carries a date that is not its first characters.
+
+    Reported, never failed: `**2026-10-05**` is a legitimate way to write a date
+    and the row is checked as a row regardless. What is reported is the shape
+    that nearly escaped a gate -- the same row read as prose while carrying
+    every figure it had undecorated -- so a reviewer sees a decorated date
+    instead of having to notice one.
+    """
+    cells = _cells(row)
+    if not cells or not cells[0]:
+        return False
+    return bool(DATE_CELL_RE.search(cells[0])) and not DATE_CELL_RE.match(cells[0])
 
 
 def task_id_of(row: str) -> str:
@@ -865,6 +897,7 @@ def cmd_check(args: argparse.Namespace) -> int:
     exemptions = load_baseline(args.path)
     rows = 0
     prose_rows = 0
+    decorated_rows = 0
     flagged = 0
     exempted = 0
     unbacked: set[tuple[str, str, str]] = set()
@@ -889,6 +922,13 @@ def cmd_check(args: argparse.Namespace) -> int:
             )
             continue
         rows += 1
+        if has_decorated_date_cell(row):
+            decorated_rows += 1
+            print(
+                f"{args.path}:{number}  DECORATED DATE  -- the first cell carries a "
+                "date that is not its first characters, so it is checked as a "
+                "row rather than as a sub-table in a section's prose"
+            )
         task = task_id_of(row)
         if not task:
             for _, figure in figures:
@@ -937,6 +977,11 @@ def cmd_check(args: argparse.Namespace) -> int:
         f"no backing artifact; {exempted} exempted by the committed inventory; "
         f"{prose_rows} prose sub-table line(s) skipped"
     )
+    if decorated_rows:
+        print(
+            f"changelog_figures: {decorated_rows} row(s) carry a DECORATED date in "
+            "the first cell; each was checked as a row, not as prose"
+        )
     return 1 if flagged else 0
 
 

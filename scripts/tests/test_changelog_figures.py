@@ -537,6 +537,46 @@ class CheckGateTests(CheckFixture, unittest.TestCase):
         self.assertEqual(status, 1)
         self.assertIn("NO TASK ID", out)
 
+    def test_a_decorated_date_row_is_still_gated_end_to_end(self):
+        """The reproduction, as an assertion rather than as a report.
+
+        The undecorated form of this row is caught by the case below, so the
+        pair brackets the defect: bolding the date must not change the exit
+        code, and must not turn the row into a reported sub-table.
+        """
+        self.append(
+            "| **2026-10-04** | NOARTIFACT-TASK-X | builder | a | b | Ran 1836 tests |"
+            " s |"
+        )
+        status, out = self.run_check()
+        self.assertEqual(status, 1)
+        self.assertIn("NOARTIFACT-TASK-X", out)
+        self.assertNotIn("PROSE TABLE", out)
+
+    def test_an_undecorated_row_of_the_same_shape_is_also_gated(self):
+        """The other half of the bracket: identical but for the decoration."""
+        self.append(
+            "| 2026-10-04 | NOARTIFACT-TASK-X | builder | a | b | Ran 1836 tests | s |"
+        )
+        self.assertEqual(self.run_check()[0], 1)
+
+    def test_a_decorated_date_row_that_is_backed_still_passes_and_says_so(self):
+        """Reporting the shape must not fail a row nobody can improve.
+
+        The row is checked exactly as the undecorated one is, so a backed row is
+        green, and the decorated date is printed so a reviewer sees the shape
+        that nearly escaped rather than having to notice it.
+        """
+        self.append(
+            "| **2026-10-04** | GATE-7 | builder | a | b | FAILED (failures=6, "
+            "errors=1, expected failures=4), cov 99.80% | s |"
+        )
+        self.write_floor_artifact(failures=6, errors=1)
+        status, out = self.run_check()
+        self.assertEqual(status, 0)
+        self.assertIn("DECORATED DATE", out)
+        self.assertIn("checked as a row", out)
+
     def test_a_row_with_no_figure_is_not_inspected(self):
         self.append(
             "| 2026-10-04 | DOC-ONLY | builder | a | no suite re-run | n/a | s |"
@@ -618,6 +658,69 @@ class ProseTableTests(unittest.TestCase):
         row = self.SUBTABLES[0]
         self.assertEqual(cf.task_id_of(row), "1790")
         self.assertTrue(cf.is_prose_table_row(row))
+
+    def test_a_decorated_date_cell_is_still_a_row(self):
+        """The fail-open defect this class exists to close, named as a unit.
+
+        `**2026-10-05**` is an agent-run row, not a sub-table in a section's
+        prose. Classified as prose it was reported as one and every figure in it
+        escaped a gate that catches the identical row undecorated.
+        """
+        row = "| **2026-10-05** | GATE-7 | builder | a | 1836 tests | s |"
+        self.assertFalse(cf.is_prose_table_row(row))
+        self.assertEqual(cf.task_id_of(row), "GATE-7")
+
+    def test_every_way_of_writing_a_date_keeps_the_row_a_row(self):
+        """Decoration must not be a way out of the gate, so each spelling is a case.
+
+        Bold, a footnote asterisk, a leading label and a backtick are the four
+        shapes markdown actually produces around a date. Each is a row, because
+        the only way to leave the row path is to delete the date itself.
+        """
+        cells = [
+            "2026-10-05",
+            "**2026-10-05**",
+            "2026-10-05*",
+            "date: 2026-10-05",
+            "`2026-10-05`",
+            "**2026-10-05** (cycle 3)",
+        ]
+        for cell in cells:
+            row = f"| {cell} | GATE-7 | builder | a | 1836 tests | s |"
+            self.assertFalse(cf.is_prose_table_row(row), cell)
+            self.assertEqual(cf.task_id_of(row), "GATE-7", cell)
+
+    def test_a_decorated_date_is_reported_rather_than_silently_accepted(self):
+        """The shape is visible, but the row is still checked, not excused."""
+        self.assertTrue(
+            cf.has_decorated_date_cell(
+                "| **2026-10-05** | GATE-7 | builder | a | 1836 tests | s |"
+            )
+        )
+        self.assertFalse(
+            cf.has_decorated_date_cell(
+                "| 2026-10-05 | GATE-7 | builder | a | 1836 tests | s |"
+            )
+        )
+        self.assertFalse(cf.has_decorated_date_cell("| before | `Ran 1797` |"))
+
+    def test_the_rule_is_a_date_somewhere_and_not_a_conjunction(self):
+        """Why prose is not also "the second cell is not task-shaped".
+
+        The sub-tables this file contains have task-shaped second cells, so a
+        conjunction would reclassify all of them as rows and demand an artifact
+        named after a table cell -- the defect the conjunction was meant to
+        close. Each shape below is prose, and each has a task-shaped cell 1.
+        """
+        rows = [
+            "| 1784 | `1784 / OK / xf 4` | `1784 / FAILED` |",
+            "| Ran | before this change | `Ran 1797 / OK` |",
+            "| SQLite | SQLite | PostgreSQL 17 |",
+            "| while | `test_send_runs` | nothing sent yet |",
+        ]
+        for row in rows:
+            self.assertTrue(cf.task_id_of(row), row)
+            self.assertTrue(cf.is_prose_table_row(row), row)
 
 
 class ExemptionInventoryTests(CheckFixture, unittest.TestCase):
