@@ -89,10 +89,23 @@ jobs:
         with:
           python-version: "3.14"
           cache: pip
-          cache-dependency-path: backend/requirements.txt
+          # The LOCK, not requirements.txt: it is the file whose contents decide
+          # what gets installed, so it is what the cache key must follow.
+          # requirements.txt is a pointer to it and changes far less often, so
+          # keying on the pointer would keep serving a cache built from a lock
+          # nobody re-read.
+          cache-dependency-path: backend/requirements.lock
 
-      - name: Install pinned dependencies
-        run: pip install -r requirements.txt
+      # requirements.lock is the compiled, hash-pinned resolution of
+      # requirements.in, and it is what every job here installs. Two reasons it
+      # is the install source rather than requirements.txt: it pins the
+      # TRANSITIVE dependencies (asgiref, sqlparse, tzdata, urllib3 and the rest
+      # -- nothing in this repo imports those directly, so no hand-written file
+      # can pin them), and its `--hash` lines make pip verify every wheel it
+      # downloads. requirements.txt is a one-line pointer to it, kept so the
+      # documented developer command in backend/README.md still works.
+      - name: Install pinned dependencies from the lock
+        run: pip install -r requirements.lock
 
       - name: Django system check
         run: python manage.py check
@@ -242,10 +255,10 @@ jobs:
         with:
           python-version: "3.14"
           cache: pip
-          cache-dependency-path: backend/requirements.txt
+          cache-dependency-path: backend/requirements.lock
 
       - name: Install pinned dependencies
-        run: pip install -r requirements.txt
+        run: pip install -r requirements.lock
 
       # Both halves of the gate, both exit codes measured: `ruff check .`
       # exits 0 only on a clean lint, and `ruff format --check .` exits 0
@@ -322,10 +335,10 @@ jobs:
         with:
           python-version: "3.14"
           cache: pip
-          cache-dependency-path: backend/requirements.txt
+          cache-dependency-path: backend/requirements.lock
 
       - name: Install pinned dependencies
-        run: pip install -r requirements.txt
+        run: pip install -r requirements.lock
 
       # settings.py falls back to SQLite without complaint when DATABASE_URL is
       # unset or malformed, so "the job ran" would otherwise not mean "PG ran".

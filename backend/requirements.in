@@ -1,0 +1,79 @@
+# Direct dependencies -- the ONLY hand-edited dependency file in this tree.
+#
+# Do not add pins here for libraries the application does not import directly:
+# that is what requirements.lock is for. Edit this file, then regenerate:
+#
+#     pip-compile --output-file=requirements.lock requirements.in
+#
+# requirements.txt is a POINTER to that lock (it contains `-r requirements.lock`
+# and nothing else), so `pip install -r requirements.txt` and
+# `pip install -r requirements.lock` install byte-identical sets, and there is
+# exactly one file whose contents a machine wrote. requirements.lock is
+# committed on purpose: an unpinned transitive is a dependency nobody chose,
+# resolved at install time, and it is the reason a green suite can go red on a
+# commit that changed no Python.
+#
+# The `==` pins below are deliberate and load-bearing, so they stay in the .in
+# rather than floating: each one is a version-sensitive decision, and the reason
+# is written next to it. Dropping a pin here and letting the compiler choose
+# would make those decisions silently.
+Django==6.1.1
+djangorestframework==3.18.1
+djangorestframework-simplejwt==5.5.1
+django-cors-headers==4.9.0
+# SPEC-20-9: scannable MFA enrollment QR from the otpauth:// provisioning
+# URI (common/qr.py). Pure Python, no runtime dependencies, emits SVG
+# without an image library.
+segno==1.6.1
+razorpay==2.0.1
+# SPEC-22-01: production Postgres. Django's postgresql backend loads psycopg3
+# at first connection, so without this the documented postgres DATABASE_URL
+# crashes the moment prod takes its first query. [binary] ships prebuilt
+# libpq wheels (no compiler needed in the image).
+psycopg[binary]==3.3.6
+# SPEC-22-04 [R-22.13]: error tracking, imported ONLY when SENTRY_DSN is set
+# (config/settings.py _init_error_tracking). Without a DSN the package is
+# never imported, so the app boots and behaves exactly as it did before it
+# was added - which is also why the test suite never needs it: the SDK init
+# is stubbed. Official SDK, pinned like everything else here.
+sentry-sdk==2.71.0
+# WSGI server for config.wsgi (the Dockerfile CMD); Django's dev server is
+# not a production server.
+gunicorn==26.2.0
+# Serves STATIC_ROOT from the app process, so DEBUG=false deployments still
+# ship admin CSS/JS without a separate web server or object store.
+whitenoise==6.11.0
+python-dotenv==1.2.3
+Pillow==12.3.0
+coverage==7.16.1
+# GATE-1 (2026-10-04): ruff is both the linter and the FORMATTER OF RECORD
+# for this tree (config: backend/pyproject.toml; gate: the `lint` job in
+# .github/workflows/backend-tests.yml). Pinned like everything else above
+# because formatter output is version-sensitive -- the pin is what makes a
+# local run and a CI run agree byte for byte, and dropping it would let the
+# gate silently start reformatting on whatever ruff is current.
+ruff==0.16.10
+# MUT-1: mutmut, the automated mutation runner behind
+# .github/workflows/mutation-weekly.yml. Weekly and workflow_dispatch only --
+# it never runs on a pull_request, so it cannot gate one.
+#
+# 2.5.1 and NOT the current 3.8.0, and the reason is not age. mutmut 3 takes
+# `pytest>=6.2.5` as a HARD requirement (its own metadata), and this repo's
+# floor is measured by `manage.py test`; adopting 3.x would mean carrying a
+# second test runner whose result is not the number the changelog prints.
+# 2.5.1 takes any command as its runner, so the project's own runner is used
+# unchanged. Its base install is also pytest-free (pytest is only an extra).
+#
+# Config is [tool.mutmut] in backend/pyproject.toml. Two gotchas measured while
+# wiring this up, both of which cost a run before they were understood:
+#   - `runner` IS read from that config file. mutmut declares `--runner` with
+#     no default, so the value click passes is None (falsy) and the config
+#     merge substitutes the file's value; the non-empty pytest runner is only
+#     that merge's Python fallback. `--runner` on the command line is therefore
+#     an OVERRIDE of the file's value, not a requirement. paths_to_mutate and
+#     the boolean flags below are read from the file for the same reason: their
+#     defaults are falsy too.
+#   - `simple_output` does not disable the progress spinner; `no_progress`
+#     does. With only simple_output set, mutmut dies on a cp1252 console with
+#     UnicodeEncodeError on the braille character it writes to stdout.
+mutmut==2.5.1
