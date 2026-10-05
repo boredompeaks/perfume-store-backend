@@ -18,6 +18,11 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from doc_claims import (  # noqa: E402
+    FALLBACK_BASE,
+    MIN_REASON_CHARS,
+    RE_MODULE_PATH,
+    RE_PATH_LINE,
+    RE_REASON_REFERENCE,
     _inside_any_span,
     _path_exists,
     _resolve_path,
@@ -28,8 +33,6 @@ from doc_claims import (  # noqa: E402
     resolve_base,
     verify_claims,
 )
-from doc_claims import FALLBACK_BASE, MIN_REASON_CHARS  # noqa: E402
-from doc_claims import RE_MODULE_PATH, RE_PATH_LINE, RE_REASON_REFERENCE  # noqa: E402
 
 DOC = "backend/docs/changes.md"
 

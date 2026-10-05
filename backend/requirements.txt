@@ -2,7 +2,7 @@
 # generated from requirements.in by the pinned pip-tools:
 #
 #     pip-compile --generate-hashes --no-emit-index-url --no-emit-trusted-host \
-#         --output-file=requirements.lock requirements.in
+#         --allow-unsafe --output-file=requirements.lock requirements.in
 #
 # (Same command as the one in requirements.in; the lock's own generated header
 # prints an extra `--no-index` from pip-compile's internal invocation, which

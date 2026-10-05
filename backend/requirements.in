@@ -4,7 +4,21 @@
 # that is what requirements.lock is for. Edit this file, then regenerate:
 #
 #     pip-compile --generate-hashes --no-emit-index-url --no-emit-trusted-host \
-#         --output-file=requirements.lock requirements.in
+#         --allow-unsafe --output-file=requirements.lock requirements.in
+#
+# TIER-2 cycle 3 (BUG-6): `--allow-unsafe` is REQUIRED, not decoration, and
+# omitting it produces a lock that cannot be installed. pip-tools depends on
+# `setuptools` and `pip`, which pip-compile classifies as "unsafe" and leaves
+# OUT of the lock by default -- while `--generate-hashes` puts pip in
+# `--require-hashes` mode, where every requirement must be pinned with `==`.
+# With pip-tools in this file and `--allow-unsafe` absent, the lock shipped
+# `pip-tools==7.6.1` with an UNPINNED `setuptools` beside it, and
+# `pip install -r requirements.lock` in a fresh venv exited 1:
+#   ERROR: In --require-hashes mode, all requirements must have their versions
+#   pinned with ==. These do not: setuptools ...
+# `--allow-unsafe` puts pip, setuptools and wheel into the lock WITH `==` pins
+# and hashes, which is the only form that both keeps them hash-verified and
+# installable. Removing the flag reintroduces a lock that does not install.
 #
 # TIER-2 cycle 2 (BUG-5): pip-compile is the GENERATOR of requirements.lock and
 # was documented here, in requirements.txt and in the lock's own header while

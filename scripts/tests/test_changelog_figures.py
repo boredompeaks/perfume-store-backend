@@ -37,7 +37,6 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import changelog_figures as cf  # noqa: E402
 
-
 # Real `manage.py test --verbosity 0` tail, SQLite, full suite.
 GREEN_RUN = (
     "INFO 2026-10-04 21:26:24,658 common.audit request_id=0ce4d64a106e4bcc8f541f8b84c3fa84d "
