@@ -474,6 +474,41 @@ def _directive_note(directive: CounterExample | None) -> str:
     return f"cited as a counter-example ({directive.kind}): {directive.reason}"
 
 
+def _is_dotted_module_segment(text: str, span: tuple[int, int]) -> bool:
+    """True when ``span`` is a NON-FINAL segment of a dotted identifier.
+
+    A dotted test id has the shape ``package.module.Class.test_method``, so
+    every segment but the last names a module or a class. A module that is a
+    test module carries the ``test_`` stem in its own name
+    (``tests.test_correlation_ids....``), and demanding a ``def`` for that stem
+    reported correct prose as a missing test.
+
+    The final segment is deliberately NOT exempt: it is the method name, which
+    is the claim the gate exists to check, so this cannot hide a quoted method
+    that does not exist. The dotted run is measured on the IDENTIFIER text
+    either side of the segment, not on the whole line, so prose around the
+    citation cannot change the verdict.
+    """
+    start, end = span
+    before = start - 1
+    while before >= 0 and (text[before].isalnum() or text[before] == "_"):
+        before -= 1
+    if before >= 0 and text[before] == ".":
+        # There is a dotted segment in front of this one, so this is not the
+        # head of the identifier; it is an interior segment whatever follows.
+        pass
+    else:
+        return False
+    after = end
+    while after < len(text) and (text[after].isalnum() or text[after] == "_"):
+        after += 1
+    # A non-final segment is exactly one that is followed by a dot and at least
+    # one more word character.
+    return after < len(text) and text[after] == "." and after + 1 < len(text) and (
+        text[after + 1].isalnum() or text[after + 1] == "_"
+    )
+
+
 def _inside_any_span(span: tuple[int, int], spans: list[tuple[int, int]]) -> bool:
     """Whether ``span`` lies wholly inside any one of ``spans``.
 
@@ -556,6 +591,18 @@ def extract_claims(text: str, path: str, first_line: int = 1) -> list[Claim]:
             # own span, so a method cited anywhere else on the line is
             # unaffected.
             if _inside_any_span(match.span(), path_spans):
+                continue
+            # The same reading one syntax level up (BUG-2). A test module is
+            # cited DOTTED as well as by path -- `tests.test_correlation_ids.
+            # UnhandledExceptionTests.test_...` is how a failure id is written
+            # down -- and in that form the module's own `test_` stem is a
+            # segment with no `def` anywhere, so the pass demanded one and
+            # reported correct prose as a missing test. Only a NON-FINAL segment
+            # of a dotted identifier is a module or class name; the final
+            # segment is the method, which is exactly the claim worth making, so
+            # the exemption cannot launder a quoted method name. A stem that is
+            # not part of a dotted identifier at all is untouched.
+            if _is_dotted_module_segment(prose, match.span()):
                 continue
             name = match.group(1)
             # A quoted name is one claim whether it is asserted or reported
