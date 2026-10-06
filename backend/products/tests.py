@@ -325,6 +325,60 @@ class SlugGenerationTests(ApiTestCase):
         self.assertEqual(generated, "x" * 100)
         self.assertEqual(len(generated), 100)
 
+    # U+00BD VULGAR FRACTION ONE HALF. ``slugify`` normalises it to a digit, a
+    # FRACTION SLASH and a digit, then drops the non-ASCII slash -- so ONE
+    # character of name becomes TWO characters of slug. This is the whole
+    # mechanism that makes an over-long generated value reachable from a row
+    # the database will actually accept: the name stays inside its own declared
+    # width while the value derived from it leaves the slug column's. Written as
+    # an escape so the width of a source line is not the width of the name.
+    WIDENING_CHAR = "\u00bd"
+
+    def test_storable_name_slugifying_wider_than_the_slug_column_is_clamped(self):
+        """PG-2b cycle 2: the clamp reached through a row that STORES.
+
+        Every other truncation pin in this class drives an over-long name, and
+        an over-long name is not a row either database accepts - ``name`` is
+        declared at the same 100 as ``slug``. Those pins therefore only ever
+        ran on SQLite, which enforces no declared length, so PostgreSQL never
+        saw the clamp exercised through a real save at all. This one uses 60
+        widening characters: 60 is inside the declared 100, so the row saves on
+        both engines, while ``slugify`` turns it into 120 characters of slug and
+        the generated value no longer fits the column it is about to be
+        written to.
+
+        The expected value is a hand-written literal, never
+        ``slugify(name)[:100]``: a pin derived from the constant it guards
+        agrees with a wrong constant from both sides. Sixty widening characters
+        are ``"12"`` sixty times over, and the first 100 characters of that run
+        are ``"12"`` fifty times over.
+
+        Completeness: widening the ``slug`` column changes what is stored here
+        and fails this assertion, so this is a drift guard and not a snapshot
+        of the current bound.
+        """
+        product = self.make_product(name=self.WIDENING_CHAR * 60)
+        self.assertEqual(product.slug, "12" * 50)
+        self.assertEqual(len(product.slug), 100)
+        # Re-read through the database rather than trusting the in-memory
+        # attribute: the defect this guards is a value the COLUMN rejects, so
+        # the pin has to be about what the column accepted.
+        stored = products.objects.get(pk=product.pk).slug
+        self.assertEqual(stored, "12" * 50)
+
+    def test_storable_widening_name_collision_lands_inside_the_slug_column(self):
+        """Same input through the collision branch, still a storable row.
+
+        The first row takes the whole 100 characters, so the second one has to
+        give the base up to the "-2" marker's two characters. Hand-written
+        again: ``"12"`` forty-nine times then the marker.
+        """
+        self.make_product(name=self.WIDENING_CHAR * 60)
+        second = self.make_product(name=self.WIDENING_CHAR * 60)
+        self.assertEqual(second.slug, "12" * 49 + "-2")
+        self.assertEqual(len(second.slug), 100)
+        self.assertNotEqual(second.slug, "12" * 50)
+
     def test_one_over_the_bound_generation_loses_exactly_one_character(self):
         candidate = products(name="z" * 101)
         self.assertEqual(candidate._generate_unique_slug(), "z" * 100)
