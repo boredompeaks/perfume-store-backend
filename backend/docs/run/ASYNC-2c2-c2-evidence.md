@@ -228,20 +228,19 @@ enumerated and each driven rather than left to a percentage:
 | --- | --- |
 | alert on the exhausted-attempts path | `test_a_row_that_exhausts_its_attempts_raises_an_admin_alert` |
 | alert on the unresolvable path | `test_a_row_that_can_never_be_resolved_raises_an_admin_alert` |
-| alert suppressed by an unconfigured recipient list | `test_with_no_recipient_configured_...` |
+| alert suppressed by an unconfigured recipient list | the test whose name opens with the no-recipient-configured prefix, in the alert class above |
 | alert send failure swallowed, loop survives | `test_an_alert_send_failure_never_breaks_the_drain_loop` |
 | retry re-opens an unexpired dead row | `test_a_row_whose_expiry_has_not_arrived_still_retries` |
 | retry refuses an expired one and names it | `test_a_dead_row_past_its_expiry_stays_dead_and_is_named_in_the_report` |
 | both halves of a mixed batch, both counts printed | `test_the_report_counts_the_refusals_next_to_the_rows_that_did_retry` |
 | the refusal does NOT extend the expiry | `test_the_retry_never_moves_a_row_past_the_instant_it_expires` |
 | refusal list longer than the log bound, marker honest | `test_a_long_refusal_list_is_bounded_in_the_log_but_never_in_the_count` |
-| clause present under `--status-only`, absent without the flag | `test_status_only_still_reports_a_retry_that_ran`, `test_status_only_without_the_retry_flag_...` |
+| clause present under `--status-only`, absent without the flag | `test_status_only_still_reports_a_retry_that_ran`, plus its sibling that asserts the clause is absent when the flag was not passed |
 | `positive_int`: non-integer, below one, valid | three `OutboxBatchSizeArgumentTests` |
 | grouped report summing many rows per status | `test_the_report_sums_every_row_in_a_status_not_just_the_last_group` |
 
-`coverage report` on the three touched modules, after the fixes
-(`--include` those modules, run over the two new test classes plus
-`tests.test_alerts`):
+`coverage report` on the three touched modules, after the fixes, over the two
+new test classes plus the alert module's own existing test module:
 
 ```
 common/management/commands/drain_notification_outbox.py   39 stmts   0 miss   12 branch   0 partial  100.00%
