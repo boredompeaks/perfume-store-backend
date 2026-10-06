@@ -85,16 +85,51 @@ class products(models.Model):
             models.Index(fields=["category"], name="products_category_idx"),
         ]
 
+    def _generate_unique_slug(self):
+        """Slug for a row that arrived without one: slugify(name), held inside
+        the column's own declared bound, made unique with a numeric suffix.
+
+        Split out of ``save()`` because the bound is only reachable through
+        input that the column cannot store, and the two engines disagree about
+        what an overshoot costs. PostgreSQL enforces a declared length and
+        raises StringDataRightTruncation; SQLite enforces nothing, so the
+        identical write is silent there. An over-long name is precisely the
+        input this clamp exists for, and ``name`` is bounded the same way as
+        ``slug`` -- so a test that drove the clamp through ``save()`` could
+        only ever have run on the engine that does not enforce the bound, which
+        is the whole reason a latent overshoot survived here unnoticed.
+        """
+        # The bound is read off this model's own field, never typed here: a
+        # literal in a generation path silently rots the moment the column
+        # changes, and both literals this used to carry (the unclamped first
+        # candidate, and the 95-character collision budget) were already wrong
+        # for any bound other than 100.
+        max_length = self._meta.get_field("slug").max_length
+        base_slug = slugify(self.name) or "product"
+        slug = base_slug[:max_length]
+        suffix = 2
+        while products.objects.exclude(pk=self.pk).filter(slug=slug).exists():
+            # The suffix is the part that has to fit, so the BASE yields its
+            # characters. Cutting the finished candidate instead would drop
+            # the discriminator off the end of every collision, which is how
+            # two distinct products land on one slug and the unique constraint
+            # turns a truncation bug into a 500 on a different path. Each
+            # candidate here is distinct from the last, so the loop walks off
+            # the taken values and stops at the first free one.
+            #
+            # Truncating the FINISHED candidate instead of the base is the
+            # mutation this shape exists to survive: the cut then lands on the
+            # suffix, every candidate comes out identical to the one before it,
+            # and the loop never terminates at all.
+            marker = f"-{suffix}"
+            slug = f"{base_slug[: max_length - len(marker)]}{marker}"
+            suffix += 1
+        return slug
+
     def save(self, *args, **kwargs):
 
         if not self.slug:
-            base_slug = slugify(self.name) or "product"
-            slug = base_slug
-            suffix = 2
-            while products.objects.exclude(pk=self.pk).filter(slug=slug).exists():
-                slug = f"{base_slug[:95]}-{suffix}"
-                suffix += 1
-            self.slug = slug
+            self.slug = self._generate_unique_slug()
 
         super().save(*args, **kwargs)
 
