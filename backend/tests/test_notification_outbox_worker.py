@@ -1305,7 +1305,12 @@ class OutboxDeadLetterAlertTests(OutboxDrainTestCase):
         self.assertIn("SMTPRecipientsRefused", alerts_sent[0].body)
 
     def test_repeated_failures_alert_again_once_the_cooldown_lapses(self):
-        """Two dead rows, two alerts once the window is cleared between them.
+        """Dead rows keep alerting once the cooldown window is cleared.
+
+        Each drain in this test closes out one more unresolvable row, and the
+        alert is bounded by the cooldown window rather than by the row: the
+        pass inside the window is silent and the pass after a cleared window
+        alerts again.
 
         "Alerting on repeated failures" is a per-type cooldown bounded repeat,
         so the property to pin is that the alert REPEATS. The cooldown itself
