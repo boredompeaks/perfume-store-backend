@@ -119,7 +119,7 @@ The `doc_claims` scanner **cannot distinguish a `test_`-stemmed MODULE from a `t
 
 | Task | Req | Pri | Status |
 |---|---|---|---|
-| PG-2b | Slug `varchar(100)` `StringDataRightTruncation` | P1 | PENDING — 1 error still live on PG. |
+| PG-2b | Slug `varchar(100)` `StringDataRightTruncation` | P1 | **BUILDING 2026-10-06 — lane B** (worktree `wt-async`, branch `fix/pg-2b-slug-truncation`). Re-derived cold and **still live**: it is the one product-code defect among the seven PostgreSQL failures in the current floor pair, and it is invisible on SQLite because SQLite does not enforce `varchar(n)` — the product's slug builder emits a value longer than the column declares and the row 500s on Postgres only. Scope: bound the generated slug to the field's own declared maximum, read off the field rather than typed, and keep the collision-suffix path inside the same bound. No schema change is needed and none should be made. |
 | PG-2e | 6 test-only PG failures: `varchar_pattern_ops` index introspection + non-transactional sequences breaking hardcoded PKs | P1 | PENDING — **new, created by this task.** Test-side, but it means pagination and correlation-id tests are asserting engine-specific behaviour. |
 
 ## ASYNC-1 RESULT — the hypothesis is CONFIRMED, and it is worse than "slow"
@@ -144,7 +144,7 @@ The `doc_claims` scanner **cannot distinguish a `test_`-stemmed MODULE from a `t
 |---|---|---|---|
 | ASYNC-2a | Set an SMTP timeout, env-driven, with a pin | **P1** | PENDING — smallest item in this queue and the cheapest risk reduction available: one settings key turns an unbounded hang into a bounded failure. |
 | ASYNC-2b | Stop sending pre-commit inside `atomic()` — at minimum `ORDER_PAID` and the back-in-stock loop, which hold row locks across an unbounded network wait | **P1** | PENDING — **the highest-value item in the entire async queue.** A row lock held across an SMTP handshake is a checkout-blocking outage waiting for a bad minute. |
-| ASYNC-2c | Jobs layer: outbox, retry with backoff, dead-letter, observability (**SPEC-2-03**) | P2 | PENDING — the structural fix. Depends on 2b establishing the outbox seam. |
+| ASYNC-2c | Jobs layer: outbox, retry with backoff, dead-letter, observability (**SPEC-2-03**) | P2 | **BUILDING, split into three; ASYNC-2c2 dispatched 2026-10-06 as lane A** (worktree `spec-comp-wt`, branch `feat/async-2c2`). The capability source is spec section 19.3, which requires retry with backoff, idempotent processing, dead-letter/failure handling, job status and observability, manual retry for authorized operators, and alerting on repeated failures — capabilities, not a mandated tool, so the tool choice is not the deliverable and the section's own illustrative-tool disclaimer governs. **ASYNC-2c1 SHIPPED: the durable outbox substrate, and it converts NOTHING.** **THE ORDERING CONSTRAINT IS LOAD-BEARING: 2c2 (worker, drain loop, retry/backoff, dead-letter) must land before 2c3 converts any site**, because a converted site before a drain loop means the notification is silently never delivered. 2c3 is therefore queued behind 2c2 and is NOT parallelisable with it. |
 | ASYNC-2d | Per-recipient failure isolation in the alert loop; shared cooldown backend | P2 | PENDING |
 | ASYNC-2e | Register `shipped`/`delivered`/`cancelled` or stop dispatching them | P2 | PENDING — currently strings outside the `EventType` vocabulary, reaching nothing. |
 
