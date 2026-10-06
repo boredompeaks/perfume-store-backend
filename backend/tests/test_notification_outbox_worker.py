@@ -53,7 +53,9 @@ from unittest import mock
 
 from django.contrib.auth import get_user_model
 from django.core import mail
+from django.core.cache import cache
 from django.core.management import call_command
+from django.core.management.base import CommandError
 from django.db import (
     OperationalError,
     close_old_connections,
@@ -73,6 +75,11 @@ from common.models import AuditEvent, NotificationOutbox
 from common.notifications import UnresolvableNotification
 from common.testing import ApiTestCase
 from orders.models import Order
+
+# The mailbox the admin alert module is pointed at where an alert is expected.
+# Named here rather than imported so this file's expectations do not move when
+# the alert module's own test helpers are refactored.
+ALERT_RECIPIENT = "outbox-oncall@example.com"
 
 # Poison payloads, one row each. Every way the substrate's own docstrings say a
 # stored context can fail at send time, so "the batch survives a bad row" is
@@ -1213,3 +1220,429 @@ class OutboxErrorTextTests(OutboxDrainTestCase):
         row.refresh_from_db()
         self.assertLessEqual(len(row.last_error), notifications.LAST_ERROR_MAX_LENGTH)
         self.assertTrue(row.last_error.endswith("..."))
+
+
+# ---------------------------------------------------------------------------
+# ASYNC-2c2 cycle 2: the four findings audit cycle 1 left open.
+# ---------------------------------------------------------------------------
+
+
+@tag("notifications")
+class OutboxDeadLetterAlertTests(OutboxDrainTestCase):
+    """A dead-lettered row reaches the admin alert module (spec 19.2).
+
+    The dead-letter transition used to write ONE log line. ``ops.alerts`` is
+    where every admin alert this product sends already goes, it already holds
+    the recipient list and the per-type cooldown, and it already has the
+    in-tree precedent of a caller raising an alert beside its own audit hook
+    (a password-reset success beside the AUTH_PASSWORD_RESET record). Spec 19.2
+    names failed notification deliveries as an admin notification and no such
+    alert type existed.
+
+    **These assert on MAIL, never on a log record.** A log line is exactly what
+    the pre-fix code already emitted, so a test that asserted on one would pass
+    against the defect it exists to close.
+    """
+
+    def setUp(self):
+        super().setUp()
+        # The cooldown is a cache-backed, per-alert-type window; a previous
+        # test's entry would suppress this class's first alert.
+        cache.clear()
+
+    def alert_mails(self):
+        return [message for message in mail.outbox if message.to == [ALERT_RECIPIENT]]
+
+    def queue_undeliverable(self, buyer="alertbuyer"):
+        """A queued row whose stored reference will not resolve at send time.
+
+        Deleting the order is what makes this the *unresolvable* dead-letter
+        path rather than the exhausted-attempts one, so the two tests below
+        exercise the two places a row can be closed out.
+        """
+        order = make_order(self.make_user(buyer))
+        row = self.queue(order=order)
+        Order.objects.filter(pk=order.pk).delete()
+        return row
+
+    def test_a_row_that_can_never_be_resolved_raises_an_admin_alert(self):
+        row = self.queue_undeliverable("alertunresolvable")
+        with override_settings(ALERT_RECIPIENTS=ALERT_RECIPIENT):
+            result = notifications.drain_notifications()
+        self.assertEqual(result.dead, 1)
+        alerts_sent = self.alert_mails()
+        self.assertEqual(len(alerts_sent), 1)
+        # The body has to identify WHICH row died and WHY, or the operator has
+        # a mailbox full of indistinguishable alerts and a table to go read.
+        self.assertIn(str(row.pk), alerts_sent[0].body)
+        self.assertIn("is gone", alerts_sent[0].body)
+
+    @override_settings(NOTIFICATION_OUTBOX_MAX_ATTEMPTS=1)
+    def test_a_row_that_exhausts_its_attempts_raises_an_admin_alert(self):
+        """The other dead-letter path: every attempt failed.
+
+        The handler is replaced rather than ``send_email``, and that is the
+        point: the alert rides the SAME single send path as the notification,
+        so patching ``send_email`` would break the alert too and this test
+        could not distinguish "the alert fired" from "the alert tried and the
+        stub ate it".
+        """
+
+        def refuse(context):
+            raise OSError("SMTPRecipientsRefused: nobody@example.com")
+
+        row = self.queue(order=make_order(self.make_user("alertattempts")))
+        with override_settings(ALERT_RECIPIENTS=ALERT_RECIPIENT):
+            with mock.patch.dict(
+                notifications._EVENT_HANDLERS,
+                {AuditEvent.EventType.ORDER_PAID: refuse},
+            ):
+                result = notifications.drain_notifications()
+        self.assertEqual(result.dead, 1)
+        alerts_sent = self.alert_mails()
+        self.assertEqual(len(alerts_sent), 1)
+        self.assertIn(str(row.pk), alerts_sent[0].body)
+        self.assertIn("SMTPRecipientsRefused", alerts_sent[0].body)
+
+    def test_repeated_failures_alert_again_once_the_cooldown_lapses(self):
+        """Two dead rows, two alerts once the window is cleared between them.
+
+        "Alerting on repeated failures" is a per-type cooldown bounded repeat,
+        so the property to pin is that the alert REPEATS. The cooldown itself
+        is this project's existing mechanism and cycle 2 changed nothing
+        inside it; the window is cleared between passes here purely so the
+        repeat is observable rather than suppressed by design.
+        """
+        first = self.queue_undeliverable("alertrepeatone")
+        with override_settings(ALERT_RECIPIENTS=ALERT_RECIPIENT):
+            notifications.drain_notifications()
+            self.assertEqual(len(self.alert_mails()), 1)
+
+            # Inside the cooldown the mechanism this task does not own
+            # collapses the repeat. Asserted so a change to it is noticed
+            # rather than discovered in an operator's inbox.
+            self.queue_undeliverable("alertrepeattwo")
+            notifications.drain_notifications()
+            self.assertEqual(len(self.alert_mails()), 1)
+
+            cache.clear()
+            self.queue_undeliverable("alertrepeatthree")
+            notifications.drain_notifications()
+        self.assertEqual(len(self.alert_mails()), 2)
+        self.assertNotEqual(first.pk, 0)
+
+    def test_with_no_recipient_configured_the_row_still_dies_and_nothing_is_sent(self):
+        """An unconfigured alert budget must not cost the dead-letter.
+
+        The alert module's own contract is log-only and never raises into the
+        flow that tripped it; this pins that the drain loop's terminal
+        transition is that flow, so an empty ``ALERT_RECIPIENTS`` degrades to
+        "no admin hears about it" and never to "the row is not recorded".
+        """
+        row = self.queue_undeliverable("alertnocrecipient")
+        with override_settings(ALERT_RECIPIENTS=""):
+            result = notifications.drain_notifications()
+        self.assertEqual(result.dead, 1)
+        self.assertEqual(len(mail.outbox), 0)
+        row.refresh_from_db()
+        self.assertEqual(row.status, NotificationOutbox.Status.DEAD)
+
+    def test_an_alert_send_failure_never_breaks_the_drain_loop(self):
+        """Log-only, like every other alert in this project.
+
+        If raising the alert could abort a pass, a broken mail provider on the
+        ALERT path would stop notifications being delivered at all — the
+        monitoring would become the outage. The row is queued BEFORE the stub,
+        because ``enqueue`` refuses an event with no registered handler and a
+        patch applied first would silently leave nothing to dead-letter.
+        """
+        row = self.queue_undeliverable("alertraisesnothing")
+        with mock.patch.object(
+            notifications, "send_email", side_effect=OSError("down")
+        ):
+            with override_settings(ALERT_RECIPIENTS=ALERT_RECIPIENT):
+                result = notifications.drain_notifications()
+        self.assertEqual(result.dead, 1)
+        self.assertEqual(len(mail.outbox), 0)
+        row.refresh_from_db()
+        self.assertEqual(row.status, NotificationOutbox.Status.DEAD)
+
+
+@tag("notifications")
+class OutboxRetryRetentionTests(OutboxDrainTestCase):
+    """``--retry-dead`` against a row whose retention window has closed.
+
+    The cycle-2 decision, in tests. A dead row past ``expires_at`` is NOT
+    re-opened, because the payload is deliberately not scrubbed of one-time
+    token material and deletion on a clock is the compensating control — so
+    extending an expired row's life to make a retry work would extend the
+    retention of exactly the material the expiry exists to bound. And it could
+    not deliver anyway: ``PASSWORD_RESET_TIMEOUT`` has almost certainly
+    invalidated the token, and a link that cannot work is worse than no mail.
+
+    The consequence this whole class guards is the one that made the defect a
+    defect: the observability signal must SURVIVE the retry. A re-opened
+    expired row became PENDING, was never claimed, and left the status report
+    reading as though the failure had never happened.
+    """
+
+    def _run(self, *args):
+        out = StringIO()
+        call_command("drain_notification_outbox", *args, stdout=out)
+        return out.getvalue()
+
+    def test_a_dead_row_past_its_expiry_stays_dead_and_is_named_in_the_report(self):
+        row = self.queue_expired(
+            status=NotificationOutbox.Status.DEAD,
+            attempts=3,
+            last_error="OSError: gone",
+        )
+        output = self._run("--retry-dead")
+        self.assertIn("re-opened 0 dead row", output)
+        self.assertIn("dead 1", output)
+        self.assertEqual(len(mail.outbox), 0)
+        row.refresh_from_db()
+        self.assertEqual(row.status, NotificationOutbox.Status.DEAD)
+        self.assertEqual(row.attempts, 3)
+        # The reason the row died is the evidence the row was kept for.
+        self.assertEqual(row.last_error, "OSError: gone")
+
+    def test_the_report_counts_the_refusals_next_to_the_rows_that_did_retry(self):
+        """Mixed batch: the operator sees both halves, not a single total."""
+        retryable = self.queue(
+            order=make_order(self.make_user("retrylive")),
+            status=NotificationOutbox.Status.DEAD,
+            attempts=1,
+        )
+        expired = [
+            self.queue_expired(
+                order=make_order(self.make_user(f"retrypast{index}")),
+                status=NotificationOutbox.Status.DEAD,
+                attempts=2,
+            )
+            for index in range(2)
+        ]
+        output = self._run("--retry-dead")
+        self.assertIn("re-opened 1 dead row", output)
+        self.assertIn("left dead past their expiry", output)
+        retryable.refresh_from_db()
+        self.assertEqual(retryable.status, NotificationOutbox.Status.SENT)
+        self.assertEqual(len(mail.outbox), 1)
+        for row in expired:
+            row.refresh_from_db()
+            self.assertEqual(row.status, NotificationOutbox.Status.DEAD)
+        self.assertEqual(
+            NotificationOutbox.objects.filter(
+                status=NotificationOutbox.Status.DEAD
+            ).count(),
+            2,
+        )
+
+    def test_a_row_whose_expiry_has_not_arrived_still_retries(self):
+        """The refusal turns on the expiry and on nothing else.
+
+        Pinned from both sides on purpose: a retry that refused everything, or
+        one that refused only rows it happened to see first, would both pass a
+        test that only drove an expired row.
+        """
+        row = self.queue(
+            expires_at=future(),
+            status=NotificationOutbox.Status.DEAD,
+            attempts=1,
+        )
+        self._run("--retry-dead")
+        row.refresh_from_db()
+        self.assertEqual(row.status, NotificationOutbox.Status.SENT)
+
+    def test_the_retry_never_moves_a_row_past_the_instant_it_expires(self):
+        """The retention bound is not the retry's to extend.
+
+        Asserted on the stored value rather than on the status, because a
+        re-opened row that reaches ``SENT`` on a hand-extended expiry would
+        satisfy every other test in this class while quietly holding credential
+        material past the bound that exists to bound it.
+        """
+        row = self.queue_expired(status=NotificationOutbox.Status.DEAD, attempts=1)
+        original_expiry = row.expires_at
+        self._run("--retry-dead")
+        row.refresh_from_db()
+        self.assertEqual(row.expires_at, original_expiry)
+
+    def test_the_refusal_is_specific_to_the_retry_flag(self):
+        """A plain drain leaves a dead row alone — it was never claimable.
+
+        So the status report after an ordinary pass still shows it, and the
+        operator who never asked for a retry never loses the signal either.
+        """
+        row = self.queue_expired(status=NotificationOutbox.Status.DEAD, attempts=3)
+        self._run()
+        row.refresh_from_db()
+        self.assertEqual(row.status, NotificationOutbox.Status.DEAD)
+        self.assertIn("dead 1", self._run("--status-only"))
+
+    def test_a_long_refusal_list_is_bounded_in_the_log_but_never_in_the_count(self):
+        """More refusals than the log will spell out.
+
+        The count an operator acts on must be exact however long the pk list
+        gets; only the list is capped, and the cap is marked rather than
+        silent, so a reader cannot mistake a truncated list for the whole one.
+        """
+        for index in range(23):
+            self.queue_expired(
+                order=make_order(self.make_user(f"manyrefused{index}")),
+                status=NotificationOutbox.Status.DEAD,
+                attempts=2,
+            )
+        with self.assertLogs("common.notifications", level="INFO") as captured:
+            output = self._run("--retry-dead")
+        self.assertIn("23 left dead past their expiry", output)
+        line = "\n".join(captured.output)
+        self.assertIn("23 left dead past their retention window", line)
+        self.assertIn("(+3 more)", line)
+        # Exactly DEAD_RETRY_PK_LOG_LIMIT pks are spelled out, not all 23, and
+        # every one of them is a bare integer — a bounded list that quietly grew
+        # a word in it would still be unreadable at 20 entries.
+        pk_list = line.split("pks=[")[1].split("]")[0]
+        parts = [part.strip() for part in pk_list.split(", ")]
+        self.assertEqual(parts[-1], "(+3 more)")
+        spelled_out = parts[:-1]
+        self.assertEqual(len(spelled_out), notifications.DEAD_RETRY_PK_LOG_LIMIT)
+        self.assertTrue(all(part.isdigit() for part in spelled_out))
+        # The marker must state the real shortfall, or a reader cannot tell a
+        # bounded list from a wrong one.
+        shortfall = int(parts[-1].strip("()+ more"))
+        self.assertEqual(shortfall, 23 - notifications.DEAD_RETRY_PK_LOG_LIMIT)
+
+    def test_status_only_still_reports_a_retry_that_ran(self):
+        """The one combination an operator uses to DECIDE whether to retry.
+
+        It sends nothing, so its output is the whole of what it says — which is
+        why it has to carry the retry clause too, and why the clause is keyed
+        on the flag rather than on the counts.
+        """
+        self.queue(
+            order=make_order(self.make_user("statusonlylive")),
+            status=NotificationOutbox.Status.DEAD,
+            attempts=1,
+        )
+        self.queue_expired(
+            order=make_order(self.make_user("statusonlypast")),
+            status=NotificationOutbox.Status.DEAD,
+            attempts=1,
+        )
+        output = self._run("--status-only", "--retry-dead")
+        self.assertIn("--status-only", output)
+        self.assertIn("re-opened 1 dead row(s)", output)
+        self.assertIn("1 left dead past their expiry", output)
+        self.assertEqual(len(mail.outbox), 0)
+
+    def test_status_only_without_the_retry_flag_keeps_its_own_one_line_shape(self):
+        """No clause, so its presence keeps meaning "a retry ran".
+
+        The regression guard on the choice above: keying the clause on the
+        counts instead would print it here for an idle table, and an operator
+        reading that would be told a retry happened when none did.
+        """
+        output = self._run("--status-only")
+        self.assertNotIn("re-opened", output)
+
+
+@tag("notifications")
+class OutboxBatchSizeArgumentTests(OutboxDrainTestCase):
+    """``--batch-size`` is validated, because a wrong one is silent otherwise.
+
+    A negative limit used to make the pass examine nothing at all and a zero
+    used to fall through to the configured default — both without an error, so
+    an operator who typed ``--batch-size 0`` got a full pass they had not asked
+    for and one who typed ``--batch-size -1`` got an empty report that read
+    exactly like an idle queue.
+    """
+
+    def _run(self, *args):
+        out = StringIO()
+        call_command("drain_notification_outbox", *args, stdout=out)
+        return out.getvalue()
+
+    def test_a_zero_batch_size_is_refused_by_name(self):
+        self.queue_many(2)
+        with self.assertRaises(CommandError) as caught:
+            self._run("--batch-size", "0")
+        self.assertIn("--batch-size", str(caught.exception))
+        self.assertIn("positive", str(caught.exception))
+        self.assertEqual(len(mail.outbox), 0)
+
+    def test_a_negative_batch_size_is_refused_rather_than_silently_accepted(self):
+        self.queue_many(2)
+        with self.assertRaises(CommandError) as caught:
+            self._run("--batch-size", "-3")
+        self.assertIn("--batch-size", str(caught.exception))
+        self.assertEqual(len(mail.outbox), 0)
+
+    def test_a_non_numeric_batch_size_is_refused(self):
+        with self.assertRaises(CommandError) as caught:
+            self._run("--batch-size", "many")
+        self.assertIn("--batch-size", str(caught.exception))
+
+    def test_a_positive_batch_size_is_still_honoured(self):
+        """The validation must not swallow the argument it was added for."""
+        self.queue_many(3)
+        output = self._run("--batch-size", "2")
+        self.assertIn("examined 2", output)
+        self.assertIn("pending 1", output)
+        self.assertEqual(len(mail.outbox), 2)
+
+
+@tag("notifications")
+class OutboxStatusReportStrengthTests(OutboxDrainTestCase):
+    """The status report's pin, strengthened against the hazard beside it.
+
+    ``outbox_status_counts`` assigns into a dict keyed by status from grouped
+    rows. That is last-write-wins, and it would silently under-report if the
+    ORM ever folded the model's declared ``Meta.ordering`` into the GROUP BY:
+    one status would then arrive as several groups, and the last one written
+    would win. The earlier pin could not see that, because it only ever put at
+    most ONE row in each status — a hazard that merges nothing is invisible to
+    a fixture that holds nothing to merge.
+
+    Every row here therefore gets its own distinct ``created_at``, which is
+    what makes the fold observable: grouped by ``created_at`` as well as
+    status, four rows in one status arrive as four groups of one.
+    """
+
+    def seed(self, status, count, buyer_prefix, age_minutes):
+        for index in range(count):
+            self.queue(
+                order=make_order(self.make_user(f"{buyer_prefix}{index}")),
+                status=status,
+                created_at=past() - timedelta(minutes=age_minutes + index),
+            )
+
+    def test_the_report_sums_every_row_in_a_status_not_just_the_last_group(self):
+        """Hand-written literals, so a wrong report cannot agree with itself."""
+        self.seed(NotificationOutbox.Status.PENDING, 3, "sumpending", 10)
+        self.seed(NotificationOutbox.Status.SENT, 2, "sumsent", 30)
+        self.seed(NotificationOutbox.Status.FAILED, 4, "sumfailed", 50)
+        self.seed(NotificationOutbox.Status.DEAD, 1, "sumdead", 70)
+        self.assertEqual(
+            notifications.outbox_status_counts(),
+            {"pending": 3, "sent": 2, "failed": 4, "dead": 1},
+        )
+
+    def test_the_report_is_still_all_zeros_on_an_empty_table(self):
+        self.assertEqual(
+            notifications.outbox_status_counts(),
+            {"pending": 0, "sent": 0, "failed": 0, "dead": 0},
+        )
+
+    def test_a_status_that_only_ever_appears_alone_still_counts(self):
+        """The single-row case the stronger fixture above replaced.
+
+        Kept as its own test so dropping to one row per status is a visible
+        edit here rather than a silent weakening of the pin.
+        """
+        self.queue(status=NotificationOutbox.Status.PENDING)
+        NotificationOutbox.objects.update(status=NotificationOutbox.Status.SENT)
+        self.assertEqual(
+            notifications.outbox_status_counts(),
+            {"pending": 0, "sent": 1, "failed": 0, "dead": 0},
+        )

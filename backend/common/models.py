@@ -308,7 +308,10 @@ class NotificationOutbox(models.Model):
     ``PASSWORD_RESET_TIMEOUT`` has almost certainly invalidated whatever
     one-time material its payload carries and a link that no longer works is
     worse than no mail at all. Such a row ages out and the purge command
-    deletes it.
+    deletes it. **The operator's manual retry honours the same gate and will
+    not extend it** — a dead row past this instant is refused and left
+    ``DEAD``, so the status report still shows it, rather than being re-opened
+    to a ``PENDING`` state nothing will ever claim.
 
     **The status vocabulary, every value driven by a test.** ``PENDING`` is a
     row owed a send that has not been attempted yet; ``SENT`` is terminal and

@@ -4,7 +4,7 @@
 Every alert is a plain-transactional email to the configured staff
 recipients, sent through the SPEC-19-1 single send path
 (``common.notifications.send_email`` — never a new send_mail call; the
-whole point of R-19.0). The module owns the four alert types that have an
+whole point of R-19.0). The module owns the alert types that have an
 existing detection site; the order-lifecycle admin alerts (new order,
 reconciliation, fulfilment) are deliberately absent — their content halves
 are SPEC-1-12's (section-19.md owner attributions).
@@ -50,6 +50,7 @@ OUT_OF_STOCK = "out_of_stock"
 PAYMENT_FAILURE_SPIKE = "payment_failure_spike"
 SECURITY_ALERT = "security_alert"
 INTEGRATION_OUTAGE = "integration_outage"
+BACKGROUND_JOB_FAILURE = "background_job_failure"
 
 
 def _recipients():
@@ -276,4 +277,31 @@ def notify_integration_outage(detail_text):
         INTEGRATION_OUTAGE,
         {"detail": detail_text},
         "Integration outage alert",
+    )
+
+
+def notify_background_job_failure(detail_text):
+    """Background job failure: a queued notification was dead-lettered.
+
+    Spec 19.2 names failed notification deliveries among the admin
+    notifications, and this is the alert type for them. ASYNC-2c2 built the
+    trigger: ``common.notifications`` raises this beside the dead-letter
+    transition itself, in the same shape as the security alert's trigger site
+    — a caller raising an alert beside the hook that detected the problem —
+    rather than a separate monitor re-deriving the condition from the table.
+    The row's ``last_error`` is the diagnosis and it lives on the row; the
+    operator surface is ``manage.py drain_notification_outbox --status-only``.
+
+    "Repeated failures" is the cooldown's job, unchanged: one alert type, one
+    window, so a burst of poison rows is one mail and the next burst outside the
+    window is the next mail. Reached from a management command rather than a
+    request, so the log-only send contract matters twice over — an alert that
+    raised would abort a drain pass and turn the monitoring into the outage.
+    """
+    if not _recipients():
+        return False
+    return _send(
+        BACKGROUND_JOB_FAILURE,
+        {"detail": detail_text},
+        "Background job failure alert",
     )

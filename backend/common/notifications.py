@@ -31,7 +31,11 @@ path altogether: it writes the INTENT to send into ``NotificationOutbox``,
 inside the caller's transaction, and returns. ASYNC-2c2 adds the other half,
 ``drain_notifications``, which claims and sends those rows with a bounded
 retry and a dead-letter — so every property below is now behaviour a caller
-can observe, and the tests pin it rather than assert storage invariants.
+can observe, and the tests pin it rather than assert storage invariants. A
+dead-letter also RAISES an admin alert (``ops.alerts``' background-job-failure
+type, called beside the transition itself), because a transition that only
+wrote a log line left an operator dependent on reading a scheduler's output to
+learn a customer's confirmation had been dropped.
 
 **No call site is converted by either task, deliberately.** The sites still
 call ``dispatch``/``dispatch_on_commit`` and still send, so nothing is
@@ -787,7 +791,50 @@ def _record_success(pk):
     return DrainOutcome.SENT
 
 
-def _record_failure(pk, attempts, error):
+def _alert_dead_letter(pk, event_type, attempts, reason):
+    """Raise the admin alert for one row that has just been dead-lettered.
+
+    **This is the whole of the "alerting on repeated failures" requirement**,
+    and it was a log line and nothing else until cycle 2: the dead-letter
+    transition wrote ``logger.error`` and stopped, so an operator had to be
+    already reading a scheduler's output to learn that a customer's
+    confirmation had been dropped. Spec 19.2 names failed notification
+    deliveries among the admin notifications, and ``ops.alerts`` is where every
+    admin alert this product sends goes — it owns the recipient list
+    (``ALERT_RECIPIENTS``), the per-alert-type cooldown that bounds the repeat,
+    and the log-only send contract. The cooldown mechanism itself is untouched
+    by this call: it is that module's existing mechanism, owned elsewhere.
+
+    The import is FUNCTION-LOCAL and that is not a style choice: ``ops.alerts``
+    imports this module at its top level to reach ``send_email``, so a
+    module-level import here is a cycle. Same shape as
+    ``ops.alerts.check_payment_failure_spike`` importing ``AuditEvent`` the
+    same way.
+
+    Identity is passed as scalars rather than as the row so that neither caller
+    has to hold an instance it deliberately does not re-read: ``_record_failure``
+    takes ``attempts`` as an argument precisely because reading the row again
+    for a second answer to a settled question is what its docstring forbids.
+
+    ``reason`` goes into the mail because an alert that cannot say WHICH row
+    died and WHY is indistinguishable from every other one of them. It is the
+    same bounded ``_error_text`` the row stores in ``last_error`` — capped at
+    ``LAST_ERROR_MAX_LENGTH`` — not an unbounded exception repr, and it goes to
+    the operators who can already read that column.
+
+    Never raises into the caller: ``_send`` is log-only by that module's own
+    contract, and a drain pass that aborted because the ALERT mailbox was down
+    would stop delivering the notifications the alert exists to protect.
+    """
+    from ops import alerts
+
+    alerts.notify_background_job_failure(
+        f"notification outbox row {pk} (event {event_type!r}) was "
+        f"dead-lettered after {attempts} attempt(s): {_error_text(reason)}"
+    )
+
+
+def _record_failure(pk, event_type, attempts, error):
     """Count one failed attempt: retry later, or dead-letter it now.
 
     ``attempts`` is passed in rather than read here. The row was already read
@@ -829,6 +876,7 @@ def _record_failure(pk, attempts, error):
             attempts,
             _error_text(error),
         )
+        _alert_dead_letter(pk, event_type, attempts, error)
         return DrainOutcome.DEAD
     logger.warning(
         "notification outbox row failed, will retry pk=%s attempt=%d error=%s",
@@ -839,7 +887,7 @@ def _record_failure(pk, attempts, error):
     return DrainOutcome.FAILED
 
 
-def _dead_letter(pk, reason):
+def _dead_letter(pk, event_type, attempts, reason):
     """Close out a row that no attempt could ever fix.
 
     Distinct from :func:`_record_failure` in that the row is not rescheduled:
@@ -847,6 +895,10 @@ def _dead_letter(pk, reason):
     waiting to fail identically would only keep it consuming batches. The
     attempt its claim already spent is still recorded, which is what keeps the
     count an honest record of what the worker did.
+
+    ``attempts`` is passed in for the alert rather than read back, for the same
+    reason :func:`_record_failure` takes it as an argument: the row was already
+    read once by :func:`_deliver` and no other worker can be writing it.
     """
     updated = NotificationOutbox.objects.filter(pk=pk).update(
         status=NotificationOutbox.Status.DEAD,
@@ -862,6 +914,7 @@ def _dead_letter(pk, reason):
         pk,
         _error_text(reason),
     )
+    _alert_dead_letter(pk, event_type, attempts, reason)
     return DrainOutcome.DEAD
 
 
@@ -901,14 +954,17 @@ def _deliver(pk):
     try:
         context = resolve_context(row.payload)
     except UnresolvableNotification as exc:
-        return _dead_letter(pk, exc)
+        return _dead_letter(pk, row.event_type, row.attempts, exc)
     handler = _EVENT_HANDLERS.get(row.event_type)
     if handler is None:
         # The event had a handler when the row was queued and has none now.
         # Nothing can render it and no retry will ever produce a handler, so
         # this is the same shape as an unresolvable reference: close it out.
         return _dead_letter(
-            pk, f"no notification registered for event {row.event_type!r}"
+            pk,
+            row.event_type,
+            row.attempts,
+            f"no notification registered for event {row.event_type!r}",
         )
     try:
         handler(context)
@@ -919,7 +975,7 @@ def _deliver(pk):
             row.event_type,
             row.attempts,
         )
-        return _record_failure(pk, row.attempts, exc)
+        return _record_failure(pk, row.event_type, row.attempts, exc)
     return _record_success(pk)
 
 
@@ -969,6 +1025,16 @@ def outbox_status_counts():
     return counts
 
 
+DeadRetryResult = namedtuple("DeadRetryResult", ["requeued", "expired", "expired_pks"])
+
+# How many refused pks the log line spells out. The COUNT is always exact and
+# always reported; only the pk list is bounded, because a poison template or a
+# dead provider can dead-letter a whole batch and an unbounded log line is its
+# own incident. The tail is marked, never silently cut, for the same reason
+# LAST_ERROR_MAX_LENGTH is.
+DEAD_RETRY_PK_LOG_LIMIT = 20
+
+
 def retry_dead_notifications(event_type=None):
     """Re-open dead-lettered rows for another attempt (operator, ASYNC-2c2).
 
@@ -981,30 +1047,79 @@ def retry_dead_notifications(event_type=None):
     ``common/roles.py``, which is not this task's file, and substituting an
     inline ``is_staff`` check is what conventions.md forbids.
 
-    ``attempts`` is DELIBERATELY preserved. The row has failed that many times
-    and forgetting it would make the count a lie; if the send fails again the
-    row goes straight back to ``DEAD``, so this cannot be used to build an
-    unbounded loop. If the send succeeds the row is ``SENT`` and its history
-    stays visible as a count of how many times this notification had not gone
-    out.
+    **A dead row past its ``expires_at`` is REFUSED, not re-opened.** This is
+    the product decision cycle 2 had to make, and both answers were defensible,
+    so the reasoning is recorded rather than the choice:
+
+    - *Extend the row's life so the retry can claim it.* Defensible because the
+      operator's retry is supposed to deliver. Rejected: the payload is
+      deliberately NOT scrubbed of one-time token material (see
+      :func:`serialize_context`), and deletion on a clock plus this gate are the
+      compensating control for exactly that. Extending ``expires_at`` would
+      extend the retention of the most sensitive material in the table, by an
+      operator flag, repeatably — retry, fail, dead, retry — with no bound.
+    - *Refuse the retry so the expiry keeps working.* Chosen. It cannot
+      deliver either: ``PASSWORD_RESET_TIMEOUT`` has almost certainly
+      invalidated the token by now, and a mail carrying a link that cannot work
+      is worse than no mail — which is the same reason the claim predicate
+      refuses an expired row in the first place. So the retry would either
+      violate the retention bound or send a broken link.
+
+    **What that costs, and why it is not the bug it used to be.** The old
+    behaviour re-opened expired rows anyway: they became ``PENDING``, the claim
+    predicate (``expires_at > now``) never took them, nothing was sent, and the
+    status report then showed no dead rows at all — erasing the signal the
+    dead-letter exists to provide, on precisely the oldest failures an operator
+    retrying dead rows is working on. The refusal keeps them ``DEAD``, so
+    ``outbox_status_counts`` still reports them, and this function returns the
+    two counts separately so the operator can see which rows did not move.
+
+    ``attempts`` is DELIBERATELY preserved on the rows that do re-open. The row
+    has failed that many times and forgetting it would make the count a lie;
+    if the send fails again the row goes straight back to ``DEAD``, so this
+    cannot be used to build an unbounded loop. If the send succeeds the row is
+    ``SENT`` and its history stays visible as a count of how many times this
+    notification had not gone out.
 
     ``event_type=None`` means EVERY event, not "rows whose event type is null",
     which is what a plain ``filter(event_type=event_type)`` would have done —
     a manual retry that silently matched nothing because it compared a column
     against NULL.
 
-    Returns the number of rows re-opened.
+    Returns a :class:`DeadRetryResult`: ``requeued`` is how many rows were
+    re-opened, ``expired`` how many were refused for being past their retention
+    window, and ``expired_pks`` names the refused ones so the log can point an
+    operator at the rows that need a decision rather than a retry.
     """
+    now = timezone.now()
     doomed = NotificationOutbox.objects.filter(status=NotificationOutbox.Status.DEAD)
     if event_type is not None:
         doomed = doomed.filter(event_type=event_type)
-    requeued = doomed.update(
+    # Two queries rather than one because they are opposites: the second is
+    # the complement of the first. ``expires_at`` is NOT NULL, so
+    # ``expires_at__lte`` is an exact complement and cannot leave a row
+    # unaccounted for in neither bucket.
+    expired_pks = tuple(doomed.filter(expires_at__lte=now).values_list("pk", flat=True))
+    requeued = doomed.filter(expires_at__gt=now).update(
         status=NotificationOutbox.Status.PENDING,
-        next_attempt_at=timezone.now(),
+        next_attempt_at=now,
     )
+    shown = list(expired_pks[:DEAD_RETRY_PK_LOG_LIMIT])
+    listed = ", ".join(str(pk) for pk in shown)
+    if len(expired_pks) > len(shown):
+        # Its own comma-separated element, not appended to the last pk: a bare
+        # "20 (+3 more)" reads as though 20 were annotated, and the whole point
+        # of spelling pks out is that an operator can match one to a row.
+        listed += f", (+{len(expired_pks) - len(shown)} more)"
     logger.info(
-        "notification outbox manual retry re-opened %d dead row(s) event_type=%s",
+        "notification outbox manual retry re-opened %d dead row(s) event_type=%s; "
+        "%d left dead past their retention window, which this retry will not "
+        "extend: pks=[%s]",
         requeued,
         event_type or "all",
+        len(expired_pks),
+        listed,
     )
-    return requeued
+    return DeadRetryResult(
+        requeued=requeued, expired=len(expired_pks), expired_pks=expired_pks
+    )
