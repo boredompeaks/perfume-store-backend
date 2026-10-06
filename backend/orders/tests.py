@@ -3,6 +3,7 @@
 Razorpay is always mocked (``self.razorpay_mock``); no test touches the
 network or the real keys from ``.env`` (V-01 containment).
 """
+
 import os
 from datetime import timedelta
 from decimal import Decimal
@@ -10,8 +11,8 @@ from unittest import mock
 
 from django.conf import settings
 from django.contrib.auth.models import User
-from django.core.cache import cache
 from django.core import mail
+from django.core.cache import cache
 from django.core.management import call_command
 from django.db import IntegrityError, connection
 from django.test import SimpleTestCase, TransactionTestCase, override_settings, tag
@@ -24,11 +25,11 @@ from common.models import AuditEvent
 from common.roles import ROLE_FINANCE, ROLE_SUPPORT
 from common.testing import TEST_RAZORPAY_KEY_ID, ApiTestCase
 from config.settings import _env_currency
-from orders.admin import OrderAdmin
 from orders import events as order_events
+from orders import state as order_state
+from orders.admin import OrderAdmin
 from orders.models import Coupon, Order, OrderItem, OrderStatusEvent
 from orders.serializers import OrderItemSerializer, OrderSerializer
-from orders import state as order_state
 from orders.views import _mint_order_reservations, apply_coupon, create_payment
 from products.models import StockMovement, StockReservation, products
 
@@ -39,7 +40,9 @@ class OrderTestBase(ApiTestCase):
     def setUp(self):
         self.buyer = self.make_user("buyer")
         _, self.token = self.api_login("buyer")
-        self.product = self.make_product(name="Rose Aurum", price="500.00", stock=10, category="Floral")
+        self.product = self.make_product(
+            name="Rose Aurum", price="500.00", stock=10, category="Floral"
+        )
         self.cart_data = self.seed_session_cart([(self.product, 2)])  # subtotal 1000.00
 
     def create_order(self, coupon=None, product=None, quantity=2):
@@ -85,8 +88,12 @@ class CurrencyStoreConfigTests(OrderTestBase):
         with override_settings(DEFAULT_CURRENCY="USD"):
             order = Order.objects.create(
                 user=self.buyer,
-                full_name="B", phone="1", address="a",
-                city="c", state="s", pincode="1",
+                full_name="B",
+                phone="1",
+                address="a",
+                city="c",
+                state="s",
+                pincode="1",
                 total_amount=Decimal("10.00"),
             )
             item = OrderItem.objects.create(
@@ -264,7 +271,9 @@ class ApplyCouponTests(OrderTestBase):
     """30-32. Coupon preview validation and math."""
 
     def _preview(self, code):
-        return self.client.post("/api/orders/apply-coupon/", {"code": code}, format="json")
+        return self.client.post(
+            "/api/orders/apply-coupon/", {"code": code}, format="json"
+        )
 
     # 30. every rejection shares one uniform body: unknown, inactive,
     # not-yet-valid, expired, usage-limit and min-order must be
@@ -276,11 +285,15 @@ class ApplyCouponTests(OrderTestBase):
             ("inactive", self.make_coupon(code="DEAD", active=False).code),
             (
                 "expired",
-                self.make_coupon(code="OLD", valid_until=timezone.now() - timedelta(minutes=1)).code,
+                self.make_coupon(
+                    code="OLD", valid_until=timezone.now() - timedelta(minutes=1)
+                ).code,
             ),
             (
                 "not-yet-valid",
-                self.make_coupon(code="FUTURE", valid_from=timezone.now() + timedelta(days=1)).code,
+                self.make_coupon(
+                    code="FUTURE", valid_from=timezone.now() + timedelta(days=1)
+                ).code,
             ),
             (
                 "usage-limit",
@@ -340,7 +353,9 @@ class ApplyCouponTests(OrderTestBase):
         res = self._preview("HALFCAP")
         self.assertEqual(res.status_code, 200, res.data)
         self.assertEqual(res.data["subtotal"], Decimal("1000.00"))
-        self.assertEqual(res.data["discount"], Decimal("300.00"))  # 500.00 raw -> capped
+        self.assertEqual(
+            res.data["discount"], Decimal("300.00")
+        )  # 500.00 raw -> capped
         self.assertEqual(res.data["final_total"], Decimal("700.00"))
 
         self.make_coupon(code="HALF", discount_value="50")
@@ -353,7 +368,9 @@ class ApplyCouponTests(OrderTestBase):
         self.make_coupon(code="FLAT1500", discount_type="fixed", discount_value="1500")
         res = self._preview("FLAT1500")
         self.assertEqual(res.status_code, 200, res.data)
-        self.assertEqual(res.data["discount"], Decimal("1000.00"))  # clamped, not negative total
+        self.assertEqual(
+            res.data["discount"], Decimal("1000.00")
+        )  # clamped, not negative total
         self.assertEqual(res.data["final_total"], Decimal("0.00"))
 
         self.make_coupon(code="FLAT40", discount_type="fixed", discount_value="40")
@@ -363,7 +380,9 @@ class ApplyCouponTests(OrderTestBase):
 
     def test_preview_without_session_or_cart(self):
         self.make_coupon(code="SAVE10", discount_value="10")
-        res = self.fresh_client().post("/api/orders/apply-coupon/", {"code": "SAVE10"}, format="json")
+        res = self.fresh_client().post(
+            "/api/orders/apply-coupon/", {"code": "SAVE10"}, format="json"
+        )
         self.assertEqual(res.status_code, 404, res.data)
         self.assertEqual(res.data["error"], "Cart not found")
 
@@ -424,10 +443,16 @@ class CheckoutTests(OrderTestBase):
         self.make_product(name="Grand Cru", price="1999.99", stock=5)
         self.seed_session_cart([])  # keep buyer cart; add the expensive item
         product = products.objects.get(name="Grand Cru")
-        CartItem.objects.create(cart=Cart.objects.get(session_id=self.client.session.session_key), product=product, quantity=1)
+        CartItem.objects.create(
+            cart=Cart.objects.get(session_id=self.client.session.session_key),
+            product=product,
+            quantity=1,
+        )
         coupon = self.make_coupon(code="PCT30", discount_value="30")
 
-        preview = self.client.post("/api/orders/apply-coupon/", {"code": "PCT30"}, format="json")
+        preview = self.client.post(
+            "/api/orders/apply-coupon/", {"code": "PCT30"}, format="json"
+        )
         order = self.create_order(coupon=coupon)
 
         self.assertEqual(
@@ -440,7 +465,9 @@ class CheckoutTests(OrderTestBase):
         """Parity invariant for amounts that quantize exactly (guards against
         regressions in the common case)."""
         coupon = self.make_coupon(code="PCT10", discount_value="10")
-        preview = self.client.post("/api/orders/apply-coupon/", {"code": "PCT10"}, format="json")
+        preview = self.client.post(
+            "/api/orders/apply-coupon/", {"code": "PCT10"}, format="json"
+        )
         order = self.create_order(coupon=coupon)
         self.assertEqual(Decimal(preview.data["discount"]), order.discount_amount)
         self.assertEqual(Decimal(preview.data["final_total"]), order.total_amount)
@@ -460,13 +487,13 @@ class CheckoutTests(OrderTestBase):
 
         self.assertEqual(res.status_code, 201, res.data)
         order = Order.objects.get(id=res.data["id"])
-        self.assertEqual(order.total_amount, Decimal("900.00"))   # 1000 - 10%
+        self.assertEqual(order.total_amount, Decimal("900.00"))  # 1000 - 10%
         self.assertEqual(order.discount_amount, Decimal("100.00"))
-        self.assertEqual(order.status, "pending")                 # not client-controlled
-        self.assertEqual(order.user, self.buyer)                  # not client-controlled
+        self.assertEqual(order.status, "pending")  # not client-controlled
+        self.assertEqual(order.user, self.buyer)  # not client-controlled
         self.assertEqual(order.coupon, coupon)
         item = OrderItem.objects.get(order=order)
-        self.assertEqual(item.price, Decimal("500.00"))           # snapshot from DB
+        self.assertEqual(item.price, Decimal("500.00"))  # snapshot from DB
         self.assertEqual(item.subtotal, Decimal("1000.00"))
         self.assertEqual(item.product_name, "Rose Aurum")
 
@@ -510,7 +537,9 @@ class CheckoutTests(OrderTestBase):
         # authenticated, no cart in this session -> documented 404 (F-18)
         client = self.fresh_client()
         self.api_login("buyer", client=client)
-        res = client.post("/api/orders/checkout/", self.checkout_payload(), format="json")
+        res = client.post(
+            "/api/orders/checkout/", self.checkout_payload(), format="json"
+        )
         self.assertEqual(res.status_code, 404, res.data)
         self.assertEqual(res.data["error"], "Cart not found")
 
@@ -610,7 +639,7 @@ class CheckoutStockGateTests(OrderTestBase):
         cart = Cart.objects.get(session_id=self.client.session.session_key)
         CartItem.objects.create(cart=cart, product=second, quantity=3)
         products.objects.filter(pk=self.product.pk).update(stock=1)  # wants 2
-        products.objects.filter(pk=second.pk).update(stock=2)        # wants 3
+        products.objects.filter(pk=second.pk).update(stock=2)  # wants 3
 
         res = self.checkout()
 
@@ -760,14 +789,18 @@ class CreatePaymentTests(OrderTestBase):
         client_mock = self.razorpay_mock(order_id="order_TEST001")
         order = self.create_order()
 
-        res = self.client.post("/api/orders/payment/", {"order_id": order.id}, format="json")
+        res = self.client.post(
+            "/api/orders/payment/", {"order_id": order.id}, format="json"
+        )
 
         self.assertEqual(res.status_code, 200, res.data)
         self.assertEqual(res.data["razorpay_order_id"], "order_TEST001")
         self.assertEqual(res.data["amount"], 100000)  # 1000.00 * 100 paise
         self.assertEqual(res.data["amount_in_rupees"], Decimal("1000.00"))
         self.assertEqual(res.data["currency"], "INR")
-        self.assertEqual(res.data["key_id"], TEST_RAZORPAY_KEY_ID)  # dummy, never the real key
+        self.assertEqual(
+            res.data["key_id"], TEST_RAZORPAY_KEY_ID
+        )  # dummy, never the real key
         client_mock.order.create.assert_called_once_with(
             {"amount": 100000, "currency": "INR", "receipt": f"order_{order.id}"}
         )
@@ -778,12 +811,18 @@ class CreatePaymentTests(OrderTestBase):
         client_mock = self.razorpay_mock()
         order = self.create_order()
 
-        first = self.client.post("/api/orders/payment/", {"order_id": order.id}, format="json")
-        second = self.client.post("/api/orders/payment/", {"order_id": order.id}, format="json")
+        first = self.client.post(
+            "/api/orders/payment/", {"order_id": order.id}, format="json"
+        )
+        second = self.client.post(
+            "/api/orders/payment/", {"order_id": order.id}, format="json"
+        )
 
         self.assertEqual(first.status_code, 200)
         self.assertEqual(second.status_code, 200)
-        self.assertEqual(first.data["razorpay_order_id"], second.data["razorpay_order_id"])
+        self.assertEqual(
+            first.data["razorpay_order_id"], second.data["razorpay_order_id"]
+        )
         client_mock.order.create.assert_called_once()  # idempotent: no second API call
 
     def test_payment_requires_order_id(self):
@@ -794,7 +833,9 @@ class CreatePaymentTests(OrderTestBase):
 
     def test_payment_unknown_order_404(self):
         self.razorpay_mock()
-        res = self.client.post("/api/orders/payment/", {"order_id": 999999}, format="json")
+        res = self.client.post(
+            "/api/orders/payment/", {"order_id": 999999}, format="json"
+        )
         self.assertEqual(res.status_code, 404, res.data)
         self.assertEqual(res.data["error"], "Order not found")
 
@@ -803,10 +844,18 @@ class CreatePaymentTests(OrderTestBase):
         client_mock = self.razorpay_mock()
         other = self.make_user("seller")
         other_order = Order.objects.create(
-            user=other, full_name="S", phone="1", address="a", city="c", state="s",
-            pincode="1", total_amount=Decimal("10.00"),
+            user=other,
+            full_name="S",
+            phone="1",
+            address="a",
+            city="c",
+            state="s",
+            pincode="1",
+            total_amount=Decimal("10.00"),
         )
-        res = self.client.post("/api/orders/payment/", {"order_id": other_order.id}, format="json")
+        res = self.client.post(
+            "/api/orders/payment/", {"order_id": other_order.id}, format="json"
+        )
         self.assertEqual(res.status_code, 404, res.data)
         client_mock.order.create.assert_not_called()
 
@@ -816,7 +865,9 @@ class CreatePaymentTests(OrderTestBase):
         order.status = "confirmed"
         order.save(update_fields=["status"])
 
-        res = self.client.post("/api/orders/payment/", {"order_id": order.id}, format="json")
+        res = self.client.post(
+            "/api/orders/payment/", {"order_id": order.id}, format="json"
+        )
         self.assertEqual(res.status_code, 400, res.data)
         self.assertEqual(res.data["error"], "This order cannot be paid")
 
@@ -945,9 +996,7 @@ class CreatePaymentAtomicityTests(OrderTestBase):
 
         locked = mock.MagicMock()
         locked.get.return_value = winner
-        with mock.patch.object(
-            Order.objects, "select_for_update", return_value=locked
-        ):
+        with mock.patch.object(Order.objects, "select_for_update", return_value=locked):
             res = self.client.post(
                 "/api/orders/payment/", {"order_id": order.id}, format="json"
             )
@@ -968,10 +1017,14 @@ class CreatePaymentAtomicityTests(OrderTestBase):
 class VerifyPaymentTests(OrderTestBase):
     """37-39. Signature check, success side effects, idempotency."""
 
-    def _prepare_paid_setup(self, coupon=None, order_id="order_TEST001", payment_id="pay_TEST001"):
+    def _prepare_paid_setup(
+        self, coupon=None, order_id="order_TEST001", payment_id="pay_TEST001"
+    ):
         client_mock = self.razorpay_mock(order_id=order_id)
         order = self.create_order(coupon=coupon)
-        res = self.client.post("/api/orders/payment/", {"order_id": order.id}, format="json")
+        res = self.client.post(
+            "/api/orders/payment/", {"order_id": order.id}, format="json"
+        )
         self.assertEqual(res.status_code, 200, res.data)
         order.refresh_from_db()  # picks up razorpay_order_id written by the payment call
         payload = {
@@ -1083,10 +1136,16 @@ class VerifyPaymentTests(OrderTestBase):
             "razorpay_payment_id": "pay_X",
             "razorpay_signature": "sig",
         }
-        for missing in ("razorpay_order_id", "razorpay_payment_id", "razorpay_signature"):
+        for missing in (
+            "razorpay_order_id",
+            "razorpay_payment_id",
+            "razorpay_signature",
+        ):
             with self.subTest(missing=missing):
                 payload = {k: v for k, v in full.items() if k != missing}
-                res = self.client.post("/api/orders/payment/verify/", payload, format="json")
+                res = self.client.post(
+                    "/api/orders/payment/verify/", payload, format="json"
+                )
                 self.assertEqual(res.status_code, 400, res.data)
                 self.assertEqual(res.data["error"], "Payment details are required")
 
@@ -1100,7 +1159,9 @@ class VerifyPaymentTests(OrderTestBase):
         order = self.create_order(coupon=coupon)
         self.razorpay_mock(order_id="order_PAYOK")
 
-        res = self.client.post("/api/orders/payment/", {"order_id": order.id}, format="json")
+        res = self.client.post(
+            "/api/orders/payment/", {"order_id": order.id}, format="json"
+        )
         self.assertEqual(res.status_code, 200)
         order.refresh_from_db()
         payload = {
@@ -1122,7 +1183,7 @@ class VerifyPaymentTests(OrderTestBase):
         self.product.refresh_from_db()
         second.refresh_from_db()
         self.assertEqual(self.product.stock, 8)  # 10 - 2
-        self.assertEqual(second.stock, 3)        # 4 - 1
+        self.assertEqual(second.stock, 3)  # 4 - 1
 
         coupon.refresh_from_db()
         self.assertEqual(coupon.used_count, 1)
@@ -1183,7 +1244,9 @@ class VerifyPaymentTests(OrderTestBase):
         order = self.create_order(coupon=coupon)
         self.razorpay_mock(order_id="order_NOPAY")
 
-        res = self.client.post("/api/orders/payment/", {"order_id": order.id}, format="json")
+        res = self.client.post(
+            "/api/orders/payment/", {"order_id": order.id}, format="json"
+        )
         order.refresh_from_db()
         payload = {
             "order_id": order.id,
@@ -1196,7 +1259,9 @@ class VerifyPaymentTests(OrderTestBase):
         res = no_cookie.post("/api/orders/payment/verify/", payload, format="json")
 
         self.assertEqual(res.status_code, 200, res.data)
-        self.assertEqual(CartItem.objects.count(), 1)  # cart untouched, not the verify's job here
+        self.assertEqual(
+            CartItem.objects.count(), 1
+        )  # cart untouched, not the verify's job here
 
     # 39. idempotency; insufficient stock -> 409 (V-03: no refund path yet) ------------------
     def test_second_verify_rejected_idempotent(self):
@@ -1211,9 +1276,9 @@ class VerifyPaymentTests(OrderTestBase):
 
         order.refresh_from_db()
         self.product.refresh_from_db()
-        self.assertEqual(self.product.stock, 8)          # decremented exactly once
+        self.assertEqual(self.product.stock, 8)  # decremented exactly once
         coupon.refresh_from_db()
-        self.assertEqual(coupon.used_count, 1)           # incremented exactly once
+        self.assertEqual(coupon.used_count, 1)  # incremented exactly once
         self.assertEqual(order.status, "confirmed")
         # SPEC-6-02: the rejected replay must not double-book the ledger either
         self.assertEqual(StockMovement.objects.count(), 1)
@@ -1226,7 +1291,9 @@ class VerifyPaymentTests(OrderTestBase):
         self.razorpay_mock(order_id="order_RACE")
         self.client.post("/api/orders/payment/", {"order_id": order.id}, format="json")
         order.refresh_from_db()
-        products.objects.filter(pk=self.product.pk).update(stock=1)  # sold out elsewhere meanwhile
+        products.objects.filter(pk=self.product.pk).update(
+            stock=1
+        )  # sold out elsewhere meanwhile
 
         payload = {
             "order_id": order.id,
@@ -1237,7 +1304,10 @@ class VerifyPaymentTests(OrderTestBase):
         res = self.client.post("/api/orders/payment/verify/", payload, format="json")
 
         self.assertEqual(res.status_code, 409, res.data)
-        self.assertEqual(res.data["error"], "An item is no longer available in the requested quantity")
+        self.assertEqual(
+            res.data["error"],
+            "An item is no longer available in the requested quantity",
+        )
         order.refresh_from_db()
         self.product.refresh_from_db()
         self.assertEqual(order.status, "pending")
@@ -1285,36 +1355,54 @@ class VerifyPaymentTests(OrderTestBase):
 
     def test_verify_requires_order_id_and_known_order(self):
         self.razorpay_mock()
-        res = self.client.post("/api/orders/payment/verify/", {
-            "razorpay_order_id": "order_X",
-            "razorpay_payment_id": "pay_X",
-            "razorpay_signature": "sig",
-        }, format="json")
+        res = self.client.post(
+            "/api/orders/payment/verify/",
+            {
+                "razorpay_order_id": "order_X",
+                "razorpay_payment_id": "pay_X",
+                "razorpay_signature": "sig",
+            },
+            format="json",
+        )
         self.assertEqual(res.status_code, 400, res.data)
         self.assertEqual(res.data["error"], "order_id is required")
 
-        res = self.client.post("/api/orders/payment/verify/", {
-            "order_id": 999999,
-            "razorpay_order_id": "order_X",
-            "razorpay_payment_id": "pay_X",
-            "razorpay_signature": "sig",
-        }, format="json")
+        res = self.client.post(
+            "/api/orders/payment/verify/",
+            {
+                "order_id": 999999,
+                "razorpay_order_id": "order_X",
+                "razorpay_payment_id": "pay_X",
+                "razorpay_signature": "sig",
+            },
+            format="json",
+        )
         self.assertEqual(res.status_code, 404, res.data)
         self.assertEqual(res.data["error"], "Order not found")
 
     def test_verify_scoped_to_owner(self):
         other = self.make_user("seller")
         other_order = Order.objects.create(
-            user=other, full_name="S", phone="1", address="a", city="c", state="s",
-            pincode="1", total_amount=Decimal("10.00"),
+            user=other,
+            full_name="S",
+            phone="1",
+            address="a",
+            city="c",
+            state="s",
+            pincode="1",
+            total_amount=Decimal("10.00"),
         )
         self.razorpay_mock(order_id="order_THEIRS")
-        res = self.client.post("/api/orders/payment/verify/", {
-            "order_id": other_order.id,
-            "razorpay_order_id": "order_THEIRS",
-            "razorpay_payment_id": "pay_THEIRS",
-            "razorpay_signature": "sig",
-        }, format="json")
+        res = self.client.post(
+            "/api/orders/payment/verify/",
+            {
+                "order_id": other_order.id,
+                "razorpay_order_id": "order_THEIRS",
+                "razorpay_payment_id": "pay_THEIRS",
+                "razorpay_signature": "sig",
+            },
+            format="json",
+        )
         self.assertEqual(res.status_code, 404, res.data)
 
     # ——— ASYNC-2b1: send registered, not performed under the locks ———
@@ -1368,15 +1456,23 @@ class CheckoutCouponValidationTests(OrderTestBase):
     def test_checkout_coupon_rejections(self):
         cases = [
             ("unknown", "GHOST404", "Invalid coupon code"),
-            ("inactive", self.make_coupon(code="DEAD", active=False).code, "This coupon is inactive"),
+            (
+                "inactive",
+                self.make_coupon(code="DEAD", active=False).code,
+                "This coupon is inactive",
+            ),
             (
                 "expired",
-                self.make_coupon(code="OLD", valid_until=timezone.now() - timedelta(minutes=1)).code,
+                self.make_coupon(
+                    code="OLD", valid_until=timezone.now() - timedelta(minutes=1)
+                ).code,
                 "This coupon has expired",
             ),
             (
                 "not-yet-valid",
-                self.make_coupon(code="FUTURE", valid_from=timezone.now() + timedelta(days=1)).code,
+                self.make_coupon(
+                    code="FUTURE", valid_from=timezone.now() + timedelta(days=1)
+                ).code,
                 "This coupon is not active yet",
             ),
             (
@@ -1427,7 +1523,9 @@ class CheckoutCartLookupTests(OrderTestBase):
     def test_apply_coupon_with_session_but_no_cart_row_404(self):
         self.make_coupon(code="SAVE10", discount_value="10")
         Cart.objects.all().delete()
-        res = self.client.post("/api/orders/apply-coupon/", {"code": "SAVE10"}, format="json")
+        res = self.client.post(
+            "/api/orders/apply-coupon/", {"code": "SAVE10"}, format="json"
+        )
         self.assertEqual(res.status_code, 404, res.data)
         self.assertEqual(res.data["error"], "Cart not found")
 
@@ -1443,8 +1541,14 @@ class OrderListTests(OrderTestBase):
         coupon = self.make_coupon(code="PCT10", discount_value="10")
         mine = self.create_order(coupon=coupon)
         theirs = Order.objects.create(
-            user=other, full_name="S", phone="1", address="a", city="c", state="s",
-            pincode="1", total_amount=Decimal("10.00"),
+            user=other,
+            full_name="S",
+            phone="1",
+            address="a",
+            city="c",
+            state="s",
+            pincode="1",
+            total_amount=Decimal("10.00"),
         )
 
         res = self.client.get("/api/orders/")
@@ -1554,16 +1658,12 @@ class OrderHistoryPaginationTests(OrderTestBase):
         with override_settings(ORDER_HISTORY_PAGE_SIZE=1):
             page1 = self.client.get("/api/orders/")
             self.assertEqual(page1.data["total_pages"], 2)
-            self.assertEqual(
-                [row["id"] for row in page1.data["results"]], [newer.id]
-            )
+            self.assertEqual([row["id"] for row in page1.data["results"]], [newer.id])
             self.assertTrue(page1.data["next_page"])
             self.assertFalse(page1.data["previous_page"])
 
             page2 = self.client.get("/api/orders/?page=2")
-            self.assertEqual(
-                [row["id"] for row in page2.data["results"]], [older.id]
-            )
+            self.assertEqual([row["id"] for row in page2.data["results"]], [older.id])
             self.assertTrue(page2.data["previous_page"])
             self.assertFalse(page2.data["next_page"])
 
@@ -1786,9 +1886,7 @@ class BusinessEventTimestampTests(OrderTestBase):
                 self.assertIn(field, OrderSerializer.Meta.fields)
                 self.assertIn(field, OrderSerializer.Meta.read_only_fields)
                 self.assertIn(field, OrderAdmin.readonly_fields)
-                self.assertIn(
-                    field, dict(OrderAdmin.fieldsets)["Timestamps"]["fields"]
-                )
+                self.assertIn(field, dict(OrderAdmin.fieldsets)["Timestamps"]["fields"])
 
         # the changelist carries the two live event stamps beside the row
         self.assertIn("paid_at", OrderAdmin.list_display)
@@ -1846,9 +1944,7 @@ class OrderIndexSchemaTests(ApiTestCase):
             for columns in self._explicit_index_columns()
             if columns == ["user_id", "created_at"]
         ]
-        self.assertTrue(
-            matching, "no (user_id, created_at) index on orders_order"
-        )
+        self.assertTrue(matching, "no (user_id, created_at) index on orders_order")
 
     def test_status_and_creation_date_composite_exists_at_db_level(self):
         matching = [
@@ -1856,9 +1952,7 @@ class OrderIndexSchemaTests(ApiTestCase):
             for columns in self._explicit_index_columns()
             if columns == ["status", "created_at"]
         ]
-        self.assertTrue(
-            matching, "no (status, created_at) index on orders_order"
-        )
+        self.assertTrue(matching, "no (status, created_at) index on orders_order")
 
     def test_order_number_stays_satisfied_by_its_unique_constraint(self):
         """2555: order_number's covering constraint(s) are all UNIQUE —
@@ -1932,8 +2026,6 @@ class AdminOrdersApiTests(ApiTestCase):
     @staticmethod
     def _user_with_role(username, role):
         from django.contrib.auth.models import Group
-
-        from common.roles import ROLE_ADMIN
 
         user = User.objects.create_user(
             username, f"{username}@example.com", "S3cure-Passphrase!"
@@ -2188,13 +2280,23 @@ class BulkSetStatusRaceGuardTests(ApiTestCase):
 
         victim = Order.objects.create(
             user=self.make_user("race_buyer"),
-            full_name="V", phone="1", address="a", city="c", state="s",
-            pincode="1", total_amount=Decimal("10.00"),
+            full_name="V",
+            phone="1",
+            address="a",
+            city="c",
+            state="s",
+            pincode="1",
+            total_amount=Decimal("10.00"),
         )
         control = Order.objects.create(
             user=victim.user,
-            full_name="C", phone="1", address="a", city="c", state="s",
-            pincode="1", total_amount=Decimal("10.00"),
+            full_name="C",
+            phone="1",
+            address="a",
+            city="c",
+            state="s",
+            pincode="1",
+            total_amount=Decimal("10.00"),
         )
 
         class RacingQuerySet(django_models.QuerySet):
@@ -2234,6 +2336,7 @@ class BulkSetStatusRaceGuardTests(ApiTestCase):
 # [R-10.1] SPEC-10-01a: order lifecycle dimensions
 # ==================================
 
+
 @tag("orders")
 class OrderStateSourceTests(SimpleTestCase):
     """orders.state is the single source of truth for the order machine:
@@ -2250,7 +2353,9 @@ class OrderStateSourceTests(SimpleTestCase):
         self.assertIs(orders_admin.transition_allowed, order_state.transition_allowed)
         self.assertIs(orders_views.ALLOWED_TRANSITIONS, order_state.ALLOWED_TRANSITIONS)
         self.assertIs(orders_views.transition_allowed, order_state.transition_allowed)
-        self.assertIs(orders_views.ADMIN_FULFILMENT_NEXT, order_state.ADMIN_FULFILMENT_NEXT)
+        self.assertIs(
+            orders_views.ADMIN_FULFILMENT_NEXT, order_state.ADMIN_FULFILMENT_NEXT
+        )
 
     def test_transition_allowed_pins_the_current_machine(self):
         # The legal edges (exactly one step forward, cancel from pending).
@@ -2298,10 +2403,10 @@ class OrderStateSourceTests(SimpleTestCase):
         pending -> failed and failed -> captured are machine edges; money
         that never arrived cannot refund and captured money cannot un-pay."""
         for old, new in [
-            ("pending", "captured"),        # the normal verify capture
-            ("pending", "failed"),          # SPEC-10-04: the failure writer
-            ("failed", "captured"),         # SPEC-10-04: the retry capture
-            ("authorized", "captured"),     # gateway two-step (declared only)
+            ("pending", "captured"),  # the normal verify capture
+            ("pending", "failed"),  # SPEC-10-04: the failure writer
+            ("failed", "captured"),  # SPEC-10-04: the retry capture
+            ("authorized", "captured"),  # gateway two-step (declared only)
             ("captured", "partially_refunded"),
             ("captured", "refunded"),
             ("partially_refunded", "refunded"),
@@ -2309,8 +2414,8 @@ class OrderStateSourceTests(SimpleTestCase):
             with self.subTest(old=old, new=new):
                 self.assertTrue(order_state.payment_transition_allowed(old, new))
         for old, new in [
-            ("pending", "refunded"),        # never paid, nothing to refund
-            ("captured", "failed"),         # captured money cannot "un-pay"
+            ("pending", "refunded"),  # never paid, nothing to refund
+            ("captured", "failed"),  # captured money cannot "un-pay"
             ("failed", "refunded"),
             ("refunded", "captured"),
             ("unknown", "captured"),
@@ -2354,9 +2459,7 @@ class PaymentMethodExposureTests(OrderTestBase):
 
         listing = self.client.get("/api/orders/")
         self.assertEqual(listing.status_code, 200, listing.data)
-        self.assertEqual(
-            listing.data["results"][0]["payment_method"], "prepaid"
-        )
+        self.assertEqual(listing.data["results"][0]["payment_method"], "prepaid")
         detail = self.client.get(f"/api/orders/{order.id}/")
         self.assertEqual(detail.status_code, 200, detail.data)
         self.assertEqual(detail.data["payment_method"], "prepaid")
@@ -2384,7 +2487,9 @@ class LifecycleDimensionsFieldTests(OrderTestBase):
         fulfilment_values = {v for v, _ in order_state.FULFILMENT_STATUS_CHOICES}
         for legacy_status in [s for s, _ in Order.STATUS_CHOICES]:
             with self.subTest(legacy_status=legacy_status):
-                payment, fulfilment = order_state.LEGACY_STATUS_DIMENSIONS[legacy_status]
+                payment, fulfilment = order_state.LEGACY_STATUS_DIMENSIONS[
+                    legacy_status
+                ]
                 self.assertEqual(
                     (payment, fulfilment),
                     self.EXPECTED_DIMENSIONS[legacy_status],
@@ -2396,7 +2501,9 @@ class LifecycleDimensionsFieldTests(OrderTestBase):
         for legacy_status, (payment, fulfilment) in self.EXPECTED_DIMENSIONS.items():
             with self.subTest(legacy_status=legacy_status):
                 self.assertEqual(order_state.payment_for_status(legacy_status), payment)
-                self.assertEqual(order_state.fulfilment_for_status(legacy_status), fulfilment)
+                self.assertEqual(
+                    order_state.fulfilment_for_status(legacy_status), fulfilment
+                )
 
     def test_new_orders_start_pending_and_unfulfilled(self):
         order = self.create_order()
@@ -2446,9 +2553,10 @@ class LifecycleBackfillMigrationTests(TransactionTestCase):
 
         call_command("migrate", "orders", verbosity=0, interactive=False)
 
-        for legacy_status, (payment, fulfilment) in (
-            order_state.LEGACY_STATUS_DIMENSIONS.items()
-        ):
+        for legacy_status, (
+            payment,
+            fulfilment,
+        ) in order_state.LEGACY_STATUS_DIMENSIONS.items():
             with self.subTest(legacy_status=legacy_status):
                 order = Order.objects.get(full_name=f"Backfill-{legacy_status}")
                 self.assertEqual(order.payment_status, payment)
@@ -2565,9 +2673,7 @@ class LifecycleWiringTests(OrderTestBase):
         self.assertEqual(res.status_code, 200, res.data)
         order.refresh_from_db()  # picks up the minted razorpay_order_id
         self.client.raise_request_exception = False
-        with mock.patch.object(
-            AuditEvent, "record", side_effect=RuntimeError("down")
-        ):
+        with mock.patch.object(AuditEvent, "record", side_effect=RuntimeError("down")):
             res = self.client.post(
                 "/api/orders/payment/verify/",
                 self._verify_payload(order),
@@ -2740,6 +2846,7 @@ class LifecycleWiringTests(OrderTestBase):
 # [R-10.12]/[R-10.17]/[R-10.18] SPEC-10-02: transition audit trail
 # ==================================
 
+
 @tag("orders")
 class TransitionAuditTrailTests(OrderTestBase):
     """[R-10.12] Every legal order-status transition appends one immutable
@@ -2902,9 +3009,7 @@ class TransitionAuditTrailTests(OrderTestBase):
         self.assertEqual(res.status_code, 200, res.data)
         order.refresh_from_db()
         self.client.raise_request_exception = False
-        with mock.patch.object(
-            AuditEvent, "record", side_effect=RuntimeError("down")
-        ):
+        with mock.patch.object(AuditEvent, "record", side_effect=RuntimeError("down")):
             res = self.client.post(
                 "/api/orders/payment/verify/",
                 self._verify_payload(order),
@@ -3095,13 +3200,23 @@ class TransitionAuditTrailTests(OrderTestBase):
 
         victim = Order.objects.create(
             user=self.buyer,
-            full_name="V", phone="1", address="a", city="c", state="s",
-            pincode="1", total_amount=Decimal("10.00"),
+            full_name="V",
+            phone="1",
+            address="a",
+            city="c",
+            state="s",
+            pincode="1",
+            total_amount=Decimal("10.00"),
         )
         control = Order.objects.create(
             user=self.buyer,
-            full_name="C", phone="1", address="a", city="c", state="s",
-            pincode="1", total_amount=Decimal("10.00"),
+            full_name="C",
+            phone="1",
+            address="a",
+            city="c",
+            state="s",
+            pincode="1",
+            total_amount=Decimal("10.00"),
         )
 
         class CancellingQuerySet(django_models.QuerySet):
@@ -3171,8 +3286,14 @@ class TransitionAuditTrailTests(OrderTestBase):
         self.assertFalse(event_admin.has_delete_permission(request))
 
         # every field renders read-only: the change form is a view
-        for field in ("order", "from_status", "to_status", "actor", "trigger",
-                      "created_at"):
+        for field in (
+            "order",
+            "from_status",
+            "to_status",
+            "actor",
+            "trigger",
+            "created_at",
+        ):
             self.assertIn(field, OrderStatusEventAdmin.readonly_fields)
 
     def test_event_model_pins(self):
@@ -3182,9 +3303,7 @@ class TransitionAuditTrailTests(OrderTestBase):
             order_state.STATUS_EVENT_TRIGGERS,
         )
         self.assertEqual(OrderStatusEvent._meta.ordering, ("-created_at", "-id"))
-        self.assertEqual(
-            OrderStatusEvent._meta.verbose_name, "order status event"
-        )
+        self.assertEqual(OrderStatusEvent._meta.verbose_name, "order status event")
         order = self.create_order()
         event = order.status_events.get()
         self.assertEqual(
@@ -3196,6 +3315,7 @@ class TransitionAuditTrailTests(OrderTestBase):
 # ==================================
 # [R-10.19]/[R-10.14] SPEC-10-03: shipped-transition preconditions
 # ==================================
+
 
 @tag("orders")
 class ShippedPreconditionTests(OrderTestBase):
@@ -3442,9 +3562,7 @@ class ShippedPreconditionTests(OrderTestBase):
             ["order has no items to ship"],
         )
         prepaid = self._confirmed_row(paid=False, with_item=True)
-        self.assertNotEqual(
-            order_state.precondition_failures(prepaid, "shipped"), []
-        )
+        self.assertNotEqual(order_state.precondition_failures(prepaid, "shipped"), [])
 
     def test_cod_order_ships_through_the_bulk_writer_without_capture(self):
         """End to end: a COD confirmed row ships with payment_status still
@@ -3484,12 +3602,11 @@ class ShippedPreconditionTests(OrderTestBase):
         evaluated by the same precondition_failures the writers call —
         SPEC-1-08's shipment checks attach here without touching writers.
         A status with no registered checks evaluates clean."""
+
         def _reject_all(order):
             return ["shipment section will replace this"]
 
-        self.assertEqual(
-            len(order_state.TRANSITION_PRECONDITIONS["shipped"]), 2
-        )
+        self.assertEqual(len(order_state.TRANSITION_PRECONDITIONS["shipped"]), 2)
         order = self._confirmed_row(paid=True, with_item=True)
         self.assertEqual(order_state.precondition_failures(order, "shipped"), [])
         self.assertEqual(order_state.precondition_failures(order, "delivered"), [])
@@ -3504,15 +3621,12 @@ class ShippedPreconditionTests(OrderTestBase):
             )
         # patch.dict restored the built-ins: the registry is process state,
         # not per-test leakage
-        self.assertEqual(
-            len(order_state.TRANSITION_PRECONDITIONS["shipped"]), 2
-        )
+        self.assertEqual(len(order_state.TRANSITION_PRECONDITIONS["shipped"]), 2)
 
     def test_registered_hook_blocks_ship_through_the_bulk_writer(self):
         """The writers evaluate the registry, not hardcoded checks: a
         SPEC-1-08 check that fails blocks an otherwise-eligible ship and
         is reported like any other unmet precondition."""
-        from django.contrib import messages as django_messages
         from django.contrib.admin import site as admin_site
         from django.contrib.messages.storage.fallback import FallbackStorage
         from django.test import RequestFactory
@@ -3550,6 +3664,7 @@ class ShippedPreconditionTests(OrderTestBase):
 # ==================================
 # [R-10.16] SPEC-10-05: per-transition side-effect contract
 # ==================================
+
 
 @tag("orders")
 class TransitionNotificationTests(OrderTestBase):
@@ -3631,15 +3746,11 @@ class TransitionNotificationTests(OrderTestBase):
         with mock.patch("orders.events.notifications.dispatch") as dispatch_mock:
             res = self._run_admin_action("mark_shipped", [order])
             self.assertEqual(res.status_code, 200)
-            dispatch_mock.assert_called_once_with(
-                "order.shipped", {"order": order}
-            )
+            dispatch_mock.assert_called_once_with("order.shipped", {"order": order})
             dispatch_mock.reset_mock()
             res = self._run_admin_action("mark_delivered", [order])
             self.assertEqual(res.status_code, 200)
-            dispatch_mock.assert_called_once_with(
-                "order.delivered", {"order": order}
-            )
+            dispatch_mock.assert_called_once_with("order.delivered", {"order": order})
         order.refresh_from_db()
         self.assertEqual(order.status, "delivered")
 
@@ -3650,9 +3761,7 @@ class TransitionNotificationTests(OrderTestBase):
         with mock.patch("orders.events.notifications.dispatch") as dispatch_mock:
             res = self._change_form_post(order, "shipped")
             self.assertEqual(res.status_code, 200)
-            dispatch_mock.assert_called_once_with(
-                "order.shipped", {"order": order}
-            )
+            dispatch_mock.assert_called_once_with("order.shipped", {"order": order})
         order.refresh_from_db()
         self.assertEqual(order.status, "shipped")
 
@@ -3663,9 +3772,7 @@ class TransitionNotificationTests(OrderTestBase):
         with mock.patch("orders.events.notifications.dispatch") as dispatch_mock:
             res = support.post(f"/api/admin/orders/{order.id}/fulfill/")
             self.assertEqual(res.status_code, 200, res.data)
-            dispatch_mock.assert_called_once_with(
-                "order.shipped", {"order": order}
-            )
+            dispatch_mock.assert_called_once_with("order.shipped", {"order": order})
         order.refresh_from_db()
         self.assertEqual(order.status, "shipped")
 

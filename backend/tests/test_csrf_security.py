@@ -56,9 +56,7 @@ class CsrfStackWiringTests(SimpleTestCase):
 
     def test_csrf_gate_installed_after_jwt(self):
         default_auth = settings.REST_FRAMEWORK["DEFAULT_AUTHENTICATION_CLASSES"]
-        self.assertIn(
-            "django.middleware.csrf.CsrfViewMiddleware", settings.MIDDLEWARE
-        )
+        self.assertIn("django.middleware.csrf.CsrfViewMiddleware", settings.MIDDLEWARE)
         self.assertEqual(
             [cls.split(".")[-1] for cls in default_auth],
             ["JWTAuthentication", "SessionCartCSRFAuthentication"],
@@ -203,9 +201,7 @@ class TokenAuthMutationCsrfTruthTests(ApiTestCase):
         guest surface)."""
         product = self.make_product(price="200.00")
         self.seed_session_cart([(product, 1)])
-        self.make_coupon(
-            code="CSRF10", discount_type="percentage", discount_value="10"
-        )
+        self.make_coupon(code="CSRF10", discount_type="percentage", discount_value="10")
         self.make_user()
         _, token = self.api_login()
         self.assertTrue(token)
@@ -241,9 +237,7 @@ class ApiXssOutputSafetyTests(ApiTestCase):
             # response as markup regardless of payload.
             self.assertTrue(res["Content-Type"].startswith("application/json"))
         self.assertEqual(detail.data["name"], f"Rose {self.SCRIPT}")
-        self.assertEqual(
-            detail.data["description"], f"Notes of {self.META} over musk."
-        )
+        self.assertEqual(detail.data["description"], f"Notes of {self.META} over musk.")
         stored = {row["id"]: row for row in listing.data["results"]}[product.id]
         self.assertEqual(stored["name"], f"Rose {self.SCRIPT}")
         # Raw-body pin: the payload rides as literal JSON string data -- no
@@ -267,9 +261,7 @@ class ApiXssOutputSafetyTests(ApiTestCase):
         self.assertEqual(res.status_code, 201, res.data)
         listing = self.client.get("/api/orders/")
         self.assertEqual(listing.status_code, 200, listing.data)
-        self.assertTrue(
-            listing["Content-Type"].startswith("application/json")
-        )
+        self.assertTrue(listing["Content-Type"].startswith("application/json"))
         order = listing.data["results"][0]
         self.assertEqual(order["full_name"], name)
         self.assertEqual(order["address"], address)

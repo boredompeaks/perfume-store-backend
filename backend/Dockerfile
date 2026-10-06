@@ -21,7 +21,12 @@ WORKDIR /app
 # Dependencies first: this layer is cached until requirements.txt changes,
 # so ordinary source edits do not re-run pip. No compiler in this image, so
 # psycopg[binary]'s prebuilt libpq wheel and Pillow's wheel are the ones used.
-COPY requirements.txt ./
+#
+# requirements.txt is a POINTER (`-r requirements.lock`), and pip resolves that
+# include relative to the file, so the lock has to be in the image too. Copying
+# only the pointer produces a build error rather than an unpinned install,
+# which is the intended failure: it cannot be quiet.
+COPY requirements.txt requirements.lock ./
 RUN pip install --no-cache-dir --upgrade pip \
     && pip install --no-cache-dir -r requirements.txt
 

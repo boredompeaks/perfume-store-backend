@@ -19,6 +19,7 @@ Both gates are needed: ``inventory.adjust`` (the same capability the
 adjust-stock action rides, read off ``action_capabilities`` so the two
 cannot drift) AND Django's own ``products.write`` change permission.
 """
+
 import re
 from decimal import Decimal
 
@@ -115,7 +116,7 @@ class InlineStockEditLedgerTests(ApiTestCase):
 
         movement = StockMovement.objects.get(product=self.product)
         self.assertEqual(StockMovement.objects.count(), 1)  # exactly one
-        self.assertEqual(movement.delta, 39)                # 42 - 3, not 42
+        self.assertEqual(movement.delta, 39)  # 42 - 3, not 42
         self.assertEqual(movement.stock_after, 42)
         self.assertEqual(movement.reason, StockMovement.Reason.CORRECTION)
         self.assertEqual(movement.note, "changelist inline stock edit")
@@ -238,9 +239,9 @@ class InlineStockCapabilityGateTests(ApiTestCase):
         client.force_login(self.scribe)
         res = client.get(CHANGELIST)
         self.assertEqual(res.status_code, 200)
-        self.assertContains(res, 'name="form-0-price"')      # still editable
+        self.assertContains(res, 'name="form-0-price"')  # still editable
         self.assertNotContains(res, 'name="form-0-stock"')  # cell withdrawn
-        self.assertContains(res, 'class="field-stock"')      # column still shown
+        self.assertContains(res, 'class="field-stock"')  # column still shown
 
     def test_forged_stock_in_a_post_is_inert_and_writes_no_movement(self):
         client = self.fresh_client()
@@ -257,9 +258,9 @@ class InlineStockCapabilityGateTests(ApiTestCase):
         res = client.post(CHANGELIST, payload, follow=True)
         self.assertEqual(res.status_code, 200)
         self.product.refresh_from_db()
-        self.assertEqual(self.product.stock, 3)                 # untouched
+        self.assertEqual(self.product.stock, 3)  # untouched
         self.assertEqual(self.product.price, Decimal("64.00"))  # its own edit lands
-        self.assertEqual(StockMovement.objects.count(), 0)    # no mutation, no movement
+        self.assertEqual(StockMovement.objects.count(), 0)  # no mutation, no movement
 
     def test_role_without_change_permission_is_rejected_with_403(self):
         """inventory.adjust alone is not changelist write access: Django's own

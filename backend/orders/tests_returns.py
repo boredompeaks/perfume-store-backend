@@ -45,21 +45,20 @@ already been bitten by.
 """
 
 import ast
+import inspect
+import textwrap
 from contextlib import contextmanager
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
-import inspect
-import textwrap
 from unittest.mock import patch
 
+from django import forms
 from django.conf import settings
 from django.contrib.admin.models import LogEntry
 from django.contrib.auth.models import Group, User
-from django import forms
-from django.forms import modelform_factory
 from django.db import IntegrityError, transaction
-from django.test import tag
-from django.test import override_settings
+from django.forms import modelform_factory
+from django.test import override_settings, tag
 from django.utils import timezone
 from rest_framework.test import APIClient
 
@@ -68,9 +67,22 @@ from common.roles import (
     ROLE_FINANCE,
     ROLE_MARKETING,
     ROLE_SUPPORT,
-    sync_role_groups,
 )
 from common.testing import ApiTestCase
+from config import urls as config_urls
+from ops.models import (
+    CLOSED_RETURN_WINDOW_DAYS,
+    DEFAULT_RETURN_WINDOW_DAYS,
+    MAX_RETURN_WINDOW_DAYS,
+    SiteSettings,
+)
+from orders import urls as orders_urls
+from orders.admin import (
+    RETURN_CAPABILITY_MAP,
+    RETURNS_READ,
+    RETURNS_WRITE,
+    ReturnRequestAdminForm,
+)
 from orders.models import (
     RETURN_ALLOWED_TRANSITIONS,
     RETURN_OPEN_STATUSES,
@@ -78,23 +90,8 @@ from orders.models import (
     Order,
     Refund,
     ReturnRequest,
-    _allowed_from,
     _reject_oversized_value,
     return_transition_allowed,
-)
-from orders.admin import (
-    RETURNS_READ,
-    RETURNS_WRITE,
-    RETURN_CAPABILITY_MAP,
-    ReturnRequestAdminForm,
-)
-from orders import urls as orders_urls
-from config import urls as config_urls
-from ops.models import (
-    CLOSED_RETURN_WINDOW_DAYS,
-    DEFAULT_RETURN_WINDOW_DAYS,
-    MAX_RETURN_WINDOW_DAYS,
-    SiteSettings,
 )
 from orders.serializers import ReturnRequestSerializer
 from orders.state import (
@@ -1313,8 +1310,9 @@ class TransitionTests(ReturnTestCase):
             old_status = old[0]
             for new_status, _label in RETURN_STATUS_CHOICES:
                 with self.subTest(old=old_status, new=new_status):
-                    expected = new_status == old_status or new_status in (
-                        RETURN_ALLOWED_TRANSITIONS[old_status]
+                    expected = (
+                        new_status == old_status
+                        or new_status in (RETURN_ALLOWED_TRANSITIONS[old_status])
                     )
                     self.assertIs(
                         return_transition_allowed(old_status, new_status), expected
@@ -1495,7 +1493,7 @@ class CapabilityTests(ReturnTestCase):
     def test_the_admin_map_gates_exactly_the_capabilities_the_roles_map_grants(self):
         from django.contrib import admin as django_admin
 
-        from orders.admin import RETURNS_READ, RETURNS_WRITE, RETURN_CAPABILITY_MAP
+        from orders.admin import RETURNS_READ, RETURNS_WRITE
 
         model_admin = django_admin.site._registry[ReturnRequest]
         self.assertEqual(RETURN_CAPABILITY_MAP["view"], RETURNS_READ)
@@ -1659,7 +1657,6 @@ class AdminFormUnitTests(ReturnTestCase):
 
 
 class QuerysetGuardTests(ReturnTestCase):
-
     def setUp(self):
         super().setUp()
         self.row = self.file_request(self.order, ReturnRequest.Status.REQUESTED)
@@ -2564,7 +2561,7 @@ class ReturnEligibilityWindowTests(ReturnTestCase):
         order = self._placed("RET-2026-0052", "delivered", timedelta(days=5))
 
         with self.clock_frozen_at():
-            with patch("orders.views._return_window_days", return_value=0):
+            with patch("orders.views.return._return_window_days", return_value=0):
                 self.assertFalse(_return_eligible(order))
                 self.assertEqual(self.ask(order.order_number).status_code, 409)
             self.assertTrue(_return_eligible(order))

@@ -1,0 +1,74 @@
+{
+  "task": "ASYNC-2c1",
+  "title": "The mutation figures recorded for the notification-outbox substrate, cycles 1 and 2",
+  "note": "Written at cycle 2 after the auditor found that cycle 1's dedup-key mutation did not reproduce and could not fail for the reason claimed. Every `find` is hand-written from the committed blob and occurs exactly once; replay refuses otherwise. `claimed_count` is the figure measured by the first replay on this tree and then re-checked by every replay since - a replay that disagrees is a finding, not a number to adjust. The `expected_failing_tests` names were transcribed from that first replay, after M2's original framing proved to test nothing: a key derived from the serialised payload cannot move when the order is amended, because the payload holds only a label and a primary key. M2 is therefore framed around what it can actually break - the event type, the occurrence discriminator, and canonical key ordering.",
+  "mutations": [
+    {
+      "id": "M1",
+      "description": "enqueue writes its row on transaction.on_commit instead of inside the caller's transaction, reopening the dual-write window this substrate exists to remove",
+      "path": "backend/common/notifications.py",
+      "find": "    try:\n        with transaction.atomic():\n            return NotificationOutbox.objects.create(\n                event_type=str(event_type),\n                dedup_key=dedup_key,\n                payload=payload,\n            )",
+      "replace": "    def _deferred():\n        return NotificationOutbox.objects.create(\n            event_type=str(event_type),\n            dedup_key=dedup_key,\n            payload=payload,\n        )\n    transaction.on_commit(_deferred)\n    return None\n    try:\n        with transaction.atomic():\n            pass",
+      "expected_failing_tests": [
+        "test_the_row_is_written_inside_the_caller_transaction",
+        "test_enqueue_commits_with_the_business_write",
+        "test_a_second_enqueue_of_the_same_event_is_a_no_op",
+        "test_a_row_is_created_pending_and_unsent",
+        "test_a_model_context_is_stored_as_a_label_and_a_primary_key"
+      ],
+      "claimed_count": 10,
+      "test_scope": ["tests.test_notification_outbox"]
+    },
+    {
+      "id": "M2",
+      "description": "_dedup_key returns a plain json.dumps of the payload: it drops the event type and the occurrence discriminator, and is no longer canonically ordered, so two call sites that build the same context differently produce different keys and a second reminder collapses into the first",
+      "path": "backend/common/notifications.py",
+      "find": "    identity = {\n        \"event_type\": str(event_type),\n        \"payload\": payload,\n        \"occurrence\": occurrence,\n    }\n    return _canonical(identity)",
+      "replace": "    return json.dumps(payload)",
+      "expected_failing_tests": [
+        "test_the_key_does_not_depend_on_the_order_the_context_was_built_in",
+        "test_the_key_names_the_event_and_the_row_it_is_about",
+        "test_a_repeat_notification_is_expressible_and_gets_its_own_row",
+        "test_a_repeat_does_not_collide_with_the_one_off_row"
+      ],
+      "claimed_count": 4,
+      "test_scope": ["tests.test_notification_outbox"]
+    },
+    {
+      "id": "M3",
+      "description": "_describe renders a set with str() instead of describing and sorting it, so the dedup key varies with PYTHONHASHSEED and the duplicate suppression does not hold across gunicorn workers",
+      "path": "backend/common/notifications.py",
+      "find": "    if isinstance(value, (set, frozenset)):\n        # Sorted by its canonical JSON form, so the order does not depend on\n        # which process is describing it.\n        return sorted((_describe(item) for item in value), key=_canonical)",
+      "replace": "    if isinstance(value, (set, frozenset)):\n        return str(value)",
+      "expected_failing_tests": [
+        "test_a_set_context_value_is_ordered_deterministically",
+        "test_a_repeated_element_in_a_set_is_described_once"
+      ],
+      "claimed_count": 2,
+      "test_scope": ["tests.test_notification_outbox"]
+    },
+    {
+      "id": "M4",
+      "description": "_load_reference catches only LookupError from apps.get_model, so a stored label it cannot parse (a.b.c raises ValueError there) escapes the documented error class and kills a drain loop mid-batch. Deliberately carries no claimed_count: the mutated run goes red with an UNCAUGHT ValueError, which unittest reports as an ERROR, and the replay reads failure counts only off the 'FAILED (failures=N' line on purpose - an error is not a failure and must not satisfy a count.",
+      "path": "backend/common/notifications.py",
+      "find": "    try:\n        model = apps.get_model(label)\n    except (LookupError, ValueError):",
+      "replace": "    try:\n        model = apps.get_model(label)\n    except LookupError:",
+      "expected_failing_tests": [
+        "test_a_label_the_registry_cannot_parse_raises_the_defined_error"
+      ],
+      "test_scope": ["tests.test_notification_outbox"]
+    },
+    {
+      "id": "M5",
+      "description": "_describe truncates an over-long value instead of refusing, which is what put a cut token or URL into a queued payload where it rendered as a working-looking link and failed at the customer",
+      "path": "backend/common/notifications.py",
+      "find": "    if len(text) > PAYLOAD_VALUE_MAX_LENGTH:\n        raise NotificationPayloadError(",
+      "replace": "    if len(text) > PAYLOAD_VALUE_MAX_LENGTH:\n        return text[:PAYLOAD_VALUE_MAX_LENGTH] + \"...\"\n    if False:\n        raise NotificationPayloadError(",
+      "expected_failing_tests": [
+        "test_an_over_long_value_is_refused_rather_than_truncated"
+      ],
+      "claimed_count": 1,
+      "test_scope": ["tests.test_notification_outbox"]
+    }
+  ]
+}

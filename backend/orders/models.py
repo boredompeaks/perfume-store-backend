@@ -1,9 +1,9 @@
 from decimal import Decimal
 
 from django.conf import settings
+from django.contrib.auth.models import User
 from django.db import models
 from django.db.models import Q, Sum
-from django.contrib.auth.models import User
 
 from common.money import quantize_money
 from products.models import products
@@ -38,60 +38,36 @@ def default_currency():
 
 
 class Coupon(models.Model):
-
     DISCOUNT_TYPES = [
-        ('percentage', 'Percentage'),
-        ('fixed', 'Fixed Amount'),
+        ("percentage", "Percentage"),
+        ("fixed", "Fixed Amount"),
     ]
 
-    code = models.CharField(
-        max_length=50,
-        unique=True
-    )
+    code = models.CharField(max_length=50, unique=True)
 
-    discount_type = models.CharField(
-        max_length=20,
-        choices=DISCOUNT_TYPES
-    )
+    discount_type = models.CharField(max_length=20, choices=DISCOUNT_TYPES)
 
-    discount_value = models.DecimalField(
-        max_digits=10,
-        decimal_places=2
-    )
+    discount_value = models.DecimalField(max_digits=10, decimal_places=2)
 
     minimum_order_amount = models.DecimalField(
-        max_digits=10,
-        decimal_places=2,
-        default=0
+        max_digits=10, decimal_places=2, default=0
     )
 
     maximum_discount = models.DecimalField(
-        max_digits=10,
-        decimal_places=2,
-        null=True,
-        blank=True
+        max_digits=10, decimal_places=2, null=True, blank=True
     )
 
-    active = models.BooleanField(
-        default=True
-    )
+    active = models.BooleanField(default=True)
 
     valid_from = models.DateTimeField()
 
     valid_until = models.DateTimeField()
 
-    usage_limit = models.PositiveIntegerField(
-        null=True,
-        blank=True
-    )
+    usage_limit = models.PositiveIntegerField(null=True, blank=True)
 
-    used_count = models.PositiveIntegerField(
-        default=0
-    )
+    used_count = models.PositiveIntegerField(default=0)
 
-    created_at = models.DateTimeField(
-        auto_now_add=True
-    )
+    created_at = models.DateTimeField(auto_now_add=True)
 
     def __str__(self):
         return self.code
@@ -181,33 +157,19 @@ class Order(models.Model):
         unique=True,
     )
 
-    full_name = models.CharField(
-        max_length=150
-    )
+    full_name = models.CharField(max_length=150)
 
-    phone = models.CharField(
-        max_length=15
-    )
+    phone = models.CharField(max_length=15)
 
     address = models.TextField()
 
-    city = models.CharField(
-        max_length=100
-    )
+    city = models.CharField(max_length=100)
 
-    state = models.CharField(
-        max_length=100
-    )
+    state = models.CharField(max_length=100)
 
-    pincode = models.CharField(
-        max_length=10
-    )
+    pincode = models.CharField(max_length=10)
 
-    status = models.CharField(
-        max_length=20,
-        choices=STATUS_CHOICES,
-        default='pending'
-    )
+    status = models.CharField(max_length=20, choices=STATUS_CHOICES, default="pending")
 
     # [R-10.1] SPEC-10-01a: the lifecycle split into explicit dimensions
     # (spec 10.2). Additive by design: ``status`` above remains the compat
@@ -221,13 +183,13 @@ class Order(models.Model):
     payment_status = models.CharField(
         max_length=20,
         choices=PAYMENT_STATUS_CHOICES,
-        default='pending',
+        default="pending",
         help_text="Payment dimension of the lifecycle (spec 10.2).",
     )
     fulfilment_status = models.CharField(
         max_length=20,
         choices=FULFILMENT_STATUS_CHOICES,
-        default='unfulfilled',
+        default="unfulfilled",
         help_text="Fulfilment dimension of the lifecycle (spec 10.2).",
     )
 
@@ -247,23 +209,12 @@ class Order(models.Model):
     )
 
     coupon = models.ForeignKey(
-        Coupon,
-        on_delete=models.SET_NULL,
-        null=True,
-        blank=True,
-        related_name='orders'
+        Coupon, on_delete=models.SET_NULL, null=True, blank=True, related_name="orders"
     )
 
-    discount_amount = models.DecimalField(
-        max_digits=10,
-        decimal_places=2,
-        default=0
-    )
+    discount_amount = models.DecimalField(max_digits=10, decimal_places=2, default=0)
 
-    total_amount = models.DecimalField(
-        max_digits=10,
-        decimal_places=2
-    )
+    total_amount = models.DecimalField(max_digits=10, decimal_places=2)
 
     # [R-1.07] SPEC-1-B05: what the order was actually charged to deliver it.
     # Two columns because the amount is the money record and the method is a
@@ -276,11 +227,11 @@ class Order(models.Model):
     # amount does not already say. PROTECT would also make the admin's delete
     # view raise on referenced rows, i.e. a 500 on a legitimate action.
     shipping_method = models.ForeignKey(
-        'shipping.ShippingMethod',
+        "shipping.ShippingMethod",
         on_delete=models.SET_NULL,
         null=True,
         blank=True,
-        related_name='orders',
+        related_name="orders",
     )
 
     # [R-8.13] The frozen delivery-option label (spec 8.3 "Historical
@@ -329,8 +280,12 @@ class Order(models.Model):
         default=default_currency,
     )
 
-    razorpay_order_id = models.CharField(max_length=100, blank=True, null=True, unique=True)
-    razorpay_payment_id = models.CharField(max_length=100, blank=True, null=True, unique=True)
+    razorpay_order_id = models.CharField(
+        max_length=100, blank=True, null=True, unique=True
+    )
+    razorpay_payment_id = models.CharField(
+        max_length=100, blank=True, null=True, unique=True
+    )
 
     # [R-9.3.14] SPEC-9-01: header-keyed checkout idempotency. Set once by
     # create_order when the client sent an Idempotency-Key header; NULL for
@@ -367,13 +322,9 @@ class Order(models.Model):
     cancelled_at = models.DateTimeField(null=True, blank=True)
     refunded_at = models.DateTimeField(null=True, blank=True)
 
-    created_at = models.DateTimeField(
-        auto_now_add=True
-    )
+    created_at = models.DateTimeField(auto_now_add=True)
 
-    updated_at = models.DateTimeField(
-        auto_now=True
-    )
+    updated_at = models.DateTimeField(auto_now=True)
 
     class Meta:
         # [R-8.17] SPEC-8-05: spec 8.3 "Indexes" starting set (2557
@@ -389,12 +340,12 @@ class Order(models.Model):
         # auto-index for user-only joins.
         indexes = [
             models.Index(
-                fields=['user', '-created_at'],
-                name='orders_user_created_idx',
+                fields=["user", "-created_at"],
+                name="orders_user_created_idx",
             ),
             models.Index(
-                fields=['status', 'created_at'],
-                name='orders_status_created_idx',
+                fields=["status", "created_at"],
+                name="orders_status_created_idx",
             ),
         ]
         constraints = [
@@ -404,8 +355,8 @@ class Order(models.Model):
             # that one user can never hold two orders for one key. The
             # backing index also serves the replay probe lookup.
             models.UniqueConstraint(
-                fields=['user', 'idempotency_key'],
-                name='orders_user_idem_key_uidx',
+                fields=["user", "idempotency_key"],
+                name="orders_user_idem_key_uidx",
             ),
             # [R-1.13] The guest twin of the constraint above. A guest row's
             # `user` is NULL, and NULLs stay distinct in the constraint
@@ -479,23 +430,11 @@ class Order(models.Model):
 
 
 class OrderItem(models.Model):
+    order = models.ForeignKey(Order, on_delete=models.CASCADE, related_name="items")
 
-    order = models.ForeignKey(
-        Order,
-        on_delete=models.CASCADE,
-        related_name='items'
-    )
+    product = models.ForeignKey(products, on_delete=models.SET_NULL, null=True)
 
-    product = models.ForeignKey(
-        products,
-        on_delete=models.SET_NULL,
-        null=True
-    )
-
-    product_name = models.CharField(
-        max_length=200,
-        default=''
-    )
+    product_name = models.CharField(max_length=200, default="")
 
     # [R-8.13] Frozen identity snapshots (spec 8.3 "Historical snapshots"):
     # set once at checkout from the catalogue state the customer bought and
@@ -508,26 +447,19 @@ class OrderItem(models.Model):
     # variant's SKU/name replaces both once selection input exists.
     sku = models.CharField(
         max_length=64,  # ProductVariant.sku width, so a later variant-matched
-        default=''      # population source fits without another migration
+        default="",  # population source fits without another migration
     )
 
     variant_name = models.CharField(
         max_length=200,  # product_name width: it mirrors the product name
-        default=''
+        default="",
     )
 
-    price = models.DecimalField(
-        max_digits=10,
-        decimal_places=2
-    )
+    price = models.DecimalField(max_digits=10, decimal_places=2)
 
     quantity = models.PositiveIntegerField()
 
-    subtotal = models.DecimalField(
-        max_digits=10,
-        decimal_places=2,
-        default=0
-    )
+    subtotal = models.DecimalField(max_digits=10, decimal_places=2, default=0)
 
     # [R-8.11] Denomination of the price/subtotal money columns: set once
     # beside the amounts it labels, same store-config default as the parent
@@ -548,6 +480,7 @@ class OrderItem(models.Model):
 # register into the state's extension hook at import. Every callable
 # returns a list of human-readable failure reasons (empty = met); the
 # writers evaluate them through state.precondition_failures only.
+
 
 def _require_captured_payment(order):
     """Ship only after the money is real: a shipped order whose payment
@@ -613,9 +546,7 @@ class OrderStatusEvent(models.Model):
     """
 
     order = models.ForeignKey(
-        Order,
-        on_delete=models.CASCADE,
-        related_name='status_events'
+        Order, on_delete=models.CASCADE, related_name="status_events"
     )
 
     from_status = models.CharField(
@@ -635,7 +566,7 @@ class OrderStatusEvent(models.Model):
         on_delete=models.SET_NULL,
         null=True,
         blank=True,
-        related_name='order_status_events',
+        related_name="order_status_events",
     )
 
     trigger = models.CharField(
@@ -643,9 +574,7 @@ class OrderStatusEvent(models.Model):
         choices=STATUS_EVENT_TRIGGERS,
     )
 
-    created_at = models.DateTimeField(
-        auto_now_add=True
-    )
+    created_at = models.DateTimeField(auto_now_add=True)
 
     class Meta:
         # Newest first: the admin surface (and any future consumer) reads
@@ -699,23 +628,13 @@ class Refund(models.Model):
         FULL = "full", "Full"
         PARTIAL = "partial", "Partial"
 
-    order = models.ForeignKey(
-        Order,
-        on_delete=models.CASCADE,
-        related_name='refunds'
-    )
+    order = models.ForeignKey(Order, on_delete=models.CASCADE, related_name="refunds")
 
-    amount = models.DecimalField(
-        max_digits=10,
-        decimal_places=2
-    )
+    amount = models.DecimalField(max_digits=10, decimal_places=2)
 
     reason = models.TextField()
 
-    kind = models.CharField(
-        max_length=10,
-        choices=Kind.choices
-    )
+    kind = models.CharField(max_length=10, choices=Kind.choices)
 
     status = models.CharField(
         max_length=20,
@@ -740,7 +659,7 @@ class Refund(models.Model):
         on_delete=models.SET_NULL,
         null=True,
         blank=True,
-        related_name='order_refunds',
+        related_name="order_refunds",
     )
 
     # [R-9.3.14]-shaped replay identity, scoped to the order: a client that
@@ -753,13 +672,9 @@ class Refund(models.Model):
         blank=True,
     )
 
-    created_at = models.DateTimeField(
-        auto_now_add=True
-    )
+    created_at = models.DateTimeField(auto_now_add=True)
 
-    updated_at = models.DateTimeField(
-        auto_now=True
-    )
+    updated_at = models.DateTimeField(auto_now=True)
 
     class Meta:
         ordering = ("-created_at", "-id")
@@ -772,8 +687,8 @@ class Refund(models.Model):
             # can never hold two refunds for one key. Its backing index also
             # serves the replay probe.
             models.UniqueConstraint(
-                fields=['order', 'idempotency_key'],
-                name='orders_refund_order_idem_uidx',
+                fields=["order", "idempotency_key"],
+                name="orders_refund_order_idem_uidx",
             ),
         ]
 
@@ -1226,7 +1141,7 @@ class PaymentEvent(models.Model):
         on_delete=models.SET_NULL,
         null=True,
         blank=True,
-        related_name='payment_events',
+        related_name="payment_events",
     )
 
     # The gateway payment the event is about (a refund event carries the
@@ -1236,7 +1151,7 @@ class PaymentEvent(models.Model):
     gateway_payment_id = models.CharField(
         max_length=100,
         blank=True,
-        default='',
+        default="",
     )
 
     amount = models.DecimalField(
@@ -1254,9 +1169,7 @@ class PaymentEvent(models.Model):
         default=Outcome.RECORDED,
     )
 
-    created_at = models.DateTimeField(
-        auto_now_add=True
-    )
+    created_at = models.DateTimeField(auto_now_add=True)
 
     class Meta:
         # Newest first for the same reason OrderStatusEvent is: the trail is
@@ -1267,4 +1180,3 @@ class PaymentEvent(models.Model):
 
     def __str__(self):
         return f"{self.event_type} {self.event_id} ({self.outcome})"
-

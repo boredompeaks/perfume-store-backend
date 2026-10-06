@@ -89,10 +89,23 @@ jobs:
         with:
           python-version: "3.14"
           cache: pip
-          cache-dependency-path: backend/requirements.txt
+          # The LOCK, not requirements.txt: it is the file whose contents decide
+          # what gets installed, so it is what the cache key must follow.
+          # requirements.txt is a pointer to it and changes far less often, so
+          # keying on the pointer would keep serving a cache built from a lock
+          # nobody re-read.
+          cache-dependency-path: backend/requirements.lock
 
-      - name: Install pinned dependencies
-        run: pip install -r requirements.txt
+      # requirements.lock is the compiled, hash-pinned resolution of
+      # requirements.in, and it is what every job here installs. Two reasons it
+      # is the install source rather than requirements.txt: it pins the
+      # TRANSITIVE dependencies (asgiref, sqlparse, tzdata, urllib3 and the rest
+      # -- nothing in this repo imports those directly, so no hand-written file
+      # can pin them), and its `--hash` lines make pip verify every wheel it
+      # downloads. requirements.txt is a one-line pointer to it, kept so the
+      # documented developer command in backend/README.md still works.
+      - name: Install pinned dependencies from the lock
+        run: pip install -r requirements.lock
 
       - name: Django system check
         run: python manage.py check
@@ -159,6 +172,93 @@ jobs:
           fi
           python scripts/doc_claims.py --head HEAD
 
+      # GATE-7's `check` subcommand, wired here (TIER-2 cycle 2, BUG-4). The
+      # changelog's floor and `failures=N` figures were, until
+      # scripts/changelog_figures.py existed, typed by hand -- which is the
+      # mechanism behind every stale-figure finding in this repo's history --
+      # and the tool that PRINTS them was in no workflow at all, so nothing
+      # ever CHECKED them. The printer and the checker earn their place
+      # differently: the printer stops a figure being invented, this step stops
+      # one being published without a measurement behind it.
+      #
+      # A SIBLING of the claim scan above, for the same reason: neither step
+      # wraps the runner, because a wrapper around the coverage-gated suite
+      # risks perturbing the measurement it is about to report on. It is also
+      # diff-scoped against the SAME base, so both steps judge the rows this
+      # change added and neither judges the whole corpus every run.
+      #
+      # `check` returns 1 naming the row and the figure when a changelog row
+      # carries a floor or `failures=N` figure with no artifact recording it.
+      # That is a real failure and is not baselined away: the artifact is the
+      # evidence, and a figure with none is exactly the defect this catches.
+      # Rows that predate the artifacts are the auditor's to certify, not this
+      # step's to excuse -- so if this ever goes red on a pre-existing row,
+      # report it rather than relaxing the gate.
+      - name: Changelog figure gate (changelog_figures check)
+        working-directory: ${{ github.workspace }}
+        # `--base` is REQUIRED by the subcommand, so it cannot be left to a
+        # default the way the claim scan's is: the same variable, and the same
+        # branch-creation fallback, or the two steps would judge different row
+        # sets and a green run would mean nothing.
+        env:
+          DOC_CLAIMS_BASE: ${{ github.event.pull_request.base.sha || github.event.before }}
+        run: |
+          set -euo pipefail
+          if [ -z "${DOC_CLAIMS_BASE}" ] || [ "${DOC_CLAIMS_BASE}" = "0000000000000000000000000000000000000000" ]; then
+            echo "changelog_figures: no usable diff base (branch creation); falling back to the previous tip of this ref."
+            DOC_CLAIMS_BASE="HEAD"
+          fi
+          python scripts/changelog_figures.py check --base "${DOC_CLAIMS_BASE}"
+
+      # GATE-5: scripts/tests/ holds the unit tests for the pipeline's own
+      # tooling (doc_claims.py's parser, mutation_evidence.py's format), and
+      # until this step they were run by nobody -- they were orphaned the day
+      # they were written, which is the exact defect scripts/tests/__init__.py
+      # exists to document: without its package marker, discover descends into
+      # no subdirectory and reports "Ran 0 tests / NO TESTS RAN". That file
+      # records the empty run as exiting 0; measured here on the pinned
+      # Python 3.14 it exits 5. The COUNT is deliberately not written into this
+      # comment: it moves every time a case is added to any module under
+      # scripts/tests/, and a pinned figure here is a figure that will be wrong
+      # again. The step below prints both counts on every run and requires them
+      # to agree, which is the property that actually matters. The guard
+      # therefore does not trust the exit code either way -- it asserts the
+      # COUNT, so an absent suite is
+      # red with an explicit reason whatever the runner's exit convention is,
+      # and a suite that merely SHRANK is caught too (an exit code cannot
+      # tell those two apart).
+      #
+      # Two independent counts: the sources' own `def test_` declarations, and
+      # the number the runner reports. Both must be non-zero and equal; both
+      # are printed, so a red step says which side moved.
+      #
+      # workspace-root scoped (like the claim scan above): the documented
+      # command is `python -m unittest discover -s scripts -p "test_*.py"`
+      # from the repo root, and -s scripts is relative to where it runs.
+      # Stdlib only -- no pip install in this step -- so it cannot go red on a
+      # wheel that failed to download, and it cannot disagree with
+      # requirements.txt about what the scripts import.
+      - name: scripts/tests unit suite (discovery is the defect it catches)
+        working-directory: ${{ github.workspace }}
+        run: |
+          set -euo pipefail
+          status=0
+          log="$(python -m unittest discover -s scripts -p "test_*.py" 2>&1)" || status=$?
+          printf '%s\n' "${log}"
+          expected="$(grep -c "def test_" scripts/tests/*.py | awk -F: '{total += $NF} END {print total + 0}')"
+          collected="$(printf '%s\n' "${log}" | sed -n 's/^Ran \([0-9][0-9]*\) tests.*/\1/p' | head -n 1)"
+          echo "collected=${collected:-0} declared=${expected}"
+          if [ "${collected:-0}" -eq 0 ]; then
+            echo "::error::scripts/tests collected 0 tests. The runner's exit code says nothing about whether a suite was found, so this count is the guard."
+            exit 1
+          fi
+          if [ "${collected}" -ne "${expected}" ]; then
+            echo "::error::scripts/tests reported ${collected} tests but the sources declare ${expected} def test_ functions; discovery is skipping a file."
+            exit 1
+          fi
+          exit "${status}"
+
+
       # `coverage report` is the gate (fail_under=90 in .coveragerc); the HTML
       # report is a separate step so the upload below always has an artifact to
       # publish -- including on a red gate, where it is the diagnostic.
@@ -172,5 +272,212 @@ jobs:
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: coverage-html
+          path: backend/htmlcov/
+          retention-days: 7
+
+  # GATE-1: ruff lints AND formats this tree. Config lives in
+  # backend/pyproject.toml; the version is pinned in backend/requirements.in
+  # (ruff==0.16.10, carried into backend/requirements.lock, which is what this
+  # job installs) -- one source for it, so this job and a local run cannot
+  # disagree about which ruff ran. TIER-2 cycle 2 (BUG-3): this comment named
+  # backend/requirements.txt, which since TIER-2-LOCK is a one-line POINTER
+  # holding no pins of its own, so it named a file that no longer decides
+  # anything. A separate job rather than more steps inside `test`: a
+  # dirty tree should be reported without waiting on the full suite, and a
+  # red suite should never be what hides an unformatted commit.
+  lint:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: backend
+    steps:
+      # Same two SHAs the `test` job pins above, tags in trailing comments --
+      # the SPEC-22-11 rule in this file's header applies to every job in it.
+      # Checkout stays at the default fetch-depth: 1 on purpose: ruff reads
+      # the working tree, not history, so the full-history fetch above is
+      # paid only by the claim scan, which is not part of this job.
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: "3.14"
+          cache: pip
+          cache-dependency-path: backend/requirements.lock
+
+      - name: Install pinned dependencies
+        run: pip install -r requirements.lock
+
+      # Both halves of the gate, both exit codes measured: `ruff check .`
+      # exits 0 only on a clean lint, and `ruff format --check .` exits 0
+      # only when not one file would be rewritten.
+      - name: ruff check (lint)
+        run: ruff check .
+
+      - name: ruff format --check (format)
+        run: ruff format --check .
+
+      # TIER-2 item 3: the same rules, plus check-yaml, as the hooks in
+      # .pre-commit-config.yaml. This is REDUNDANT with the two steps above on
+      # purpose and is not a stronger version of them: it runs the identical
+      # pinned ruff (the hook rev is v0.16.10 to match the pin in
+      # requirements.in, so the two cannot disagree about formatting) and adds
+      # the YAML parse and the whitespace/secret checks on files the `lint`
+      # job's working-directory never sees -- the workflow files, Procfile,
+      # docker-compose.yml, and every other tracked file in the repository.
+      #
+      # `--all-files` rather than a changed-files list, because a check scoped
+      # to the diff is a check that only ever sees the last commit: the whole
+      # point of check-yaml is that a workflow which does not PARSE cannot be
+      # pushed at all, and the push that would carry the broken file is
+      # precisely the one a diff-scoped run would have to notice.
+      #
+      # The hook store is cached because each of these revs is installed into
+      # its own virtualenv on a cold cache; the config is committed and the
+      # revs are commit SHAs, so the cache key tracks the real inputs.
+      - uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: ~/.cache/pre-commit
+          key: pre-commit-${{ github.sha }}
+          restore-keys: pre-commit-
+
+      - name: pre-commit run --all-files
+        run: pre-commit run --all-files --show-diff-on-failure
+
+      # TIER-2 item 4: mypy, scoped by [tool.mypy] in backend/pyproject.toml to
+      # common/ and orders/state.py -- the RBAC capability maps and the order
+      # lifecycle machine, i.e. the two files where a wrong value is a security
+      # or money defect rather than a cosmetic one, and orders/state.py is also
+      # what the weekly mutation job targets.
+      #
+      # The paths are passed on the command line rather than left to a config
+      # `files` setting, so this step and a local run cannot disagree about what
+      # is in scope; the config carries the RULES (ignore_missing_imports,
+      # check_untyped_defs, the two measured per-module suppressions) and this
+      # line carries the SCOPE. A new module is added to the gate by editing
+      # this line, which is a visible diff in the workflow rather than a
+      # silently-widening default.
+      #
+      # Exit 0 is the whole gate: mypy exits non-zero on any reported error.
+      #
+      # The step name is QUOTED because it contains a colon. Unquoted,
+      # `name: mypy (scoped: common/ ...)` is a YAML mapping value and the file
+      # does not parse at all -- which GitHub rejects at push time, so the
+      # workflow never runs and every gate in it silently stops existing. The
+      # pre-commit check-yaml hook caught exactly this, which is the argument
+      # for having it: the failure was in a file three commits had already
+      # touched and no test in this repo parses YAML (deliberately -- PyYAML is
+      # not a dependency, see tests/test_deployment_contract.py).
+      - name: "mypy (scoped: common/ + orders/state.py)"
+        run: mypy common/ orders/state.py
+
+  # GATE-3: the suite is read on TWO engines, and until this job only one of
+  # them ran here. PostgreSQL is the engine that matters -- SQLite serialises
+  # writes and has no row-level locking, so the oversell/double-spend/TOCTOU
+  # class of defect cannot manifest on it at all, and it silently ignores
+  # varchar(n) limits Postgres enforces. A green SQLite job says nothing about
+  # the engine production runs on.
+  #
+  # This job does NOT require the suite to be green on PostgreSQL. It is
+  # certified-red by design: a known set of tests fails only on PG (index
+  # introspection sees Postgres-only varchar_pattern_ops duplicates; PG
+  # sequences are not transactional, so hardcoded primary keys do not survive a
+  # rollback). Those are tracked as PG-2b / PG-2e and are fixed there. What
+  # this job enforces is the SET: scripts/pg_gate.py compares the run against
+  # scripts/pg_baseline.json and fails on any failure OUTSIDE it, while a
+  # baseline entry that stopped failing is a warning. A count could not do this
+  # -- "failures=6" is identical for the six known failures and for those six
+  # plus a new regression, and only the set tells them apart.
+  postgres:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: backend
+    services:
+      postgres:
+        # Pinned to an exact tag, not `latest` and not a floating minor: the
+        # certified baseline was measured on this version, and a silent
+        # version bump can add or remove a failure without any commit here
+        # changing. A moving tag would make the baseline untrustworthy in
+        # exactly the way this job exists to prevent.
+        image: postgres:17.11-alpine
+        env:
+          POSTGRES_DB: perfume_store
+          POSTGRES_USER: perfume
+          # Ephemeral, throwaway CI-only credential for a database that lives
+          # and dies inside this job's runner. Not a secret: nothing outside
+          # this job can reach it, and .env/RDS credentials are never read
+          # here. Same reasoning as the dummy Razorpay values in the `test`
+          # job above.
+          POSTGRES_PASSWORD: ci_pg_only_not_a_secret
+        ports:
+          - 5432:5432
+        # Without the health check, a fast test step can reach Postgres before
+        # initdb has finished and fail every test with a connection error --
+        # which would look exactly like the certified failure set plus a
+        # hundred new failures, and train everyone to ignore this job.
+        options: >-
+          --health-cmd "pg_isready -U perfume -d perfume_store"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      DJANGO_DEBUG: "true"
+      RAZORPAY_KEY_ID: rzp_test_CI_DUMMY
+      RAZORPAY_KEY_SECRET: ci-dummy-secret
+      # Honoured by config/settings.py; an unset or unparseable value falls
+      # back to SQLite silently, and this job would then certify a SQLite run
+      # under a Postgres name -- so the engine is asserted below rather than
+      # assumed from the presence of this variable.
+      DATABASE_URL: postgres://perfume:ci_pg_only_not_a_secret@localhost:5432/perfume_store
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: "3.14"
+          cache: pip
+          cache-dependency-path: backend/requirements.lock
+
+      - name: Install pinned dependencies
+        run: pip install -r requirements.lock
+
+      # settings.py falls back to SQLite without complaint when DATABASE_URL is
+      # unset or malformed, so "the job ran" would otherwise not mean "PG ran".
+      - name: Assert the engine is PostgreSQL
+        run: |
+          set -euo pipefail
+          engine="$(python -c "import os,django;os.environ.setdefault('DJANGO_SETTINGS_MODULE','config.settings');django.setup();from django.db import connection;print(connection.settings_dict['ENGINE'])")"
+          echo "engine=${engine}"
+          if [ "${engine}" != "django.db.backends.postgresql" ]; then
+            echo "::error::expected django.db.backends.postgresql, got ${engine} -- this job would certify a SQLite run as PostgreSQL."
+            exit 1
+          fi
+
+      # The suite is red here on purpose (see the job comment), so this step
+      # must not treat a non-zero exit as a step failure: `pipefail` is
+      # deliberately NOT set, which leaves the pipeline's status as tee's (0),
+      # and without a summary line in the log the gate below exits 2 rather
+      # than passing -- a crashed or truncated run cannot read as clean. The
+      # log is tee'd because that is what pg_gate.py reads.
+      - name: Test suite on PostgreSQL (failures expected; set is gated below)
+        run: |
+          python -m coverage run manage.py test 2>&1 | tee pg-suite.log
+
+      - name: Coverage report
+        run: python -m coverage report
+
+      - name: Certified PostgreSQL failure-set gate (pg_gate)
+        working-directory: ${{ github.workspace }}
+        run: python scripts/pg_gate.py --log backend/pg-suite.log
+
+      - name: Generate coverage HTML report
+        if: always()
+        run: python -m coverage html
+
+      - name: Upload coverage HTML report
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: coverage-html-postgres
           path: backend/htmlcov/
           retention-days: 7

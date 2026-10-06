@@ -9,16 +9,17 @@
 - Rows are append-only: updates and deletes raise at the model level, and
   events outlive the order/user rows they describe (``SET_NULL`` FKs).
 """
+
 from unittest.mock import patch
 
 from django.contrib.auth.models import AnonymousUser, User
 from django.core import mail
+from rest_framework.throttling import ScopedRateThrottle
 
 from common.models import AuditEvent
 from common.testing import ApiTestCase, extract_link_params
 from orders.models import Order
 from products.models import StockMovement
-from rest_framework.throttling import ScopedRateThrottle
 
 
 class AuditEventModelTests(ApiTestCase):
@@ -77,9 +78,7 @@ class AuditEventModelTests(ApiTestCase):
         self.auth(None)
         User.objects.get(username="buyer").delete()
 
-        event = AuditEvent.objects.get(
-            event_type=AuditEvent.EventType.ORDER_CREATED
-        )
+        event = AuditEvent.objects.get(event_type=AuditEvent.EventType.ORDER_CREATED)
         self.assertIsNone(event.order)
         self.assertIsNone(event.actor)
         self.assertEqual(event.detail["order_id"], order_id)
@@ -117,9 +116,7 @@ class OrderPaymentTrailTests(ApiTestCase):
 
     def test_order_created_event_names_actor_order_and_total(self):
         order_id = self._checkout()
-        event = AuditEvent.objects.get(
-            event_type=AuditEvent.EventType.ORDER_CREATED
-        )
+        event = AuditEvent.objects.get(event_type=AuditEvent.EventType.ORDER_CREATED)
         self.assertEqual(event.category, AuditEvent.Category.ORDER)
         self.assertEqual(event.actor, self.user)
         self.assertEqual(event.order_id, order_id)
@@ -318,9 +315,7 @@ class AuthTrailTests(ApiTestCase):
 
     def test_register_writes_registration_event(self):
         self.register_and_verify(username="audited-buyer")
-        event = AuditEvent.objects.get(
-            event_type=AuditEvent.EventType.AUTH_REGISTERED
-        )
+        event = AuditEvent.objects.get(event_type=AuditEvent.EventType.AUTH_REGISTERED)
         self.assertEqual(event.category, AuditEvent.Category.AUTH)
         self.assertEqual(event.actor.username, "audited-buyer")
         self.assertEqual(event.detail["username"], "audited-buyer")

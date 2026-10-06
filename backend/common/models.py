@@ -14,11 +14,20 @@ Events are written by ``AuditEvent.record`` inside the same
 ``transaction.atomic()`` block as the side effect they record (the
 ``StockMovement`` ledger pattern from SPEC-6-02), so trail and effect
 commit or roll back together and can never disagree.
+
+``NotificationOutbox`` joins it in ASYNC-2c1 on the same principle, for the
+other half of a business event: the notification a customer is owed. The
+audit trail records what the system did; the outbox records what it still
+owes a person, and — for the same reason — commits or rolls back with the
+write that earned it.
 """
 
 import logging
+from datetime import timedelta
 
+from django.conf import settings
 from django.db import models
+from django.utils import timezone
 
 from common.audit import clean_audit_payload
 from common.middleware import (
@@ -31,6 +40,25 @@ from common.middleware import (
 # route or filter the business trail in log tooling independently of model
 # noise; settings.LOGGING pins it at INFO (SPEC-7-02).
 audit_logger = logging.getLogger("common.audit")
+
+# A queued notification's expiry is a property of writing one, not something
+# each caller should be able to forget, so it is a field default rather than a
+# required argument: ``NotificationOutbox.objects.create()`` cannot produce a
+# row that never expires. The bound is deployment-shaped (it decides how long a
+# copy of a one-time token may sit in this table), so it is env-driven through
+# settings rather than written here.
+NOTIFICATION_OUTBOX_DEFAULT_TTL_SECONDS = 3 * 24 * 60 * 60
+
+
+def default_notification_outbox_expiry():
+    """When a freshly written outbox row stops being worth keeping."""
+    return timezone.now() + timedelta(
+        seconds=getattr(
+            settings,
+            "NOTIFICATION_OUTBOX_TTL_SECONDS",
+            NOTIFICATION_OUTBOX_DEFAULT_TTL_SECONDS,
+        )
+    )
 
 
 class AuditEvent(models.Model):
@@ -221,6 +249,104 @@ class AuditEvent(models.Model):
         raise ValueError(
             "AuditEvent rows are append-only: deleting an event is forbidden."
         )
+
+
+class NotificationOutbox(models.Model):
+    """One durable, not-yet-sent customer notification (ASYNC-2c1).
+
+    The substrate the post-commit sends in this project still lack. Rows are
+    written by ``common.notifications.enqueue`` INSIDE the transaction of the
+    business write they describe, so an order that commits leaves its
+    notification behind and an order that rolls back leaves nothing — the
+    dual-write window (business effect committed, notification lost) that
+    ``dispatch_on_commit`` still has is closed by storing the intent rather
+    than performing the send.
+
+    What a row holds is deliberately thin. ``payload`` carries identifiers
+    and scalars only — a model reference is its label plus primary key, never
+    the instance — because the request that enqueued the row is gone by the
+    time anything reads it, and an instance or a lazily-evaluated string
+    would hold that request's values rather than the row's. The worker
+    re-reads each reference at drain time through
+    ``common.notifications.resolve_context``, which is also why the row
+    stores no template name and no subject: the handler builds those, from
+    live state, when it runs.
+
+    ``dedup_key`` is the **enqueue-time** idempotence guard, discussed at
+    ``notifications._dedup_key``: it collapses two paths that fire for one
+    business event, so the same notification is queued once. It is NOT the
+    send-side at-least-once guard and cannot be - it is derived only from the
+    event type and the payload, is byte-identical before and after any send,
+    and is unique, so it carries no send state and can never match a second
+    row. What actually makes the queue at-least-once is this row's own
+    ``status``/``sent_at`` under a claim that locks the row: a worker that
+    dies between sending and stamping re-sends *this* row. That is ASYNC-2c2's
+    work and it does not exist yet.
+
+    ``expires_at`` bounds how long the row — and any token material in its
+    payload — may sit, and is what makes the table safe to fill with
+    notifications built from one-time codes: the payload is deliberately not
+    scrubbed, so deletion on a clock is the compensating control. The deletion
+    owner is named and in-tree (``manage.py purge_notification_outbox``);
+    nothing schedules it yet, which is stated in that command's docstring.
+
+    State is only what storage needs — ``PENDING`` until some later task
+    claims, sends and stamps the row. There is deliberately no claim lease,
+    attempt counter, backoff or dead-letter here: those are ASYNC-2c2 (the
+    worker) and ASYNC-2d (retry/dead-letter), and until ASYNC-2c2 lands
+    **nothing drains this table, so rows accumulate**.
+    """
+
+    class Status(models.TextChoices):
+        PENDING = "pending", "Pending"
+        SENT = "sent", "Sent"
+        FAILED = "failed", "Failed"
+
+    # An AuditEvent.EventType value (``order.paid``) or the bare transition
+    # names the registry keys on. db_indexed because the drain query filters
+    # and groups on it.
+    event_type = models.CharField(max_length=50, db_index=True)
+    # TextField, not a bounded CharField: the key is DERIVED (a canonical
+    # encoding of the event type, the payload and any caller-supplied
+    # occurrence discriminator), so a length cap would either truncate a key
+    # into a collision — silently swallowing a distinct notification — or
+    # demand a bound on payload scalars that has no honest justification.
+    # Still unique, so the database enforces idempotence rather than a
+    # convention.
+    dedup_key = models.TextField(unique=True)
+    payload = models.JSONField(default=dict, blank=True)
+    # db_indexed: the worker's claim query is "oldest PENDING row".
+    status = models.CharField(
+        max_length=10,
+        choices=Status.choices,
+        default=Status.PENDING,
+        db_index=True,
+    )
+    created_at = models.DateTimeField(auto_now_add=True)
+    # Stamped by the worker when it sends. NULL means "never confirmed sent",
+    # which is not the same as PENDING — a row can fail and be retried — so it
+    # is a nullable stamp rather than a status value.
+    sent_at = models.DateTimeField(null=True, blank=True)
+    # Written at enqueue from settings.NOTIFICATION_OUTBOX_TTL_SECONDS (via
+    # the field default, so it cannot be omitted) and db_indexed because the
+    # purge command's only query is "everything past this instant". A row that
+    # outlives it has either been drained or stranded; either way its payload is
+    # no longer needed and may hold credential material that should not still
+    # be sitting in a table.
+    expires_at = models.DateTimeField(
+        db_index=True, default=default_notification_outbox_expiry
+    )
+
+    class Meta:
+        # FIFO drain order, with the pk as the tiebreak so two rows written
+        # in the same clock tick still have a total order (a worker's LIMIT
+        # claim needs one).
+        ordering = ("created_at", "pk")
+        verbose_name = "Notification outbox row"
+        verbose_name_plural = "Notification outbox rows"
+
+    def __str__(self):
+        return f"{self.created_at:%Y-%m-%d %H:%M:%S} {self.event_type} ({self.status})"
 
 
 class SavedFilter(models.Model):

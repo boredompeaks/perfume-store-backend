@@ -1,44 +1,27 @@
 from django.urls import path
 
 from .views import (
-    order_list,
-    order_detail,
-    create_order,
     apply_coupon,
+    create_order,
     create_payment,
-    verify_payment,
     # [R-1.13] SPEC-1-B04: the guest's own order, keyed on the token minted
     # at checkout rather than on a session.
     guest_order_detail,
+    order_detail,
+    order_list,
+    return_request_detail,
     # [R-1.16] SPEC-1-B07a/B07b: the customer's returns family - POST creates
     # one, GET lists the caller's own, and the keyed route reads one. The body
     # of the create names the order, so it is a POST against the family root
     # rather than a keyed detail route.
     return_requests,
-    return_request_detail,
+    verify_payment,
 )
 
-
 urlpatterns = [
-
-    path(
-        '',
-        order_list,
-        name='order-list'
-    ),
-
-    path(
-        '<int:order_id>/',
-        order_detail,
-        name='order-detail'
-    ),
-
-    path(
-        'checkout/',
-        create_order,
-        name='create-order'
-    ),
-
+    path("", order_list, name="order-list"),
+    path("<int:order_id>/", order_detail, name="order-detail"),
+    path("checkout/", create_order, name="create-order"),
     # [R-1.13] Guest order read, two shapes of the same view: the token alone
     # (it is globally unique, so it identifies the order) and the token plus
     # the customer-facing order number as an extra cross-check. Both take the
@@ -51,25 +34,9 @@ urlpatterns = [
         guest_order_detail,
         name="guest-order-detail-by-number",
     ),
-
-    path(
-        'apply-coupon/',
-        apply_coupon,
-        name='apply-coupon'
-    ),
-
-    path(
-        'payment/',
-        create_payment,
-        name='create-payment'
-    ),
-
-    path(
-    'payment/verify/',
-    verify_payment,
-    name='verify-payment'
-),
-
+    path("apply-coupon/", apply_coupon, name="apply-coupon"),
+    path("payment/", create_payment, name="create-payment"),
+    path("payment/verify/", verify_payment, name="verify-payment"),
     # [R-1.16] SPEC-1-B07a/B07b: the customer's returns family (spec 4 line 1083,
     # under the account's `/account/returns` page of line 1045). Declared after
     # the `<int:order_id>` route above, which cannot match a non-integer, so

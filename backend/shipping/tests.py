@@ -793,17 +793,22 @@ class ShippingCostAtomicityTests(ApiTestCase):
 
     def test_the_price_is_resolved_inside_the_atomic_block(self):
         observed = {}
-        import orders.views as orders_views
+        # The spy has to replace the binding `create_order` actually resolves,
+        # and that callee reads it from the checkout module's own globals. The
+        # split moved the callee out of the single `orders.views` module, so
+        # rebinding the name on the package facade would leave the view reading
+        # its own untouched binding and the spy would never be called.
+        from orders.views import checkout as checkout_views
 
-        real_quote = orders_views.quote_shipping
+        real_quote = checkout_views.quote_shipping
 
         def spy(**kwargs):
             observed["in_atomic_block"] = connection.in_atomic_block
             observed["lock_requested"] = kwargs.get("lock")
             return real_quote(**kwargs)
 
-        orders_views.quote_shipping = spy
-        self.addCleanup(setattr, orders_views, "quote_shipping", real_quote)
+        checkout_views.quote_shipping = spy
+        self.addCleanup(setattr, checkout_views, "quote_shipping", real_quote)
 
         self.seed_session_cart([(self.product, 1)])
         self.checkout()
@@ -819,7 +824,6 @@ class ShippingCostAtomicityTests(ApiTestCase):
 
         from django.db.models.query import QuerySet
 
-        standard = self.standard
         observed = []
         original = QuerySet.order_by
 

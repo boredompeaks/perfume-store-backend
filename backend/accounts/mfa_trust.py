@@ -31,6 +31,7 @@ The TTL is env-driven (``MFA_TRUST_DAYS``, default 30); 0 is a safe
 deployment-wide kill switch that puts every privileged login straight back
 behind the challenge.
 """
+
 from datetime import timedelta
 
 from django.conf import settings

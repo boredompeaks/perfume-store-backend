@@ -36,7 +36,6 @@ def remove_superadmin_role_group(apps, schema_editor):
 
 
 class Migration(migrations.Migration):
-
     dependencies = [
         ("common", "0005_savedfilter"),
     ]

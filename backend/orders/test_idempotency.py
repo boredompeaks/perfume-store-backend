@@ -11,6 +11,7 @@ constraint plus a NULL-distinctness pin -- instead of wall-clock thread
 scheduling (house pattern from test_order_number.py). Razorpay is never
 touched; no test hits the network.
 """
+
 from decimal import Decimal
 
 from django.db import IntegrityError
@@ -145,9 +146,7 @@ class IdempotencyReplayTests(IdempotencyTestBase):
 
         self.assertEqual(replay.status_code, 200, replay.data)
         self.assertEqual(replay.data["id"], first.data["id"])
-        self.assertEqual(
-            replay.data["order_number"], first.data["order_number"]
-        )
+        self.assertEqual(replay.data["order_number"], first.data["order_number"])
         self.assertEqual(replay.data["total_amount"], first.data["total_amount"])
         self.assertEqual(Order.objects.count(), 1)
         self.assertEqual(OrderItem.objects.count(), 1)
@@ -165,9 +164,7 @@ class IdempotencyReplayTests(IdempotencyTestBase):
         self.assertEqual(first.status_code, 201, first.data)
         other_session = self.second_session()
 
-        replay = self.keyed_checkout(
-            key="checkout-retry-001", client=other_session
-        )
+        replay = self.keyed_checkout(key="checkout-retry-001", client=other_session)
 
         self.assertEqual(replay.status_code, 200, replay.data)
         self.assertEqual(replay.data["id"], first.data["id"])
@@ -214,9 +211,7 @@ class IdempotencyReplayTests(IdempotencyTestBase):
         self.api_login("other", client=other_client)
         self.seed_session_cart([(self.product, 2)], client=other_client)
 
-        theirs = self.keyed_checkout(
-            key="checkout-retry-001", client=other_client
-        )
+        theirs = self.keyed_checkout(key="checkout-retry-001", client=other_client)
 
         self.assertEqual(theirs.status_code, 201, theirs.data)
         self.assertNotEqual(theirs.data["id"], first.data["id"])
@@ -225,9 +220,7 @@ class IdempotencyReplayTests(IdempotencyTestBase):
         self.assertEqual(other_order.idempotency_key, "checkout-retry-001")
 
         # and their own retry replays their own order, still two orders
-        replay = self.keyed_checkout(
-            key="checkout-retry-001", client=other_client
-        )
+        replay = self.keyed_checkout(key="checkout-retry-001", client=other_client)
         self.assertEqual(replay.status_code, 200, replay.data)
         self.assertEqual(replay.data["id"], theirs.data["id"])
         self.assertEqual(Order.objects.count(), 2)

@@ -2,15 +2,16 @@ import copy
 import csv
 from functools import partial
 
+from django import forms
 from django.contrib import admin, messages
 from django.forms import modelformset_factory
 from django.http import HttpResponse
 from django.shortcuts import render
 from django.utils.html import format_html, mark_safe
-from django import forms
 
 from common.admin import RoleAwareModelAdmin
 from common.saved_filters import SavedFilterMixin
+
 from .models import ProductVariant, StockMovement, products
 
 # SPEC-20-11 [R-20.35]: the ledger stamp carried by a changelist inline
@@ -164,9 +165,7 @@ class ProductAdmin(SavedFilterMixin, RoleAwareModelAdmin):
         view_only.list_editable = tuple(
             field for field in self.list_editable if field != INLINE_STOCK_FIELD
         )
-        return super(ProductAdmin, view_only).changelist_view(
-            request, extra_context
-        )
+        return super(ProductAdmin, view_only).changelist_view(request, extra_context)
 
     def get_changelist_formset(self, request, **kwargs):
         """Changelist formset whose form is ``ChangelistStockForm``.
@@ -183,9 +182,7 @@ class ProductAdmin(SavedFilterMixin, RoleAwareModelAdmin):
             self.get_changelist_form(request, form=ChangelistStockForm),
             extra=0,
             fields=self.list_editable,
-            formfield_callback=partial(
-                self.formfield_for_dbfield, request=request
-            ),
+            formfield_callback=partial(self.formfield_for_dbfield, request=request),
             **kwargs,
         )
 
@@ -237,7 +234,9 @@ class ProductAdmin(SavedFilterMixin, RoleAwareModelAdmin):
             # no interpolation -> mark_safe (format_html requires args/kwargs)
             return mark_safe('<strong style="color:#c62828;">out of stock</strong>')
         if obj.stock <= 5:
-            return format_html('<strong style="color:#e6a700;">low ({})</strong>', obj.stock)
+            return format_html(
+                '<strong style="color:#e6a700;">low ({})</strong>', obj.stock
+            )
         return obj.stock
 
     @admin.display(description="Preview")

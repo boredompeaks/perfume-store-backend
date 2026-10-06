@@ -1,4 +1,5 @@
 """E2E isolation/lifecycle tests - docs/test-gaps.md e2e items 4 and 7."""
+
 from decimal import Decimal
 
 from django.test import tag
@@ -25,7 +26,9 @@ class MultiUserIsolationTests(ApiTestCase):
 
         # Alice builds a cart and checks out
         self.seed_session_cart([(product, 2)], client=self.client_a)
-        res = self.client_a.post("/api/orders/checkout/", self.checkout_payload(), format="json")
+        res = self.client_a.post(
+            "/api/orders/checkout/", self.checkout_payload(), format="json"
+        )
         self.assertEqual(res.status_code, 201, res.data)
         alice_order_id = res.data["id"]
 
@@ -36,7 +39,9 @@ class MultiUserIsolationTests(ApiTestCase):
 
         # Bob cannot pay Alice's order (ownership-scoped)
         self.razorpay_mock(order_id="order_SECRET")
-        res = self.client_b.post("/api/orders/payment/", {"order_id": alice_order_id}, format="json")
+        res = self.client_b.post(
+            "/api/orders/payment/", {"order_id": alice_order_id}, format="json"
+        )
         self.assertEqual(res.status_code, 404, res.data)
 
         # Bob cannot verify a payment against Alice's order either
@@ -54,7 +59,9 @@ class MultiUserIsolationTests(ApiTestCase):
 
         # Bob cannot see or mutate Alice's cart items
         alice_item = CartItem.objects.get()
-        res = self.client_b.patch(f"/api/cart/{alice_item.id}/", {"quantity": 1}, format="json")
+        res = self.client_b.patch(
+            f"/api/cart/{alice_item.id}/", {"quantity": 1}, format="json"
+        )
         self.assertEqual(res.status_code, 404, res.data)
         res = self.client_b.delete(f"/api/cart/{alice_item.id}/")
         self.assertEqual(res.status_code, 404, res.data)
@@ -62,7 +69,9 @@ class MultiUserIsolationTests(ApiTestCase):
         # Bob's own cart is empty and cannot check out Alice's cart
         res = self.client_b.get("/api/cart/")
         self.assertEqual(res.data["items"], [])
-        res = self.client_b.post("/api/orders/checkout/", self.checkout_payload(), format="json")
+        res = self.client_b.post(
+            "/api/orders/checkout/", self.checkout_payload(), format="json"
+        )
         self.assertEqual(res.status_code, 400, res.data)
         self.assertEqual(res.data["error"], "Cart is empty")
 
@@ -108,7 +117,9 @@ class ProductLifecycleTests(ApiTestCase):
         self.assertEqual(res.data["items"][0]["price"], "99.00")
 
         # staff reprices to 149.00 - order history must keep 99.00
-        res = staff_client.patch(f"/api/products/{slug}/", {"price": "149.00"}, format="json")
+        res = staff_client.patch(
+            f"/api/products/{slug}/", {"price": "149.00"}, format="json"
+        )
         self.assertEqual(res.status_code, 200, res.data)
         self.assertEqual(res.data["price"], "149.00")
 

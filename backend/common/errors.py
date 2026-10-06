@@ -22,6 +22,7 @@ mappings of field name to message list). Plain JSON 4xx/5xx bodies with
 scalar or nested-dict context — the health probe's 503 checks body, for
 example — pass through byte-identical.
 """
+
 import json
 
 from rest_framework.utils.encoders import JSONEncoder
@@ -107,7 +108,7 @@ class ErrorEnvelopeMiddleware:
             # rewrites what the renderer will emit.
             response.data = enveloped
         else:
-            response.content = json.dumps(
-                enveloped, cls=JSONEncoder
-            ).encode(response.charset or "utf-8")
+            response.content = json.dumps(enveloped, cls=JSONEncoder).encode(
+                response.charset or "utf-8"
+            )
         return response

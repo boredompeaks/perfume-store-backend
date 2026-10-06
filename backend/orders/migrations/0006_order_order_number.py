@@ -13,25 +13,24 @@ def backfill_order_numbers(apps, schema_editor):
     Single writer with a per-year counter inside one migration transaction,
     so the unique constraint cannot be violated by construction.
     """
-    Order = apps.get_model('orders', 'Order')
+    Order = apps.get_model("orders", "Order")
     sequences = {}
-    for order in Order.objects.order_by('id').iterator():
+    for order in Order.objects.order_by("id").iterator():
         year = order.created_at.year
         sequences[year] = sequences.get(year, 0) + 1
-        order.order_number = f'ORD-{year}-{sequences[year]:06d}'
-        order.save(update_fields=['order_number'])
+        order.order_number = f"ORD-{year}-{sequences[year]:06d}"
+        order.save(update_fields=["order_number"])
 
 
 class Migration(migrations.Migration):
-
     dependencies = [
-        ('orders', '0005_order_razorpay_payment_ids'),
+        ("orders", "0005_order_razorpay_payment_ids"),
     ]
 
     operations = [
         migrations.AddField(
-            model_name='order',
-            name='order_number',
+            model_name="order",
+            name="order_number",
             field=models.CharField(blank=True, max_length=20, null=True, unique=True),
         ),
         migrations.RunPython(backfill_order_numbers, migrations.RunPython.noop),

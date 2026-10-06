@@ -17,6 +17,20 @@ explicit dimensions below (spec 10.2) are additive and kept in sync by the
 writers. No consumer is forced onto the new fields in this batch.
 """
 
+# Typing imports (TIER-2). `Callable` is a RUNTIME import, not a typing-only
+# one, because it appears in the module-level annotation on
+# TRANSITION_PRECONDITIONS below and Python evaluates that annotation when the
+# module is loaded. `TYPE_CHECKING` gates the model reference, and that one IS
+# typing-only: this module promises to stay dependency-free (the 0012 data
+# migration imports from here), so a real import of orders.models would risk an
+# import cycle at migration time. A string annotation around the name means
+# nothing is resolved when this module is loaded.
+from collections.abc import Callable
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from orders.models import Order
+
 # ——— legacy single status (compat surface) ———————————————————————————
 
 STATUS_CHOICES = [
@@ -78,7 +92,14 @@ FULFILMENT_QUEUE_STATUSES = tuple(ADMIN_FULFILMENT_NEXT)
 # themselves at import (models is imported by every writer surface, so
 # the registry is populated before any writer runs). precondition_failures
 # is the ONLY evaluation point — writers must never special-case a check.
-TRANSITION_PRECONDITIONS = {}
+# Annotated rather than left bare (TIER-2): the registry is a mapping from a
+# status to the list of callables registered against it, and an empty `{}` is
+# precisely the case mypy cannot infer -- it has no value to read the type
+# from. `Callable[[Order], list[str]]` is the contract the docstring above
+# already states (callables receiving the Order, returning failure reasons),
+# and the `Order` reference is a string because this module stays
+# dependency-free (see the module docstring) and must not import the model.
+TRANSITION_PRECONDITIONS: dict[str, list[Callable[["Order"], list[str]]]] = {}
 
 
 def register_transition_preconditions(status, *checks):
@@ -97,6 +118,7 @@ def precondition_failures(order, new_status):
     for check in TRANSITION_PRECONDITIONS.get(new_status, ()):
         failures.extend(check(order) or [])
     return failures
+
 
 # ——— [R-10.1] explicit lifecycle dimensions (spec 10.2) —————————————————
 # The legacy single status conflates "did they pay" with "did we ship"; the
@@ -162,6 +184,7 @@ def payment_transition_allowed(old_payment: str, new_payment: str) -> bool:
     return new_payment == old_payment or new_payment in PAYMENT_ALLOWED_TRANSITIONS.get(
         old_payment, set()
     )
+
 
 # Total legacy→dimensions mapping: EVERY legacy status value maps to BOTH
 # dimensions — this is what the 0012 data migration backfills from, so a
@@ -249,7 +272,7 @@ CAPTURED_MONEY_PAYMENT_STATUSES = frozenset(
 LIFECYCLE_SEQUENCE = ("pending", "confirmed", "shipped", "delivered", "cancelled")
 
 
-def status_for_payment(payment_status: str) -> str:
+def status_for_payment(payment_status: str) -> str | None:
     """The earliest lifecycle status whose payment dimension is ``payment_status``.
 
     The inverse of :func:`payment_for_status`, and the reason a writer never
@@ -258,6 +281,15 @@ def status_for_payment(payment_status: str) -> str:
     refund-dimension values, states the legacy single status cannot express
     (the documented [R-10.1] divergence), so a caller must handle it rather
     than assume a mapping exists.
+
+    The return annotation is ``str | None`` and it was ``str`` until mypy was
+    pointed at this module (TIER-2). The annotation was the defect, not the
+    body: ``None`` is a real, intended and TESTED return here — the pins in
+    ``orders.tests_webhooks`` assert ``assertIsNone`` for both refund-dimension
+    and unmapped values — and ``orders.webhooks`` branches on it. A ``-> str``
+    signature on a function that returns ``None`` tells every future caller,
+    and every type checker reading this module, that the None branch cannot
+    happen. ``str | None`` says what the function actually does.
     """
     for status in LIFECYCLE_SEQUENCE:
         if LEGACY_STATUS_DIMENSIONS.get(status, ("", ""))[0] == payment_status:

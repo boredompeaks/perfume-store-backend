@@ -12,8 +12,8 @@ concurrency authority, with get_or_create's IntegrityError retry semantics
 doing the upsert. Opt-out is a no-op-safe 200 (uniform response, no
 existence leak — deleting a nonexistent preference is still "opted out").
 """
-from django.db import transaction
 
+from django.db import transaction
 from rest_framework import status
 from rest_framework.decorators import api_view, permission_classes, throttle_scope
 from rest_framework.permissions import IsAuthenticated
@@ -66,7 +66,7 @@ def restock_notification(request, slug):
     # DELETE — uniform response whether or not a preference exists: an
     # anonymous-shaped existence probe gains nothing, and the caller's
     # end state is identical ("not opted in").
-    RestockNotification.objects.filter(
-        user=request.user, product=product
-    ).update(active=False, notified_at=None)
+    RestockNotification.objects.filter(user=request.user, product=product).update(
+        active=False, notified_at=None
+    )
     return Response({"active": False})

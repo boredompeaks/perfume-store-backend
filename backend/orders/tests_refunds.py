@@ -19,13 +19,12 @@ import itertools
 from decimal import Decimal
 from unittest import mock
 
+import razorpay
 from django.contrib.admin.models import ADDITION, LogEntry
 from django.contrib.auth.models import Group, User
 from django.contrib.contenttypes.models import ContentType
 from django.test import SimpleTestCase, override_settings, tag
 from django.utils import timezone
-
-import razorpay
 
 from common.roles import ROLE_FINANCE, ROLE_SUPPORT
 from common.testing import TEST_RAZORPAY_KEY_ID, TEST_RAZORPAY_KEY_SECRET, ApiTestCase

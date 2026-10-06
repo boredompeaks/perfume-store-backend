@@ -12,6 +12,7 @@ returned 201/200). This class is the enforcement half of the fix; the
 token pair (csrftoken cookie + X-CSRFToken header) is issued by the cart
 GET surface and replayed by the SPA.
 """
+
 from django.conf import settings
 from rest_framework.authentication import SessionAuthentication
 

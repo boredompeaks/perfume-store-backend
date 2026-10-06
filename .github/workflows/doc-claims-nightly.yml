@@ -1,0 +1,111 @@
+# SPEC-22-11 (full rule in backend-tests.yml's header): every action is
+# pinned to a full commit SHA with its tag in a trailing comment, because a
+# mutable tag is a remote-controlled pointer. Never widen a pin back to a tag.
+#
+# Why this workflow exists at all, and why it is NOT another step inside
+# backend-tests.yml: that workflow's claim scan is DIFF-SCOPED on purpose --
+# it reads only the claims a push or PR actually touched, because a build gate
+# that fails on prose nobody in this commit edited teaches people to ignore
+# the gate. The other half of that trade is drift nobody touches: a claim that
+# went stale while its file sat still is invisible to every push-scoped scan.
+# This repo's claims live in 39 files, most of which are written once and
+# then left alone, so the complement -- the WHOLE corpus, from the root commit
+# to HEAD, on a schedule -- is what this workflow runs. It is expected to be
+# able to go red on pre-existing findings, and a red run here is a finding to
+# report rather than a reason to baseline the claim away (the same rule
+# backend-tests.yml states for its own scan).
+name: doc-claims-nightly
+
+on:
+  schedule:
+    # Nightly at 03:17 UTC. Scheduled runs are best-effort and are taken from
+    # the repository's DEFAULT BRANCH; the slot itself is arbitrary but fixed,
+    # so a missed window is visible as a gap rather than as a moving one.
+    - cron: "17 3 * * *"
+  # Manual runs, without editing the cron above (also the API entry point).
+  workflow_dispatch:
+
+# A scheduled workflow executes only from the default branch, so this file
+# becomes live when feat/add-frontend is the default -- master is legacy and
+# is never a target here. workflow_dispatch can still run it from any branch
+# that contains it. Least privilege either way: the scan only reads the
+# checkout it was given.
+permissions:
+  contents: read
+
+# One run at a time; a re-dispatch cancels the stale one instead of queueing
+# behind it.
+concurrency:
+  group: doc-claims-nightly
+  cancel-in-progress: true
+
+jobs:
+  full-corpus-claim-scan:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          # Full history, for the same reason backend-tests.yml pays for it:
+          # the scan is a three-dot diff against --base, and the default
+          # fetch-depth: 1 has neither the base object nor a merge base, so
+          # the scan would abort with a git error (exit 2 -- a runtime error)
+          # instead of reporting claims. Here the base is the ROOT commit, so
+          # the entire history has to be present, not just recent pushes.
+          fetch-depth: 0
+
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: "3.14"
+
+      # No pip install step: scripts/doc_claims.py is stdlib-only (argparse,
+      # hashlib, json, os, re, subprocess, sys, pathlib), so this job cannot
+      # go red because a package index was unreachable, and it cannot
+      # disagree with backend/requirements.txt about what the scanner needs.
+      - name: Documentation claim scan - full corpus (root commit to HEAD)
+        run: |
+          set -euo pipefail
+          # The ROOT commit: `git rev-list --max-parents=0 HEAD`. Diffing from
+          # it is exactly what makes this FULL-CORPUS -- every tracked file is
+          # inside the diff, so no claim is skipped for living in a file that
+          # nobody edited. The sha is pinned rather than passed as a branch
+          # name so the scope cannot silently shrink if the ref moves; the
+          # root of a linear history does not move.
+          BASE="84c8fa71164c23f1a955c67cfc71bd324545519f"
+          status=0
+          out="$(python scripts/doc_claims.py --base "${BASE}" 2>&1)" || status=$?
+          printf '%s\n' "${out}"
+          # The scanner's own exit contract is the gate: 0 = no errors,
+          # 1 = mechanically decidable errors, 2 = runtime error (bad base,
+          # unreadable doc). The count is parsed out of the scanner's own
+          # summary line for the report ONLY -- prose parsing must never be
+          # what decides red or green.
+          # Byte-safe on purpose, and the reason is measured, not assumed: the
+          # separator in that line is an em-dash, which this scanner emits as
+          # cp1252 byte 0x97 when stdout is a pipe (and as UTF-8 in CI), so
+          # sed's `.` in a UTF-8 locale cannot match it -- replayed locally,
+          # the sed version printed an EMPTY count while grep -a returned 119.
+          # `-a` keeps grep from treating the scan output as a binary file
+          # (the corpus legitimately contains invalid-UTF-8 bytes such as the
+          # 0x97 quoted in docs/run/section-22.md), and `cut -d' ' -f1` is
+          # locale-independent. `-m1` takes the first matching line, which is
+          # the summary line the scanner prints first.
+          errors="$(printf '%s\n' "${out}" | grep -a -m1 -o '[0-9][0-9]* error(s)' | cut -d' ' -f1)" || true
+          {
+            echo "### doc_claims full-corpus - base \`${BASE}\`"
+            echo
+            echo '```'
+            printf '%s\n' "${out}" | grep -a -E '^(doc_claims: |  base )' || true
+            echo '```'
+          } >> "${GITHUB_STEP_SUMMARY}"
+          if [ -z "${errors}" ]; then
+            echo "::warning::could not parse the error count from the scanner's summary line; the exit status below still decides the result."
+          fi
+          # Belt and braces against the contract itself changing: a non-zero
+          # count with a zero exit would be a gate that reads an error and
+          # passes anyway, which is the failure mode this workflow exists to
+          # make visible.
+          if [ "${errors:-0}" -gt 0 ] && [ "${status}" -eq 0 ]; then
+            echo "::error::scanner reported ${errors} error(s) but exited 0; its exit-code contract has changed and this workflow can no longer trust it."
+            exit 1
+          fi
+          exit "${status}"

@@ -11,12 +11,13 @@ https://docs.djangoproject.com/en/6.1/ref/settings/
 """
 
 import logging
+import os
 import re
 from datetime import timedelta
 from decimal import Decimal
 from pathlib import Path
 from urllib.parse import unquote, urlparse
-import os
+
 from django.core.exceptions import ImproperlyConfigured
 from dotenv import load_dotenv
 
@@ -28,8 +29,8 @@ from dotenv import load_dotenv
 from common.money import quantize_money
 
 load_dotenv()
-RAZORPAY_KEY_ID = os.getenv('RAZORPAY_KEY_ID')
-RAZORPAY_KEY_SECRET = os.getenv('RAZORPAY_KEY_SECRET')
+RAZORPAY_KEY_ID = os.getenv("RAZORPAY_KEY_ID")
+RAZORPAY_KEY_SECRET = os.getenv("RAZORPAY_KEY_SECRET")
 # SPEC-1-06 [R-1.15]: the secret Razorpay signs every webhook delivery with
 # (Dashboard -> Settings -> Webhooks -> the secret beside the endpoint URL).
 # It is a DIFFERENT credential from the key pair above - rotating one does not
@@ -37,7 +38,7 @@ RAZORPAY_KEY_SECRET = os.getenv('RAZORPAY_KEY_SECRET')
 # accepts, which is why the endpoint fails closed (503) while it is unset
 # rather than accepting an unsigned delivery. No default: an unconfigured
 # value is empty, never a guessable literal.
-RAZORPAY_WEBHOOK_SECRET = (os.getenv('RAZORPAY_WEBHOOK_SECRET') or '').strip()
+RAZORPAY_WEBHOOK_SECRET = (os.getenv("RAZORPAY_WEBHOOK_SECRET") or "").strip()
 
 # Build paths inside the project like this: BASE_DIR / 'subdir'.
 BASE_DIR = Path(__file__).resolve().parent.parent
@@ -47,17 +48,17 @@ BASE_DIR = Path(__file__).resolve().parent.parent
 # See https://docs.djangoproject.com/en/6.1/howto/deployment/checklist/
 
 # SECURITY WARNING: keep the secret key used in production secret!
-SECRET_KEY = os.getenv('DJANGO_SECRET_KEY', 'unsafe-development-key-change-me')
+SECRET_KEY = os.getenv("DJANGO_SECRET_KEY", "unsafe-development-key-change-me")
 
 # SECURITY WARNING: don't run with debug turned on in production!
 # V-02: fails CLOSED — an absent DJANGO_DEBUG means DEBUG=False, so an
 # unconfigured deployment (forgotten env var) lands in the hardened
 # configuration and must set a real DJANGO_SECRET_KEY to boot. Set
 # DJANGO_DEBUG=true explicitly for local development only.
-DEBUG = os.getenv('DJANGO_DEBUG', 'false').lower() == 'true'
+DEBUG = os.getenv("DJANGO_DEBUG", "false").lower() == "true"
 
-if not DEBUG and not os.getenv('DJANGO_SECRET_KEY'):
-    raise RuntimeError('DJANGO_SECRET_KEY must be set when DJANGO_DEBUG is false.')
+if not DEBUG and not os.getenv("DJANGO_SECRET_KEY"):
+    raise RuntimeError("DJANGO_SECRET_KEY must be set when DJANGO_DEBUG is false.")
 
 
 # SPEC-22-03 [R-22.3]: the environments this deployment separates itself from.
@@ -65,7 +66,7 @@ if not DEBUG and not os.getenv('DJANGO_SECRET_KEY'):
 # the others - staging must never be a copy of production's database, and
 # production must never be reached with a staging credential - so the value is
 # DECLARED, validated, and mandatory outside development.
-_VALID_DEPLOY_ENVIRONMENTS = frozenset({'local', 'ci', 'staging', 'production'})
+_VALID_DEPLOY_ENVIRONMENTS = frozenset({"local", "ci", "staging", "production"})
 
 
 def _deployment_environment(debug):
@@ -76,21 +77,21 @@ def _deployment_environment(debug):
     and an unknown value is refused rather than guessed at - a typo must not
     quietly become "whatever the default was".
     """
-    raw = (os.getenv('DJANGO_ENV') or '').strip().lower()
+    raw = (os.getenv("DJANGO_ENV") or "").strip().lower()
     if not raw:
         if debug:
-            return 'local'
+            return "local"
         raise ImproperlyConfigured(
-            'DJANGO_ENV must name the deployment environment ('
-            + ', '.join(sorted(_VALID_DEPLOY_ENVIRONMENTS))
-            + ') when DJANGO_DEBUG is false: an environment that cannot be '
-            'named cannot be isolated from the others.'
+            "DJANGO_ENV must name the deployment environment ("
+            + ", ".join(sorted(_VALID_DEPLOY_ENVIRONMENTS))
+            + ") when DJANGO_DEBUG is false: an environment that cannot be "
+            "named cannot be isolated from the others."
         )
     if raw not in _VALID_DEPLOY_ENVIRONMENTS:
         raise ImproperlyConfigured(
-            f'Unsupported DJANGO_ENV {raw!r}; expected one of '
-            + ', '.join(sorted(_VALID_DEPLOY_ENVIRONMENTS))
-            + '.'
+            f"Unsupported DJANGO_ENV {raw!r}; expected one of "
+            + ", ".join(sorted(_VALID_DEPLOY_ENVIRONMENTS))
+            + "."
         )
     return raw
 
@@ -108,21 +109,19 @@ def _env_hosts(name, default, debug):
     for CSRF checks. Either way the environment was never configured, so the
     boot is refused and named instead.
     """
-    raw = (os.getenv(name) or '').strip()
+    raw = (os.getenv(name) or "").strip()
     if not raw:
         if not debug:
             raise ImproperlyConfigured(
-                f'{name} must be set explicitly when DJANGO_DEBUG is false '
-                f'(comma-separated); the development default {default!r} is '
-                f'never a deployed environment\'s configuration.'
+                f"{name} must be set explicitly when DJANGO_DEBUG is false "
+                f"(comma-separated); the development default {default!r} is "
+                f"never a deployed environment's configuration."
             )
         raw = default
-    return [entry for entry in raw.split(',') if entry]
+    return [entry for entry in raw.split(",") if entry]
 
 
-ALLOWED_HOSTS = _env_hosts(
-    'DJANGO_ALLOWED_HOSTS', 'localhost,127.0.0.1', DEBUG
-)
+ALLOWED_HOSTS = _env_hosts("DJANGO_ALLOWED_HOSTS", "localhost,127.0.0.1", DEBUG)
 
 
 def _env_bool(name, default):
@@ -135,11 +134,10 @@ def _env_bool(name, default):
     raw = os.getenv(name)
     if raw is None:
         return default
-    return raw.strip().lower() in ('1', 'true', 'yes', 'on')
+    return raw.strip().lower() in ("1", "true", "yes", "on")
 
 
-
-CSRF_COOKIE_SECURE = _env_bool('CSRF_COOKIE_SECURE', not DEBUG)
+CSRF_COOKIE_SECURE = _env_bool("CSRF_COOKIE_SECURE", not DEBUG)
 
 
 # Application definition
@@ -149,27 +147,27 @@ INSTALLED_APPS = [
     # admin site for one whose login form requires a TOTP code from
     # privileged roles — same app (label 'admin'), same registration flow,
     # one enforcement surface added at the admin door.
-    'config.admin.MFAAdminConfig',
-    'django.contrib.auth',
-    'django.contrib.contenttypes',
-    'django.contrib.sessions',
-    'django.contrib.messages',
-    'django.contrib.staticfiles',
-    'rest_framework',
+    "config.admin.MFAAdminConfig",
+    "django.contrib.auth",
+    "django.contrib.contenttypes",
+    "django.contrib.sessions",
+    "django.contrib.messages",
+    "django.contrib.staticfiles",
+    "rest_framework",
     # SPEC-17-01 [R-17.5/R-17.8/R-17.10]: token_blacklist provides the
     # OutstandingToken/BlacklistedToken tables behind refresh rotation,
     # secure logout, and session invalidation on critical account changes.
-    'rest_framework_simplejwt.token_blacklist',
-    'products',
-    'cart',
-    'orders',
-    'accounts',
+    "rest_framework_simplejwt.token_blacklist",
+    "products",
+    "cart",
+    "orders",
+    "accounts",
     # SPEC-1-B05 [R-1.07]: shipping methods/rates (spec 6.9 zones + rates)
     # and the server-side pricing both the estimate and checkout read.
-    'shipping',
-    'ops',
-    'common',
-    'corsheaders',
+    "shipping",
+    "ops",
+    "common",
+    "corsheaders",
 ]
 
 MIDDLEWARE = [
@@ -177,48 +175,48 @@ MIDDLEWARE = [
     # purpose, so the X-Request-ID header is on every response including the
     # ones produced above the view (security redirect, CORS preflight, admin
     # login bounce) and on the unhandled-exception 500.
-    'common.middleware.RequestIDMiddleware',
-    'django.middleware.security.SecurityMiddleware',
+    "common.middleware.RequestIDMiddleware",
+    "django.middleware.security.SecurityMiddleware",
     # SPEC-22-01: whitenoise serves STATIC_ROOT from the app process, so a
     # deployment with DEBUG=false still returns the admin CSS/JS. Placed
     # directly below SecurityMiddleware (its documented slot: after the
     # security headers, before anything that touches the request body or
     # the session) and unconditionally, so a misconfigured DEBUG cannot
     # silently drop assets.
-    'whitenoise.middleware.WhiteNoiseMiddleware',
-    'django.contrib.sessions.middleware.SessionMiddleware',
-    'corsheaders.middleware.CorsMiddleware',
-    'django.middleware.common.CommonMiddleware',
-    'django.middleware.csrf.CsrfViewMiddleware',
-    'django.contrib.auth.middleware.AuthenticationMiddleware',
-    'django.contrib.messages.middleware.MessageMiddleware',
-    'django.middleware.clickjacking.XFrameOptionsMiddleware',
+    "whitenoise.middleware.WhiteNoiseMiddleware",
+    "django.contrib.sessions.middleware.SessionMiddleware",
+    "corsheaders.middleware.CorsMiddleware",
+    "django.middleware.common.CommonMiddleware",
+    "django.middleware.csrf.CsrfViewMiddleware",
+    "django.contrib.auth.middleware.AuthenticationMiddleware",
+    "django.contrib.messages.middleware.MessageMiddleware",
+    "django.middleware.clickjacking.XFrameOptionsMiddleware",
     # SPEC-9-03 (R-9.2.19, spec line 3002 "consistent error responses"):
     # every JSON error response is rewritten into the single uniform
     # {"error", "code", "details"} shape in one place — middleware-level,
     # because the ad-hoc {"error": ...} view returns raise no exception a
     # DRF EXCEPTION_HANDLER could see.
-    'common.errors.ErrorEnvelopeMiddleware',
+    "common.errors.ErrorEnvelopeMiddleware",
 ]
 
-ROOT_URLCONF = 'config.urls'
+ROOT_URLCONF = "config.urls"
 
 TEMPLATES = [
     {
-        'BACKEND': 'django.template.backends.django.DjangoTemplates',
-        'DIRS': [BASE_DIR / 'templates'],
-        'APP_DIRS': True,
-        'OPTIONS': {
-            'context_processors': [
-                'django.template.context_processors.request',
-                'django.contrib.auth.context_processors.auth',
-                'django.contrib.messages.context_processors.messages',
+        "BACKEND": "django.template.backends.django.DjangoTemplates",
+        "DIRS": [BASE_DIR / "templates"],
+        "APP_DIRS": True,
+        "OPTIONS": {
+            "context_processors": [
+                "django.template.context_processors.request",
+                "django.contrib.auth.context_processors.auth",
+                "django.contrib.messages.context_processors.messages",
             ],
         },
     },
 ]
 
-WSGI_APPLICATION = 'config.wsgi.application'
+WSGI_APPLICATION = "config.wsgi.application"
 
 
 # Database
@@ -239,10 +237,10 @@ def _query_options(query):
     if not query:
         return {}
     options = {}
-    for pair in query.split('&'):
-        if not pair or '=' not in pair:
+    for pair in query.split("&"):
+        if not pair or "=" not in pair:
             continue
-        key, _, value = pair.partition('=')
+        key, _, value = pair.partition("=")
         key = unquote(key).strip()
         if key:
             options[key] = unquote(value)
@@ -264,66 +262,69 @@ def _parse_database_url(url):
     development and refused in production (_databases_from_url below).
     """
     fallback = {
-        'ENGINE': 'django.db.backends.sqlite3',
-        'NAME': BASE_DIR / 'db.sqlite3',
+        "ENGINE": "django.db.backends.sqlite3",
+        "NAME": BASE_DIR / "db.sqlite3",
     }
     if not url:
-        return fallback, False, 'is not set'
+        return fallback, False, "is not set"
     try:
         parsed = urlparse(url)
         # Accessing .port validates it: a malformed port raises ValueError.
         port = parsed.port
     except ValueError:
-        return fallback, False, 'is not a parseable URL (malformed host or port)'
+        return fallback, False, "is not a parseable URL (malformed host or port)"
     scheme = parsed.scheme.lower()
-    if scheme in ('postgres', 'postgresql'):
+    if scheme in ("postgres", "postgresql"):
         # The db name is never a filesystem path, so stripping all leading
         # slashes is safe here and accepts both /name and name forms.
-        name = parsed.path.lstrip('/')
+        name = parsed.path.lstrip("/")
         if not name:
-            return fallback, False, 'names no database'
+            return fallback, False, "names no database"
         config = {
-            'ENGINE': 'django.db.backends.postgresql',
-            'NAME': name,
+            "ENGINE": "django.db.backends.postgresql",
+            "NAME": name,
         }
         if parsed.username:
-            config['USER'] = unquote(parsed.username)
+            config["USER"] = unquote(parsed.username)
         if parsed.password is not None:
-            config['PASSWORD'] = unquote(parsed.password)
+            config["PASSWORD"] = unquote(parsed.password)
         if parsed.hostname:
-            config['HOST'] = parsed.hostname
+            config["HOST"] = parsed.hostname
         if port is not None:
-            config['PORT'] = str(port)
+            config["PORT"] = str(port)
         # SPEC-22-01: libpq connection params (sslmode above all) are part
         # of the URL, not noise — a remote production Postgres reached
         # without sslmode would carry its traffic in the clear.
         options = _query_options(parsed.query)
         if options:
-            config['OPTIONS'] = options
-        return config, True, ''
-    if scheme == 'sqlite':
+            config["OPTIONS"] = options
+        return config, True, ""
+    if scheme == "sqlite":
         # Exactly one leading slash is stripped so that sqlite:///db.sqlite3
         # names a file relative to BASE_DIR while the four-slash form
         # (sqlite:////abs/path) and a drive prefix (sqlite:///C:/...) name
         # an absolute one. Path.isabs() is platform-dependent, so the
         # absolute check is done on the raw string instead.
         raw = parsed.path
-        if raw.startswith('/'):
+        if raw.startswith("/"):
             raw = raw[1:]
         if not raw:
-            return fallback, False, 'names no sqlite file'
+            return fallback, False, "names no sqlite file"
         name = Path(raw)
-        is_absolute = raw.startswith('/') or (len(raw) > 1 and raw[1] == ':')
-        return {
-            'ENGINE': 'django.db.backends.sqlite3',
-            'NAME': name if is_absolute else BASE_DIR / name,
-        }, True, ''
+        is_absolute = raw.startswith("/") or (len(raw) > 1 and raw[1] == ":")
+        return (
+            {
+                "ENGINE": "django.db.backends.sqlite3",
+                "NAME": name if is_absolute else BASE_DIR / name,
+            },
+            True,
+            "",
+        )
     # Unsupported scheme (mysql://, ...): reported, never silently accepted.
     return (
         fallback,
         False,
-        f'has unsupported scheme {scheme!r} '
-        f'(supported: postgres, postgresql, sqlite)',
+        f"has unsupported scheme {scheme!r} (supported: postgres, postgresql, sqlite)",
     )
 
 
@@ -352,17 +353,17 @@ def _databases_from_url(url, debug):
     config, resolved, reason = _parse_database_url(url)
     if not resolved and not debug:
         raise ImproperlyConfigured(
-            f'DATABASE_URL {reason}. With DJANGO_DEBUG=false the app refuses '
-            f'to fall back to the local sqlite development database '
-            f'({BASE_DIR / "db.sqlite3"}): a production or staging host '
-            f'serving developer data is worse than a failed boot. Set '
-            f'DATABASE_URL (see backend/.env.example), or run with '
-            f'DJANGO_DEBUG=true for local development.'
+            f"DATABASE_URL {reason}. With DJANGO_DEBUG=false the app refuses "
+            f"to fall back to the local sqlite development database "
+            f"({BASE_DIR / 'db.sqlite3'}): a production or staging host "
+            f"serving developer data is worse than a failed boot. Set "
+            f"DATABASE_URL (see backend/.env.example), or run with "
+            f"DJANGO_DEBUG=true for local development."
         )
-    return {'default': config}
+    return {"default": config}
 
 
-DATABASES = _databases_from_url(os.getenv('DATABASE_URL'), DEBUG)
+DATABASES = _databases_from_url(os.getenv("DATABASE_URL"), DEBUG)
 
 
 # Password validation
@@ -370,16 +371,16 @@ DATABASES = _databases_from_url(os.getenv('DATABASE_URL'), DEBUG)
 
 AUTH_PASSWORD_VALIDATORS = [
     {
-        'NAME': 'django.contrib.auth.password_validation.UserAttributeSimilarityValidator',
+        "NAME": "django.contrib.auth.password_validation.UserAttributeSimilarityValidator",
     },
     {
-        'NAME': 'django.contrib.auth.password_validation.MinimumLengthValidator',
+        "NAME": "django.contrib.auth.password_validation.MinimumLengthValidator",
     },
     {
-        'NAME': 'django.contrib.auth.password_validation.CommonPasswordValidator',
+        "NAME": "django.contrib.auth.password_validation.CommonPasswordValidator",
     },
     {
-        'NAME': 'django.contrib.auth.password_validation.NumericPasswordValidator',
+        "NAME": "django.contrib.auth.password_validation.NumericPasswordValidator",
     },
 ]
 
@@ -387,9 +388,9 @@ AUTH_PASSWORD_VALIDATORS = [
 # Internationalization
 # https://docs.djangoproject.com/en/6.1/topics/i18n/
 
-LANGUAGE_CODE = 'en-us'
+LANGUAGE_CODE = "en-us"
 
-TIME_ZONE = 'UTC'
+TIME_ZONE = "UTC"
 
 USE_I18N = True
 
@@ -399,13 +400,13 @@ USE_TZ = True
 # Static files (CSS, JavaScript, Images)
 # https://docs.djangoproject.com/en/6.1/howto/static-files/
 
-STATIC_URL = 'static/'
+STATIC_URL = "static/"
 
 # SPEC-22-01: collectstatic needs a destination. Env-driven because the
 # container image (Dockerfile) and a conventional VM/hosted deployment put
 # it in different places; the default is the conventional in-backend
 # directory so a deployment with no configuration at all still builds.
-STATIC_ROOT = os.getenv('DJANGO_STATIC_ROOT') or str(BASE_DIR / 'staticfiles')
+STATIC_ROOT = os.getenv("DJANGO_STATIC_ROOT") or str(BASE_DIR / "staticfiles")
 
 # whitenoise serves what collectstatic gathered, straight from the app
 # process: no separate web server, no S3 bucket, no missing-asset 404s in
@@ -454,12 +455,14 @@ def _env_positive_int(name, default):
 # Email
 # https://docs.djangoproject.com/en/6.1/topics/email/#topic-email-configuration
 
-EMAIL_BACKEND = os.getenv('EMAIL_BACKEND', 'django.core.mail.backends.smtp.EmailBackend')
-EMAIL_HOST = os.getenv('EMAIL_HOST', '')
-EMAIL_PORT = int(os.getenv('EMAIL_PORT', '587'))
-EMAIL_HOST_USER = os.getenv('EMAIL_HOST_USER', '')
-EMAIL_HOST_PASSWORD = os.getenv('EMAIL_HOST_PASSWORD', '')
-EMAIL_USE_TLS = os.getenv('EMAIL_USE_TLS', 'true').lower() == 'true'
+EMAIL_BACKEND = os.getenv(
+    "EMAIL_BACKEND", "django.core.mail.backends.smtp.EmailBackend"
+)
+EMAIL_HOST = os.getenv("EMAIL_HOST", "")
+EMAIL_PORT = int(os.getenv("EMAIL_PORT", "587"))
+EMAIL_HOST_USER = os.getenv("EMAIL_HOST_USER", "")
+EMAIL_HOST_PASSWORD = os.getenv("EMAIL_HOST_PASSWORD", "")
+EMAIL_USE_TLS = os.getenv("EMAIL_USE_TLS", "true").lower() == "true"
 # SPEC-ASYNC-2a: the socket wait on an SMTP send is BOUNDED. Django hands
 # this setting to smtplib, which hands it to socket.settimeout(), so leaving
 # it unset (Django's own default is None) means a socket with NO timeout: a
@@ -484,27 +487,44 @@ EMAIL_USE_TLS = os.getenv('EMAIL_USE_TLS', 'true').lower() == 'true'
 # (common.notifications.send_email raises; dispatch and the alerts path log
 # and continue) instead of hanging.
 EMAIL_TIMEOUT = _env_positive_int("EMAIL_TIMEOUT", 10)
-DEFAULT_FROM_EMAIL = os.getenv('DEFAULT_FROM_EMAIL', EMAIL_HOST_USER)
-FRONTEND_URL = os.getenv('FRONTEND_URL', 'http://localhost:3000').rstrip('/')
+# ASYNC-2c1: how long a queued notification row is allowed to sit before the
+# purge command treats it as spent.
+#
+# This bound exists because the outbox payload deliberately does NOT go through
+# the audit trail's credential-field scrubber: a password-reset or
+# email-verification notification is built out of exactly the one-time token
+# material that scrubber drops, so dropping it here would break the mail. The
+# consequence of not dropping it is that a queued payload can hold live token
+# material, and the mitigation for THAT is deletion on a clock rather than
+# redaction at write time. The default is three days: comfortably longer than
+# any mail queue backlog or provider retry window, and short enough that a
+# stranded row holding a token does not outlive the reason it was queued.
+# ``PASSWORD_RESET_TIMEOUT`` (Django's own default, 3 days) bounds the token's
+# validity independently, so this is the second of two bounds, not the only one.
+NOTIFICATION_OUTBOX_TTL_SECONDS = _env_positive_int(
+    "NOTIFICATION_OUTBOX_TTL_SECONDS", 3 * 24 * 60 * 60
+)
+DEFAULT_FROM_EMAIL = os.getenv("DEFAULT_FROM_EMAIL", EMAIL_HOST_USER)
+FRONTEND_URL = os.getenv("FRONTEND_URL", "http://localhost:3000").rstrip("/")
 # SPEC-20-13: where the admin login page sends an account that MFA has
 # blocked. Mandatory MFA (R-17.9) refuses an unenrolled privileged login,
 # so without a reachable enrollment surface such an account is locked out
 # of both /admin/ and the API with no way back in. The default is the
 # storefront host's staff enrollment page, so a single-host deployment
 # needs no extra configuration; override it only when the two live apart.
-MFA_ENROLL_URL = os.getenv('MFA_ENROLL_URL', f"{FRONTEND_URL}/staff/mfa/enroll")
-MEDIA_URL = '/media/'
+MFA_ENROLL_URL = os.getenv("MFA_ENROLL_URL", f"{FRONTEND_URL}/staff/mfa/enroll")
+MEDIA_URL = "/media/"
 # SPEC-2-04 [V-13]: uploads (product images, user files) are MEDIA, not
 # STATIC. MEDIA_ROOT is env-driven for the same reason STATIC_ROOT is
 # (SPEC-22-01): the container image mounts a persistent volume at
 # /app/media and a host deployment puts it wherever its disk is, while
 # local development keeps the conventional in-backend directory so the
 # dev loop changes nothing.
-MEDIA_ROOT = Path(os.getenv('DJANGO_MEDIA_ROOT') or (BASE_DIR / 'media'))
+MEDIA_ROOT = Path(os.getenv("DJANGO_MEDIA_ROOT") or (BASE_DIR / "media"))
 
 # An importable dotted path, nothing else: a filesystem path, a URL or a
 # stray trailing dot can never be imported.
-_DOTTED_PATH = re.compile(r'^[A-Za-z_]\w*(\.[A-Za-z_]\w*)+$')
+_DOTTED_PATH = re.compile(r"^[A-Za-z_]\w*(\.[A-Za-z_]\w*)+$")
 
 
 def _env_dotted_path(name, default):
@@ -517,11 +537,11 @@ def _env_dotted_path(name, default):
     be caught by importing it, and importing an operator-supplied module at
     settings-import time is not something this project does.
     """
-    raw = (os.getenv(name) or '').strip() or default
+    raw = (os.getenv(name) or "").strip() or default
     if not _DOTTED_PATH.fullmatch(raw):
         raise ImproperlyConfigured(
-            f'{name} must be an importable dotted Python path (the default is '
-            f'{default}); got {raw!r}.'
+            f"{name} must be an importable dotted Python path (the default is "
+            f"{default}); got {raw!r}."
         )
     return raw
 
@@ -537,23 +557,21 @@ def _env_dotted_path(name, default):
 # whitenoise serves what collectstatic gathered from STATIC_ROOT, and a
 # manifest-hashing storage would rewrite every collected asset URL.
 MEDIA_BACKEND = _env_dotted_path(
-    'DJANGO_MEDIA_BACKEND', 'django.core.files.storage.FileSystemStorage'
+    "DJANGO_MEDIA_BACKEND", "django.core.files.storage.FileSystemStorage"
 )
 STORAGES = {
-    'default': {'BACKEND': MEDIA_BACKEND},
-    'staticfiles': {
-        'BACKEND': 'django.contrib.staticfiles.storage.StaticFilesStorage'
-    },
+    "default": {"BACKEND": MEDIA_BACKEND},
+    "staticfiles": {"BACKEND": "django.contrib.staticfiles.storage.StaticFilesStorage"},
 }
 
 
 # Ops dashboard / /health/: a product with stock at or below this many units
 # counts as "low stock". Tunable per deployment without a code change.
-LOW_STOCK_THRESHOLD = _env_int('LOW_STOCK_THRESHOLD', 5)
+LOW_STOCK_THRESHOLD = _env_int("LOW_STOCK_THRESHOLD", 5)
 
 # Ops dashboard: the "Sales over time" chart covers this many calendar days
 # ending today. Tunable per deployment without a code change.
-DASHBOARD_SALES_WINDOW_DAYS = _env_int('DASHBOARD_SALES_WINDOW_DAYS', 30)
+DASHBOARD_SALES_WINDOW_DAYS = _env_int("DASHBOARD_SALES_WINDOW_DAYS", 30)
 
 # SPEC-20-8: "trust this device for N days" on the privileged MFA door. The
 # TTL is the only knob: 30 days is the window the user directive asks for,
@@ -561,48 +579,48 @@ DASHBOARD_SALES_WINDOW_DAYS = _env_int('DASHBOARD_SALES_WINDOW_DAYS', 30)
 # behind a fresh code, no code change needed. Trust is opt-in per device (no
 # login can grant it), so this can only lengthen or shorten a grant the user
 # already made — it cannot grant one.
-MFA_TRUST_DAYS = _env_int('MFA_TRUST_DAYS', 30)
+MFA_TRUST_DAYS = _env_int("MFA_TRUST_DAYS", 30)
 # The signed marker binding a trusted device to the browser that asked for
 # it (HttpOnly, SameSite=Strict): a stolen password from any other browser
 # still earns the challenge.
-MFA_TRUST_COOKIE_NAME = os.getenv('MFA_TRUST_COOKIE_NAME', 'mfa_trusted_device')
-MFA_TRUST_COOKIE_SAMESITE = os.getenv('MFA_TRUST_COOKIE_SAMESITE', 'Strict')
+MFA_TRUST_COOKIE_NAME = os.getenv("MFA_TRUST_COOKIE_NAME", "mfa_trusted_device")
+MFA_TRUST_COOKIE_SAMESITE = os.getenv("MFA_TRUST_COOKIE_SAMESITE", "Strict")
 
 # SPEC-19-2 [R-19.20/R-19.21] admin alerts. Comma-separated staff/admin
 # mailboxes; empty disables admin alerts entirely (no guessed recipient).
-ALERT_RECIPIENTS = os.getenv('ALERT_RECIPIENTS', '')
+ALERT_RECIPIENTS = os.getenv("ALERT_RECIPIENTS", "")
 # Per-alert-type dedupe window in seconds: an alert type that already sent
 # inside the window is logged instead of re-sent (mail-bomb bound for the
 # pollable /health/ and dashboard triggers).
-ALERT_COOLDOWN_SECONDS = _env_int('ALERT_COOLDOWN_SECONDS', 300)
+ALERT_COOLDOWN_SECONDS = _env_int("ALERT_COOLDOWN_SECONDS", 300)
 # "Payment-failure spike" rule (spec names the alert, not the number):
 # at least this many failed payment attempts within a trailing window of
 # this many seconds fires the spike alert (defaults: 3 in 300).
-PAYMENT_FAILURE_SPIKE_COUNT = _env_int('PAYMENT_FAILURE_SPIKE_COUNT', 3)
+PAYMENT_FAILURE_SPIKE_COUNT = _env_int("PAYMENT_FAILURE_SPIKE_COUNT", 3)
 PAYMENT_FAILURE_SPIKE_WINDOW_SECONDS = _env_int(
-    'PAYMENT_FAILURE_SPIKE_WINDOW_SECONDS', 300
+    "PAYMENT_FAILURE_SPIKE_WINDOW_SECONDS", 300
 )
 
 # Storefront products listing: rows per page. The historical hardcoded 2
 # was a dev/test artifact (F-23); 12 is a storefront-appropriate default.
 # Tunable per deployment without a code change; non-integer values are
 # ignored and the default is used instead.
-PRODUCTS_PAGE_SIZE = _env_int('PRODUCTS_PAGE_SIZE', 12)
+PRODUCTS_PAGE_SIZE = _env_int("PRODUCTS_PAGE_SIZE", 12)
 
 # [R-21.2.6] Duplicate checkout submissions (double-click / client retry)
 # collapse onto the still-payable pending order carrying the identical
 # payload for this many seconds, instead of minting a second charge target.
 # Tunable per deployment without a code change; non-integer values are
 # ignored and the default is used instead.
-CHECKOUT_DEDUP_WINDOW_SECONDS = _env_int('CHECKOUT_DEDUP_WINDOW_SECONDS', 300)
+CHECKOUT_DEDUP_WINDOW_SECONDS = _env_int("CHECKOUT_DEDUP_WINDOW_SECONDS", 300)
 
 # SPEC-9-04 [R-9.2.14] Customer order-history listing (GET /api/orders/):
 # rows per page, and the ceiling a ?page_size caller may request. The spec
 # pins no number for order history, so both are deployment config
 # (conventions.md: no hardcoded thresholds); non-integer values are ignored
 # and the defaults are used instead.
-ORDER_HISTORY_PAGE_SIZE = _env_int('ORDER_HISTORY_PAGE_SIZE', 10)
-ORDER_HISTORY_MAX_PAGE_SIZE = _env_int('ORDER_HISTORY_MAX_PAGE_SIZE', 100)
+ORDER_HISTORY_PAGE_SIZE = _env_int("ORDER_HISTORY_PAGE_SIZE", 10)
+ORDER_HISTORY_MAX_PAGE_SIZE = _env_int("ORDER_HISTORY_MAX_PAGE_SIZE", 100)
 
 # SPEC-1-B07b [R-1.16] Customer returns listing (GET /api/orders/returns/):
 # rows per page, and the ceiling a ?page_size caller may request. Declared as
@@ -625,8 +643,8 @@ ORDER_HISTORY_MAX_PAGE_SIZE = _env_int('ORDER_HISTORY_MAX_PAGE_SIZE', 100)
 # stay env-driven precisely because they are the OTHER kind - a page density
 # is a property of the deployment and does not vary per store. An order's age
 # IS an input to eligibility as of B07d; see orders.views._return_eligible.
-RETURNS_HISTORY_PAGE_SIZE = _env_int('RETURNS_HISTORY_PAGE_SIZE', 10)
-RETURNS_HISTORY_MAX_PAGE_SIZE = _env_int('RETURNS_HISTORY_MAX_PAGE_SIZE', 100)
+RETURNS_HISTORY_PAGE_SIZE = _env_int("RETURNS_HISTORY_PAGE_SIZE", 10)
+RETURNS_HISTORY_MAX_PAGE_SIZE = _env_int("RETURNS_HISTORY_MAX_PAGE_SIZE", 100)
 
 # SPEC-12-01 [R-12.2] Inventory reservation: seconds a checkout's stock
 # reservation holds units before it goes stale and becomes releasable by
@@ -635,7 +653,7 @@ RETURNS_HISTORY_MAX_PAGE_SIZE = _env_int('RETURNS_HISTORY_MAX_PAGE_SIZE', 100)
 # the default comfortably exceeds a typical Razorpay checkout session.
 # Tunable per deployment without a code change; non-integer values are
 # ignored and the default is used instead.
-RESERVATION_TTL = _env_int('RESERVATION_TTL', 900)
+RESERVATION_TTL = _env_int("RESERVATION_TTL", 900)
 
 
 # The largest amount any money column in this repo can hold:
@@ -750,11 +768,11 @@ def _env_currency(name, default):
 # currency that changes would reprice historical rows' meaning, so it is
 # never-changes-at-runtime config (the S16 boundary), not merchant-editable
 # runtime state. Existing rows keep the currency they were minted with.
-DEFAULT_CURRENCY = _env_currency('DEFAULT_CURRENCY', 'INR')
+DEFAULT_CURRENCY = _env_currency("DEFAULT_CURRENCY", "INR")
 
 REST_FRAMEWORK = {
-    'DEFAULT_AUTHENTICATION_CLASSES': (
-        'rest_framework_simplejwt.authentication.JWTAuthentication',
+    "DEFAULT_AUTHENTICATION_CLASSES": (
+        "rest_framework_simplejwt.authentication.JWTAuthentication",
         # SPEC-17-03 [R-17.18]: CSRF gate for session-cookie mutations,
         # AFTER the JWT authenticator so bearer-authenticated requests
         # (checkout) short-circuit the chain and gain no CSRF friction —
@@ -762,38 +780,53 @@ REST_FRAMEWORK = {
         # request that does ride the session cookie (guest carts, session
         # logins) is CSRF-checked on unsafe methods; cart_detail's GET
         # issues the csrftoken cookie the SPA replays as X-CSRFToken.
-        'common.authentication.SessionCartCSRFAuthentication',
+        "common.authentication.SessionCartCSRFAuthentication",
     ),
     # Scoped throttling: every public mutating endpoint opts in by declaring
     # a `throttle_scope`; views without a scope are left unthrottled by this
     # class (conventions.md "Every public mutating endpoint gets a throttle
     # scope", V-04). Rates are deployment-tunable via environment variables.
-    'DEFAULT_THROTTLE_CLASSES': (
-        'rest_framework.throttling.ScopedRateThrottle',
-    ),
-    'DEFAULT_THROTTLE_RATES': {
-        'coupon': os.getenv('THROTTLE_COUPON_RATE', '10/min'),
-        'cart': os.getenv('THROTTLE_CART_RATE', '60/min'),
-        'auth': os.getenv('THROTTLE_AUTH_RATE', '10/min'),
+    "DEFAULT_THROTTLE_CLASSES": ("rest_framework.throttling.ScopedRateThrottle",),
+    "DEFAULT_THROTTLE_RATES": {
+        "coupon": os.getenv("THROTTLE_COUPON_RATE", "10/min"),
+        "cart": os.getenv("THROTTLE_CART_RATE", "60/min"),
+        "auth": os.getenv("THROTTLE_AUTH_RATE", "10/min"),
         # Tighter than 'auth': the recovery views each send an email per
         # accepted request, so this budget is the outbound-mail-bomb bound.
-        'recovery': os.getenv('THROTTLE_RECOVERY_RATE', '5/min'),
+        "recovery": os.getenv("THROTTLE_RECOVERY_RATE", "5/min"),
         # Payment intent minting (SPEC-11-01): every accepted request calls
         # the gateway and writes a payment event, so this budget bounds
         # both gateway spend and order-id brute-forcing.
-        'payment': os.getenv('PAYMENT_THROTTLE_RATE', '10/min'),
+        "payment": os.getenv("PAYMENT_THROTTLE_RATE", "10/min"),
         # SPEC-19-4 back-in-stock opt-in/opt-out: each opt-in is intent to
         # receive an outbound email, so the budget is the same shape as
         # the recovery bound (tighter than the generic auth budget).
-        'restock': os.getenv('THROTTLE_RESTOCK_RATE', '5/min'),
+        "restock": os.getenv("THROTTLE_RESTOCK_RATE", "5/min"),
         # SPEC-1-06: webhook deliveries are server-to-server and arrive in
         # bursts (a retry storm, a payout sweep, a provider-side loop), so the
         # budget is a floor on honest traffic rather than an anti-brute-force
         # bound - unlike 'payment', which also throttles order-id guessing.
         # Signature verification is what defends this endpoint; the rate
         # only bounds the parsing work an unsigned caller can ask for.
-        'webhook': os.getenv('THROTTLE_WEBHOOK_RATE', '120/min'),
+        "webhook": os.getenv("THROTTLE_WEBHOOK_RATE", "120/min"),
     },
+    # How many reverse proxies stand in front of the app, which decides whose
+    # address an anonymous throttle budget is keyed on - for every scope above
+    # at once, since they share this one decision. Behind a proxy every caller
+    # arrives carrying the proxy's REMOTE_ADDR, so without a hop count the
+    # budgets of the whole deployment collapse into one; and when the count is
+    # left unset DRF trusts the WHOLE X-Forwarded-For header, which the caller
+    # itself wrote, so varying that header bought a fresh budget per request.
+    # The default trusts nothing and keys on REMOTE_ADDR - fail-closed, the
+    # same direction as the V-02 DEBUG reading above. Set it to the real hop
+    # count only behind a proxy that APPENDS the address it saw and
+    # overwrites any client-supplied copy, which is what makes the resolved
+    # address the caller's rather than a claim. Read as a DRF API setting
+    # (hence inside REST_FRAMEWORK, not alongside SECURE_PROXY_SSL_HEADER:
+    # Django has no consumer for it). A non-integer value, or a negative one
+    # that would count back through the forwarded-for list from the wrong
+    # end, falls back to the documented default like every _env_int knob.
+    "NUM_PROXIES": max(0, _env_int("NUM_PROXIES", 0)),
 }
 
 # SPEC-17-01 [R-17.5/R-17.8/R-17.10] JWT lifecycle: the access token is a
@@ -805,14 +838,14 @@ REST_FRAMEWORK = {
 # env-driven integer seconds (documented in .env.example); non-integer
 # values fall back to the documented defaults like every _env_int knob.
 SIMPLE_JWT = {
-    'ACCESS_TOKEN_LIFETIME': timedelta(
-        seconds=_env_int('JWT_ACCESS_TOKEN_LIFETIME_SECONDS', 900)
+    "ACCESS_TOKEN_LIFETIME": timedelta(
+        seconds=_env_int("JWT_ACCESS_TOKEN_LIFETIME_SECONDS", 900)
     ),
-    'REFRESH_TOKEN_LIFETIME': timedelta(
-        seconds=_env_int('JWT_REFRESH_TOKEN_LIFETIME_SECONDS', 604800)
+    "REFRESH_TOKEN_LIFETIME": timedelta(
+        seconds=_env_int("JWT_REFRESH_TOKEN_LIFETIME_SECONDS", 604800)
     ),
-    'ROTATE_REFRESH_TOKENS': True,
-    'BLACKLIST_AFTER_ROTATION': True,
+    "ROTATE_REFRESH_TOKENS": True,
+    "BLACKLIST_AFTER_ROTATION": True,
 }
 
 # SPEC-17-02 [R-17.12]: the refresh token leaves the JSON body and browser
@@ -826,9 +859,9 @@ SIMPLE_JWT = {
 # same-site deployment constraint BACKEND_REQUESTS.md already documents for
 # the session cookie — strict CSRF enforcement for cookie-authenticated
 # mutations is SPEC-17-03's follow-up.
-JWT_REFRESH_COOKIE_NAME = os.getenv('JWT_REFRESH_COOKIE_NAME', 'refresh_token')
-JWT_REFRESH_COOKIE_PATH = os.getenv('JWT_REFRESH_COOKIE_PATH', '/api/')
-JWT_REFRESH_COOKIE_SAMESITE = os.getenv('JWT_REFRESH_COOKIE_SAMESITE', 'Lax')
+JWT_REFRESH_COOKIE_NAME = os.getenv("JWT_REFRESH_COOKIE_NAME", "refresh_token")
+JWT_REFRESH_COOKIE_PATH = os.getenv("JWT_REFRESH_COOKIE_PATH", "/api/")
+JWT_REFRESH_COOKIE_SAMESITE = os.getenv("JWT_REFRESH_COOKIE_SAMESITE", "Lax")
 
 # SPEC-17-03 [R-17.18]: the session cookie carries the cart identity, so
 # its SameSite policy is explicit deployment config rather than an implicit
@@ -836,13 +869,15 @@ JWT_REFRESH_COOKIE_SAMESITE = os.getenv('JWT_REFRESH_COOKIE_SAMESITE', 'Lax')
 # cross-site POSTs cannot attach it, while same-site navigation keeps the
 # cart working. Server-side CSRF enforcement (SessionCartCSRFAuthentication
 # above) is the actual gate — this is the same-site belt to its braces.
-SESSION_COOKIE_SAMESITE = os.getenv('SESSION_COOKIE_SAMESITE', 'Lax')
+SESSION_COOKIE_SAMESITE = os.getenv("SESSION_COOKIE_SAMESITE", "Lax")
 
-CORS_ALLOWED_ORIGINS = [origin for origin in os.getenv(
-    'CORS_ALLOWED_ORIGINS', 'http://localhost:3000'
-).split(',') if origin]
+CORS_ALLOWED_ORIGINS = [
+    origin
+    for origin in os.getenv("CORS_ALLOWED_ORIGINS", "http://localhost:3000").split(",")
+    if origin
+]
 CSRF_TRUSTED_ORIGINS = _env_hosts(
-    'CSRF_TRUSTED_ORIGINS', 'http://localhost:3000', DEBUG
+    "CSRF_TRUSTED_ORIGINS", "http://localhost:3000", DEBUG
 )
 
 CORS_ALLOW_CREDENTIALS = True
@@ -853,7 +888,7 @@ CORS_ALLOW_CREDENTIALS = True
 # is the literal header name (django-cors-headers joins these strings
 # verbatim) and a test pins it to the middleware's constant, so the two
 # cannot drift.
-CORS_EXPOSE_HEADERS = ['X-Request-ID']
+CORS_EXPOSE_HEADERS = ["X-Request-ID"]
 
 
 # Logging (SPEC-7-02): an env-driven dictConfig baseline. No external
@@ -929,8 +964,7 @@ def _build_logging(app_level, file_path=None):
             "plain": {
                 "()": "common.middleware.RequestIDFormatter",
                 "format": (
-                    "{levelname} {asctime} {name} request_id={request_id} "
-                    "{message}"
+                    "{levelname} {asctime} {name} request_id={request_id} {message}"
                 ),
                 "style": "{",
             },
@@ -1073,13 +1107,13 @@ ERROR_TRACKING_ENABLED = _init_error_tracking(
 # host that still serves plain HTTP locks real users out for the declared
 # window. A production value (e.g. 31536000, with subdomains/preload only
 # after the whole host tree is HTTPS) is S22's call.
-SECURE_HSTS_SECONDS = _env_int('SECURE_HSTS_SECONDS', 0)
-SECURE_HSTS_INCLUDE_SUBDOMAINS = _env_bool('SECURE_HSTS_INCLUDE_SUBDOMAINS', False)
-SECURE_HSTS_PRELOAD = _env_bool('SECURE_HSTS_PRELOAD', False)
+SECURE_HSTS_SECONDS = _env_int("SECURE_HSTS_SECONDS", 0)
+SECURE_HSTS_INCLUDE_SUBDOMAINS = _env_bool("SECURE_HSTS_INCLUDE_SUBDOMAINS", False)
+SECURE_HSTS_PRELOAD = _env_bool("SECURE_HSTS_PRELOAD", False)
 
 # Redirect plain-HTTP requests to HTTPS. Off by default so local dev and
 # the test suite (no TLS) keep working; enable behind a real deployment.
-SECURE_SSL_REDIRECT = _env_bool('SECURE_SSL_REDIRECT', False)
+SECURE_SSL_REDIRECT = _env_bool("SECURE_SSL_REDIRECT", False)
 
 # Behind a TLS-terminating reverse proxy Django only sees plain HTTP, so
 # scheme-dependent behaviour (SSL redirect, cookie Secure flags, CSRF
@@ -1089,13 +1123,24 @@ SECURE_SSL_REDIRECT = _env_bool('SECURE_SSL_REDIRECT', False)
 # mirroring the fail-safe fallbacks above. Never set this without the S22
 # proxy actually sending the header: a forgeable pair lets a client lie
 # about its scheme.
-_proxy_header_name = os.getenv('SECURE_PROXY_SSL_HEADER_NAME', '')
-_proxy_header_value = os.getenv('SECURE_PROXY_SSL_HEADER_VALUE', '')
+_proxy_header_name = os.getenv("SECURE_PROXY_SSL_HEADER_NAME", "")
+_proxy_header_value = os.getenv("SECURE_PROXY_SSL_HEADER_VALUE", "")
 SECURE_PROXY_SSL_HEADER = (
     (_proxy_header_name, _proxy_header_value)
     if _proxy_header_name and _proxy_header_value
     else None
 )
+
+# The host half of the same proxy question: behind a proxy the Host header a
+# client sent is usually the proxy's own name, and the host the proxy actually
+# served is in X-Forwarded-Host. This makes request.get_host() read that
+# header instead. Off by default, for the reason the scheme header above gives:
+# a forwarded host is only as trustworthy as the proxy that sets it, and
+# turning this on without one lets a caller dictate the host Django validates
+# against ALLOWED_HOSTS. Set it only alongside a proxy that overwrites the
+# header on every request. NOTE this resolves the HOST; REST_FRAMEWORK's
+# NUM_PROXIES is what keys an anonymous throttle budget on the caller's IP.
+USE_X_FORWARDED_HOST = _env_bool("USE_X_FORWARDED_HOST", False)
 
 # Session (cart identity / admin login) and CSRF cookies: Secure by
 # default whenever DEBUG is off, mirroring the JWT refresh cookie's
@@ -1105,11 +1150,11 @@ SECURE_PROXY_SSL_HEADER = (
 # form posts keep working over HTTPS. Local development (DEBUG=true)
 # stays off, and either default can be forced explicitly via env for
 # exotic topologies.
-SESSION_COOKIE_SECURE = _env_bool('SESSION_COOKIE_SECURE', not DEBUG)
+SESSION_COOKIE_SECURE = _env_bool("SESSION_COOKIE_SECURE", not DEBUG)
 
 # SPEC-17-08 [R-17.21]: product image upload size ceiling in whole MB.
 # Enforced by products.validate_image_size on every upload surface (the
 # API serializer field and the admin product form). A deployment raising
 # it should also raise the web server's own body limit, which fires
 # first and answers with its own 413.
-MAX_UPLOAD_MB = _env_int('MAX_UPLOAD_MB', 5)
+MAX_UPLOAD_MB = _env_int("MAX_UPLOAD_MB", 5)

@@ -18,6 +18,11 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from doc_claims import (  # noqa: E402
+    FALLBACK_BASE,
+    MIN_REASON_CHARS,
+    RE_MODULE_PATH,
+    RE_PATH_LINE,
+    RE_REASON_REFERENCE,
     _inside_any_span,
     _path_exists,
     _resolve_path,
@@ -28,8 +33,6 @@ from doc_claims import (  # noqa: E402
     resolve_base,
     verify_claims,
 )
-from doc_claims import FALLBACK_BASE, MIN_REASON_CHARS  # noqa: E402
-from doc_claims import RE_MODULE_PATH, RE_PATH_LINE, RE_REASON_REFERENCE  # noqa: E402
 
 DOC = "backend/docs/changes.md"
 
@@ -586,6 +589,121 @@ class TestStemmedModuleVersusMethodTests(unittest.TestCase):
         claims = extract_claims("from `models.py/admin.py/views.py` today", DOC)
         self.assertEqual([c.kind for c in claims], ["module_path"])
         self.assertEqual(claims[0].value, "models.py/admin.py/views.py")
+
+
+class DottedTestIdModuleVersusMethodTests(unittest.TestCase):
+    """BUG-2: a `test_` MODULE SEGMENT in a DOTTED id is not a METHOD.
+
+    A failure id is written down dotted -- ``package.module.Class.test_method``
+    -- and in that form the module's own ``test_`` stem is an interior segment
+    with no ``def`` anywhere in the tree. ``RE_TEST_NAME`` matched it and the
+    gate reported correct prose as a missing test: the same defect BUG-1 fixed
+    one syntax level up for a cited PATH, left open for the dotted spelling.
+
+    Only an INTERIOR (non-final) segment is exempt. The final segment is the
+    method, which is the claim the gate exists to check, so this cannot launder
+    a quoted method name -- every "still an error" test below is that guard.
+    """
+
+    # A tuple of pairs rather than a dict: `ruff check` flags a mutable class
+    # attribute (RUF012), and the sibling classes below carry that flag already
+    # -- this one does not add to it.
+    KNOWN = (
+        ("backend/tests/test_correlation_ids.py", 200),
+        ("backend/tests/test_backup_db.py", 900),
+    )
+
+    def _method_names(self, prose):
+        return [c.value for c in extract_claims(prose, DOC) if c.kind == "test_name"]
+
+    def _errors(self, prose):
+        errors, _ = verify_claims(extract_claims(prose, DOC), set(), self.KNOWN)
+        return errors
+
+    def test_an_interior_module_segment_is_not_a_method_claim(self):
+        # The real failing case: the module's stem is not demanded of a `def`,
+        # and the METHOD on the same id is still demanded and still reported.
+        errors = self._errors(
+            "`tests.test_correlation_ids.UnhandledExceptionTests."
+            "test_unhandled_exception_500_still_returns_the_request_id` failed"
+        )
+        self.assertEqual([c.kind for c in errors], ["test_name"])
+        self.assertEqual(
+            errors[0].value,
+            "test_unhandled_exception_500_still_returns_the_request_id",
+        )
+
+    def test_the_method_on_a_dotted_id_is_a_warning_when_it_exists(self):
+        errors, warnings = verify_claims(
+            extract_claims(
+                "`tests.test_correlation_ids.UnhandledExceptionTests."
+                "test_unhandled_exception_500_still_returns_the_request_id` failed",
+                DOC,
+            ),
+            {"test_unhandled_exception_500_still_returns_the_request_id"},
+            self.KNOWN,
+        )
+        self.assertEqual(errors, [])
+        self.assertEqual(len(warnings), 1)
+
+    def test_a_bare_name_is_still_a_claim(self):
+        # The exemption is an INTERIOR dotted segment specifically. A name quoted
+        # on its own is a method claim and nothing exempts it -- this is what
+        # keeps the dotted spelling from becoming a blanket pass.
+        self.assertEqual(
+            self._method_names("killed `test_never_existed` today"),
+            ["test_never_existed"],
+        )
+        self.assertEqual(
+            [c.kind for c in self._errors("`test_never_existed`")], ["test_name"]
+        )
+
+    def test_a_final_segment_after_a_dot_is_still_a_claim(self):
+        # `pkg.module.Class.test_x` -- the trailing `test_x` is the method.
+        self.assertEqual(
+            self._method_names("`pkg.module.Class.test_x` regressed"),
+            ["test_x"],
+        )
+
+    def test_a_trailing_sentence_period_is_not_a_dotted_identifier(self):
+        # Without the "a word character must follow the dot" half, prose that
+        # ends in a period right after a quoted method name would silently stop
+        # being checked -- a false PASS, which is the worse direction.
+        self.assertEqual(
+            self._method_names("the header reads `FAIL: test_x` and stops."),
+            ["test_x"],
+        )
+
+    def test_a_missing_method_on_a_dotted_id_is_still_an_error(self):
+        errors = self._errors(
+            "`tests.test_backup_db.BackupScheduleArtifactTests."
+            "test_never_existed` failed"
+        )
+        self.assertEqual([c.kind for c in errors], ["test_name"])
+        self.assertEqual(errors[0].value, "test_never_existed")
+
+    def test_an_unresolvable_module_segment_makes_no_claim_at_all(self):
+        # The dotted form carries no `.py` for the path pass to catch, so an
+        # interior segment is neither claimed as a method nor verified as a
+        # file. This pins that the exemption did not quietly grow into
+        # demanding that dotted modules resolve -- it is a narrower claim, not a
+        # different one.
+        errors = self._errors(
+            "`tests.test_no_such_module.Class.test_real_method` failed"
+        )
+        self.assertEqual([c.kind for c in errors], ["test_name"])
+        self.assertEqual(errors[0].value, "test_real_method")
+
+    def test_a_dotted_id_beside_a_bare_method_claims_both(self):
+        self.assertEqual(
+            sorted(
+                self._method_names(
+                    "`tests.test_backup_db.BackupScheduleArtifactTests.test_a` and "
+                    "`test_b` both regressed"
+                )
+            ),
+            ["test_a", "test_b"],
+        )
 
 
 class NonDotPySuffixTests(unittest.TestCase):

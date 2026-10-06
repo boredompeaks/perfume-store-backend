@@ -4,20 +4,35 @@ from django.db import migrations, models
 
 
 class Migration(migrations.Migration):
-
     dependencies = [
-        ('orders', '0013_orderstatusevent'),
+        ("orders", "0013_orderstatusevent"),
     ]
 
     operations = [
         migrations.AddField(
-            model_name='order',
-            name='payment_method',
-            field=models.CharField(choices=[('prepaid', 'Prepaid'), ('cod', 'Cash on delivery')], default='prepaid', help_text='How the order intends to pay (spec 10.1 COD mandate).', max_length=20),
+            model_name="order",
+            name="payment_method",
+            field=models.CharField(
+                choices=[("prepaid", "Prepaid"), ("cod", "Cash on delivery")],
+                default="prepaid",
+                help_text="How the order intends to pay (spec 10.1 COD mandate).",
+                max_length=20,
+            ),
         ),
         migrations.AlterField(
-            model_name='orderstatusevent',
-            name='trigger',
-            field=models.CharField(choices=[('order_create', 'Order created'), ('admin_change_form', 'Admin change form'), ('admin_bulk_action', 'Admin bulk action'), ('payment_verify', 'Payment verified'), ('admin_api_fulfil', 'Admin fulfilment API'), ('admin_api_cancel', 'Admin cancel API'), ('payment_failed', 'Payment verification failed')], max_length=30),
+            model_name="orderstatusevent",
+            name="trigger",
+            field=models.CharField(
+                choices=[
+                    ("order_create", "Order created"),
+                    ("admin_change_form", "Admin change form"),
+                    ("admin_bulk_action", "Admin bulk action"),
+                    ("payment_verify", "Payment verified"),
+                    ("admin_api_fulfil", "Admin fulfilment API"),
+                    ("admin_api_cancel", "Admin cancel API"),
+                    ("payment_failed", "Payment verification failed"),
+                ],
+                max_length=30,
+            ),
         ),
     ]

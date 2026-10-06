@@ -11,20 +11,20 @@ Security rules enforced here (per docs/conventions.md and docs/test-gaps.md):
 - Password hashing uses the fast MD5 hasher (test-only speed-up; production
   settings are untouched).
 """
+
 from datetime import timedelta
 from decimal import Decimal
 from pathlib import Path
 from tempfile import mkdtemp
 from unittest.mock import patch
 
+import razorpay
 from django.contrib.auth.models import User
 from django.core import mail
 from django.core.cache import cache
 from django.test import TestCase, override_settings
 from django.utils import timezone
 from rest_framework.test import APIClient
-
-import razorpay
 
 from accounts.models import TOTPDevice
 from common import totp
@@ -69,7 +69,13 @@ class ApiTestCase(TestCase):
     # Factories
     # ------------------------------------------------------------------
 
-    def make_user(self, username="buyer", password="S3cure-Passphrase!", email=None, is_active=True):
+    def make_user(
+        self,
+        username="buyer",
+        password="S3cure-Passphrase!",
+        email=None,
+        is_active=True,
+    ):
         return User.objects.create_user(
             username=username,
             email=email or f"{username}@example.com",
@@ -94,7 +100,14 @@ class ApiTestCase(TestCase):
         user.groups.add(Group.objects.get_or_create(name=ROLE_ADMIN)[0])
         return user
 
-    def make_product(self, name="Rose Aurum", price="499.99", stock=10, category="Floral", **overrides):
+    def make_product(
+        self,
+        name="Rose Aurum",
+        price="499.99",
+        stock=10,
+        category="Floral",
+        **overrides,
+    ):
         from products.models import products
 
         fields = dict(
@@ -108,9 +121,18 @@ class ApiTestCase(TestCase):
         fields.update(overrides)
         return products.objects.create(**fields)
 
-    def make_coupon(self, code="SAVE10", discount_type="percentage", discount_value="10",
-                    minimum_order_amount="0", maximum_discount=None, active=True,
-                    usage_limit=None, used_count=0, **overrides):
+    def make_coupon(
+        self,
+        code="SAVE10",
+        discount_type="percentage",
+        discount_value="10",
+        minimum_order_amount="0",
+        maximum_discount=None,
+        active=True,
+        usage_limit=None,
+        used_count=0,
+        **overrides,
+    ):
         from orders.models import Coupon
 
         fields = dict(
@@ -118,7 +140,9 @@ class ApiTestCase(TestCase):
             discount_type=discount_type,
             discount_value=Decimal(discount_value),
             minimum_order_amount=Decimal(minimum_order_amount),
-            maximum_discount=Decimal(maximum_discount) if maximum_discount is not None else None,
+            maximum_discount=Decimal(maximum_discount)
+            if maximum_discount is not None
+            else None,
             active=active,
             valid_from=timezone.now() - timedelta(days=1),
             valid_until=timezone.now() + timedelta(days=1),
@@ -181,7 +205,9 @@ class ApiTestCase(TestCase):
             target.credentials(HTTP_AUTHORIZATION=f"Bearer {token}")
         return res, token
 
-    def register_and_verify(self, username="buyer", password="S3cure-Passphrase!", email=None):
+    def register_and_verify(
+        self, username="buyer", password="S3cure-Passphrase!", email=None
+    ):
         """Full registration through the API: register -> verify email link."""
         email = email or f"{username}@example.com"
         res = self.client.post(
@@ -236,7 +262,9 @@ class ApiTestCase(TestCase):
 
     def checkout(self, client=None, **overrides):
         client = client or self.client
-        return client.post("/api/orders/checkout/", self.checkout_payload(**overrides), format="json")
+        return client.post(
+            "/api/orders/checkout/", self.checkout_payload(**overrides), format="json"
+        )
 
     # ------------------------------------------------------------------
     # Razorpay fakes (never touch the network)

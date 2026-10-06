@@ -280,7 +280,9 @@ class VerifyLocksWhatItMutatesTests(ApiTestCase):
 
     def test_verify_still_locks_the_order_row_it_mutates(self):
         """Dropping the coupon join must not have dropped the order lock."""
-        coupon = self.make_coupon(code="LOCKORD", discount_value="10")
+        # The coupon row must exist before _buy resolves the code; only the
+        # binding was unused, so the call (and its row) stays.
+        self.make_coupon(code="LOCKORD", discount_value="10")
         order, _product = self._buy(coupon_code="LOCKORD")
 
         res, sqls = self._pay_then_verify(order, "order_LOCK2", "pay_LOCK2")

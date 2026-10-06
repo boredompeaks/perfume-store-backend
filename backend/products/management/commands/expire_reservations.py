@@ -16,6 +16,7 @@ never touched, and a late verify of a swept checkout still proceeds on
 verify_payment's re-checked stock (SPEC-12-02 deliberately made a lapsed
 TTL a non-gate for conversion).
 """
+
 from django.core.management.base import BaseCommand
 from django.db import transaction
 from django.utils import timezone
@@ -40,8 +41,7 @@ class Command(BaseCommand):
         released = self._expire_stale(timezone.now())
         if options.get("verbosity", 1) >= 1:
             self.stdout.write(
-                f"expire_reservations: released {released} stale "
-                f"reservation(s)."
+                f"expire_reservations: released {released} stale reservation(s)."
             )
 
     def _expire_stale(self, now):
@@ -75,9 +75,7 @@ class Command(BaseCommand):
         with transaction.atomic():
             for product_id in sorted(by_product):
                 rows = by_product[product_id]
-                product = products.objects.select_for_update().get(
-                    pk=product_id
-                )
+                product = products.objects.select_for_update().get(pk=product_id)
                 flipped = StockReservation.objects.filter(
                     pk__in=[row["id"] for row in rows],
                     status=StockReservation.Status.ACTIVE,

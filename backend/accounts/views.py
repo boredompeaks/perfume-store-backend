@@ -1,33 +1,33 @@
-from rest_framework.decorators import api_view, throttle_scope
-from rest_framework.exceptions import AuthenticationFailed
-from rest_framework.exceptions import PermissionDenied
-from rest_framework.exceptions import ValidationError as DRFValidationError
-from rest_framework.permissions import IsAuthenticated
-from rest_framework.response import Response
-from rest_framework import status
-from rest_framework.views import APIView
-from rest_framework_simplejwt.exceptions import TokenError
-from rest_framework_simplejwt.tokens import RefreshToken
-from rest_framework_simplejwt.token_blacklist.models import (
-    BlacklistedToken,
-    OutstandingToken,
-)
-from rest_framework_simplejwt.views import TokenObtainPairView, TokenRefreshView
+from django.conf import settings
 from django.contrib.auth import authenticate
 from django.contrib.auth.models import User
-from django.conf import settings
-from django.contrib.auth.tokens import default_token_generator
 from django.contrib.auth.password_validation import validate_password
+from django.contrib.auth.tokens import default_token_generator
 from django.core.exceptions import ValidationError
 from django.db import transaction
 from django.utils import timezone
 from django.utils.encoding import force_bytes, force_str
-from django.utils.http import urlsafe_base64_encode, urlsafe_base64_decode
+from django.utils.http import urlsafe_base64_decode, urlsafe_base64_encode
+from rest_framework import status
+from rest_framework.decorators import api_view, throttle_scope
+from rest_framework.exceptions import AuthenticationFailed, PermissionDenied
+from rest_framework.exceptions import ValidationError as DRFValidationError
+from rest_framework.permissions import IsAuthenticated
+from rest_framework.response import Response
+from rest_framework.views import APIView
+from rest_framework_simplejwt.exceptions import TokenError
+from rest_framework_simplejwt.token_blacklist.models import (
+    BlacklistedToken,
+    OutstandingToken,
+)
+from rest_framework_simplejwt.tokens import RefreshToken
+from rest_framework_simplejwt.views import TokenObtainPairView, TokenRefreshView
 
 from common import notifications, qr, totp
 from common.models import AuditEvent
 from common.permissions import IsPrivilegedRole, is_privileged
 from ops import alerts
+
 from . import mfa_trust
 from .models import (
     MFA_CODE_INVALID,
@@ -62,7 +62,7 @@ class LoginView(TokenObtainPairView):
     logins without any code path that mints tokens skipping the factor.
     """
 
-    throttle_scope = 'auth'
+    throttle_scope = "auth"
     serializer_class = MFATokenObtainPairSerializer
 
     def post(self, request, *args, **kwargs):
@@ -116,20 +116,18 @@ def _set_refresh_cookie(response):
     browser client gets. The cookie's max-age is synced to the token
     lifetime so the browser never presents a cookie older than the token it
     holds."""
-    token = response.data.get('refresh')
+    token = response.data.get("refresh")
     if token:
         response.set_cookie(
             settings.JWT_REFRESH_COOKIE_NAME,
             token,
-            max_age=int(
-                settings.SIMPLE_JWT['REFRESH_TOKEN_LIFETIME'].total_seconds()
-            ),
+            max_age=int(settings.SIMPLE_JWT["REFRESH_TOKEN_LIFETIME"].total_seconds()),
             httponly=True,
             secure=not settings.DEBUG,
             samesite=settings.JWT_REFRESH_COOKIE_SAMESITE,
             path=settings.JWT_REFRESH_COOKIE_PATH,
         )
-        del response.data['refresh']
+        del response.data["refresh"]
     return response
 
 
@@ -138,7 +136,7 @@ def _clear_refresh_cookie(response):
     cookie set by _set_refresh_cookie or the browser keeps the stale one."""
     response.set_cookie(
         settings.JWT_REFRESH_COOKIE_NAME,
-        '',
+        "",
         max_age=0,
         expires=0,
         httponly=True,
@@ -159,18 +157,18 @@ class RefreshView(TokenRefreshView):
     rejected refresh sweeps the cookie so a dead token cannot pin the
     browser into retrying it."""
 
-    throttle_scope = 'auth'
+    throttle_scope = "auth"
 
     def post(self, request, *args, **kwargs):
         body = request.data if isinstance(request.data, dict) else None
-        if body is not None and not body.get('refresh'):
+        if body is not None and not body.get("refresh"):
             cookie = request.COOKIES.get(settings.JWT_REFRESH_COOKIE_NAME)
             # JSON bodies parse to a plain mutable dict, so the cookie token
             # merges in place — DRF 3.18 exposes no data setter. Form-encoded
             # bodies (immutable QueryDict) are not a browser-client surface
             # and stay untouched.
             if cookie and type(body) is dict:
-                body['refresh'] = cookie
+                body["refresh"] = cookie
         return _set_refresh_cookie(super().post(request, *args, **kwargs))
 
     def handle_exception(self, exc):
@@ -199,16 +197,16 @@ class LogoutView(APIView):
     """
 
     permission_classes = [IsAuthenticated]
-    throttle_scope = 'auth'
+    throttle_scope = "auth"
 
     def post(self, request):
         raw = request.COOKIES.get(settings.JWT_REFRESH_COOKIE_NAME)
         if not raw and isinstance(request.data, dict):
-            raw = request.data.get('refresh')
+            raw = request.data.get("refresh")
         if not isinstance(raw, str) or not raw:
             # No cookie and no body token: nothing was presented, and no
             # cookie can exist to sweep (raw would have come from it).
-            raise DRFValidationError({'refresh': ['This field is required.']})
+            raise DRFValidationError({"refresh": ["This field is required."]})
         try:
             # RefreshToken() verifies signature and expiry: an invalid or
             # already-expired token is rejected rather than recorded.
@@ -218,12 +216,12 @@ class LogoutView(APIView):
             # rejecting, or every future logout retries the same dead token.
             return _clear_refresh_cookie(
                 Response(
-                    {'refresh': ['Invalid or expired token.']},
+                    {"refresh": ["Invalid or expired token."]},
                     status=status.HTTP_400_BAD_REQUEST,
                 )
             )
         token.blacklist()
-        return _clear_refresh_cookie(Response({'message': 'Logged out.'}))
+        return _clear_refresh_cookie(Response({"message": "Logged out."}))
 
 
 def _blacklist_user_refresh_tokens(user):
@@ -271,16 +269,13 @@ def _send_verification_email(user):
     )
 
 
-@api_view(['POST'])
-@throttle_scope('auth')
+@api_view(["POST"])
+@throttle_scope("auth")
 def register(request):
 
-    serializer = RegisterSerializer(
-        data=request.data
-    )
+    serializer = RegisterSerializer(data=request.data)
 
     if serializer.is_valid():
-
         # [R-7.20] The account creation and its trail row commit together:
         # no user without its registration event, no event without a user.
         with transaction.atomic():
@@ -295,7 +290,9 @@ def register(request):
             _send_verification_email(user)
         except Exception:
             return Response(
-                {'error': 'Account created, but verification email could not be sent. Check SMTP settings.'},
+                {
+                    "error": "Account created, but verification email could not be sent. Check SMTP settings."
+                },
                 status=status.HTTP_503_SERVICE_UNAVAILABLE,
             )
 
@@ -306,48 +303,51 @@ def register(request):
                     "id": user.id,
                     "username": user.username,
                     "email": user.email,
-                }
+                },
             },
-            status=status.HTTP_201_CREATED
+            status=status.HTTP_201_CREATED,
         )
 
-    return Response(
-        serializer.errors,
-        status=status.HTTP_400_BAD_REQUEST
-    )
+    return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
 
 
-@api_view(['GET'])
-@throttle_scope('auth')
+@api_view(["GET"])
+@throttle_scope("auth")
 def username_available(request):
     """The scope also throttles GET (ScopedRateThrottle has no safe-method
     exemption): this endpoint is a public username-existence oracle, so
     without a rate limit it enables cheap username enumeration."""
-    username = request.query_params.get('username', '').strip()
+    username = request.query_params.get("username", "").strip()
 
     if len(username) < 3:
-        return Response({
-            'available': False,
-            'message': 'Username must be at least 3 characters.'
-        })
+        return Response(
+            {"available": False, "message": "Username must be at least 3 characters."}
+        )
 
     exists = User.objects.filter(username__iexact=username).exists()
-    return Response({
-        'available': not exists,
-        'message': 'Username is available.' if not exists else 'This username is already taken.'
-    })
+    return Response(
+        {
+            "available": not exists,
+            "message": "Username is available."
+            if not exists
+            else "This username is already taken.",
+        }
+    )
 
 
 # Token-carrying account mutations (no mail): the 'auth' budget already
 # bounds identity flows (register/login/refresh), and verify/confirm are
 # bounded further by the entropy of their one-time tokens.
-@api_view(['POST'])
-@throttle_scope('auth')
+@api_view(["POST"])
+@throttle_scope("auth")
 def verify_email(request):
-    user = _get_user(request.data.get('uid'))
-    token = request.data.get('token', '')
+    user = _get_user(request.data.get("uid"))
+    token = request.data.get("token", "")
     if user is None or not default_token_generator.check_token(user, token):
-        return Response({'error': 'This verification link is invalid or expired.'}, status=status.HTTP_400_BAD_REQUEST)
+        return Response(
+            {"error": "This verification link is invalid or expired."},
+            status=status.HTTP_400_BAD_REQUEST,
+        )
 
     if not user.is_active:
         # [R-7.20] The activation and its trail row commit together; a
@@ -355,13 +355,13 @@ def verify_email(request):
         # nothing.
         with transaction.atomic():
             user.is_active = True
-            user.save(update_fields=['is_active'])
+            user.save(update_fields=["is_active"])
             AuditEvent.record(
                 AuditEvent.EventType.AUTH_EMAIL_VERIFIED,
                 actor=user,
                 detail={"username": user.username},
             )
-    return Response({'message': 'Email verified. You can now log in.'})
+    return Response({"message": "Email verified. You can now log in."})
 
 
 # The three email-sending recovery endpoints get their own 'recovery'
@@ -369,23 +369,30 @@ def verify_email(request):
 # request triggers an outbound email, so the budget *is* the mail-bomb
 # bound. The uniform 200 bodies below are untouched by throttling — only
 # the extra 429 refusal is added.
-@api_view(['POST'])
-@throttle_scope('recovery')
+@api_view(["POST"])
+@throttle_scope("recovery")
 def resend_verification(request):
-    email = request.data.get('email', '').strip()
+    email = request.data.get("email", "").strip()
     user = User.objects.filter(email__iexact=email, is_active=False).first()
     if user:
         try:
             _send_verification_email(user)
         except Exception:
-            return Response({'error': 'Verification email could not be sent. Check SMTP settings.'}, status=status.HTTP_503_SERVICE_UNAVAILABLE)
-    return Response({'message': 'If an unverified account exists, a verification email has been sent.'})
+            return Response(
+                {"error": "Verification email could not be sent. Check SMTP settings."},
+                status=status.HTTP_503_SERVICE_UNAVAILABLE,
+            )
+    return Response(
+        {
+            "message": "If an unverified account exists, a verification email has been sent."
+        }
+    )
 
 
-@api_view(['POST'])
-@throttle_scope('recovery')
+@api_view(["POST"])
+@throttle_scope("recovery")
 def forgot_username(request):
-    email = request.data.get('email', '').strip()
+    email = request.data.get("email", "").strip()
     user = User.objects.filter(email__iexact=email).first()
     if user:
         try:
@@ -396,14 +403,19 @@ def forgot_username(request):
                 user.email,
             )
         except Exception:
-            return Response({'error': 'Username email could not be sent. Check SMTP settings.'}, status=status.HTTP_503_SERVICE_UNAVAILABLE)
-    return Response({'message': 'If an account exists for this email, the username has been sent.'})
+            return Response(
+                {"error": "Username email could not be sent. Check SMTP settings."},
+                status=status.HTTP_503_SERVICE_UNAVAILABLE,
+            )
+    return Response(
+        {"message": "If an account exists for this email, the username has been sent."}
+    )
 
 
-@api_view(['POST'])
-@throttle_scope('recovery')
+@api_view(["POST"])
+@throttle_scope("recovery")
 def request_password_reset(request):
-    email = request.data.get('email', '').strip()
+    email = request.data.get("email", "").strip()
     user = User.objects.filter(email__iexact=email, is_active=True).first()
     if user:
         uid = _encoded_user_id(user)
@@ -420,28 +432,42 @@ def request_password_reset(request):
                 user.email,
             )
         except Exception:
-            return Response({'error': 'Password-reset email could not be sent. Check SMTP settings.'}, status=status.HTTP_503_SERVICE_UNAVAILABLE)
-    return Response({'message': 'If an active account exists for this email, a password-reset link has been sent.'})
+            return Response(
+                {
+                    "error": "Password-reset email could not be sent. Check SMTP settings."
+                },
+                status=status.HTTP_503_SERVICE_UNAVAILABLE,
+            )
+    return Response(
+        {
+            "message": "If an active account exists for this email, a password-reset link has been sent."
+        }
+    )
 
 
-@api_view(['POST'])
-@throttle_scope('auth')
+@api_view(["POST"])
+@throttle_scope("auth")
 def reset_password(request):
-    user = _get_user(request.data.get('uid'))
-    token = request.data.get('token', '')
-    password = request.data.get('password', '')
+    user = _get_user(request.data.get("uid"))
+    token = request.data.get("token", "")
+    password = request.data.get("password", "")
     if user is None or not default_token_generator.check_token(user, token):
-        return Response({'error': 'This password-reset link is invalid or expired.'}, status=status.HTTP_400_BAD_REQUEST)
+        return Response(
+            {"error": "This password-reset link is invalid or expired."},
+            status=status.HTTP_400_BAD_REQUEST,
+        )
     try:
         validate_password(password, user)
     except ValidationError as error:
-        return Response({'password': list(error.messages)}, status=status.HTTP_400_BAD_REQUEST)
+        return Response(
+            {"password": list(error.messages)}, status=status.HTTP_400_BAD_REQUEST
+        )
     # [R-7.20] The credential change and its trail row commit together. The
     # one-time token is deliberately not stored in detail: it is single-use
     # evidence, not audit data.
     with transaction.atomic():
         user.set_password(password)
-        user.save(update_fields=['password'])
+        user.save(update_fields=["password"])
         # [R-17.10] the password change is a critical account change: every
         # outstanding session (refresh token) dies with it, in the same
         # transaction — no window where old sessions outlive new
@@ -463,7 +489,7 @@ def reset_password(request):
         alerts.notify_security_change(
             f"Password reset completed for user {user.username} (id {user.pk})."
         )
-    return Response({'message': 'Password reset successfully. You can now log in.'})
+    return Response({"message": "Password reset successfully. You can now log in."})
 
 
 # --- SPEC-17-05 [R-17.9]: TOTP enrollment for privileged roles ------------
@@ -544,7 +570,7 @@ class MFAStatusView(APIView):
     # The accounts URLConf wiring guard requires a scope on every route;
     # 'auth' matches the sibling MFA endpoints (this one is read-only, but
     # the budget also bounds enabled-state probing).
-    throttle_scope = 'auth'
+    throttle_scope = "auth"
 
     def get(self, request):
         return Response({"enabled": TOTPDevice.active_for(request.user) is not None})
@@ -580,7 +606,7 @@ class MFASetupView(APIView):
     """
 
     permission_classes = []
-    throttle_scope = 'auth'
+    throttle_scope = "auth"
 
     def post(self, request):
         user, error = _authorize_enrollment(request)
@@ -636,7 +662,7 @@ class MFAConfirmView(APIView):
     """
 
     permission_classes = []
-    throttle_scope = 'auth'
+    throttle_scope = "auth"
 
     def post(self, request):
         user, error = _authorize_enrollment(request)
@@ -664,9 +690,7 @@ class MFAConfirmView(APIView):
             device.confirmed_at = timezone.now()
             device.enabled = True
             device.last_used_counter = counter
-            device.save(
-                update_fields=["confirmed_at", "enabled", "last_used_counter"]
-            )
+            device.save(update_fields=["confirmed_at", "enabled", "last_used_counter"])
         return Response({"enabled": True})
 
 
@@ -682,7 +706,7 @@ class MFADisableView(APIView):
     """
 
     permission_classes = [IsPrivilegedRole]
-    throttle_scope = 'auth'
+    throttle_scope = "auth"
 
     def post(self, request):
         device = TOTPDevice.objects.filter(
@@ -724,7 +748,7 @@ class MFATrustDeviceView(APIView):
     """
 
     permission_classes = [IsPrivilegedRole]
-    throttle_scope = 'auth'
+    throttle_scope = "auth"
 
     def post(self, request):
         device = TOTPDevice.active_for(request.user)

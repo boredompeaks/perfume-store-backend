@@ -20,29 +20,28 @@ def backfill_order_item_snapshots(apps, schema_editor):
     left to copy, and their ``product_name``/``price`` snapshots already
     carry the purchase record.
     """
-    OrderItem = apps.get_model('orders', 'OrderItem')
-    for item in OrderItem.objects.select_related('product').order_by('id').iterator():
-        item.sku = ''
-        item.variant_name = item.product.name if item.product_id else ''
-        item.save(update_fields=['sku', 'variant_name'])
+    OrderItem = apps.get_model("orders", "OrderItem")
+    for item in OrderItem.objects.select_related("product").order_by("id").iterator():
+        item.sku = ""
+        item.variant_name = item.product.name if item.product_id else ""
+        item.save(update_fields=["sku", "variant_name"])
 
 
 class Migration(migrations.Migration):
-
     dependencies = [
-        ('orders', '0006_order_order_number'),
+        ("orders", "0006_order_order_number"),
     ]
 
     operations = [
         migrations.AddField(
-            model_name='orderitem',
-            name='sku',
-            field=models.CharField(default='', max_length=64),
+            model_name="orderitem",
+            name="sku",
+            field=models.CharField(default="", max_length=64),
         ),
         migrations.AddField(
-            model_name='orderitem',
-            name='variant_name',
-            field=models.CharField(default='', max_length=200),
+            model_name="orderitem",
+            name="variant_name",
+            field=models.CharField(default="", max_length=200),
         ),
         migrations.RunPython(backfill_order_item_snapshots, migrations.RunPython.noop),
     ]

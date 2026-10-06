@@ -38,8 +38,6 @@ from unittest.mock import patch
 from django.core.management import CommandError, call_command
 from django.test import SimpleTestCase, tag
 
-REPO_ROOT = Path(__file__).resolve().parents[2]
-
 from ops.management.commands import backup_db as backup_module
 from ops.management.commands.backup_db import (
     DEFAULT_KEEP,
@@ -53,6 +51,8 @@ from ops.management.commands.backup_db import (
     scrub,
     utc_stamp,
 )
+
+REPO_ROOT = Path(__file__).resolve().parents[2]
 
 # A probe credential. It must never appear in any command output, and the
 # tests prove that by putting it in both the connection config and the
@@ -148,8 +148,9 @@ class BackupTestCase(SimpleTestCase):
             stdout.write(DUMP_BODY)
             return type("Completed", (), {"returncode": returncode, "stderr": stderr})()
 
-        with patch.object(backup_module.subprocess, "run", fake_run), patch.object(
-            backup_module, "pg_dump_binary", return_value=binary
+        with (
+            patch.object(backup_module.subprocess, "run", fake_run),
+            patch.object(backup_module, "pg_dump_binary", return_value=binary),
         ):
             yield
 
@@ -285,9 +286,12 @@ class PostgresBackupTests(BackupTestCase):
     def test_a_failed_dumps_error_text_cannot_leak_the_password(self):
         """`pg_dump` output is third-party text that may quote the connection
         it was given; it is redacted before it is printed."""
-        with self.using_databases(default=POSTGRES_ENTRY), self.pg_dump(
-            returncode=1,
-            stderr=f"pg_dump: error: connection to {PROBE_URL} failed".encode(),
+        with (
+            self.using_databases(default=POSTGRES_ENTRY),
+            self.pg_dump(
+                returncode=1,
+                stderr=f"pg_dump: error: connection to {PROBE_URL} failed".encode(),
+            ),
         ):
             with self.assertRaises(CommandError) as caught:
                 self.run_command()
@@ -314,8 +318,9 @@ class PostgresBackupTests(BackupTestCase):
             f"user={PROBE_USER} dbname={PROBE_DB} sslmode=require\n"
         ).encode()
 
-        with self.using_databases(default=POSTGRES_ENTRY), self.pg_dump(
-            returncode=1, stderr=stderr
+        with (
+            self.using_databases(default=POSTGRES_ENTRY),
+            self.pg_dump(returncode=1, stderr=stderr),
         ):
             with self.assertRaises(CommandError) as caught:
                 self.run_command()
@@ -338,8 +343,9 @@ class PostgresBackupTests(BackupTestCase):
         self.assertIn("***redacted***", message)
 
     def test_a_failure_with_no_diagnostic_output_still_says_something(self):
-        with self.using_databases(default=POSTGRES_ENTRY), self.pg_dump(
-            returncode=2, stderr=b"   "
+        with (
+            self.using_databases(default=POSTGRES_ENTRY),
+            self.pg_dump(returncode=2, stderr=b"   "),
         ):
             with self.assertRaises(CommandError) as caught:
                 self.run_command()
@@ -351,8 +357,9 @@ class PostgresBackupTests(BackupTestCase):
     def test_a_failed_dump_exits_non_zero_and_keeps_no_dump(self):
         """A backup that failed must be loud, or the schedule silently
         produces nothing while the runbook still claims backups exist."""
-        with self.using_databases(default=POSTGRES_ENTRY), self.pg_dump(
-            returncode=1, stderr=b"pg_dump: error: boom"
+        with (
+            self.using_databases(default=POSTGRES_ENTRY),
+            self.pg_dump(returncode=1, stderr=b"pg_dump: error: boom"),
         ):
             with self.assertRaises(CommandError) as caught:
                 self.run_command()
@@ -435,8 +442,9 @@ class SqliteBackupTests(BackupTestCase):
         source = self.make_database(backup_name(stamp, ".sqlite3"))
         before = source.read_bytes()
 
-        with self.using_databases(default=sqlite_entry(source)), patch.object(
-            backup_module, "utc_stamp", return_value=stamp
+        with (
+            self.using_databases(default=sqlite_entry(source)),
+            patch.object(backup_module, "utc_stamp", return_value=stamp),
         ):
             self.run_command()
 
@@ -634,8 +642,10 @@ class RetentionTests(BackupTestCase):
         for stamp in ("20260101T000000Z", "20260102T000000Z", "20260103T000000Z"):
             self.write_dump(stamp)
 
-        with self.using_databases(default=POSTGRES_ENTRY), self.pg_dump(), patch.object(
-            backup_module, "utc_stamp", return_value="20260104T000000Z"
+        with (
+            self.using_databases(default=POSTGRES_ENTRY),
+            self.pg_dump(),
+            patch.object(backup_module, "utc_stamp", return_value="20260104T000000Z"),
         ):
             output = self.run_command(keep=2)
 

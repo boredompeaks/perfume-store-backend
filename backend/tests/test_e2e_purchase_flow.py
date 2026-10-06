@@ -1,9 +1,9 @@
 """E2E purchase-flow tests - docs/test-gaps.md e2e items 1, 8, 10, 11."""
+
 import unittest
 
 from django.test import tag
 
-from cart.models import CartItem
 from common.testing import ApiTestCase
 from orders.models import Order
 
@@ -43,7 +43,9 @@ class FullPurchaseHappyPathTests(ApiTestCase):
         self.assertEqual(res.status_code, 200, res.data)
 
         # --- anonymous session cart (same cookie jar as the JWT below) ------
-        res = self.client.post("/api/cart/", {"product_id": product_id, "quantity": 2}, format="json")
+        res = self.client.post(
+            "/api/cart/", {"product_id": product_id, "quantity": 2}, format="json"
+        )
         self.assertEqual(res.status_code, 201, res.data)
 
         # --- checkout with a coupon ------------------------------------------
@@ -56,8 +58,10 @@ class FullPurchaseHappyPathTests(ApiTestCase):
         self.assertEqual(res.data["status"], "pending")
 
         # --- payment: razorpay order created (mocked) ------------------------
-        client_mock = self.razorpay_mock(order_id="order_HAPPY")
-        res = self.client.post("/api/orders/payment/", {"order_id": order_id}, format="json")
+        self.razorpay_mock(order_id="order_HAPPY")
+        res = self.client.post(
+            "/api/orders/payment/", {"order_id": order_id}, format="json"
+        )
         self.assertEqual(res.status_code, 200, res.data)
         self.assertEqual(res.data["razorpay_order_id"], "order_HAPPY")
         self.assertEqual(res.data["amount"], 90000)  # paise
@@ -100,12 +104,14 @@ class CartPersistenceTests(ApiTestCase):
     # e2e 8. cart persists across requests with the same session cookie;
     # cleared after the paid verify
     def test_cart_persists_across_requests_and_clears_after_paid_verify(self):
-        user = self.make_user("buyer")
+        self.make_user("buyer")
         product = self.make_product(price="100.00", stock=5)
 
         res = self.client.get("/api/cart/")
         cart_id = res.data["id"]
-        self.client.post("/api/cart/", {"product_id": product.id, "quantity": 3}, format="json")
+        self.client.post(
+            "/api/cart/", {"product_id": product.id, "quantity": 3}, format="json"
+        )
 
         # same session cookie -> same cart, contents intact
         res = self.client.get("/api/cart/")
@@ -132,7 +138,7 @@ class CartPersistenceTests(ApiTestCase):
 
         res = self.client.get("/api/cart/")
         self.assertEqual(res.data["id"], cart_id)  # cart itself remains
-        self.assertEqual(res.data["items"], [])    # but the paid line is gone
+        self.assertEqual(res.data["items"], [])  # but the paid line is gone
         product.refresh_from_db()
         self.assertEqual(product.stock, 2)
 
@@ -143,7 +149,11 @@ class UnverifiedUserChainTests(ApiTestCase):
     def test_unverified_user_cannot_login_and_cannot_checkout(self):
         res = self.client.post(
             "/api/accounts/register/",
-            {"username": "ghostbuyer", "email": "ghost@example.com", "password": "S3cure-Passphrase!"},
+            {
+                "username": "ghostbuyer",
+                "email": "ghost@example.com",
+                "password": "S3cure-Passphrase!",
+            },
             format="json",
         )
         self.assertEqual(res.status_code, 201, res.data)
@@ -160,7 +170,9 @@ class UnverifiedUserChainTests(ApiTestCase):
         # refused for the thing a guest cannot omit (its email), and a guest
         # submission that does name one lands with NO user, never as
         # ghostbuyer's order.
-        res = self.client.post("/api/orders/checkout/", self.checkout_payload(), format="json")
+        res = self.client.post(
+            "/api/orders/checkout/", self.checkout_payload(), format="json"
+        )
         self.assertEqual(res.status_code, 400, res.data)
         self.assertEqual(res.data["error"], "guest_email is required")
 
@@ -188,13 +200,17 @@ class HybridAuthContractTests(ApiTestCase):
 
         # the cart is built on one client (its own session cookie jar)
         cart_client = self.fresh_client()
-        cart_client.post("/api/cart/", {"product_id": product.id, "quantity": 1}, format="json")
+        cart_client.post(
+            "/api/cart/", {"product_id": product.id, "quantity": 1}, format="json"
+        )
 
         # a second client holds the JWT but no session cookie -> checkout
         # cannot find the cart (documented 404 until F-18 adds ownership)
         jwt_client = self.fresh_client()
         self.api_login("buyer", client=jwt_client)
-        res = jwt_client.post("/api/orders/checkout/", self.checkout_payload(), format="json")
+        res = jwt_client.post(
+            "/api/orders/checkout/", self.checkout_payload(), format="json"
+        )
         self.assertEqual(res.status_code, 404, res.data)
         self.assertEqual(res.data["error"], "Cart not found")
         self.assertEqual(Order.objects.count(), 0)
@@ -206,10 +222,14 @@ class HybridAuthContractTests(ApiTestCase):
         self.make_user("buyer")
         product = self.make_product()
         cart_client = self.fresh_client()
-        cart_client.post("/api/cart/", {"product_id": product.id, "quantity": 1}, format="json")
+        cart_client.post(
+            "/api/cart/", {"product_id": product.id, "quantity": 1}, format="json"
+        )
 
         jwt_client = self.fresh_client()
         self.api_login("buyer", client=jwt_client)
-        res = jwt_client.post("/api/orders/checkout/", self.checkout_payload(), format="json")
+        res = jwt_client.post(
+            "/api/orders/checkout/", self.checkout_payload(), format="json"
+        )
         self.assertEqual(res.status_code, 400, res.data)
         self.assertIn("session", str(res.data).lower())

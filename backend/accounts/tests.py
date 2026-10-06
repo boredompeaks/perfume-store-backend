@@ -1,4 +1,4 @@
-﻿"""Accounts unit tests - docs/test-gaps.md items 1-14.
+"""Accounts unit tests - docs/test-gaps.md items 1-14.
 
 Covers registration validation, email verification, enumeration-safe
 recovery flows, and the V-05 password policy: registration and password
@@ -6,6 +6,7 @@ reset both run Django's ``validate_password`` (conventions.md), so a
 password the shared validators reject fails both paths in the same
 field-error shape.
 """
+
 import unittest
 from datetime import timedelta
 from unittest import mock
@@ -14,18 +15,18 @@ from django.conf import settings
 from django.contrib.auth.models import User
 from django.contrib.auth.tokens import default_token_generator
 from django.core import mail
+from django.core.cache import cache
 from django.test import SimpleTestCase, override_settings, tag
 from django.utils.encoding import force_bytes
 from django.utils.http import urlsafe_base64_encode
+from rest_framework.settings import api_settings
+from rest_framework.throttling import ScopedRateThrottle
+from rest_framework_simplejwt.tokens import RefreshToken
 
 from accounts.serializers import RegisterSerializer
 from accounts.urls import urlpatterns as account_urlpatterns
 from accounts.views import LoginView, _encoded_user_id, _get_user, register
 from common.testing import ApiTestCase, extract_link_params
-from django.core.cache import cache
-from rest_framework.settings import api_settings
-from rest_framework.throttling import ScopedRateThrottle
-from rest_framework_simplejwt.tokens import RefreshToken
 
 
 def make_inactive_user(username="pending", email=None):
@@ -42,7 +43,11 @@ class RegisterSerializerTests(ApiTestCase):
     # 1. valid data creates inactive user -------------------------------------------------
     def test_valid_data_creates_inactive_user(self):
         serializer = RegisterSerializer(
-            data={"username": "newuser", "email": "new@example.com", "password": "S3cure-Passphrase!"}
+            data={
+                "username": "newuser",
+                "email": "new@example.com",
+                "password": "S3cure-Passphrase!",
+            }
         )
         self.assertTrue(serializer.is_valid(), serializer.errors)
         user = serializer.save()
@@ -60,7 +65,11 @@ class RegisterSerializerTests(ApiTestCase):
         User.objects.create_user("alice", "alice@example.com", "S3cure-Passphrase!")
         for candidate in ("alice", "ALICE", "Alice"):
             serializer = RegisterSerializer(
-                data={"username": candidate, "email": "other@example.com", "password": "S3cure-Passphrase!"}
+                data={
+                    "username": candidate,
+                    "email": "other@example.com",
+                    "password": "S3cure-Passphrase!",
+                }
             )
             self.assertFalse(serializer.is_valid(), candidate)
             self.assertIn("username", serializer.errors)
@@ -72,7 +81,11 @@ class RegisterSerializerTests(ApiTestCase):
         User.objects.create_user("alice", "alice@example.com", "S3cure-Passphrase!")
         for candidate in ("alice@example.com", "ALICE@EXAMPLE.COM"):
             serializer = RegisterSerializer(
-                data={"username": f"user_{candidate}", "email": candidate, "password": "S3cure-Passphrase!"}
+                data={
+                    "username": f"user_{candidate}",
+                    "email": candidate,
+                    "password": "S3cure-Passphrase!",
+                }
             )
             self.assertFalse(serializer.is_valid(), candidate)
             self.assertIn("email", serializer.errors)
@@ -80,7 +93,11 @@ class RegisterSerializerTests(ApiTestCase):
 
     def test_blank_email_rejected(self):
         serializer = RegisterSerializer(
-            data={"username": "blankmail", "email": "", "password": "S3cure-Passphrase!"}
+            data={
+                "username": "blankmail",
+                "email": "",
+                "password": "S3cure-Passphrase!",
+            }
         )
         self.assertFalse(serializer.is_valid())
         self.assertIn("email", serializer.errors)
@@ -88,7 +105,11 @@ class RegisterSerializerTests(ApiTestCase):
     # 4. password < 8 rejected ----------------------------------------------------------------
     def test_short_password_rejected(self):
         serializer = RegisterSerializer(
-            data={"username": "shorty", "email": "shorty@example.com", "password": "short12"}
+            data={
+                "username": "shorty",
+                "email": "shorty@example.com",
+                "password": "short12",
+            }
         )
         self.assertFalse(serializer.is_valid())
         self.assertIn("password", serializer.errors)
@@ -96,7 +117,11 @@ class RegisterSerializerTests(ApiTestCase):
 
     def test_missing_username_or_password_rejected(self):
         for missing in ("username", "password"):
-            data = {"username": "u", "email": "u@example.com", "password": "S3cure-Passphrase!"}
+            data = {
+                "username": "u",
+                "email": "u@example.com",
+                "password": "S3cure-Passphrase!",
+            }
             data.pop(missing)
             serializer = RegisterSerializer(data=data)
             self.assertFalse(serializer.is_valid(), missing)
@@ -116,12 +141,21 @@ class RegisterSerializerTests(ApiTestCase):
     def test_response_never_returns_password(self):
         res = self.client.post(
             "/api/accounts/register/",
-            {"username": "shapecheck", "email": "shape@example.com", "password": "S3cure-Passphrase!"},
+            {
+                "username": "shapecheck",
+                "email": "shape@example.com",
+                "password": "S3cure-Passphrase!",
+            },
             format="json",
         )
         self.assertEqual(res.status_code, 201, res.data)
         self.assertEqual(
-            res.data["user"], {"id": User.objects.get(username="shapecheck").id, "username": "shapecheck", "email": "shape@example.com"}
+            res.data["user"],
+            {
+                "id": User.objects.get(username="shapecheck").id,
+                "username": "shapecheck",
+                "email": "shape@example.com",
+            },
         )
         self.assertNotIn("password", res.data["user"])
 
@@ -132,7 +166,11 @@ class RegisterSerializerTests(ApiTestCase):
         validate_password — the same policy the reset path enforces."""
         res = self.client.post(
             "/api/accounts/register/",
-            {"username": "weakpass", "email": "weak@example.com", "password": "password"},
+            {
+                "username": "weakpass",
+                "email": "weak@example.com",
+                "password": "password",
+            },
             format="json",
         )
         self.assertEqual(res.status_code, 400, res.data)
@@ -144,7 +182,11 @@ class RegisterSerializerTests(ApiTestCase):
         NumericPasswordValidator through the shared policy."""
         res = self.client.post(
             "/api/accounts/register/",
-            {"username": "numericpass", "email": "numeric@example.com", "password": "987654321"},
+            {
+                "username": "numericpass",
+                "email": "numeric@example.com",
+                "password": "987654321",
+            },
             format="json",
         )
         self.assertEqual(res.status_code, 400, res.data)
@@ -188,10 +230,7 @@ class RegisterSerializerTests(ApiTestCase):
         self.assertEqual(res.status_code, 400, res.data)
         self.assertIsInstance(res.data["details"]["password"], list)
         self.assertTrue(
-            all(
-                isinstance(message, str)
-                for message in res.data["details"]["password"]
-            )
+            all(isinstance(message, str) for message in res.data["details"]["password"])
         )
         self.assertFalse(User.objects.filter(username="parity").exists())
         self.assertEqual(len(mail.outbox), 0)
@@ -209,7 +248,10 @@ class RegisterSerializerTests(ApiTestCase):
         self.assertEqual(reset_res.status_code, 400, reset_res.data)
         self.assertIsInstance(reset_res.data["details"]["password"], list)
         self.assertTrue(
-            all(isinstance(message, str) for message in reset_res.data["details"]["password"])
+            all(
+                isinstance(message, str)
+                for message in reset_res.data["details"]["password"]
+            )
         )
 
 
@@ -217,10 +259,17 @@ class RegisterSerializerTests(ApiTestCase):
 class RegisterViewTests(ApiTestCase):
     # 6. SMTP failure -> 503, account still created (F-28) ---------------------------------
     def test_smtp_failure_returns_503_and_account_still_created(self):
-        with mock.patch("accounts.views._send_verification_email", side_effect=Exception("smtp down")):
+        with mock.patch(
+            "accounts.views._send_verification_email",
+            side_effect=Exception("smtp down"),
+        ):
             res = self.client.post(
                 "/api/accounts/register/",
-                {"username": "nomail", "email": "nomail@example.com", "password": "S3cure-Passphrase!"},
+                {
+                    "username": "nomail",
+                    "email": "nomail@example.com",
+                    "password": "S3cure-Passphrase!",
+                },
                 format="json",
             )
 
@@ -235,7 +284,11 @@ class RegisterViewTests(ApiTestCase):
         with mock.patch("accounts.views._send_verification_email") as send_mock:
             res = self.client.post(
                 "/api/accounts/register/",
-                {"username": "taken2", "email": "taken@example.com", "password": "S3cure-Passphrase!"},
+                {
+                    "username": "taken2",
+                    "email": "taken@example.com",
+                    "password": "S3cure-Passphrase!",
+                },
                 format="json",
             )
         self.assertEqual(res.status_code, 400, res.data)
@@ -250,7 +303,10 @@ class VerifyEmailTests(ApiTestCase):
 
         res = self.client.post(
             "/api/accounts/verify-email/",
-            {"uid": _encoded_user_id(user), "token": default_token_generator.make_token(user)},
+            {
+                "uid": _encoded_user_id(user),
+                "token": default_token_generator.make_token(user),
+            },
             format="json",
         )
 
@@ -262,7 +318,10 @@ class VerifyEmailTests(ApiTestCase):
         # idempotent: verifying an already-active account still succeeds
         res = self.client.post(
             "/api/accounts/verify-email/",
-            {"uid": _encoded_user_id(user), "token": default_token_generator.make_token(user)},
+            {
+                "uid": _encoded_user_id(user),
+                "token": default_token_generator.make_token(user),
+            },
             format="json",
         )
         self.assertEqual(res.status_code, 200, res.data)
@@ -278,7 +337,9 @@ class VerifyEmailTests(ApiTestCase):
             {"uid": _encoded_user_id(user), "token": ""},
             {},
         ):
-            res = self.client.post("/api/accounts/verify-email/", payload, format="json")
+            res = self.client.post(
+                "/api/accounts/verify-email/", payload, format="json"
+            )
             self.assertEqual(res.status_code, 400, payload)
             self.assertIn("invalid or expired", res.data["error"])
 
@@ -312,9 +373,16 @@ class VerifyEmailTests(ApiTestCase):
 class ResendVerificationTests(ApiTestCase):
     # 9. unknown email -> uniform 200 (no enumeration) -------------------------------------
     def test_unknown_email_uniform_response_no_email_sent(self):
-        res = self.client.post("/api/accounts/resend-verification/", {"email": "ghost@example.com"}, format="json")
+        res = self.client.post(
+            "/api/accounts/resend-verification/",
+            {"email": "ghost@example.com"},
+            format="json",
+        )
         self.assertEqual(res.status_code, 200, res.data)
-        self.assertEqual(res.data["message"], "If an unverified account exists, a verification email has been sent.")
+        self.assertEqual(
+            res.data["message"],
+            "If an unverified account exists, a verification email has been sent.",
+        )
         self.assertEqual(len(mail.outbox), 0)
 
     def test_missing_email_uniform_response(self):
@@ -325,26 +393,43 @@ class ResendVerificationTests(ApiTestCase):
     def test_inactive_account_receives_verification_email(self):
         user = make_inactive_user("resendme")
 
-        res = self.client.post("/api/accounts/resend-verification/", {"email": "resendme@example.com"}, format="json")
+        res = self.client.post(
+            "/api/accounts/resend-verification/",
+            {"email": "resendme@example.com"},
+            format="json",
+        )
 
         self.assertEqual(res.status_code, 200, res.data)
         self.assertEqual(len(mail.outbox), 1)
         self.assertEqual(mail.outbox[0].to, [user.email])
         uid, token = extract_link_params(mail.outbox[0].body, "verify-email")
-        res = self.client.post("/api/accounts/verify-email/", {"uid": uid, "token": token}, format="json")
+        res = self.client.post(
+            "/api/accounts/verify-email/", {"uid": uid, "token": token}, format="json"
+        )
         self.assertEqual(res.status_code, 200, res.data)
         self.assertTrue(User.objects.get(username="resendme").is_active)
 
     def test_active_account_gets_no_email(self):
         self.make_user("alreadyactive")
-        res = self.client.post("/api/accounts/resend-verification/", {"email": "alreadyactive@example.com"}, format="json")
+        res = self.client.post(
+            "/api/accounts/resend-verification/",
+            {"email": "alreadyactive@example.com"},
+            format="json",
+        )
         self.assertEqual(res.status_code, 200, res.data)
         self.assertEqual(len(mail.outbox), 0)
 
     def test_smtp_failure_returns_503(self):
         make_inactive_user("smtpfail")
-        with mock.patch("accounts.views._send_verification_email", side_effect=Exception("smtp down")):
-            res = self.client.post("/api/accounts/resend-verification/", {"email": "smtpfail@example.com"}, format="json")
+        with mock.patch(
+            "accounts.views._send_verification_email",
+            side_effect=Exception("smtp down"),
+        ):
+            res = self.client.post(
+                "/api/accounts/resend-verification/",
+                {"email": "smtpfail@example.com"},
+                format="json",
+            )
         self.assertEqual(res.status_code, 503, res.data)
         self.assertIn("could not be sent", res.data["error"])
 
@@ -353,14 +438,25 @@ class ResendVerificationTests(ApiTestCase):
 class ForgotUsernameTests(ApiTestCase):
     # 10. unknown email -> uniform 200 ---------------------------------------------------------
     def test_unknown_email_uniform_response(self):
-        res = self.client.post("/api/accounts/forgot-username/", {"email": "ghost@example.com"}, format="json")
+        res = self.client.post(
+            "/api/accounts/forgot-username/",
+            {"email": "ghost@example.com"},
+            format="json",
+        )
         self.assertEqual(res.status_code, 200, res.data)
-        self.assertEqual(res.data["message"], "If an account exists for this email, the username has been sent.")
+        self.assertEqual(
+            res.data["message"],
+            "If an account exists for this email, the username has been sent.",
+        )
         self.assertEqual(len(mail.outbox), 0)
 
     def test_known_email_receives_username(self):
         self.make_user("rememberme")
-        res = self.client.post("/api/accounts/forgot-username/", {"email": "rememberme@example.com"}, format="json")
+        res = self.client.post(
+            "/api/accounts/forgot-username/",
+            {"email": "rememberme@example.com"},
+            format="json",
+        )
         self.assertEqual(res.status_code, 200, res.data)
         self.assertEqual(len(mail.outbox), 1)
         self.assertIn("Your username is: rememberme", mail.outbox[0].body)
@@ -370,7 +466,11 @@ class ForgotUsernameTests(ApiTestCase):
         with mock.patch(
             "common.notifications.send_email", side_effect=Exception("smtp down")
         ):
-            res = self.client.post("/api/accounts/forgot-username/", {"email": "smtpfail@example.com"}, format="json")
+            res = self.client.post(
+                "/api/accounts/forgot-username/",
+                {"email": "smtpfail@example.com"},
+                format="json",
+            )
         self.assertEqual(res.status_code, 503, res.data)
 
 
@@ -379,13 +479,21 @@ class PasswordResetTests(ApiTestCase):
     # 11. request: inactive-only filter ------------------------------------------------------------
     def test_inactive_account_gets_no_reset_email(self):
         make_inactive_user("frozen", "frozen@example.com")
-        res = self.client.post("/api/accounts/password-reset/", {"email": "frozen@example.com"}, format="json")
+        res = self.client.post(
+            "/api/accounts/password-reset/",
+            {"email": "frozen@example.com"},
+            format="json",
+        )
         self.assertEqual(res.status_code, 200, res.data)
         self.assertEqual(len(mail.outbox), 0)
 
     def test_active_account_receives_reset_link(self):
         user = self.make_user("resetme")
-        res = self.client.post("/api/accounts/password-reset/", {"email": "resetme@example.com"}, format="json")
+        res = self.client.post(
+            "/api/accounts/password-reset/",
+            {"email": "resetme@example.com"},
+            format="json",
+        )
         self.assertEqual(res.status_code, 200, res.data)
         self.assertEqual(len(mail.outbox), 1)
         uid, token = extract_link_params(mail.outbox[0].body, "reset-password")
@@ -394,9 +502,17 @@ class PasswordResetTests(ApiTestCase):
 
     def test_uniform_response_regardless_of_account_state(self):
         """Enumeration safety: identical body for known and unknown emails."""
-        known = self.client.post("/api/accounts/password-reset/", {"email": "ghost@example.com"}, format="json")
+        known = self.client.post(
+            "/api/accounts/password-reset/",
+            {"email": "ghost@example.com"},
+            format="json",
+        )
         self.make_user("knownuser")
-        unknown = self.client.post("/api/accounts/password-reset/", {"email": "knownuser@example.com"}, format="json")
+        unknown = self.client.post(
+            "/api/accounts/password-reset/",
+            {"email": "knownuser@example.com"},
+            format="json",
+        )
         self.assertEqual(known.status_code, unknown.status_code)
         self.assertEqual(known.data["message"], unknown.data["message"])
 
@@ -405,7 +521,11 @@ class PasswordResetTests(ApiTestCase):
         with mock.patch(
             "common.notifications.send_email", side_effect=Exception("smtp down")
         ):
-            res = self.client.post("/api/accounts/password-reset/", {"email": "smtpfail@example.com"}, format="json")
+            res = self.client.post(
+                "/api/accounts/password-reset/",
+                {"email": "smtpfail@example.com"},
+                format="json",
+            )
         self.assertEqual(res.status_code, 503, res.data)
         self.assertEqual(len(mail.outbox), 0)
 
@@ -424,7 +544,11 @@ class PasswordResetTests(ApiTestCase):
         }
         for password, expected in cases.items():
             with self.subTest(password=password):
-                res = self.client.post("/api/accounts/password-reset/confirm/", {**payload, "password": password}, format="json")
+                res = self.client.post(
+                    "/api/accounts/password-reset/confirm/",
+                    {**payload, "password": password},
+                    format="json",
+                )
                 self.assertEqual(res.status_code, 400, res.data)
                 self.assertIn("password", res.data["details"])
                 self.assertIn(
@@ -443,7 +567,9 @@ class PasswordResetTests(ApiTestCase):
             {"uid": _encoded_user_id(user)},
             {},
         ):
-            res = self.client.post("/api/accounts/password-reset/confirm/", payload, format="json")
+            res = self.client.post(
+                "/api/accounts/password-reset/confirm/", payload, format="json"
+            )
             self.assertEqual(res.status_code, 400, payload)
             self.assertIn("invalid or expired", res.data["error"])
         user.refresh_from_db()
@@ -483,7 +609,9 @@ class UsernameAvailableTests(ApiTestCase):
     def test_too_short_username_reports_unavailable(self):
         for candidate in ("", "a", "ab", "  x  "):
             with self.subTest(candidate=candidate):
-                res = self.client.get("/api/accounts/username-available/", {"username": candidate})
+                res = self.client.get(
+                    "/api/accounts/username-available/", {"username": candidate}
+                )
                 self.assertEqual(res.status_code, 200, res.data)
                 self.assertFalse(res.data["available"])
                 self.assertIn("at least 3 characters", res.data["message"])
@@ -492,12 +620,16 @@ class UsernameAvailableTests(ApiTestCase):
         self.make_user("buyer")
         for candidate in ("buyer", "BUYER", "Buyer"):
             with self.subTest(candidate=candidate):
-                res = self.client.get("/api/accounts/username-available/", {"username": candidate})
+                res = self.client.get(
+                    "/api/accounts/username-available/", {"username": candidate}
+                )
                 self.assertFalse(res.data["available"])
                 self.assertIn("already taken", res.data["message"])
 
     def test_free_username_reports_available(self):
-        res = self.client.get("/api/accounts/username-available/", {"username": "freshname"})
+        res = self.client.get(
+            "/api/accounts/username-available/", {"username": "freshname"}
+        )
         self.assertEqual(res.status_code, 200, res.data)
         self.assertTrue(res.data["available"])
         self.assertIn("available", res.data["message"])
@@ -873,9 +1005,7 @@ class LogoutTests(ApiTestCase):
         return refresh
 
     def test_logout_requires_authentication(self):
-        res = self.client.post(
-            "/api/accounts/logout/", {"refresh": "x"}, format="json"
-        )
+        res = self.client.post("/api/accounts/logout/", {"refresh": "x"}, format="json")
         self.assertEqual(res.status_code, 401, res.data)
 
     def test_logout_blacklists_the_presented_refresh_token(self):

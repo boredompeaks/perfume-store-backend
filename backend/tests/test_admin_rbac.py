@@ -17,13 +17,13 @@ from django.contrib.admin.models import LogEntry
 from django.contrib.auth.models import Group, User
 from django.test import RequestFactory, tag
 
+from accounts.admin import StoreUserAdmin
+from cart.admin import CartAdmin
+from cart.models import Cart
 from common.admin import CONFIRMATION_NOTE_MAX_LENGTH, RoleAwareModelAdmin
 from common.permissions import user_has_capability
 from common.roles import CAPABILITY_ROLES, ROLE_ADMIN, STAFF_ROLES
 from common.testing import ApiTestCase
-from accounts.admin import StoreUserAdmin
-from cart.admin import CartAdmin
-from cart.models import Cart
 from ops.admin import SiteSettingsAdmin
 from ops.models import SiteSettings
 from orders.admin import CouponAdmin, OrderAdmin

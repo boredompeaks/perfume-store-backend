@@ -1,16 +1,13 @@
 import re
 
+from django.conf import settings
 from django.contrib import admin
 from django.urls import include, path, re_path
 from django.views.static import serve as serve_media
 
-from django.conf import settings
-
-from ops.views import api_settings, audit_log, dashboard, health
-
 from common.admin_search import global_search
 from common.saved_filters import delete_saved_filter, save_saved_filter
-
+from ops.views import api_settings, audit_log, dashboard, health
 from orders.views import (
     admin_order_cancel,
     admin_order_detail,
@@ -100,18 +97,15 @@ urlpatterns = [
     # Store dashboard (staff-only) — must be registered BEFORE the admin
     # include, or the admin's URLconf swallows it and returns 404.
     path("admin/dashboard/", dashboard, name="admin-dashboard"),
-
     # Audit log (spec 6.12 route /admin/audit-log) — same before-the-admin
     # include rule as the dashboard above.
     path("admin/audit-log/", audit_log, name="admin-audit-log"),
-
     # SPEC-5-10 (spec 5.1, "Search orders, products, customers…"): the ONE
     # global admin search. Gated by the disjunction of the three models' own
     # view capabilities, with each model's results gated individually by
     # its ModelAdmin — same before-the-admin include rule as the chrome
     # routes above.
     path("admin/search/", global_search, name="admin-global-search"),
-
     # SPEC-20-6 [R-20.11]: the saved-filter write endpoints — save the
     # current filter selection under a name, and drop one of the caller's
     # own. Applying a saved filter needs no route: it is the
@@ -129,7 +123,6 @@ urlpatterns = [
         delete_saved_filter,
         name="admin-saved-filter-delete",
     ),
-
     # §9.4 Orders module JSON seam (SPEC-9-07), legacy family: the alias of
     # the v1:admin orders mounts above (same view objects, no duplication).
     path("api/admin/orders/", admin_order_list, name="admin-orders-list"),
@@ -155,24 +148,16 @@ urlpatterns = [
         admin_order_refund,
         name="admin-orders-refund",
     ),
-
     path("admin/", admin.site.urls),
-
     path("health/", health, name="health"),
     path("api/settings/", api_settings, name="api-settings"),
-
     path("api/products/", include("products.urls")),
-
     path("api/cart/", include("cart.urls")),
-
     path("api/orders/", include("orders.urls")),
-
     # [R-1.07] SPEC-1-B05: the legacy alias of the v1:store shipping mount
     # above (same urlconf object, no duplication).
     path("api/shipping/", include("shipping.urls")),
-
     path("api/accounts/", include("accounts.urls")),
-
     # /api/v1/ namespace (spec §9, R-9.0): same urlconf objects as the
     # legacy mounts above; legacy paths remain alive as aliases.
     path("api/v1/", include((v1_urlpatterns, "v1"), namespace="v1")),
@@ -197,8 +182,8 @@ urlpatterns = [
 # never be shadowed by a media path.
 urlpatterns += [
     re_path(
-        r'^' + re.escape(settings.MEDIA_URL.lstrip('/')) + r'(?P<path>.*)$',
+        r"^" + re.escape(settings.MEDIA_URL.lstrip("/")) + r"(?P<path>.*)$",
         serve_media,
-        {'document_root': str(settings.MEDIA_ROOT)},
+        {"document_root": str(settings.MEDIA_ROOT)},
     )
 ]

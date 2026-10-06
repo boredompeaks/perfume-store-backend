@@ -1,0 +1,160 @@
+{
+  "backend/docs/changes.md": [
+    {
+      "figures": [
+        [
+          "coverage",
+          "cov 100.00%"
+        ],
+        [
+          "expected_failures",
+          "xf 4"
+        ],
+        [
+          "tests",
+          "1819 tests"
+        ],
+        [
+          "tests",
+          "1836 tests"
+        ]
+      ],
+      "reason": "A DOC-ONLY row. It records that no suite re-run happened and quotes a scoped retention-class run plus the figures the earlier cycle measured, so a floor artifact for this task would record the whole suite on some other commit rather than what the row says. Backfilling one would attach a measurement to a sentence that never made it.",
+      "task": "ASYNC-2c1"
+    },
+    {
+      "figures": [
+        [
+          "coverage",
+          "cov 100.00%"
+        ],
+        [
+          "expected_failures",
+          "xf 4"
+        ],
+        [
+          "stmts",
+          "9030 stmts"
+        ],
+        [
+          "tests",
+          "1836 tests"
+        ]
+      ],
+      "reason": "A lint and format row, and its own counted figures (the lint errors, the distinct rules, the files the formatter rewrote) are ruff's output rather than a suite floor. The floor it also quotes was measured on that commit, before the printer existed. `floor --task GATE-1` run now measures the current tree, so the artifact it would write records a different tree than the row describes -- an artifact that satisfies the gate's existence test while vouching for something else.",
+      "task": "GATE-1"
+    },
+    {
+      "figures": [
+        [
+          "coverage",
+          "cov 99.80%"
+        ],
+        [
+          "coverage",
+          "coverage 99.80%"
+        ],
+        [
+          "expected_failures",
+          "expected failures=4"
+        ],
+        [
+          "expected_failures",
+          "xf 4"
+        ],
+        [
+          "mutation",
+          "failures=4"
+        ],
+        [
+          "mutation",
+          "failures=6"
+        ],
+        [
+          "stmts",
+          "9030 stmts"
+        ],
+        [
+          "tests",
+          "180 tests"
+        ],
+        [
+          "tests",
+          "1836 tests"
+        ]
+      ],
+      "reason": "A PostgreSQL row written before the printer existed and edited by a later cycle in this train, so the diff against a promotion base reports the whole row as added even though the figures in it are two cycles old. `floor --task GATE-3` measures the current tree on both engines and would record a different figure from the one the row prints, so the artifact cannot be backfilled honestly. Its `failures=N` figures are the pg gate's certified failure count on that commit, not a mutation replay, and scripts/mutation_evidence.py holds no manifest for this task because no mutation was ever recorded against it.",
+      "task": "GATE-3"
+    },
+    {
+      "figures": [
+        [
+          "coverage",
+          "cov 99.80%"
+        ],
+        [
+          "expected_failures",
+          "xf 4"
+        ],
+        [
+          "stmts",
+          "9030 stmts"
+        ],
+        [
+          "tests",
+          "1836 tests"
+        ]
+      ],
+      "reason": "The row that turned branch coverage on, and it quotes the same suite measured twice on that commit -- once line-only, once branch-inclusive -- to show the setting is doing work. `floor` records one run per engine and cannot record a line-only and a branch-inclusive reading of the same commit, and running it now measures the tree as it stands rather than as it stood when the decision was taken.",
+      "task": "GATE-4"
+    },
+    {
+      "figures": [
+        [
+          "coverage",
+          "cov 100.00%"
+        ],
+        [
+          "expected_failures",
+          "xf 4"
+        ],
+        [
+          "stmts",
+          "9030 stmts"
+        ],
+        [
+          "tests",
+          "0 tests"
+        ],
+        [
+          "tests",
+          "Ran 0 tests"
+        ]
+      ],
+      "reason": "The discovery-guard row. `Ran 0 tests / NO TESTS RAN` is the COUNTER-EXAMPLE the row carries in order to show the guard catches a suite that cannot be found; it is the output of a deliberately broken discovery, not a floor. No artifact can record it, and writing one that 'backs' it would be fabricating a measurement of a failure nobody ran. The row's remaining figures are the collected/declared counts of the step replayed in git bash, which `floor` does not record either.",
+      "task": "GATE-5"
+    },
+    {
+      "figures": [
+        [
+          "coverage",
+          "cov 100.00%"
+        ],
+        [
+          "expected_failures",
+          "expected failures=4"
+        ],
+        [
+          "stmts",
+          "9030 stmts"
+        ],
+        [
+          "tests",
+          "1836 tests"
+        ]
+      ],
+      "reason": "The nightly claim-scan row. Its headline figure is the scanner's own error count over the whole corpus and the exit code it decided the job on, read from `scripts/doc_claims.py --base`; `floor` records a suite run and a coverage TOTAL row and has no field for either, so there is nothing here for an artifact to match.",
+      "task": "GATE-6"
+    }
+  ]
+}

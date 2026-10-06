@@ -1,0 +1,21 @@
+{
+  "engine": "postgresql",
+  "postgres_image": "postgres:17.11-alpine",
+  "certified_on": "2026-10-04",
+  "certified_by": "builder, full suite run locally against PostgreSQL 17.11 with DATABASE_URL set; the six ids below were emitted by scripts/pg_gate.py --emit-baseline from that run's captured output, not transcribed.",
+  "measured": {
+    "tests": 1836,
+    "failures": 6,
+    "errors": 1,
+    "expected_failures": 4
+  },
+  "note": "failing_tests holds DISTINCT test ids, which is why its length is 6 while failures+errors is 7: orders.tests.OrderIndexSchemaTests.test_payment_provider_references_stay_constraint_covered uses subTest over two columns and emits two failure headers for one test. This file is hand-maintained and is never written by scripts/pg_gate.py -- a self-updating baseline records whatever the last run did, which is the defect the gate exists to catch. When a fix lands, delete that entry in the same commit; pg_gate.py reports an entry that stopped failing as a warning and stays green so the fix is not punished. To re-certify after an intended change, run scripts/pg_gate.py --emit-baseline and review the diff by hand.",
+  "failing_tests": [
+    "orders.tests.OrderIndexSchemaTests.test_order_number_stays_satisfied_by_its_unique_constraint",
+    "orders.tests.OrderIndexSchemaTests.test_payment_provider_references_stay_constraint_covered",
+    "products.tests.ProductCatalogIndexSchemaTests.test_slug_stays_satisfied_by_its_unique_constraint",
+    "products.tests.SlugGenerationTests.test_long_name_collision_truncated_to_slug_max_length",
+    "tests.test_correlation_ids.UnhandledExceptionTests.test_unhandled_exception_500_still_returns_the_request_id",
+    "tests.test_e2e_concurrency.PaginationStabilityTests.test_pages_partition_the_catalog_stably_across_repeated_requests"
+  ]
+}
