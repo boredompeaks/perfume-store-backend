@@ -5,14 +5,26 @@ minimal contract: the lifecycle transitions that carry a customer
 notification (shipped, delivered, cancelled) fire ONE call into the shared
 notifications seam — ``common.notifications.dispatch``, the same dispatch
 verify_payment already uses for order.paid ([R-19.0]) — never a second
-send path. The notifications subsystem itself (handlers, templates,
-outbox) is SPEC-1-12/S19: until its handlers register against these
-events, dispatch resolves no handler and returns, so the hook sites below
-are the contract and the content arrives later.
+send path.
 
-Event names follow the AuditEvent.EventType dotted convention; when
-SPEC-1-12/S19 adds the matching EventType members and registers handlers,
-these hook sites start delivering unchanged.
+**These three names are members of ``AuditEvent.EventType`` (ASYNC-2e).**
+They used to be bare strings here, which is the defect class this hook
+site now names deliberately: ``_EVENT_HANDLERS`` is keyed on the enum, so a
+name outside it resolves no handler, is not a value the audit trail can
+record, and was absorbed by the same DEBUG no-op as a benign
+"no notification wired yet" — so three missing notifications reported
+nothing. The values below are the enum members, and both facts that made
+them dead (the key type and the log level that hid it) are pinned by
+tests.
+
+What is deliberately still absent: **no handler is registered for any of
+these three.** Dispatching them therefore still sends no email, and
+``dispatch`` logs it at DEBUG as the content gap it honestly is. The order
+email content set is SPEC-1-12/SPEC-19-2's scope, not this file's, and
+``common.notifications.events_without_handler()`` names the gap so it can
+be closed deliberately rather than discovered. A reader of this file may
+say the hook sites exist and fire once per transition; a reader may NOT say
+a customer receives a shipped, delivered or cancelled notification.
 
 Placement: every status writer calls ``notify_transition`` AFTER the
 transition's save and its OrderStatusEvent append, INSIDE the same
@@ -31,6 +43,7 @@ notify site, the same cardinality as the audit trail.
 import logging
 
 from common import notifications
+from common.models import AuditEvent
 
 # A dedicated channel name so deployment log tooling can route side-effect
 # failures independently (mirrors common.notifications).
@@ -39,10 +52,16 @@ logger = logging.getLogger("orders.events")
 # Transition → notification event. Only lifecycle moves that carry a
 # customer notification are listed here; confirmed has deliberately no
 # entry (verify_payment's own order.paid dispatch owns that notification).
+#
+# The values are AuditEvent.EventType MEMBERS, not bare strings, and that is
+# the load-bearing choice: the registry is keyed on the enum, so a bare
+# string that is not a member matches nothing and fails silently. Keying this
+# map on the enum makes a name that is not a vocabulary member a test failure
+# instead of a production no-op.
 TRANSITION_EVENTS = {
-    "shipped": "order.shipped",
-    "delivered": "order.delivered",
-    "cancelled": "order.cancelled",
+    "shipped": AuditEvent.EventType.ORDER_SHIPPED,
+    "delivered": AuditEvent.EventType.ORDER_DELIVERED,
+    "cancelled": AuditEvent.EventType.ORDER_CANCELLED,
 }
 
 

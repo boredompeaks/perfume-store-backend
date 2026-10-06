@@ -90,10 +90,18 @@ class AuditEvent(models.Model):
         SYSTEM = "system", "System"
 
     class EventType(models.TextChoices):
-        # Order lifecycle. Further per-transition events ride section 10
-        # (the from->to status machine), not here.
+        # Order lifecycle. The from->to status machine's own transitions
+        # (SPEC-10-05) are named here so the lifecycle notification hook
+        # sites dispatch vocabulary members rather than bare strings —
+        # see orders/events.py for why a name outside this enum is a
+        # registry that resolves nothing. Membership is NOT delivery:
+        # _EVENT_HANDLERS in common.notifications is the separate question
+        # of whether a name has a handler, and these three have none.
         ORDER_CREATED = "order.created", "Order created"
         ORDER_PAID = "order.paid", "Order paid"
+        ORDER_SHIPPED = "order.shipped", "Order shipped"
+        ORDER_DELIVERED = "order.delivered", "Order delivered"
+        ORDER_CANCELLED = "order.cancelled", "Order cancelled"
         # Payment intent + verify outcomes/failures.
         PAYMENT_INITIATED = "payment.initiated", "Payment intent created"
         PAYMENT_SIGNATURE_REJECTED = (

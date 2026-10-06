@@ -130,6 +130,39 @@ _EVENT_HANDLERS = {
     AuditEvent.EventType.ORDER_PAID: _notify_order_paid,
 }
 
+# The vocabulary _EVENT_HANDLERS is keyed on, as a set for lookup. EventType
+# members are str subclasses and compare and hash equal to their own value,
+# so a caller passing either the member or the bare string resolves the same
+# handler — verified rather than assumed, and pinned by a test, because the
+# whole distinction in dispatch() rests on it.
+_EVENT_TYPE_VALUES = frozenset(AuditEvent.EventType)
+
+
+def events_without_handler():
+    """Vocabulary members that dispatch to nothing, in declaration order.
+
+    **Membership is not delivery, and this is where the difference is
+    visible.** ``AuditEvent.EventType`` names every business event the
+    audit trail can record; ``_EVENT_HANDLERS`` names the subset that has
+    a customer notification attached. The gap between them is a set of
+    events a caller may legitimately dispatch and that send nothing at
+    all.
+
+    That gap used to be invisible from outside this module, which is how
+    a registry-key defect reads as working code: a hook site dispatches,
+    ``_EVENT_HANDLERS.get`` returns ``None``, and a ``logger.debug`` line
+    records the miss at a level the project's INFO baseline never shows.
+    Nothing reported the loss because nothing could ask. Returning the
+    set makes the absence addressable — a new handler closes an entry, a
+    new caller can assert against the gap rather than assume delivery.
+
+    Ordered by the enum's own declaration order rather than a set's, so
+    the answer is stable and diffable between calls.
+    """
+    return tuple(
+        member for member in AuditEvent.EventType if _EVENT_HANDLERS.get(member) is None
+    )
+
 
 def dispatch(event_type, context=None):
     """Send the notification bound to a business event. Never raises.
@@ -145,10 +178,32 @@ def dispatch(event_type, context=None):
     """
     handler = _EVENT_HANDLERS.get(event_type)
     if handler is None:
-        # Normal for the spec-19.1 events that have no notification yet;
-        # the DEBUG line keeps a mis-typed event name at a hook site
-        # findable without spamming the INFO baseline.
-        logger.debug("dispatch %s: no notification registered", event_type)
+        # Two different absences, and they used to be indistinguishable.
+        #
+        # A name that IS a vocabulary member has no handler yet: expected,
+        # the gap is the honest state of spec 19.1's content, and DEBUG
+        # keeps it findable without spamming the INFO baseline.
+        #
+        # A name that is NOT a vocabulary member can never have a handler,
+        # because _EVENT_HANDLERS is keyed on EventType. That is a dead
+        # dispatch — a hook site naming a business event the audit trail
+        # cannot record — and it is a programming error, not a content
+        # gap. It used to be absorbed by the same DEBUG line as the benign
+        # case, which is how three order lifecycle notifications went
+        # missing with nothing to show for it. WARNING is the level that
+        # says "this notification is owed and cannot be sent", and it
+        # cannot break the caller: dispatch still returns, because a
+        # notification must never roll back the transaction it follows.
+        known = event_type in _EVENT_TYPE_VALUES
+        logger.log(
+            logging.DEBUG if known else logging.WARNING,
+            "dispatch %s: no notification registered%s",
+            event_type,
+            ""
+            if known
+            else " (not an AuditEvent.EventType member, so no handler can "
+            "ever match it)",
+        )
         return
     try:
         handler(context or {})
@@ -551,9 +606,22 @@ def enqueue(event_type, context=None, occurrence=None):
     IntegrityError-handled, never check-then-act).
     """
     if _EVENT_HANDLERS.get(event_type) is None:
-        # Same contract as dispatch: nothing is wired for this event yet, and
-        # a DEBUG line keeps it findable without implying a row exists.
-        logger.debug("enqueue %s: no notification registered", event_type)
+        # Same two absences dispatch distinguishes, and the same reason: a
+        # member with no handler yet is a content gap, while a name outside
+        # the vocabulary is a dead dispatch that can never resolve. Neither
+        # writes a row, so the DEBUG line cannot imply one exists — but the
+        # second is a WARNING, because "queued nothing for an event nobody
+        # can record" is the shape of a lost notification.
+        known = event_type in _EVENT_TYPE_VALUES
+        logger.log(
+            logging.DEBUG if known else logging.WARNING,
+            "enqueue %s: no notification registered%s",
+            event_type,
+            ""
+            if known
+            else " (not an AuditEvent.EventType member, so no handler can "
+            "ever match it)",
+        )
         return None
     payload = serialize_context(context or {})
     dedup_key = _dedup_key(event_type, payload, occurrence)
