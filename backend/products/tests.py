@@ -20,7 +20,7 @@ from django.db import (
     transaction,
 )
 from django.db.models import Sum
-from django.test import override_settings, tag
+from django.test import TransactionTestCase, override_settings, tag
 from django.utils import timezone
 from rest_framework.exceptions import PermissionDenied
 from rest_framework.request import Request
@@ -307,7 +307,9 @@ class SlugGenerationTests(ApiTestCase):
         """
         self.make_product(name="x" * 100)
         candidate = products(name="x" * 150)
-        self.assertEqual(candidate._generate_unique_slug(), "x" * 98 + "-2")
+        candidates = candidate._slug_candidates()
+        next(candidates)
+        self.assertEqual(next(candidates), "x" * 98 + "-2")
 
     def test_long_name_without_collision_truncated_to_slug_max_length(self):
         """PG-2b: the FIRST candidate is clamped to the declared bound.
@@ -321,7 +323,7 @@ class SlugGenerationTests(ApiTestCase):
         database would accept.
         """
         candidate = products(name="x" * 150)
-        generated = candidate._generate_unique_slug()
+        generated = next(candidate._slug_candidates())
         self.assertEqual(generated, "x" * 100)
         self.assertEqual(len(generated), 100)
 
@@ -381,7 +383,7 @@ class SlugGenerationTests(ApiTestCase):
 
     def test_one_over_the_bound_generation_loses_exactly_one_character(self):
         candidate = products(name="z" * 101)
-        self.assertEqual(candidate._generate_unique_slug(), "z" * 100)
+        self.assertEqual(next(candidate._slug_candidates()), "z" * 100)
 
     def test_slug_max_length_declaration_is_pinned(self):
         """The bound the generator reads is the declared one, at a literal.
@@ -412,7 +414,10 @@ class SlugGenerationTests(ApiTestCase):
         # The over-long form of the same hazard, in memory for the reason given
         # on test_over_long_name_collision_against_a_stored_row.
         third = products(name="o" * 120 + "cc")
-        self.assertEqual(third._generate_unique_slug(), "o" * 98 + "-3")
+        candidates = third._slug_candidates()
+        next(candidates)
+        next(candidates)
+        self.assertEqual(next(candidates), "o" * 98 + "-3")
 
     def test_collision_suffix_keeps_every_candidate_inside_the_bound(self):
         """A multi-digit suffix has to make the base shorter, or a late
@@ -441,7 +446,29 @@ class SlugGenerationTests(ApiTestCase):
         self.assertEqual(self.make_product(name="###").slug, "product-2")
         # An over-long name of pure punctuation slugifies to nothing at all, so
         # the fallback is still what lands in the column.
-        self.assertEqual(products(name="!" * 150)._generate_unique_slug(), "product-3")
+        candidates = products(name="!" * 150)._slug_candidates()
+        next(candidates)
+        next(candidates)
+        self.assertEqual(next(candidates), "product-3")
+
+    def test_non_slug_integrity_error_propagates(self):
+        """The retry loop must not swallow a real defect: an IntegrityError
+        that is not the slug unique constraint propagates unchanged rather
+        than burning through the candidate walk."""
+        candidate = products(
+            name="Rose Water",
+            description="d",
+            price="10.00",
+            size=1,
+            stock=1,
+            category="Floral",
+        )
+        with patch(
+            "django.db.models.Model.save",
+            side_effect=IntegrityError("some other constraint"),
+        ):
+            with self.assertRaises(IntegrityError):
+                candidate.save()
 
     def test_explicit_slug_preserved_on_resave(self):
         product = self.make_product(name="Rose Water", slug="custom-slug")
@@ -454,6 +481,72 @@ class SlugGenerationTests(ApiTestCase):
         product.save()
         product.refresh_from_db()
         self.assertEqual(product.slug, "custom-slug")
+
+
+@tag("products")
+class SlugGenerationRaceTests(TransactionTestCase):
+    """Two threads, two connections, one new name: the slug generation
+    must not let an IntegrityError escape, and both rows must survive with
+    distinct slugs.
+
+    ``TransactionTestCase`` and not ``TestCase``: the point is two SEPARATE
+    database connections holding real row locks, and a test-case transaction
+    would put both workers in the same one, where the race cannot happen.
+    ``close_old_connections`` per worker is what makes them genuinely
+    separate. Driven on PostgreSQL -- the engine that enforces the unique
+    constraint under real concurrency -- rather than only on SQLite, which
+    serialises writes and so cannot exhibit the window this pin exists for.
+    """
+
+    def test_two_threads_one_name_both_rows_survive(self):
+        import threading
+
+        from django.db import OperationalError, close_old_connections
+
+        name = "Contended Rose Aurum"
+        barrier = threading.Barrier(2)
+        errors = []
+
+        def worker():
+            close_old_connections()
+            try:
+                barrier.wait()
+                products.objects.create(
+                    name=name,
+                    description="d",
+                    price="10.00",
+                    size=1,
+                    stock=1,
+                    category="Floral",
+                )
+            except Exception as exc:  # reported, never swallowed
+                errors.append(exc)
+            finally:
+                close_old_connections()
+
+        threads = [threading.Thread(target=worker) for _ in range(2)]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join(timeout=30)
+
+        if connection.vendor == "postgresql":
+            # The guarantee this pin exists for: no IntegrityError escapes
+            # the generation path, and both rows survive with distinct slugs.
+            self.assertEqual(errors, [])
+            self.assertEqual(products.objects.count(), 2)
+            slugs = set(products.objects.values_list("slug", flat=True))
+            self.assertEqual(len(slugs), 2)
+        else:
+            # SQLite serialises writes: a genuinely concurrent insert is
+            # refused with OperationalError rather than blocking, which is
+            # the engine doing the mutual exclusion itself. That refusal is
+            # the documented consequence of the engine's own write
+            # serialisation -- but an IntegrityError escaping the generation
+            # path is never acceptable on any engine, so it is asserted
+            # absent here too.
+            for exc in errors:
+                self.assertIsInstance(exc, OperationalError)
 
 
 @tag("products")

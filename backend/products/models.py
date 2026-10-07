@@ -5,7 +5,7 @@ from functools import partial
 
 from django.conf import settings
 from django.core.exceptions import ValidationError
-from django.db import models, transaction
+from django.db import IntegrityError, models, transaction
 from django.utils import timezone
 from django.utils.text import slugify
 
@@ -85,9 +85,16 @@ class products(models.Model):
             models.Index(fields=["category"], name="products_category_idx"),
         ]
 
-    def _generate_unique_slug(self):
-        """Slug for a row that arrived without one: slugify(name), held inside
-        the column's own declared bound, made unique with a numeric suffix.
+    def _slug_candidates(self):
+        """Yield slug candidates for a row that arrived without one.
+
+        slugify(name), held inside the column's own declared bound, made
+        unique with a numeric suffix. No existence check: the database's
+        unique constraint is the concurrency authority (conventions.md:17),
+        so ``save()`` walks this sequence and retries on IntegrityError
+        rather than testing first -- the check-then-act shape this replaced
+        let two concurrent creations of the same name both pass the read
+        and one of them 500 on the insert.
 
         Split out of ``save()`` because the bound is only reachable through
         input that the column cannot store, and the two engines disagree about
@@ -106,32 +113,53 @@ class products(models.Model):
         # for any bound other than 100.
         max_length = self._meta.get_field("slug").max_length
         base_slug = slugify(self.name) or "product"
-        slug = base_slug[:max_length]
+        yield base_slug[:max_length]
         suffix = 2
-        while products.objects.exclude(pk=self.pk).filter(slug=slug).exists():
+        while True:
             # The suffix is the part that has to fit, so the BASE yields its
             # characters. Cutting the finished candidate instead would drop
             # the discriminator off the end of every collision, which is how
             # two distinct products land on one slug and the unique constraint
             # turns a truncation bug into a 500 on a different path. Each
-            # candidate here is distinct from the last, so the loop walks off
+            # candidate here is distinct from the last, so the walk moves off
             # the taken values and stops at the first free one.
             #
             # Truncating the FINISHED candidate instead of the base is the
             # mutation this shape exists to survive: the cut then lands on the
             # suffix, every candidate comes out identical to the one before it,
-            # and the loop never terminates at all.
+            # and the walk never terminates at all.
             marker = f"-{suffix}"
-            slug = f"{base_slug[: max_length - len(marker)]}{marker}"
+            yield f"{base_slug[: max_length - len(marker)]}{marker}"
             suffix += 1
-        return slug
 
     def save(self, *args, **kwargs):
 
-        if not self.slug:
-            self.slug = self._generate_unique_slug()
+        if self.slug:
+            super().save(*args, **kwargs)
+            return
 
-        super().save(*args, **kwargs)
+        for candidate in self._slug_candidates():
+            self.slug = candidate
+            try:
+                # Each attempt gets its own atomic block so a rejected insert
+                # rolls back to the savepoint and the outer transaction (if
+                # any) stays usable for the retry.
+                with transaction.atomic():
+                    super().save(*args, **kwargs)
+                return
+            except IntegrityError as exc:
+                # Only the slug unique constraint is retryable through this
+                # loop: both engines name it in the error (PostgreSQL's
+                # constraint name and SQLite's column list both carry
+                # "slug"), so anything else is a real defect and must
+                # propagate rather than burn through the candidate walk.
+                if "slug" not in str(exc):
+                    raise
+                continue
+
+        # Unreachable: the candidate walk is unbounded, so the loop only
+        # exits by returning or by a non-slug IntegrityError propagating.
+        raise AssertionError("slug candidate walk exhausted")  # pragma: no cover
 
     def adjust_stock(self, user, delta: int, reason: str, note: str = "") -> None:
         """Admin-side manual inventory adjustment. Raises ValueError if the
