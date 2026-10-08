@@ -19,10 +19,11 @@ Dedup: per alert-type cooldown (``settings.ALERT_COOLDOWN_SECONDS``,
 default 300). The low-stock and out-of-stock triggers re-fire on every
 staff dashboard load and every stock edit — without a cooldown an admin
 with 40 near-stockout SKUs gets 40 identical mails per dashboard visit and
-a payment-failure burst emails once per failed verify. The cache (default
-LocMemCache; Redis once SPEC-2-03 wires it) records the last-sent time per
-alert type; inside the window the alert is logged (INFO) instead of sent,
-so suppression is observable and testable.
+a payment-failure burst emails once per failed verify. The cooldown lives
+on the dedicated ``alerts`` cache alias (default FileBasedCache, shared
+across gunicorn workers; Redis once SPEC-2-03 wires it), so the mail-bomb
+bound holds across processes; inside the window the alert is logged
+(INFO) instead of sent, so suppression is observable and testable.
 
 Send contract: identical to ``dispatch`` — a send failure is logged with
 its traceback and swallowed (log-only). An SMTP outage must never fail the
@@ -34,7 +35,7 @@ import logging
 from datetime import timedelta
 
 from django.conf import settings
-from django.core.cache import cache
+from django.core.cache import caches
 from django.utils import timezone
 
 from common import notifications
@@ -66,9 +67,9 @@ def _recipients():
 def _in_cooldown(alert_key):
     """True when an alert of this type was sent within the cooldown window.
 
-    Cache-based on purpose: per-process atomicity is enough for a
-    mail-bomb bound, and a race that double-sends costs one duplicate mail,
-    never a business outcome.
+    Cache-based on purpose: the get-then-set is deliberately not made atomic,
+    because a race that double-sends costs one duplicate mail and never a
+    business outcome — a lock here would buy nothing for that price.
 
     Fail-open: a raisable cache backend must not kill the alert, so a
     cache outage degrades to "not suppressed" (the send is attempted,
@@ -76,9 +77,9 @@ def _in_cooldown(alert_key):
     dashboard/health flow that tripped the alert.
     """
     try:
-        if cache.get(f"alerts:cooldown:{alert_key}") is not None:
+        if caches["alerts"].get(f"alerts:cooldown:{alert_key}") is not None:
             return True
-        cache.set(
+        caches["alerts"].set(
             f"alerts:cooldown:{alert_key}",
             True,
             timeout=settings.ALERT_COOLDOWN_SECONDS,
@@ -104,8 +105,17 @@ def _send(alert_key, context, subject):
             logger.info("alert %s suppressed (cooldown)", alert_key)
             return False
         for recipient in _recipients():
-            notifications.send_email(f"alert_{alert_key}", context, subject, recipient)
-            sent = True
+            # Per-recipient isolation: one failing mailbox must not abandon
+            # the rest of the staff list (ASYNC-2d). A send failure is
+            # logged with its traceback and the loop continues; the alert
+            # still reports True when at least one mail left.
+            try:
+                notifications.send_email(
+                    f"alert_{alert_key}", context, subject, recipient
+                )
+                sent = True
+            except Exception:
+                logger.exception("alert %s send to %s failed", alert_key, recipient)
     except Exception:
         # Log-only, like dispatch: the alert must never break the flow
         # that detected the problem.

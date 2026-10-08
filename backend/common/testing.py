@@ -21,7 +21,7 @@ from unittest.mock import patch
 import razorpay
 from django.contrib.auth.models import User
 from django.core import mail
-from django.core.cache import cache
+from django.core.cache import cache, caches
 from django.db import connection
 from django.test import TestCase, override_settings
 from django.utils import timezone
@@ -63,8 +63,10 @@ class ApiTestCase(TestCase):
         # Scoped throttles keep their request history in the default cache,
         # which lives for the whole test run; reset it per test so a rate
         # limit engaged in one test can never 429 another (deterministic
-        # suite, independent of throttle rates in settings).
+        # suite, independent of throttle rates in settings). The alerts
+        # alias carries the cooldown window, so it is reset too.
         cache.clear()
+        caches["alerts"].clear()
 
     # ------------------------------------------------------------------
     # Factories

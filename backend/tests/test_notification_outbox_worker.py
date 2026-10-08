@@ -53,7 +53,7 @@ from unittest import mock
 
 from django.contrib.auth import get_user_model
 from django.core import mail
-from django.core.cache import cache
+from django.core.cache import caches
 from django.core.management import call_command
 from django.core.management.base import CommandError
 from django.db import (
@@ -1248,7 +1248,7 @@ class OutboxDeadLetterAlertTests(OutboxDrainTestCase):
         super().setUp()
         # The cooldown is a cache-backed, per-alert-type window; a previous
         # test's entry would suppress this class's first alert.
-        cache.clear()
+        caches["alerts"].clear()
 
     def alert_mails(self):
         return [message for message in mail.outbox if message.to == [ALERT_RECIPIENT]]
@@ -1330,7 +1330,7 @@ class OutboxDeadLetterAlertTests(OutboxDrainTestCase):
             notifications.drain_notifications()
             self.assertEqual(len(self.alert_mails()), 1)
 
-            cache.clear()
+            caches["alerts"].clear()
             self.queue_undeliverable("alertrepeatthree")
             notifications.drain_notifications()
         self.assertEqual(len(self.alert_mails()), 2)

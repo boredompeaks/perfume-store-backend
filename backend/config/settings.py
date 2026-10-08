@@ -626,6 +626,34 @@ MFA_TRUST_COOKIE_SAMESITE = os.getenv("MFA_TRUST_COOKIE_SAMESITE", "Strict")
 # SPEC-19-2 [R-19.20/R-19.21] admin alerts. Comma-separated staff/admin
 # mailboxes; empty disables admin alerts entirely (no guessed recipient).
 ALERT_RECIPIENTS = os.getenv("ALERT_RECIPIENTS", "")
+
+# Cache backends. The default stays per-process LocMemCache (DRF throttle
+# history, sessions) — changing it would alter throttle semantics, which is
+# a separate defect class. The alert cooldown gets its own alias on a
+# SHARED backend so the documented mail-bomb bound holds across gunicorn
+# workers (ASYNC-2d): LocMemCache is per-process, so each worker kept its
+# own window and the bound did not hold. FileBasedCache is the zero-
+# dependency shared backend (no redis/memcached in requirements); point
+# ALERT_CACHE_BACKEND at Redis/Memcached once SPEC-2-03 wires one.
+# Locations use the `or default` shape so a stray empty value in .env
+# cannot resolve to "" — FileBasedCache treats that as the process CWD and
+# would scatter cache files wherever the app happens to be started.
+CACHES = {
+    "default": {
+        "BACKEND": _env_dotted_path(
+            "CACHE_BACKEND", "django.core.cache.backends.locmem.LocMemCache"
+        ),
+        "LOCATION": (os.getenv("CACHE_LOCATION") or "").strip() or "default",
+    },
+    "alerts": {
+        "BACKEND": _env_dotted_path(
+            "ALERT_CACHE_BACKEND",
+            "django.core.cache.backends.filebased.FileBasedCache",
+        ),
+        "LOCATION": (os.getenv("ALERT_CACHE_LOCATION") or "").strip()
+        or str(BASE_DIR / "alert_cache"),
+    },
+}
 # Per-alert-type dedupe window in seconds: an alert type that already sent
 # inside the window is logged instead of re-sent (mail-bomb bound for the
 # pollable /health/ and dashboard triggers).
