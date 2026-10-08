@@ -6,7 +6,6 @@ import base64
 import math
 import os
 import re
-import unittest
 from datetime import timedelta
 from decimal import Decimal
 from unittest.mock import patch
@@ -21,7 +20,7 @@ from django.db import (
     transaction,
 )
 from django.db.models import Sum
-from django.test import override_settings, tag
+from django.test import TransactionTestCase, override_settings, tag
 from django.utils import timezone
 from rest_framework.exceptions import PermissionDenied
 from rest_framework.request import Request
@@ -36,7 +35,11 @@ from common.roles import (
     STAFF_ROLES,
     sync_role_groups,
 )
-from common.testing import ApiTestCase
+from common.testing import (
+    ApiTestCase,
+    covering_indexes,
+    redundant_covering_indexes,
+)
 from config.settings import _env_int
 from orders.models import Order
 from products.admin import ProductAdmin
@@ -279,20 +282,197 @@ class SlugGenerationTests(ApiTestCase):
         self.assertEqual(self.make_product(name="###").slug, "product-2")
 
     def test_long_name_collision_truncated_to_slug_max_length(self):
-        """The collision path truncates the base slug so base + suffix fits."""
-        self.make_product(name="x" * 150)
-        second = self.make_product(name="x" * 150)
-        self.assertEqual(second.slug, "x" * 95 + "-2")
-        self.assertLessEqual(len(second.slug), 100)
+        """The collision branch gives the base up to the suffix's characters.
 
-    @unittest.expectedFailure
-    def test_slug_overflow_without_collision_currently_exceeds_max_length(self):
-        """Latent bug (V-15 neighbour): the FIRST product with a 150-char name
-        keeps a 150-char slug because truncation only happens when a suffix is
-        appended. SQLite tolerates it; a varchar(100) DB would reject the
-        INSERT. Flip when slug generation truncates unconditionally."""
-        product = self.make_product(name="x" * 150)
-        self.assertLessEqual(len(product.slug), 100)
+        Expected values are hand-written literals, never recomputed from the
+        bound: a pin derived from the constant it guards agrees with a wrong
+        constant from both sides. 98 + len("-2") == the declared 100.
+
+        The name here is 100 characters, the model's own declared bound, so the
+        row stores on both engines. The over-long input that this pin used to
+        use (150) is not a valid row at all -- see
+        ``test_over_long_name_collision_against_a_stored_row``.
+        """
+        first = self.make_product(name="x" * 100)
+        self.assertEqual(first.slug, "x" * 100)
+        second = self.make_product(name="x" * 100)
+        self.assertEqual(second.slug, "x" * 98 + "-2")
+        self.assertEqual(len(second.slug), 100)
+
+    def test_over_long_name_collision_against_a_stored_row(self):
+        """Same collision branch, with the base coming from an over-long name.
+
+        This is the case the 150-character fixture used to describe. The
+        generated value is pinned in memory rather than through ``save()``
+        because PostgreSQL cannot store a 150-character ``name`` (its own
+        declared bound is the same 100) -- the earlier version of this pin
+        therefore only ever ran on SQLite, the engine that enforces no
+        declared length, and errored on the engine production runs.
+        """
+        self.make_product(name="x" * 100)
+        candidate = products(name="x" * 150)
+        candidates = candidate._slug_candidates()
+        next(candidates)
+        self.assertEqual(next(candidates), "x" * 98 + "-2")
+
+    def test_long_name_without_collision_truncated_to_slug_max_length(self):
+        """PG-2b: the FIRST candidate is clamped to the declared bound.
+
+        This was the shipped ``@unittest.expectedFailure`` (V-15 neighbour),
+        whose own instruction was to "flip when slug generation truncates
+        unconditionally": the unclamped first candidate kept all 150
+        slugified characters. Un-xfailed because it now truncates, and left
+        as a pin rather than deleted, because the overshoot was a real property
+        of the generator even while the row it came from was not a row the
+        database would accept.
+        """
+        candidate = products(name="x" * 150)
+        generated = next(candidate._slug_candidates())
+        self.assertEqual(generated, "x" * 100)
+        self.assertEqual(len(generated), 100)
+
+    # U+00BD VULGAR FRACTION ONE HALF. ``slugify`` normalises it to a digit, a
+    # FRACTION SLASH and a digit, then drops the non-ASCII slash -- so ONE
+    # character of name becomes TWO characters of slug. This is the whole
+    # mechanism that makes an over-long generated value reachable from a row
+    # the database will actually accept: the name stays inside its own declared
+    # width while the value derived from it leaves the slug column's. Written as
+    # an escape so the width of a source line is not the width of the name.
+    WIDENING_CHAR = "\u00bd"
+
+    def test_storable_name_slugifying_wider_than_the_slug_column_is_clamped(self):
+        """PG-2b cycle 2: the clamp reached through a row that STORES.
+
+        Every other truncation pin in this class drives an over-long name, and
+        an over-long name is not a row either database accepts - ``name`` is
+        declared at the same 100 as ``slug``. Those pins therefore only ever
+        ran on SQLite, which enforces no declared length, so PostgreSQL never
+        saw the clamp exercised through a real save at all. This one uses 60
+        widening characters: 60 is inside the declared 100, so the row saves on
+        both engines, while ``slugify`` turns it into 120 characters of slug and
+        the generated value no longer fits the column it is about to be
+        written to.
+
+        The expected value is a hand-written literal, never
+        ``slugify(name)[:100]``: a pin derived from the constant it guards
+        agrees with a wrong constant from both sides. Sixty widening characters
+        are ``"12"`` sixty times over, and the first 100 characters of that run
+        are ``"12"`` fifty times over.
+
+        Completeness: widening the ``slug`` column changes what is stored here
+        and fails this assertion, so this is a drift guard and not a snapshot
+        of the current bound.
+        """
+        product = self.make_product(name=self.WIDENING_CHAR * 60)
+        self.assertEqual(product.slug, "12" * 50)
+        self.assertEqual(len(product.slug), 100)
+        # Re-read through the database rather than trusting the in-memory
+        # attribute: the defect this guards is a value the COLUMN rejects, so
+        # the pin has to be about what the column accepted.
+        stored = products.objects.get(pk=product.pk).slug
+        self.assertEqual(stored, "12" * 50)
+
+    def test_storable_widening_name_collision_lands_inside_the_slug_column(self):
+        """Same input through the collision branch, still a storable row.
+
+        The first row takes the whole 100 characters, so the second one has to
+        give the base up to the "-2" marker's two characters. Hand-written
+        again: ``"12"`` forty-nine times then the marker.
+        """
+        self.make_product(name=self.WIDENING_CHAR * 60)
+        second = self.make_product(name=self.WIDENING_CHAR * 60)
+        self.assertEqual(second.slug, "12" * 49 + "-2")
+        self.assertEqual(len(second.slug), 100)
+        self.assertNotEqual(second.slug, "12" * 50)
+
+    def test_one_over_the_bound_generation_loses_exactly_one_character(self):
+        candidate = products(name="z" * 101)
+        self.assertEqual(next(candidate._slug_candidates()), "z" * 100)
+
+    def test_slug_max_length_declaration_is_pinned(self):
+        """The bound the generator reads is the declared one, at a literal.
+
+        This is the completeness check for the truncation pins above: they
+        assert behaviour at 100 characters, so widening the column has to fail
+        HERE, naming the declaration, rather than silently leaving them
+        asserting against a bound that no longer exists.
+        """
+        self.assertEqual(products._meta.get_field("slug").max_length, 100)
+
+    def test_slug_at_the_bound_is_left_whole(self):
+        """Clamping must not eat characters that already fit."""
+        self.assertEqual(self.make_product(name="y" * 99).slug, "y" * 99)
+        self.assertEqual(self.make_product(name="y" * 100).slug, "y" * 100)
+
+    def test_two_names_sharing_a_prefix_get_distinct_slugs(self):
+        """Threat case for blind truncation: both names slugify to the SAME 100
+        characters -- they differ only in case, which slugify folds -- so the
+        discriminator can only come from the collision branch, and cutting the
+        finished candidate instead of the base would collapse the pair onto one
+        slug and hand the uniqueness constraint a 500."""
+        first = self.make_product(name="o" * 100)
+        second = self.make_product(name="O" * 100)
+        self.assertEqual(first.slug, "o" * 100)
+        self.assertEqual(second.slug, "o" * 98 + "-2")
+        self.assertNotEqual(first.slug, second.slug)
+        # The over-long form of the same hazard, in memory for the reason given
+        # on test_over_long_name_collision_against_a_stored_row.
+        third = products(name="o" * 120 + "cc")
+        candidates = third._slug_candidates()
+        next(candidates)
+        next(candidates)
+        self.assertEqual(next(candidates), "o" * 98 + "-3")
+
+    def test_collision_suffix_keeps_every_candidate_inside_the_bound(self):
+        """A multi-digit suffix has to make the base shorter, or a late
+        collision would push the value back over the declared length. Twelve
+        rows on one base walk the counter to a two-digit marker, which the
+        single-digit cases cannot reach."""
+        base = "w" * 100
+        first = self.make_product(name=base)
+        self.assertEqual(first.slug, "w" * 100)
+        slugs = [first.slug]
+        for _ in range(11):
+            slugs.append(self.make_product(name=base).slug)
+        self.assertEqual(len(slugs), 12)
+        self.assertEqual(len(set(slugs)), 12)
+        self.assertEqual(slugs[-1], "w" * 97 + "-12")
+        self.assertEqual(len(slugs[-1]), 100)
+        for slug in slugs:
+            self.assertLessEqual(len(slug), 100)
+        self.assertEqual(products.objects.filter(slug__in=slugs).count(), 12)
+
+    def test_empty_and_punctuation_names_use_the_fallback(self):
+        """slugify returns nothing for these, so the FALLBACK is what has to
+        stay inside the bound -- and it does without truncating anything,
+        which is why the length clamp is not what saves these rows."""
+        self.assertEqual(self.make_product(name="").slug, "product")
+        self.assertEqual(self.make_product(name="###").slug, "product-2")
+        # An over-long name of pure punctuation slugifies to nothing at all, so
+        # the fallback is still what lands in the column.
+        candidates = products(name="!" * 150)._slug_candidates()
+        next(candidates)
+        next(candidates)
+        self.assertEqual(next(candidates), "product-3")
+
+    def test_non_slug_integrity_error_propagates(self):
+        """The retry loop must not swallow a real defect: an IntegrityError
+        that is not the slug unique constraint propagates unchanged rather
+        than burning through the candidate walk."""
+        candidate = products(
+            name="Rose Water",
+            description="d",
+            price="10.00",
+            size=1,
+            stock=1,
+            category="Floral",
+        )
+        with patch(
+            "django.db.models.Model.save",
+            side_effect=IntegrityError("some other constraint"),
+        ):
+            with self.assertRaises(IntegrityError):
+                candidate.save()
 
     def test_explicit_slug_preserved_on_resave(self):
         product = self.make_product(name="Rose Water", slug="custom-slug")
@@ -305,6 +485,72 @@ class SlugGenerationTests(ApiTestCase):
         product.save()
         product.refresh_from_db()
         self.assertEqual(product.slug, "custom-slug")
+
+
+@tag("products")
+class SlugGenerationRaceTests(TransactionTestCase):
+    """Two threads, two connections, one new name: the slug generation
+    must not let an IntegrityError escape, and both rows must survive with
+    distinct slugs.
+
+    ``TransactionTestCase`` and not ``TestCase``: the point is two SEPARATE
+    database connections holding real row locks, and a test-case transaction
+    would put both workers in the same one, where the race cannot happen.
+    ``close_old_connections`` per worker is what makes them genuinely
+    separate. Driven on PostgreSQL -- the engine that enforces the unique
+    constraint under real concurrency -- rather than only on SQLite, which
+    serialises writes and so cannot exhibit the window this pin exists for.
+    """
+
+    def test_two_threads_one_name_both_rows_survive(self):
+        import threading
+
+        from django.db import OperationalError, close_old_connections
+
+        name = "Contended Rose Aurum"
+        barrier = threading.Barrier(2)
+        errors = []
+
+        def worker():
+            close_old_connections()
+            try:
+                barrier.wait()
+                products.objects.create(
+                    name=name,
+                    description="d",
+                    price="10.00",
+                    size=1,
+                    stock=1,
+                    category="Floral",
+                )
+            except Exception as exc:  # reported, never swallowed
+                errors.append(exc)
+            finally:
+                close_old_connections()
+
+        threads = [threading.Thread(target=worker) for _ in range(2)]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join(timeout=30)
+
+        if connection.vendor == "postgresql":
+            # The guarantee this pin exists for: no IntegrityError escapes
+            # the generation path, and both rows survive with distinct slugs.
+            self.assertEqual(errors, [])
+            self.assertEqual(products.objects.count(), 2)
+            slugs = set(products.objects.values_list("slug", flat=True))
+            self.assertEqual(len(slugs), 2)
+        else:
+            # SQLite serialises writes: a genuinely concurrent insert is
+            # refused with OperationalError rather than blocking, which is
+            # the engine doing the mutual exclusion itself. That refusal is
+            # the documented consequence of the engine's own write
+            # serialisation -- but an IntegrityError escaping the generation
+            # path is never acceptable on any engine, so it is asserted
+            # absent here too.
+            for exc in errors:
+                self.assertIsInstance(exc, OperationalError)
 
 
 @tag("products")
@@ -1271,16 +1517,23 @@ class ProductCatalogIndexSchemaTests(ApiTestCase):
     def test_slug_stays_satisfied_by_its_unique_constraint(self):
         """2549: unique=True on slug (2479) already implies the lookup
         index the spec asks to start with — the pin rejects any duplicate
-        index stacked on top of the constraint."""
-        covering = [
-            info
-            for info in self._table_constraints(products).values()
-            if info["columns"] == ["slug"]
-        ]
+        index stacked on top of the constraint.
+
+        The one non-unique covering index a correct schema may carry is the
+        engine's own ``varchar_pattern_ops`` LIKE index, which exists for
+        ``icontains`` and must not be unique; ``redundant_covering_indexes``
+        excludes it by the name Django itself would have generated.
+        """
+        covering = covering_indexes(products, "slug")
         self.assertTrue(covering, "no constraint on slug at all")
         self.assertTrue(
-            all(info["unique"] for info in covering),
-            f"slug grew a non-unique duplicate index: {covering}",
+            any(info["unique"] for info in covering.values()),
+            f"slug has no unique covering constraint: {covering}",
+        )
+        self.assertEqual(
+            redundant_covering_indexes(products, "slug"),
+            {},
+            "slug grew a non-unique duplicate index",
         )
 
 
