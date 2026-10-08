@@ -4,8 +4,9 @@
 Every alert rides the SPEC-19-1 single send path (common.notifications
 send_email — no new send_mail anywhere), targets ALERT_RECIPIENTS only,
 is suppressed inside its per-type cooldown, and is log-only on send
-failure (an alert can never break the flow that tripped it). locmem
-backend only — no network.
+failure (an alert can never break the flow that tripped it). The
+cooldown rides the dedicated ``alerts`` cache alias — no network, and
+the alias is cleared per test.
 """
 
 from datetime import timedelta
@@ -14,7 +15,7 @@ from unittest import mock
 from django.conf import settings
 from django.contrib.auth.models import User
 from django.core import mail
-from django.core.cache import cache
+from django.core.cache import cache, caches
 from django.test import override_settings, tag
 from django.utils import timezone
 
@@ -30,9 +31,9 @@ def alert_recipients(value):
 
 
 def _clear_cooldowns():
-    # The default cache (LocMemCache) is cleared per test by ApiTestCase,
-    # but explicit clearing keeps the cooldown tests self-evident.
-    cache.clear()
+    # The alerts cache alias is cleared per test by ApiTestCase, but
+    # explicit clearing keeps the cooldown tests self-evident.
+    caches["alerts"].clear()
 
 
 def _seed_failures(count, minutes_ago=1):
@@ -153,7 +154,7 @@ class CooldownTests(ApiTestCase):
             )
             # Simulate the window passing by expiring the marker directly
             # (deterministic — no sleeps, no time mocking).
-            cache.delete("alerts:cooldown:low_stock")
+            caches["alerts"].delete("alerts:cooldown:low_stock")
             self.assertTrue(
                 alerts.notify_low_stock([{"id": 1, "name": "Rose Aurum", "stock": 2}])
             )
@@ -355,9 +356,88 @@ class SendFailureContractTests(ApiTestCase):
         the dashboard/health flow that tripped the alert."""
         with alert_recipients("staff@x.com"):
             _clear_cooldowns()
-            with mock.patch.object(cache, "get", side_effect=Exception("cache down")):
+            with mock.patch.object(
+                caches["alerts"], "get", side_effect=Exception("cache down")
+            ):
                 sent = alerts.notify_low_stock(
                     [{"id": 1, "name": "Rose Aurum", "stock": 2}]
                 )
         self.assertTrue(sent)
         self.assertEqual(len(mail.outbox), 1)
+
+    def test_one_bad_recipient_does_not_abandon_the_staff_list(self):
+        """Per-recipient isolation (ASYNC-2d): a single unreachable
+        mailbox must not silently drop the rest of the staff list — the
+        surviving recipients still get the alert, and the alert reports
+        True because a mail actually left for one of them."""
+        attempts = []
+
+        def send_email(alert_key, context, subject, recipient):
+            attempts.append(recipient)
+            if recipient == "down@x.com":
+                raise Exception("smtp refused")
+            return None
+
+        with alert_recipients("down@x.com, up@x.com"):
+            _clear_cooldowns()
+            with mock.patch("common.notifications.send_email", side_effect=send_email):
+                with self.assertLogs("ops.alerts", level="ERROR") as logs:
+                    sent = alerts.notify_low_stock(
+                        [{"id": 1, "name": "Rose Aurum", "stock": 2}]
+                    )
+        # The loop continued past the failing recipient rather than
+        # aborting on it.
+        self.assertEqual(attempts, ["down@x.com", "up@x.com"])
+        self.assertTrue(sent)
+        self.assertIn("smtp refused", "\n".join(logs.output))
+
+    def test_all_recipients_failing_reports_false(self):
+        """The True/False seam stays truthful: with every mailbox down,
+        nothing left, so the alert reports False — while still never
+        raising into its trigger."""
+        with alert_recipients("a@x.com, b@x.com"):
+            _clear_cooldowns()
+            with mock.patch(
+                "common.notifications.send_email",
+                side_effect=Exception("smtp down"),
+            ):
+                with self.assertLogs("ops.alerts", level="ERROR"):
+                    sent = alerts.notify_low_stock(
+                        [{"id": 1, "name": "Rose Aurum", "stock": 2}]
+                    )
+        self.assertFalse(sent)
+
+    def test_send_backstop_swallows_a_failure_outside_the_recipient_loop(self):
+        """The outer try in _send is the module's load-bearing log-only
+        guarantee: an exception raised anywhere in the dispatch — including
+        outside the per-recipient loop — must never propagate into the
+        dashboard/health flow that tripped the alert. The per-recipient
+        isolation above narrows what reaches it, not whether it exists."""
+        _clear_cooldowns()
+        with mock.patch.object(
+            alerts, "_recipients", side_effect=Exception("settings broke")
+        ):
+            with self.assertLogs("ops.alerts", level="ERROR") as logs:
+                sent = alerts._send("low_stock", {"detail": "x"}, "Subject")
+        self.assertFalse(sent)
+        self.assertIn("settings broke", "\n".join(logs.output))
+
+
+@tag("alerts")
+class CooldownBackendTests(ApiTestCase):
+    """The cooldown must sit on a backend shared across worker processes
+    (ASYNC-2d). LocMemCache is per-process, so each gunicorn worker held
+    its own window and the documented mail-bomb bound did not hold."""
+
+    def test_cooldown_marker_lives_on_the_alerts_alias(self):
+        with alert_recipients("staff@x.com"):
+            _clear_cooldowns()
+            alerts.notify_low_stock([{"id": 1, "name": "Rose Aurum", "stock": 2}])
+        self.assertIsNotNone(caches["alerts"].get("alerts:cooldown:low_stock"))
+        self.assertIsNone(cache.get("alerts:cooldown:low_stock"))
+
+    def test_alerts_alias_is_distinct_from_the_default_alias(self):
+        """Two aliases, two backends: the alert cooldown cannot fall back
+        into the per-process default cache, which still holds throttle
+        history and sessions."""
+        self.assertIsNot(caches["alerts"], caches["default"])

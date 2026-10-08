@@ -64,6 +64,10 @@ _DEV_ENV = {"DJANGO_DEBUG": "true"}
 # documented default for it.
 _LEAKED_ENV_NAMES = frozenset(
     {
+        "ALERT_CACHE_BACKEND",
+        "ALERT_CACHE_LOCATION",
+        "CACHE_BACKEND",
+        "CACHE_LOCATION",
         "CSRF_COOKIE_SECURE",
         # Outside the DJANGO_ family, and a documented default this module
         # pins: without the scrub, an untracked local .env value reached the
@@ -1357,3 +1361,63 @@ class TransportHardeningTests(SimpleTestCase):
         self.assertIn("HSTS 0", res.stdout)
         self.assertIn("SESSIONSEC True", res.stdout)
         self.assertIn("CSRFSEC True", res.stdout)
+
+
+class CacheAliasTests(SimpleTestCase):
+    """ASYNC-2d: the admin-alert cooldown has to hold across gunicorn
+    workers, so it gets its own `alerts` cache alias on a shared backend
+    instead of living on the per-process default cache. The default alias
+    stays LocMemCache because it holds DRF throttle history and sessions,
+    and re-pointing it would change throttle semantics.
+
+    Pinned in a subprocess because the aliases are built at settings-import
+    time from the environment, like every other documented default here.
+    """
+
+    _PRINT_ALIASES = (
+        "import config.settings as s; "
+        "print('ALIASES', sorted(s.CACHES)); "
+        "print('DEFAULT', s.CACHES['default']['BACKEND']); "
+        "print('ALERTS', s.CACHES['alerts']['BACKEND'])"
+    )
+
+    def test_alert_cooldown_alias_is_separate_and_shared_by_default(self):
+        res = run_settings_import(_DEV_ENV, snippet=self._PRINT_ALIASES)
+        self.assertEqual(res.returncode, 0, res.stderr)
+        self.assertIn("ALIASES ['alerts', 'default']", res.stdout)
+        self.assertIn(
+            "DEFAULT django.core.cache.backends.locmem.LocMemCache", res.stdout
+        )
+        self.assertIn(
+            "ALERTS django.core.cache.backends.filebased.FileBasedCache", res.stdout
+        )
+
+    def test_empty_alert_cache_location_does_not_resolve_to_the_cwd(self):
+        """FileBasedCache turns an empty LOCATION into the process working
+        directory and creates it, so a bare `ALERT_CACHE_LOCATION=` copied
+        out of .env.example must fall back to the documented directory
+        rather than scattering cache files wherever the app was started."""
+        res = run_settings_import(
+            {**_DEV_ENV, "ALERT_CACHE_LOCATION": ""},
+            snippet=(
+                "import config.settings as s; "
+                "print('LOCATION', s.CACHES['alerts']['LOCATION'])"
+            ),
+        )
+        self.assertEqual(res.returncode, 0, res.stderr)
+        location = next(
+            line.split(" ", 1)[1]
+            for line in res.stdout.splitlines()
+            if line.startswith("LOCATION ")
+        )
+        self.assertNotEqual(location.strip(), "")
+        self.assertNotEqual(location.strip(), tempfile.gettempdir())
+        self.assertEqual(os.path.basename(location.strip()), "alert_cache")
+
+    def test_a_malformed_alert_cache_backend_refuses_to_boot(self):
+        """A typo in the shared-backend knob must fail loudly at boot, not
+        quietly fall back to a per-process cache and silently restore the
+        bug this alias exists to fix."""
+        res = run_settings_import({**_DEV_ENV, "ALERT_CACHE_BACKEND": "/srv/cache"})
+        self.assertNotEqual(res.returncode, 0, res.stdout)
+        self.assertIn("ALERT_CACHE_BACKEND", res.stderr)
