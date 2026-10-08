@@ -6,6 +6,7 @@ the race is exercised by resolving the two verifications against the same
 rows in sequence - exactly the interleaving the row locks permit.
 """
 
+from django.conf import settings
 from django.test import tag
 from django.utils import timezone
 
@@ -189,7 +190,13 @@ class CouponRaceTests(ApiTestCase):
 class PaginationStabilityTests(ApiTestCase):
     # e2e 9. pagination is stable across pages even with equal created_at (F-12 context)
     def test_pages_partition_the_catalog_stably_across_repeated_requests(self):
-        names = [f"Perfume {i}" for i in range(1, 6)]
+        # Enough rows to force MORE THAN ONE page: a catalogue that fits in a
+        # single page is returned whole by every engine and cannot demonstrate
+        # that the partition is stable, so the count is derived from the
+        # configured page size rather than typed - a literal here would quietly
+        # stop crossing the boundary the moment the page size changed.
+        page_size = settings.PRODUCTS_PAGE_SIZE
+        names = [f"Perfume {i}" for i in range(1, 2 * page_size + 1)]
         for name in names:
             self.make_product(name=name)
         # identical timestamps: ordering must not depend on timestamp jitter
@@ -199,16 +206,29 @@ class PaginationStabilityTests(ApiTestCase):
 
         all_ids = []
         page = 1
+        pages_walked = 0
         while True:
             res = self.client.get("/api/products/", {"page": page})
             self.assertEqual(res.status_code, 200, res.data)
+            self.assertTrue(res.data["results"], f"page {page} came back empty")
             all_ids.extend(row["id"] for row in res.data["results"])
+            pages_walked += 1
             if not res.data["next_page"]:
                 break
             page += 1
 
-        # every product appears exactly once across pages (no skips/repeats)
-        self.assertEqual(sorted(all_ids), sorted(range(1, 6)))
+        # The walk really did cross a page boundary, or the rest of this test
+        # is asserting that one page is returned intact.
+        self.assertGreater(pages_walked, 1, "the catalogue fit on a single page")
+
+        # every product appears exactly once across pages (no skips/repeats),
+        # measured against the rows this test created rather than against a
+        # literal id range: a sequence is not transactional, so on PostgreSQL
+        # these rows do not get pks 1..N in a fresh test database.
+        self.assertEqual(
+            sorted(all_ids),
+            sorted(Product.objects.values_list("id", flat=True)),
+        )
 
         # a repeat walk yields the identical partition (stable across requests)
         repeat = []

@@ -35,7 +35,11 @@ from common.roles import (
     STAFF_ROLES,
     sync_role_groups,
 )
-from common.testing import ApiTestCase
+from common.testing import (
+    ApiTestCase,
+    covering_indexes,
+    redundant_covering_indexes,
+)
 from config.settings import _env_int
 from orders.models import Order
 from products.admin import ProductAdmin
@@ -1513,16 +1517,23 @@ class ProductCatalogIndexSchemaTests(ApiTestCase):
     def test_slug_stays_satisfied_by_its_unique_constraint(self):
         """2549: unique=True on slug (2479) already implies the lookup
         index the spec asks to start with — the pin rejects any duplicate
-        index stacked on top of the constraint."""
-        covering = [
-            info
-            for info in self._table_constraints(products).values()
-            if info["columns"] == ["slug"]
-        ]
+        index stacked on top of the constraint.
+
+        The one non-unique covering index a correct schema may carry is the
+        engine's own ``varchar_pattern_ops`` LIKE index, which exists for
+        ``icontains`` and must not be unique; ``redundant_covering_indexes``
+        excludes it by the name Django itself would have generated.
+        """
+        covering = covering_indexes(products, "slug")
         self.assertTrue(covering, "no constraint on slug at all")
         self.assertTrue(
-            all(info["unique"] for info in covering),
-            f"slug grew a non-unique duplicate index: {covering}",
+            any(info["unique"] for info in covering.values()),
+            f"slug has no unique covering constraint: {covering}",
+        )
+        self.assertEqual(
+            redundant_covering_indexes(products, "slug"),
+            {},
+            "slug grew a non-unique duplicate index",
         )
 
 
