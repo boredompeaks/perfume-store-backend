@@ -932,6 +932,10 @@ class OutboxTwoWorkerTests(TransactionTestCase):
         measurement on BOTH engines; a double-claim would show as two. The
         exact count is asserted only where the engine can be relied on to let
         one of the two writes through, because SQLite may refuse both.
+
+        The follow-up claim at the end is gated on the same condition, and
+        ``test_the_unguarded_follow_up_assertion_is_what_used_to_flake`` pins
+        the gate itself, so the two halves cannot drift apart again.
         """
         row = self._make_row("two-worker")
         _claimed, errors = self._race(barrier=True)
@@ -949,8 +953,25 @@ class OutboxTwoWorkerTests(TransactionTestCase):
                 1,
                 "neither worker claimed the row on an engine with row locks",
             )
-        # And the row is now nobody else's to take.
-        self.assertIsNone(notifications.claim_next_notification())
+        # And the row is now nobody else's to take. This one is ENGINE-GATED for
+        # the same reason the exact count above is: when an engine serialises
+        # writes it may refuse BOTH of the racing claims, in which case nobody
+        # claimed the row and it is still legitimately claimable — so demanding
+        # None here unconditionally asserts SQLite's write policy, not this
+        # module's behaviour. Where the row WAS claimed the lease must keep it
+        # out of reach on either engine, and that is asserted un-gated.
+        follow_up = notifications.claim_next_notification()
+        if row.attempts:
+            self.assertIsNone(
+                follow_up,
+                "a claimed row stayed claimable: the lease did not take effect",
+            )
+        else:
+            self.assertEqual(
+                follow_up,
+                row.pk,
+                "an unclaimed row must still be claimable, by this or another worker",
+            )
 
     def test_two_workers_racing_two_rows_still_send_each_one_exactly_once(self):
         """End to end, on the customer's side of the wire.
@@ -989,6 +1010,43 @@ class OutboxTwoWorkerTests(TransactionTestCase):
         notifications.drain_notifications()
         self.assertEqual(len(mail.outbox), 2)
         self.assertEqual(NotificationOutbox.objects.filter(status="sent").count(), 2)
+
+    def test_the_unguarded_follow_up_assertion_is_what_used_to_flake(self):
+        """The pin: an UNCLAIMED row must still be claimable, on any engine.
+
+        BUG-6, and this is a DETERMINISTIC pin for it rather than another
+        probabilistic race. The racing test above used to assert, with no engine
+        guard, that ``claim_next_notification()`` returned ``None`` after two
+        workers had gone at one row. That is false whenever the engine refuses
+        BOTH writes: nobody claimed the row, so it is still claimable and the
+        function correctly returns its pk. SQLite refuses both often enough to
+        redden a gated range roughly one run in fifteen.
+
+        Asserting that half directly, with no threads and no barrier, pins the
+        fact the guard exists to accommodate. The other half — a row that WAS
+        claimed must NOT be claimable again, because the lease pushed its
+        ``next_attempt_at`` out -- is asserted here un-gated, so this holds on
+        SQLite and on an engine with real row locks alike. A regression that
+        dropped the lease, or that re-broke the follow-up assertion into an
+        unguarded ``assertIsNone``, fails here on both engines.
+        """
+        row = self._make_row("follow-up-guard")
+
+        # Nothing has claimed it, so it is claimable: this is the assertion the
+        # old code got wrong.
+        self.assertEqual(
+            notifications.claim_next_notification(),
+            row.pk,
+            "an untouched row must be claimable",
+        )
+
+        # Claimed once, the lease puts it out of reach — on every engine.
+        self.assertIsNone(
+            notifications.claim_next_notification(),
+            "the lease must put a claimed row out of reach",
+        )
+        row.refresh_from_db()
+        self.assertEqual(row.attempts, 1)
 
     def test_one_worker_drains_a_row_two_workers_must_share(self):
         """The end-to-end shape: one pass sends it once, not twice.

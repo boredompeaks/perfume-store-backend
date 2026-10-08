@@ -1,0 +1,21 @@
+{
+  "task": "BUG-6",
+  "title": "The lease is what keeps a claimed outbox row out of reach, on both engines",
+  "note": "BUG-6 was an ASSERTION whose engine guard did not match the engine fact it was guarding. The racing test asserted the exact claim count behind `if connection.features.has_select_for_update` and then, with no guard at all, asserted that a follow-up claim returned `None`. On SQLite the two workers are serialised and the engine may refuse BOTH writes; nobody claimed the row, so it stays legitimately claimable and the unguarded assertion failed on a correctly-behaving system (measured here at 4 failures in 60 runs before the fix, all with the identical `AssertionError: 1 is not None`). The fix gates the trailing assertion on whether the row WAS claimed. M1 is the mutation that proves the guard did not become a shrug: with the lease no longer applied, a claimed row stays claimable and BOTH halves of the new assertion fire - the un-gated `assertIsNone` in the racing test on SQLite, and the un-gated `assertIsNone` in the new pin plus the exact-count invariant on PostgreSQL. Recorded because a guard that is never mutated against is how the original defect got in.",
+  "mutations": [
+    {
+      "id": "M1",
+      "description": "_claim stops pushing the row's next_attempt_at out by the lease, so the claimable predicate stays true for every other worker and a claimed row can be claimed again",
+      "path": "backend/common/notifications.py",
+      "find": "        row.attempts += 1\n        row.next_attempt_at = lease",
+      "replace": "        row.attempts += 1\n        row.next_attempt_at = now",
+      "expected_failing_tests": [
+        "test_the_unguarded_follow_up_assertion_is_what_used_to_flake"
+      ],
+      "claimed_count": 1,
+      "test_scope": [
+        "tests.test_notification_outbox_worker.OutboxTwoWorkerTests.test_the_unguarded_follow_up_assertion_is_what_used_to_flake"
+      ]
+    }
+  ]
+}
