@@ -637,6 +637,21 @@ class OutboxStatusVocabularyTests(OutboxDrainTestCase):
             sorted(outcome.value for outcome in notifications.DrainOutcome),
             ["dead", "failed", "sent", "vanished"],
         )
+        # DrainResult's fields are written out in the module rather than
+        # derived from the enum, because mypy cannot check a computed
+        # namedtuple field list. This is the coupling that derivation gave
+        # away: one field per outcome, in the enum's declaration order, plus
+        # the pass's examined count. Both lists are literals here so neither
+        # side can agree with a wrong version of the other.
+        self.assertEqual(
+            notifications.DrainResult._fields,
+            ("sent", "failed", "dead", "vanished", "examined"),
+        )
+        self.assertEqual(
+            tuple(outcome.value for outcome in notifications.DrainOutcome)
+            + ("examined",),
+            notifications.DrainResult._fields,
+        )
 
     def test_every_status_is_reachable_and_each_says_whether_it_is_claimable(self):
         """One row per status, and the claim answer for each, written out.

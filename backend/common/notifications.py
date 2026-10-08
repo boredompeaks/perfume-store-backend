@@ -130,12 +130,21 @@ _EVENT_HANDLERS = {
     AuditEvent.EventType.ORDER_PAID: _notify_order_paid,
 }
 
-# The vocabulary _EVENT_HANDLERS is keyed on, as a set for lookup. EventType
-# members are str subclasses and compare and hash equal to their own value,
-# so a caller passing either the member or the bare string resolves the same
-# handler — verified rather than assumed, and pinned by a test, because the
-# whole distinction in dispatch() rests on it.
-_EVENT_TYPE_VALUES = frozenset(AuditEvent.EventType)
+# The vocabulary _EVENT_HANDLERS is keyed on, in the enum's own DECLARATION
+# ORDER. ``__members__`` rather than iterating the class: Django's ChoicesType
+# supplies __iter__ at runtime through the metaclass, which mypy does not model
+# (it reports `"type[EventType]" has no attribute "__iter__"`), and __members__
+# is the stdlib-documented mapping from member NAME to member in declaration
+# order. It yields the identical member objects in the identical order — no
+# aliases are declared — so the ordering this module documents is unchanged.
+_EVENT_TYPE_MEMBERS = tuple(AuditEvent.EventType.__members__.values())
+
+# The same vocabulary as a set for lookup, built from the tuple above so the two
+# cannot drift apart. EventType members are str subclasses and compare and hash
+# equal to their own value, so a caller passing either the member or the bare
+# string resolves the same handler — verified rather than assumed, and pinned by
+# a test, because the whole distinction in dispatch() rests on it.
+_EVENT_TYPE_VALUES = frozenset(_EVENT_TYPE_MEMBERS)
 
 
 def events_without_handler():
@@ -160,7 +169,7 @@ def events_without_handler():
     the answer is stable and diffable between calls.
     """
     return tuple(
-        member for member in AuditEvent.EventType if _EVENT_HANDLERS.get(member) is None
+        member for member in _EVENT_TYPE_MEMBERS if _EVENT_HANDLERS.get(member) is None
     )
 
 
@@ -702,8 +711,15 @@ class DrainOutcome(Enum):
     VANISHED = "vanished"
 
 
+# The field list is written out rather than derived from DrainOutcome, which is
+# what mypy requires (it rejects a computed field list for namedtuple, and the
+# caller's `DrainResult(**counts)` cannot be checked without known names). The
+# coupling that derivation gave for free is now pinned by a test instead:
+# `DrainResult._fields` is asserted against the same written-out vocabulary, so
+# adding a DrainOutcome member without adding its field fails there rather than
+# at the first drain pass.
 DrainResult = namedtuple(
-    "DrainResult", [outcome.value for outcome in DrainOutcome] + ["examined"]
+    "DrainResult", ["sent", "failed", "dead", "vanished", "examined"]
 )
 
 

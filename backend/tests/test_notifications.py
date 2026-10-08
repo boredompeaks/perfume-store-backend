@@ -146,6 +146,25 @@ class DispatchTests(ApiTestCase):
         # that only read the capture could not tell the two cases apart.
         self.assertNotIn("not an AuditEvent.EventType member", output)
 
+    def test_ordered_member_tuple_is_the_whole_vocabulary_in_declaration_order(self):
+        # The registry is keyed on the enum but the module keeps its own
+        # ordered enumeration of it (mypy does not model the metaclass
+        # __iter__ Django supplies, so the class object cannot be iterated in
+        # typed code). This pins that enumeration against the enum itself:
+        # every member, the same objects, the enum's own order, and the same
+        # set the DEBUG-vs-WARNING lookup uses — so the two cannot drift apart
+        # and make a member-without-handler read as an unknown name.
+        members = notifications._EVENT_TYPE_MEMBERS
+        self.assertEqual(len(members), len(set(members)))
+        self.assertEqual(set(members), set(AuditEvent.EventType))
+        self.assertEqual(set(members), set(notifications._EVENT_TYPE_VALUES))
+        self.assertEqual(
+            [member.value for member in members],
+            [member.value for member in AuditEvent.EventType],
+        )
+        for member in members:
+            self.assertIsInstance(member, AuditEvent.EventType)
+
     def test_name_outside_the_vocabulary_is_a_warning_not_a_gentle_no_op(self):
         # ASYNC-2e. A name the registry can never match is a programming
         # error, not a content gap, and the two are no longer indistinguishable
