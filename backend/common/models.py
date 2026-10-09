@@ -90,10 +90,18 @@ class AuditEvent(models.Model):
         SYSTEM = "system", "System"
 
     class EventType(models.TextChoices):
-        # Order lifecycle. Further per-transition events ride section 10
-        # (the from->to status machine), not here.
+        # Order lifecycle. The from->to status machine's own transitions
+        # (SPEC-10-05) are named here so the lifecycle notification hook
+        # sites dispatch vocabulary members rather than bare strings —
+        # see orders/events.py for why a name outside this enum is a
+        # registry that resolves nothing. Membership is NOT delivery:
+        # _EVENT_HANDLERS in common.notifications is the separate question
+        # of whether a name has a handler, and these three have none.
         ORDER_CREATED = "order.created", "Order created"
         ORDER_PAID = "order.paid", "Order paid"
+        ORDER_SHIPPED = "order.shipped", "Order shipped"
+        ORDER_DELIVERED = "order.delivered", "Order delivered"
+        ORDER_CANCELLED = "order.cancelled", "Order cancelled"
         # Payment intent + verify outcomes/failures.
         PAYMENT_INITIATED = "payment.initiated", "Payment intent created"
         PAYMENT_SIGNATURE_REJECTED = (
@@ -280,8 +288,22 @@ class NotificationOutbox(models.Model):
     and is unique, so it carries no send state and can never match a second
     row. What actually makes the queue at-least-once is this row's own
     ``status``/``sent_at`` under a claim that locks the row: a worker that
-    dies between sending and stamping re-sends *this* row. That is ASYNC-2c2's
-    work and it does not exist yet.
+    dies between sending and stamping re-sends *this* row. ASYNC-2c2 built
+    that claim (``notifications.claim_next_notification``): it takes the row
+    lock, re-checks the claim predicate, and pushes ``next_attempt_at`` out by
+    a lease - which is what makes two workers incapable of claiming the same
+    row, because the lease makes the predicate false for everyone else the
+    instant the first claim commits.
+
+    **The delivery guarantee is at-least-once, and it is bounded.** A row whose
+    send did not complete is re-sent once its lease lapses, so a crashed or
+    killed worker costs a duplicate email at worst - never a silent loss,
+    which is the failure this table exists to remove. It is *not* exactly-once:
+    a send that succeeded and was lost before the stamp cannot be un-sent, and
+    the queue prefers the duplicate over the loss. Bounded is the other half:
+    ``attempts`` is the bound, and a row that reaches
+    ``NOTIFICATION_OUTBOX_MAX_ATTEMPTS`` goes to ``DEAD`` and stops being
+    claimable.
 
     ``expires_at`` bounds how long the row — and any token material in its
     payload — may sit, and is what makes the table safe to fill with
@@ -289,18 +311,33 @@ class NotificationOutbox(models.Model):
     scrubbed, so deletion on a clock is the compensating control. The deletion
     owner is named and in-tree (``manage.py purge_notification_outbox``);
     nothing schedules it yet, which is stated in that command's docstring.
+    The drain loop treats it as a second gate alongside the backoff: a row
+    whose ``expires_at`` has passed is NOT claimed and NOT sent, because
+    ``PASSWORD_RESET_TIMEOUT`` has almost certainly invalidated whatever
+    one-time material its payload carries and a link that no longer works is
+    worse than no mail at all. Such a row ages out and the purge command
+    deletes it. **The operator's manual retry honours the same gate and will
+    not extend it** — a dead row past this instant is refused and left
+    ``DEAD``, so the status report still shows it, rather than being re-opened
+    to a ``PENDING`` state nothing will ever claim.
 
-    State is only what storage needs — ``PENDING`` until some later task
-    claims, sends and stamps the row. There is deliberately no claim lease,
-    attempt counter, backoff or dead-letter here: those are ASYNC-2c2 (the
-    worker) and ASYNC-2d (retry/dead-letter), and until ASYNC-2c2 lands
-    **nothing drains this table, so rows accumulate**.
+    **The status vocabulary, every value driven by a test.** ``PENDING`` is a
+    row owed a send that has not been attempted yet; ``SENT`` is terminal and
+    carries its stamp; ``FAILED`` is a row whose last attempt failed with
+    retries still in hand, which is why it is a NON-terminal value and why it
+    is claimable again once its backoff lapses; ``DEAD`` is the dead-letter —
+    terminal, not claimable, reached either by exhausting ``attempts`` or by a
+    stored reference that cannot be resolved at all. ``FAILED`` being claimable
+    and ``DEAD`` not is the whole of the dead-letter mechanism: a row that can
+    never succeed stops consuming the batch without the loop having to be told
+    which rows are poison.
     """
 
     class Status(models.TextChoices):
         PENDING = "pending", "Pending"
         SENT = "sent", "Sent"
         FAILED = "failed", "Failed"
+        DEAD = "dead", "Dead-lettered"
 
     # An AuditEvent.EventType value (``order.paid``) or the bare transition
     # names the registry keys on. db_indexed because the drain query filters
@@ -315,7 +352,9 @@ class NotificationOutbox(models.Model):
     # convention.
     dedup_key = models.TextField(unique=True)
     payload = models.JSONField(default=dict, blank=True)
-    # db_indexed: the worker's claim query is "oldest PENDING row".
+    # db_indexed: the worker's claim query is "oldest row whose status is
+    # claimable and whose next_attempt_at has passed", and the operator's
+    # status report groups on it.
     status = models.CharField(
         max_length=10,
         choices=Status.choices,
@@ -336,6 +375,33 @@ class NotificationOutbox(models.Model):
     expires_at = models.DateTimeField(
         db_index=True, default=default_notification_outbox_expiry
     )
+    # How many times this row has been CLAIMED, which is the bound on retries
+    # (settings.NOTIFICATION_OUTBOX_MAX_ATTEMPTS). It counts claims, not
+    # sends, on purpose: a worker that claims a row and then dies before the
+    # send has still consumed an attempt, and pretending otherwise is how an
+    # unbounded retry loop gets written. Counting claims also means the number
+    # is written by exactly one statement - the claim - so it cannot drift
+    # from what the loop actually did.
+    attempts = models.PositiveIntegerField(default=0)
+    # The earliest instant this row may be claimed. Two independent things
+    # write it and both are "not before", which is why one field is enough:
+    #
+    # - the CLAIM pushes it out by NOTIFICATION_OUTBOX_LEASE_SECONDS. That is
+    #   what stops two workers taking the same row: the claim predicate is
+    #   `next_attempt_at <= now`, so the instant the first claim commits the
+    #   predicate is false for every other worker. Without this the predicate
+    #   would still hold after the first claim and the second worker would
+    #   lock, re-check, find the row unchanged and send it a second time.
+    # - a FAILURE pushes it out by the backoff for that attempt.
+    #
+    # db_indexed because it is the second half of the claim predicate, which
+    # is the query that runs on every pass of every worker.
+    next_attempt_at = models.DateTimeField(default=timezone.now, db_index=True)
+    # Why the last attempt failed, as short text, for the operator surface and
+    # for observability. Cleared on success. Deliberately a plain column and
+    # not an AuditEvent: this is the worker's own diagnosis of one row, not a
+    # record of a privileged action.
+    last_error = models.TextField(blank=True, default="")
 
     class Meta:
         # FIFO drain order, with the pk as the tiebreak so two rows written

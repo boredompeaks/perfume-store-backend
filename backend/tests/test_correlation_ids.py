@@ -80,13 +80,17 @@ class UnhandledExceptionTests(ApiTestCase):
         _, _ = self.api_login()
         product = self.make_product(stock=10)
         self.seed_session_cart([(product, 2)])
-        self.assertEqual(self.checkout().status_code, 201)
+        checked_out = self.checkout()
+        self.assertEqual(checked_out.status_code, 201)
         client_mock = self.razorpay_mock()
         client_mock.order.create.side_effect = RuntimeError("gateway down")
+        # The id the checkout actually minted, not a literal: a sequence is
+        # not transactional, so on PostgreSQL the first row of a test
+        # database is not id=1 and a hardcoded pk 404s before the view runs.
         return failing_request(
             self.client,
             "/api/orders/payment/",
-            data={"order_id": 1},
+            data={"order_id": checked_out.data["id"]},
             format="json",
             headers={REQUEST_ID_HEADER: request_id},
         )

@@ -4,7 +4,7 @@
 Every alert is a plain-transactional email to the configured staff
 recipients, sent through the SPEC-19-1 single send path
 (``common.notifications.send_email`` — never a new send_mail call; the
-whole point of R-19.0). The module owns the four alert types that have an
+whole point of R-19.0). The module owns the alert types that have an
 existing detection site; the order-lifecycle admin alerts (new order,
 reconciliation, fulfilment) are deliberately absent — their content halves
 are SPEC-1-12's (section-19.md owner attributions).
@@ -19,10 +19,11 @@ Dedup: per alert-type cooldown (``settings.ALERT_COOLDOWN_SECONDS``,
 default 300). The low-stock and out-of-stock triggers re-fire on every
 staff dashboard load and every stock edit — without a cooldown an admin
 with 40 near-stockout SKUs gets 40 identical mails per dashboard visit and
-a payment-failure burst emails once per failed verify. The cache (default
-LocMemCache; Redis once SPEC-2-03 wires it) records the last-sent time per
-alert type; inside the window the alert is logged (INFO) instead of sent,
-so suppression is observable and testable.
+a payment-failure burst emails once per failed verify. The cooldown lives
+on the dedicated ``alerts`` cache alias (default FileBasedCache, shared
+across gunicorn workers; Redis once SPEC-2-03 wires it), so the mail-bomb
+bound holds across processes; inside the window the alert is logged
+(INFO) instead of sent, so suppression is observable and testable.
 
 Send contract: identical to ``dispatch`` — a send failure is logged with
 its traceback and swallowed (log-only). An SMTP outage must never fail the
@@ -34,7 +35,7 @@ import logging
 from datetime import timedelta
 
 from django.conf import settings
-from django.core.cache import cache
+from django.core.cache import caches
 from django.utils import timezone
 
 from common import notifications
@@ -50,6 +51,7 @@ OUT_OF_STOCK = "out_of_stock"
 PAYMENT_FAILURE_SPIKE = "payment_failure_spike"
 SECURITY_ALERT = "security_alert"
 INTEGRATION_OUTAGE = "integration_outage"
+BACKGROUND_JOB_FAILURE = "background_job_failure"
 
 
 def _recipients():
@@ -65,9 +67,9 @@ def _recipients():
 def _in_cooldown(alert_key):
     """True when an alert of this type was sent within the cooldown window.
 
-    Cache-based on purpose: per-process atomicity is enough for a
-    mail-bomb bound, and a race that double-sends costs one duplicate mail,
-    never a business outcome.
+    Cache-based on purpose: the get-then-set is deliberately not made atomic,
+    because a race that double-sends costs one duplicate mail and never a
+    business outcome — a lock here would buy nothing for that price.
 
     Fail-open: a raisable cache backend must not kill the alert, so a
     cache outage degrades to "not suppressed" (the send is attempted,
@@ -75,9 +77,9 @@ def _in_cooldown(alert_key):
     dashboard/health flow that tripped the alert.
     """
     try:
-        if cache.get(f"alerts:cooldown:{alert_key}") is not None:
+        if caches["alerts"].get(f"alerts:cooldown:{alert_key}") is not None:
             return True
-        cache.set(
+        caches["alerts"].set(
             f"alerts:cooldown:{alert_key}",
             True,
             timeout=settings.ALERT_COOLDOWN_SECONDS,
@@ -103,8 +105,17 @@ def _send(alert_key, context, subject):
             logger.info("alert %s suppressed (cooldown)", alert_key)
             return False
         for recipient in _recipients():
-            notifications.send_email(f"alert_{alert_key}", context, subject, recipient)
-            sent = True
+            # Per-recipient isolation: one failing mailbox must not abandon
+            # the rest of the staff list (ASYNC-2d). A send failure is
+            # logged with its traceback and the loop continues; the alert
+            # still reports True when at least one mail left.
+            try:
+                notifications.send_email(
+                    f"alert_{alert_key}", context, subject, recipient
+                )
+                sent = True
+            except Exception:
+                logger.exception("alert %s send to %s failed", alert_key, recipient)
     except Exception:
         # Log-only, like dispatch: the alert must never break the flow
         # that detected the problem.
@@ -276,4 +287,31 @@ def notify_integration_outage(detail_text):
         INTEGRATION_OUTAGE,
         {"detail": detail_text},
         "Integration outage alert",
+    )
+
+
+def notify_background_job_failure(detail_text):
+    """Background job failure: a queued notification was dead-lettered.
+
+    Spec 19.2 names failed notification deliveries among the admin
+    notifications, and this is the alert type for them. ASYNC-2c2 built the
+    trigger: ``common.notifications`` raises this beside the dead-letter
+    transition itself, in the same shape as the security alert's trigger site
+    — a caller raising an alert beside the hook that detected the problem —
+    rather than a separate monitor re-deriving the condition from the table.
+    The row's ``last_error`` is the diagnosis and it lives on the row; the
+    operator surface is ``manage.py drain_notification_outbox --status-only``.
+
+    "Repeated failures" is the cooldown's job, unchanged: one alert type, one
+    window, so a burst of poison rows is one mail and the next burst outside the
+    window is the next mail. Reached from a management command rather than a
+    request, so the log-only send contract matters twice over — an alert that
+    raised would abort a drain pass and turn the monitoring into the outage.
+    """
+    if not _recipients():
+        return False
+    return _send(
+        BACKGROUND_JOB_FAILURE,
+        {"detail": detail_text},
+        "Background job failure alert",
     )

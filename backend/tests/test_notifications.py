@@ -131,13 +131,55 @@ class SendEmailPathTests(ApiTestCase):
 class DispatchTests(ApiTestCase):
     """dispatch(): registry-driven, never raises, log-and-continue."""
 
-    def test_unknown_event_is_a_no_op(self):
-        # A future spec-19.1 event with no notification wired yet: nothing
-        # is sent, and the no-op is findable in logs (DEBUG) not silent.
+    def test_vocabulary_member_with_no_handler_is_a_debug_no_op(self):
+        # A vocabulary member whose content has not landed: nothing is sent,
+        # and the no-op is findable in logs (DEBUG) not silent. order.shipped
+        # used to be this test's "unknown" name while actually being a name
+        # OUTSIDE the vocabulary — the case the next test pins separately.
         with self.assertLogs("common.notifications", level="DEBUG") as logs:
-            notifications.dispatch("order.shipped", {})
+            notifications.dispatch(AuditEvent.EventType.ORDER_SHIPPED, {})
         self.assertEqual(len(mail.outbox), 0)
-        self.assertIn("no notification registered", "\n".join(logs.output))
+        output = "\n".join(logs.output)
+        self.assertIn("no notification registered", output)
+        # DEBUG is asserted by the absence of the warning wording, not by the
+        # level alone: assertLogs(DEBUG) admits WARNING lines too, so a pin
+        # that only read the capture could not tell the two cases apart.
+        self.assertNotIn("not an AuditEvent.EventType member", output)
+
+    def test_ordered_member_tuple_is_the_whole_vocabulary_in_declaration_order(self):
+        # The registry is keyed on the enum but the module keeps its own
+        # ordered enumeration of it (mypy does not model the metaclass
+        # __iter__ Django supplies, so the class object cannot be iterated in
+        # typed code). This pins that enumeration against the enum itself:
+        # every member, the same objects, the enum's own order, and the same
+        # set the DEBUG-vs-WARNING lookup uses — so the two cannot drift apart
+        # and make a member-without-handler read as an unknown name.
+        members = notifications._EVENT_TYPE_MEMBERS
+        self.assertEqual(len(members), len(set(members)))
+        self.assertEqual(set(members), set(AuditEvent.EventType))
+        self.assertEqual(set(members), set(notifications._EVENT_TYPE_VALUES))
+        self.assertEqual(
+            [member.value for member in members],
+            [member.value for member in AuditEvent.EventType],
+        )
+        for member in members:
+            self.assertIsInstance(member, AuditEvent.EventType)
+
+    def test_name_outside_the_vocabulary_is_a_warning_not_a_gentle_no_op(self):
+        # ASYNC-2e. A name the registry can never match is a programming
+        # error, not a content gap, and the two are no longer indistinguishable
+        # — this is the defect class that let three lifecycle notifications go
+        # missing with nothing to report. It must not be absorbed at DEBUG.
+        with self.assertLogs("common.notifications", level="WARNING") as logs:
+            notifications.dispatch("order.teleported", {})
+        self.assertEqual(len(mail.outbox), 0)
+        self.assertIn("not an AuditEvent.EventType member", "\n".join(logs.output))
+
+    def test_dead_name_dispatch_still_never_raises(self):
+        # The escalation must not become a failure: a notification can never
+        # roll back the transaction it follows, dead name or not.
+        notifications.dispatch("order.teleported", {})
+        self.assertEqual(len(mail.outbox), 0)
 
     def test_order_paid_dispatches_confirmation_email(self):
         order = _make_order(self.make_user("notifybuyer"))

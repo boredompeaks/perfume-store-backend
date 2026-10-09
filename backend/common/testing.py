@@ -21,7 +21,8 @@ from unittest.mock import patch
 import razorpay
 from django.contrib.auth.models import User
 from django.core import mail
-from django.core.cache import cache
+from django.core.cache import cache, caches
+from django.db import connection
 from django.test import TestCase, override_settings
 from django.utils import timezone
 from rest_framework.test import APIClient
@@ -62,8 +63,10 @@ class ApiTestCase(TestCase):
         # Scoped throttles keep their request history in the default cache,
         # which lives for the whole test run; reset it per test so a rate
         # limit engaged in one test can never 429 another (deterministic
-        # suite, independent of throttle rates in settings).
+        # suite, independent of throttle rates in settings). The alerts
+        # alias carries the cooldown window, so it is reset too.
         cache.clear()
+        caches["alerts"].clear()
 
     # ------------------------------------------------------------------
     # Factories
@@ -288,6 +291,48 @@ class ApiTestCase(TestCase):
         client_mock.utility.verify_payment_signature.side_effect = (
             razorpay.errors.SignatureVerificationError("invalid signature")
         )
+
+
+def covering_indexes(model, column):
+    """Every index/constraint the database reports on exactly ``column``.
+
+    Keyed by the name the database gives it, so a caller can tell one index
+    from another without relying on dict order.
+    """
+    with connection.cursor() as cursor:
+        constraints = connection.introspection.get_constraints(
+            cursor, model._meta.db_table
+        )
+    return {
+        name: info for name, info in constraints.items() if info["columns"] == [column]
+    }
+
+
+def redundant_covering_indexes(model, column):
+    """Covering indexes that are neither unique nor the engine's own LIKE index.
+
+    Django gives every indexed ``varchar``/``text`` column a SECOND,
+    deliberately non-unique index with the ``varchar_pattern_ops`` operator
+    class, so that ``icontains`` can use an index under a non-C collation.
+    PostgreSQL creates it; SQLite does not, and its introspection never
+    surfaces one. So "every covering index is unique" is not a portable
+    invariant, and asserting it makes a correct schema look redundant on one
+    engine only.
+
+    What IS portable is the intent behind the assertion - no *duplicate*
+    index stacked on top of a column's UNIQUE constraint - so the engine's
+    own LIKE index is named by asking the backend to generate the name it
+    would have generated, rather than by hardcoding a digest. Anything left
+    over is an index a human added, which is what the pin is for.
+    """
+    like_name = connection.schema_editor()._create_index_name(
+        model._meta.db_table, [column], suffix="_like"
+    )
+    return {
+        name: info
+        for name, info in covering_indexes(model, column).items()
+        if not info["unique"] and name != like_name
+    }
 
 
 def extract_link_params(body, hint):

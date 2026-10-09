@@ -504,6 +504,43 @@ EMAIL_TIMEOUT = _env_positive_int("EMAIL_TIMEOUT", 10)
 NOTIFICATION_OUTBOX_TTL_SECONDS = _env_positive_int(
     "NOTIFICATION_OUTBOX_TTL_SECONDS", 3 * 24 * 60 * 60
 )
+# ASYNC-2c2: the drain loop's shape. All five are env-driven because every one
+# of them is a deployment property - a scheduler cadence, a provider latency, an
+# operator's patience - and a magic threshold in code would be a number no
+# deployment could tune and no reader could reason about. See .env.example.
+#
+# Drain batch size. Bounds one pass of
+# ``manage.py drain_notification_outbox``; the pass stops early anyway the
+# moment there is nothing claimable, so this is a ceiling rather than a cost.
+NOTIFICATION_OUTBOX_DRAIN_BATCH_SIZE = _env_positive_int(
+    "NOTIFICATION_OUTBOX_DRAIN_BATCH_SIZE", 100
+)
+# How long a claimed row is held out of other workers' reach. MUST exceed
+# EMAIL_TIMEOUT above: a lease shorter than the provider timeout lets a second
+# worker begin the same send while the first is still inside it. It is also how
+# long a crashed worker's row waits before the next pass picks it up, so it
+# should not exceed the drain command's scheduled interval by much.
+NOTIFICATION_OUTBOX_LEASE_SECONDS = _env_positive_int(
+    "NOTIFICATION_OUTBOX_LEASE_SECONDS", 60
+)
+# Attempts per row before it is dead-lettered. This is the bound on retries and
+# the only thing that makes a permanently-failing notification stop consuming
+# the batch. Kept small on purpose: each attempt costs one provider round trip
+# and the failure it cannot fix is usually structural.
+NOTIFICATION_OUTBOX_MAX_ATTEMPTS = _env_positive_int(
+    "NOTIFICATION_OUTBOX_MAX_ATTEMPTS", 5
+)
+# Retry backoff: base * 2**(attempt-1), capped. The base is the wait after a
+# first failure, the cap the longest wait a row will ever sit through. Their
+# ratio is the whole policy - the invariant is that a row whose next attempt is
+# in the future is not claimed, so the numbers are free to differ by
+# deployment.
+NOTIFICATION_OUTBOX_RETRY_BASE_SECONDS = _env_positive_int(
+    "NOTIFICATION_OUTBOX_RETRY_BASE_SECONDS", 30
+)
+NOTIFICATION_OUTBOX_RETRY_MAX_SECONDS = _env_positive_int(
+    "NOTIFICATION_OUTBOX_RETRY_MAX_SECONDS", 3600
+)
 DEFAULT_FROM_EMAIL = os.getenv("DEFAULT_FROM_EMAIL", EMAIL_HOST_USER)
 FRONTEND_URL = os.getenv("FRONTEND_URL", "http://localhost:3000").rstrip("/")
 # SPEC-20-13: where the admin login page sends an account that MFA has
@@ -589,6 +626,34 @@ MFA_TRUST_COOKIE_SAMESITE = os.getenv("MFA_TRUST_COOKIE_SAMESITE", "Strict")
 # SPEC-19-2 [R-19.20/R-19.21] admin alerts. Comma-separated staff/admin
 # mailboxes; empty disables admin alerts entirely (no guessed recipient).
 ALERT_RECIPIENTS = os.getenv("ALERT_RECIPIENTS", "")
+
+# Cache backends. The default stays per-process LocMemCache (DRF throttle
+# history, sessions) — changing it would alter throttle semantics, which is
+# a separate defect class. The alert cooldown gets its own alias on a
+# SHARED backend so the documented mail-bomb bound holds across gunicorn
+# workers (ASYNC-2d): LocMemCache is per-process, so each worker kept its
+# own window and the bound did not hold. FileBasedCache is the zero-
+# dependency shared backend (no redis/memcached in requirements); point
+# ALERT_CACHE_BACKEND at Redis/Memcached once SPEC-2-03 wires one.
+# Locations use the `or default` shape so a stray empty value in .env
+# cannot resolve to "" — FileBasedCache treats that as the process CWD and
+# would scatter cache files wherever the app happens to be started.
+CACHES = {
+    "default": {
+        "BACKEND": _env_dotted_path(
+            "CACHE_BACKEND", "django.core.cache.backends.locmem.LocMemCache"
+        ),
+        "LOCATION": (os.getenv("CACHE_LOCATION") or "").strip() or "default",
+    },
+    "alerts": {
+        "BACKEND": _env_dotted_path(
+            "ALERT_CACHE_BACKEND",
+            "django.core.cache.backends.filebased.FileBasedCache",
+        ),
+        "LOCATION": (os.getenv("ALERT_CACHE_LOCATION") or "").strip()
+        or str(BASE_DIR / "alert_cache"),
+    },
+}
 # Per-alert-type dedupe window in seconds: an alert type that already sent
 # inside the window is logged instead of re-sent (mail-bomb bound for the
 # pollable /health/ and dashboard triggers).

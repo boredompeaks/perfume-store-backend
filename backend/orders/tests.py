@@ -21,9 +21,15 @@ from rest_framework.settings import api_settings
 from rest_framework.throttling import ScopedRateThrottle
 
 from cart.models import Cart, CartItem
+from common import notifications
 from common.models import AuditEvent
 from common.roles import ROLE_FINANCE, ROLE_SUPPORT
-from common.testing import TEST_RAZORPAY_KEY_ID, ApiTestCase
+from common.testing import (
+    TEST_RAZORPAY_KEY_ID,
+    ApiTestCase,
+    covering_indexes,
+    redundant_covering_indexes,
+)
 from config.settings import _env_currency
 from orders import events as order_events
 from orders import state as order_state
@@ -1958,16 +1964,23 @@ class OrderIndexSchemaTests(ApiTestCase):
         """2555: order_number's covering constraint(s) are all UNIQUE —
         unique=True already provides the lookup index (and doubles as the
         IntegrityError concurrency authority for number minting) — so no
-        duplicate explicit index is stacked on top."""
-        covering = [
-            info
-            for info in self._order_constraints().values()
-            if info["columns"] == ["order_number"]
-        ]
+        duplicate explicit index is stacked on top.
+
+        The one non-unique covering index a correct schema may carry is the
+        engine's own ``varchar_pattern_ops`` LIKE index, which exists for
+        ``icontains`` and must not be unique; ``redundant_covering_indexes``
+        excludes it by the name Django itself would have generated.
+        """
+        covering = covering_indexes(Order, "order_number")
         self.assertTrue(covering, "no constraint on order_number at all")
         self.assertTrue(
-            all(info["unique"] for info in covering),
-            f"order_number grew a non-unique duplicate index: {covering}",
+            any(info["unique"] for info in covering.values()),
+            f"order_number has no unique covering constraint: {covering}",
+        )
+        self.assertEqual(
+            redundant_covering_indexes(Order, "order_number"),
+            {},
+            "order_number grew a non-unique duplicate index",
         )
 
     def test_payment_provider_references_stay_constraint_covered(self):
@@ -1976,15 +1989,16 @@ class OrderIndexSchemaTests(ApiTestCase):
         whose backing unique indexes are the prescribed starting indexes."""
         for column in ("razorpay_order_id", "razorpay_payment_id"):
             with self.subTest(column=column):
-                covering = [
-                    info
-                    for info in self._order_constraints().values()
-                    if info["columns"] == [column]
-                ]
+                covering = covering_indexes(Order, column)
                 self.assertTrue(covering, f"no constraint on {column}")
                 self.assertTrue(
-                    all(info["unique"] for info in covering),
-                    f"{column} grew a non-unique duplicate index: {covering}",
+                    any(info["unique"] for info in covering.values()),
+                    f"{column} has no unique covering constraint: {covering}",
+                )
+                self.assertEqual(
+                    redundant_covering_indexes(Order, column),
+                    {},
+                    f"{column} grew a non-unique duplicate index",
                 )
 
 
@@ -3854,6 +3868,73 @@ class TransitionNotificationTests(OrderTestBase):
         # confirmed is deliberately unhooked: verify_payment's own
         # order.paid dispatch (R-19.0) owns the payment notification
         self.assertNotIn("confirmed", order_events.TRANSITION_EVENTS)
+
+    def test_every_hooked_name_is_a_member_of_the_audit_vocabulary(self):
+        """ASYNC-2e: the enumeration, and the defect it pins.
+
+        ``_EVENT_HANDLERS`` is keyed on ``AuditEvent.EventType``, so a
+        transition event that is not a member resolves no handler, is not a
+        value the audit trail can record, and — before this task — was
+        absorbed by the same DEBUG no-op as a benign content gap. All three
+        names here were bare strings outside the vocabulary for exactly that
+        long.
+
+        This walks the WHOLE map rather than sampling two names, because the
+        failure mode being guarded is a fourth site nobody enumerated.
+        """
+        vocabulary = set(AuditEvent.EventType)
+        for transition, event_name in order_events.TRANSITION_EVENTS.items():
+            with self.subTest(transition=transition):
+                self.assertIn(event_name, vocabulary)
+                # And it is a member, not merely an equal string: a bare
+                # literal compares equal to a member, so membership alone
+                # cannot tell the fixed code from the broken one. The
+                # identity check can.
+                self.assertIsInstance(event_name, AuditEvent.EventType)
+
+    def test_a_name_outside_the_vocabulary_would_not_resolve(self):
+        """The control: proves the pin above can fail.
+
+        A registry key that resolves everything is a registry that pins
+        nothing. This drives a name of the same shape as the three real ones
+        and shows the lookup misses, so the enumeration test's green is a
+        statement about the code rather than about the assertion's shape.
+        """
+        self.assertNotIn("order.shipped_via_telepathy", set(AuditEvent.EventType))
+        self.assertIsNone(
+            notifications._EVENT_HANDLERS.get("order.shipped_via_telepathy")
+        )
+
+    def test_no_handler_is_registered_for_the_three_lifecycle_names(self):
+        """What a reader of this file may NOT claim: no customer receives a
+        shipped, delivered or cancelled notification.
+
+        The order email content set belongs to SPEC-1-12/SPEC-19-2. Until a
+        handler lands, ``dispatch`` for these names sends nothing — this
+        pins that so the gap cannot quietly become a fiction in either
+        direction (a doc claiming a mail, or a handler nobody tested).
+        """
+        for transition, event_name in order_events.TRANSITION_EVENTS.items():
+            with self.subTest(transition=transition):
+                self.assertIsNone(notifications._EVENT_HANDLERS.get(event_name))
+        self.assertIn(
+            AuditEvent.EventType.ORDER_SHIPPED,
+            notifications.events_without_handler(),
+        )
+        self.assertIn(
+            AuditEvent.EventType.ORDER_DELIVERED,
+            notifications.events_without_handler(),
+        )
+        self.assertIn(
+            AuditEvent.EventType.ORDER_CANCELLED,
+            notifications.events_without_handler(),
+        )
+        # And order.paid is NOT in the gap: the set distinguishes the two
+        # rather than naming every event.
+        self.assertNotIn(
+            AuditEvent.EventType.ORDER_PAID,
+            notifications.events_without_handler(),
+        )
 
 
 @tag("orders")
