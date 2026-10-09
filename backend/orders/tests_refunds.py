@@ -67,10 +67,58 @@ class RefundGatewaySeamTests(SimpleTestCase):
 
         # No credential is written in the code: the client is built from the
         # settings, which read RAZORPAY_KEY_ID / RAZORPAY_KEY_SECRET from env.
+        # The keyword form is the POINT of this assertion, not a detail: the
+        # SDK reads ``__init__(self, session=None, auth=None, **options)``, so
+        # the same two values passed positionally bind the key id to
+        # ``session`` and every refund dies with an AttributeError that this
+        # seam reports to the operator as "the gateway declined".
         client_cls.assert_called_once_with(
-            f"seam-{TEST_RAZORPAY_KEY_ID}", f"seam-{TEST_RAZORPAY_KEY_SECRET}"
+            auth=(f"seam-{TEST_RAZORPAY_KEY_ID}", f"seam-{TEST_RAZORPAY_KEY_SECRET}")
         )
         self.assertEqual(refund_id, "rfnd_ENV1")
+
+    def test_the_real_sdk_client_receives_the_credentials_as_its_auth(self):
+        """The construction path with ``razorpay.Client`` itself NOT mocked.
+
+        Every other test in this class replaces the client class wholesale, so
+        ``Client.__init__`` never runs and no assertion here can see WHICH
+        parameter the credentials landed in - which is precisely the defect
+        that shipped: the pair was passed positionally, bound the key id to
+        ``session``, and turned every real refund into an AttributeError this
+        seam reported to the operator as "the gateway declined". Mocking the
+        class cannot catch that, because a mock accepts any call shape.
+
+        So this patches the SDK's own default session instead and lets the real
+        ``__init__`` run, then observes the credentials where they actually
+        matter - on the ``requests`` call. Expected values are hand-written
+        literals passed in through ``override_settings``, never re-derived from
+        whatever ``settings`` happens to hold.
+        """
+        response = mock.Mock(status_code=200)
+        response.json.return_value = {"id": "rfnd_REALSESSION"}
+
+        with mock.patch("razorpay.client.requests.Session") as session_cls:
+            session_cls.return_value.post.return_value = response
+
+            with override_settings(
+                RAZORPAY_KEY_ID=f"seam-{TEST_RAZORPAY_KEY_ID}",
+                RAZORPAY_KEY_SECRET=f"seam-{TEST_RAZORPAY_KEY_SECRET}",
+                RAZORPAY_TIMEOUT=7,
+            ):
+                refund_id = refund_payment(payment_id="pay_1", amount=Decimal("10.00"))
+
+            post = session_cls.return_value.post
+
+        # The refund the provider acknowledged came back through the REAL
+        # client: proof that the whole chain ran, not just the seam's own call.
+        self.assertEqual(refund_id, "rfnd_REALSESSION")
+        # The credentials reached requests as the HTTP auth pair...
+        self.assertEqual(
+            post.call_args.kwargs["auth"],
+            (f"seam-{TEST_RAZORPAY_KEY_ID}", f"seam-{TEST_RAZORPAY_KEY_SECRET}"),
+        )
+        # ...and the env-driven timeout reached the socket alongside them.
+        self.assertEqual(post.call_args.kwargs["timeout"], 7)
 
     def test_the_money_reaches_the_gateway_in_the_currencies_minor_units(self):
         patcher, _, client = self._patched_client()
@@ -79,7 +127,7 @@ class RefundGatewaySeamTests(SimpleTestCase):
         refund_payment(payment_id="pay_1", amount=Decimal("10.00"))
 
         client.refund.create.assert_called_once_with(
-            {"payment_id": "pay_1", "amount": 1000}
+            {"payment_id": "pay_1", "amount": 1000}, timeout=10
         )
 
     def test_a_half_paise_amount_is_quantized_before_it_is_scaled(self):
@@ -92,7 +140,7 @@ class RefundGatewaySeamTests(SimpleTestCase):
         refund_payment(payment_id="pay_1", amount=Decimal("0.015"))
 
         client.refund.create.assert_called_once_with(
-            {"payment_id": "pay_1", "amount": 2}
+            {"payment_id": "pay_1", "amount": 2}, timeout=10
         )
 
     def test_a_missing_payment_reference_is_a_typed_error(self):
@@ -233,7 +281,7 @@ class FullRefundTests(RefundTestBase):
         self.assertEqual(refund.gateway_refund_id, "rfnd_TEST1")
         self.assertEqual(refund.actor_id, self.finance.pk)
         client.refund.create.assert_called_once_with(
-            {"payment_id": "pay_CAPTURED1", "amount": 90000}
+            {"payment_id": "pay_CAPTURED1", "amount": 90000}, timeout=10
         )
 
     def test_the_privileged_action_is_audited_against_the_refund(self):
@@ -286,7 +334,7 @@ class PartialRefundTests(RefundTestBase):
         self.assertEqual(refund.kind, Refund.Kind.PARTIAL)
         self.assertEqual(refund.amount, Decimal("300.00"))
         client.refund.create.assert_called_once_with(
-            {"payment_id": "pay_CAPTURED1", "amount": 30000}
+            {"payment_id": "pay_CAPTURED1", "amount": 30000}, timeout=10
         )
 
     def test_partials_accumulate_and_the_last_one_closes_the_order(self):
@@ -347,7 +395,7 @@ class PartialRefundTests(RefundTestBase):
         # 0.015 -> 0.02, and 2 minor units reach the provider.
         self.assertEqual(Refund.objects.get().amount, Decimal("0.02"))
         client.refund.create.assert_called_once_with(
-            {"payment_id": "pay_CAPTURED1", "amount": 2}
+            {"payment_id": "pay_CAPTURED1", "amount": 2}, timeout=10
         )
         order.refresh_from_db()
         self.assertEqual(order.payment_status, "partially_refunded")

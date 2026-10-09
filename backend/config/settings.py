@@ -487,6 +487,20 @@ EMAIL_USE_TLS = os.getenv("EMAIL_USE_TLS", "true").lower() == "true"
 # (common.notifications.send_email raises; dispatch and the alerts path log
 # and continue) instead of hanging.
 EMAIL_TIMEOUT = _env_positive_int("EMAIL_TIMEOUT", 10)
+# REFUND-SEAM: seconds the refund seam waits on Razorpay's socket. The same
+# argument as EMAIL_TIMEOUT above, and the same bounded-failure shape: a
+# refund is requested from inside the caller's transaction.atomic() while it
+# holds the order row, so a gateway that accepts the connection and then
+# stalls parks every other refund for that order behind the lock. It is the
+# SDK's PER-REQUEST kwarg (razorpay.Client consumes only base_url and the
+# retry knobs, so a constructor timeout would be discarded), forwarded
+# untouched to requests, and a tripped timeout becomes a typed
+# RefundGatewayError that rolls the attempt back whole.
+#
+# Env-driven for the same deployment-shaped reason as the mail timeout: raise
+# it only for a genuinely slow gateway. A non-integer value, or one below 1,
+# is ignored with a warning and 10 is used instead.
+RAZORPAY_TIMEOUT = _env_positive_int("RAZORPAY_TIMEOUT", 10)
 # ASYNC-2c1: how long a queued notification row is allowed to sit before the
 # purge command treats it as spent.
 #
