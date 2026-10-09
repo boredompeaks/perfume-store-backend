@@ -1,8 +1,8 @@
 {
   "kind": "floor",
-  "task": "BUG-6",
+  "task": "BUG-7",
   "tool": "scripts/changelog_figures.py",
-  "measured_at": "2026-10-09T05:27:09+05:30",
+  "measured_at": "2026-10-09T05:41:33+05:30",
   "pair_complete": true,
   "engines": [
     {
