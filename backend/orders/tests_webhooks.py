@@ -22,19 +22,23 @@ from unittest.mock import patch
 
 from django.core import mail
 from django.db import IntegrityError
+from django.db.models.query import QuerySet
 from django.test import override_settings
 from django.utils import timezone
 from rest_framework.permissions import AllowAny
 
 from common.models import AuditEvent
 from common.testing import ApiTestCase
-from orders.models import Order, OrderStatusEvent, PaymentEvent, Refund
+from orders.inventory import StockUnavailable, commit_order_sale
+from orders.models import Order, OrderItem, OrderStatusEvent, PaymentEvent, Refund
 from orders.state import (
+    CAPTURED_MONEY_PAYMENT_STATUSES,
+    CAPTURED_SALE_PAYMENT_STATUSES,
     TRIGGER_PAYMENT_WEBHOOK,
     status_for_payment,
 )
 from orders.webhooks import razorpay_webhook
-from products.models import StockReservation
+from products.models import StockMovement, StockReservation, products
 
 WEBHOOK_URL = "/api/v1/webhooks/razorpay/"
 # A recognizable fixture value, never a real credential (V-01).
@@ -127,6 +131,35 @@ class WebhookTestCase(ApiTestCase):
             owner=order.user,
             quantity=quantity,
             status=status,
+            expires_at=timezone.now() + timedelta(hours=1),
+        )
+
+    def add_item(self, order, product=None, quantity=2):
+        """An order line, as checkout leaves it.
+
+        The shared sale commit reads ``order.items``, so the pins about what a
+        capture does to INVENTORY need an order that actually has lines - a bare
+        ORM order commits an empty sale, which is a true fact about nothing.
+        """
+        product = self.make_product(stock=10) if product is None else product
+        OrderItem.objects.create(
+            order=order,
+            product=product,
+            product_name=product.name,
+            price=product.price,
+            quantity=quantity,
+            subtotal=product.price * quantity,
+        )
+        return product
+
+    def hold_for(self, order, product, quantity=2):
+        """The checkout-minted hold for one line, as create_order writes it."""
+        return StockReservation.objects.create(
+            product=product,
+            order=order,
+            owner=order.user,
+            quantity=quantity,
+            status=StockReservation.Status.ACTIVE,
             expires_at=timezone.now() + timedelta(hours=1),
         )
 
@@ -520,6 +553,243 @@ class CaptureReconciliationTests(WebhookTestCase):
         self.assertEqual(paid.detail["total_amount"], "1200.50")
 
 
+class WebhookSaleCommitTests(WebhookTestCase):
+    """Property 9: the delivery commits the SALE, not just the payment.
+
+    This is the property the endpoint lacked. ``_apply_captured`` used to
+    convert the order's holds to CONVERTED and stop, deferring the stock
+    decrement to a reconciler that does not exist - so a capture with no browser
+    callback behind it left the order paid with its stock never decremented and
+    no ``StockMovement`` row to reconcile against. The pins drive the real
+    endpoint and assert against the inventory tables, not the response text.
+    """
+
+    def test_capture_decrements_the_stock_its_order_sold(self):
+        order = self.make_pending_order()
+        product = self.add_item(order, quantity=2)
+
+        self.deliver(self.capture_event(order))
+
+        product.refresh_from_db()
+        self.assertEqual(product.stock, 8)  # the line's quantity, decremented
+
+    def test_capture_writes_a_sale_ledger_row_for_each_line(self):
+        # SPEC-6-02 [6.5.17]: a stock change without a movement row is a bug.
+        # `stock_after` is the REAL post-decrement quantity and the actor is
+        # the system, not the buyer - a capture moves stock, the customer does
+        # not, so naming them as the actor would misattribute the mutation.
+        order = self.make_pending_order()
+        product = self.add_item(order, quantity=3)
+
+        self.deliver(self.capture_event(order))
+
+        movements = list(StockMovement.objects.all())
+        self.assertEqual(len(movements), 1)
+        movement = movements[0]
+        self.assertEqual(movement.product_id, product.id)
+        self.assertEqual(movement.delta, -3)
+        self.assertEqual(movement.reason, StockMovement.Reason.SALE)
+        self.assertEqual(movement.stock_after, 7)
+        self.assertIsNone(movement.created_by)
+        self.assertEqual(movement.note, f"Order #{order.id}")
+
+    def test_capture_commits_every_line_of_a_multi_line_order(self):
+        order = self.make_pending_order()
+        first = self.add_item(order, quantity=1)
+        second = self.make_product(name="Oud Royale", stock=4)
+        self.add_item(order, product=second, quantity=2)
+
+        self.deliver(self.capture_event(order))
+
+        first.refresh_from_db()
+        second.refresh_from_db()
+        self.assertEqual(first.stock, 9)
+        self.assertEqual(second.stock, 2)
+        self.assertEqual(StockMovement.objects.count(), 2)
+
+    def test_capture_commits_the_sale_of_a_line_whose_product_row_is_gone(self):
+        # OrderItem.product is on_delete=SET_NULL: deleting a catalogue row
+        # leaves the line unsellable rather than absent. It must still be
+        # refused as a shortage rather than silently skipped, or the order
+        # confirms with an uncommitted line.
+        order = self.make_pending_order()
+        product = self.add_item(order, quantity=2)
+        product.delete()
+
+        self.deliver(self.capture_event(order))
+
+        self.assertEqual(
+            PaymentEvent.objects.get().outcome, PaymentEvent.Outcome.REFUSED
+        )
+        self.assertEqual(StockMovement.objects.count(), 0)
+
+
+class WebhookStockSufficiencyTests(WebhookTestCase):
+    """Property 10: the delivery cannot confirm an order it cannot fill.
+
+    The callback answers 409 on insufficient stock; the webhook has no client
+    to answer, but it does have the gateway's money, which it cannot un-capture.
+    So the honest outcome is the same no-sale with the conflict RECORDED, and
+    the pins assert the order stays unfilled rather than oversold.
+    """
+
+    def test_capture_with_stock_gone_sells_nothing_and_is_recorded(self):
+        order = self.make_pending_order()
+        product = self.add_item(order, quantity=4)
+        products.objects.filter(pk=product.pk).update(stock=1)  # sold out
+
+        response = self.deliver(self.capture_event(order))
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(
+            PaymentEvent.objects.get().outcome, PaymentEvent.Outcome.REFUSED
+        )
+        product.refresh_from_db()
+        self.assertEqual(product.stock, 1)  # untouched: no oversell
+        self.assertEqual(StockMovement.objects.count(), 0)
+
+    def test_the_stock_conflict_is_recorded_for_reconciliation(self):
+        # "The provider says this happened and we did nothing" is what the
+        # operator reconciles from, so the refusal must name the numbers.
+        order = self.make_pending_order()
+        product = self.add_item(order, quantity=4)
+        products.objects.filter(pk=product.pk).update(stock=1)
+
+        self.deliver(self.capture_event(order), event_id="evt_RACE1")
+
+        conflict = AuditEvent.objects.get(
+            event_type=AuditEvent.EventType.PAYMENT_STOCK_CONFLICT
+        )
+        self.assertEqual(conflict.order, order)
+        self.assertEqual(conflict.detail["product_id"], product.id)
+        self.assertEqual(conflict.detail["requested"], 4)
+        self.assertEqual(conflict.detail["available"], 1)
+        self.assertEqual(conflict.detail["event_id"], "evt_RACE1")
+
+    def test_an_unsellable_capture_does_not_convert_the_holds(self):
+        # A hold released rather than converted is the [R-12.8] step-6
+        # contract: a failed attempt leaves no phantom pressure on
+        # available-to-sell while the operator resolves the paid order.
+        order = self.make_pending_order()
+        product = self.add_item(order, quantity=4)
+        hold = self.hold_for(order, product, quantity=4)
+        products.objects.filter(pk=product.pk).update(stock=1)
+
+        self.deliver(self.capture_event(order))
+
+        hold.refresh_from_db()
+        self.assertEqual(hold.status, StockReservation.Status.RELEASED)
+
+    def test_a_conflict_does_not_strand_the_order_as_paid(self):
+        # The order must stay PENDING, not silently half-confirmed: a
+        # confirmed order with no stock is exactly the state this endpoint
+        # used to create.
+        order = self.make_pending_order()
+        product = self.add_item(order, quantity=4)
+        products.objects.filter(pk=product.pk).update(stock=1)
+
+        self.deliver(self.capture_event(order))
+
+        order.refresh_from_db()
+        self.assertEqual(order.status, "pending")
+        self.assertIsNone(order.paid_at)
+
+
+class SharedSaleCommitIdempotencyTests(WebhookTestCase):
+    """Property 11: the two capture writers are idempotent WITH EACH OTHER.
+
+    ``verify_payment`` (the customer callback) and ``_apply_captured`` (this
+    delivery) are the only two writers of a paid order, and for the closed-tab
+    customer ONLY the webhook runs. So the same payment can reach both writers,
+    and whichever is second must be a no-op - a second decrement is the
+    double-decrement SPEC-1-B01 already had to fix once for refunds. These pins
+    drive BOTH real endpoints against the same order and payment.
+    """
+
+    def _verify(self, order):
+        """The customer-callback verify for this order/payment, as the browser
+        would send it after a successful gateway checkout."""
+        return self.client.post(
+            "/api/orders/payment/verify/",
+            {
+                "order_id": order.id,
+                "razorpay_order_id": order.razorpay_order_id,
+                "razorpay_payment_id": "pay_TEST9",
+                "razorpay_signature": "sig",
+            },
+            format="json",
+        )
+
+    def _capture_after_callback(self, order):
+        """The callback confirms, then the delivery arrives; return the response.
+
+        ``api_login`` attaches the bearer to ``self.client``, which is the same
+        client ``deliver`` posts through, so one session sees both writers -
+        which is the point: this is one customer, two writers, one payment.
+        """
+        self.api_login()
+        self.razorpay_mock(order_id=order.razorpay_order_id)
+        verify = self._verify(order)
+        self.assertEqual(verify.status_code, 200, verify.data)
+        return self.deliver(self.capture_event(order), event_id="evt_AFTER")
+
+    def test_a_delivery_after_the_customer_callback_decrements_once(self):
+        order = self.make_pending_order()
+        product = self.add_item(order, quantity=2)
+
+        self._capture_after_callback(order)
+
+        product.refresh_from_db()
+        self.assertEqual(product.stock, 8)  # decremented exactly once
+        self.assertEqual(StockMovement.objects.count(), 1)
+
+    def test_a_delivery_after_the_customer_callback_writes_no_second_ledger_row(
+        self,
+    ):
+        order = self.make_pending_order()
+        self.add_item(order, quantity=2)
+
+        self._capture_after_callback(order)
+
+        movement = StockMovement.objects.get()
+        self.assertEqual(movement.delta, -2)
+        self.assertEqual(movement.stock_after, 8)
+        self.assertEqual(StockMovement.objects.count(), 1)
+
+    def test_a_replayed_delivery_after_the_callback_records_its_refusal(self):
+        # The second arrival is still RECORDED (the provider must stop
+        # retrying) - it is refused, not applied, and moves nothing.
+        order = self.make_pending_order()
+        product = self.add_item(order, quantity=2)
+
+        response = self._capture_after_callback(order)
+
+        self.assertEqual(response.status_code, 200)
+        second = PaymentEvent.objects.get(event_id="evt_AFTER")
+        self.assertEqual(second.outcome, PaymentEvent.Outcome.REFUSED)
+        product.refresh_from_db()
+        self.assertEqual(product.stock, 8)
+        self.assertEqual(StockMovement.objects.count(), 1)
+
+    def test_the_callback_after_a_delivery_decrements_once(self):
+        # The reverse order: the closed-tab customer is already confirmed by
+        # the gateway's own delivery, and the browser comes back afterwards.
+        # The callback's already-processed gate must refuse, and the stock must
+        # still show exactly one decrement.
+        order = self.make_pending_order()
+        product = self.add_item(order, quantity=2)
+        self.api_login()
+        self.razorpay_mock(order_id=order.razorpay_order_id)
+
+        self.assertEqual(self.deliver(self.capture_event(order)).status_code, 200)
+        verify = self._verify(order)
+
+        self.assertEqual(verify.status_code, 400, verify.data)
+        product.refresh_from_db()
+        self.assertEqual(product.stock, 8)
+        self.assertEqual(StockMovement.objects.count(), 1)
+
+
 class RefundEventTests(WebhookTestCase):
     """Property 8: a refund event is recorded, never re-issued as a refund."""
 
@@ -761,3 +1031,240 @@ class PaymentMachineHelperTests(ApiTestCase):
         # than assume a mapping exists.
         self.assertIsNone(status_for_payment("refunded"))
         self.assertIsNone(status_for_payment("failed"))
+
+
+class _LockedReadRecorder:
+    """Observe the lock-requesting reads the service really issues.
+
+    Pinned on the QUERY rather than on the SQL text, and that is not a
+    convenience: SQLite never emits ``FOR UPDATE`` at all
+    (``features.has_select_for_update`` is False), so an SQL-text pin would
+    pass on Postgres and fail on SQLite for a reason that has nothing to do
+    with the service - the same engine blind spot that let a 500 survive a
+    green SQLite run. The query object is what the service built, so recording
+    it observes the service rather than the engine that compiles it.
+    """
+
+    def __enter__(self):
+        self.locked_reads = []
+        self._original = QuerySet._fetch_all
+
+        def recording_fetch_all(queryset):
+            if queryset.query.select_for_update:
+                self.locked_reads.append(
+                    (queryset.model._meta.db_table, tuple(queryset.query.order_by))
+                )
+            return self._original(queryset)
+
+        self._patcher = patch.object(QuerySet, "_fetch_all", recording_fetch_all)
+        self._patcher.start()
+        return self
+
+    def __exit__(self, *exc_info):
+        self._patcher.stop()
+        return False
+
+    def for_table(self, table):
+        return [order_by for name, order_by in self.locked_reads if name == table]
+
+
+class SaleCommitServiceTests(WebhookTestCase):
+    """The shared service's own contract, driven directly.
+
+    The endpoint pins prove the two writers AGREE through it. These prove the
+    service is safe for a caller that has not pre-checked - which is what makes
+    it shareable at all, and what the webhook is.
+    """
+
+    def test_committing_twice_decrements_once(self):
+        # The guard, at the unit level: the caller that already committed the
+        # sale is told so by the order's own payment dimension, so a second
+        # call is a no-op rather than the double decrement SPEC-1-B01 recorded.
+        order = self.make_pending_order()
+        product = self.add_item(order, quantity=2)
+
+        commit_order_sale(order)
+        order.payment_status = "captured"
+        order.save(update_fields=["payment_status"])
+        commit_order_sale(order)
+
+        product.refresh_from_db()
+        self.assertEqual(product.stock, 8)
+        self.assertEqual(StockMovement.objects.count(), 1)
+
+    def test_a_refunded_order_is_not_resold_by_a_later_commit(self):
+        # A refunded order's sale was committed once and then unwound by the
+        # refund seam. Its stock was therefore already decremented, so a stray
+        # re-commit would take the units a second time for a sale that no
+        # longer exists. The machine's CAPTURED_MONEY_PAYMENT_STATUSES answers a
+        # different question ("can a refund still move out") and excludes
+        # `refunded`; this guard asks whether the sale is committed, and must
+        # not inherit that other question's answer.
+        order = self.make_pending_order()
+        product = self.add_item(order, quantity=2)
+        order.payment_status = "refunded"
+        order.save(update_fields=["payment_status"])
+
+        commit_order_sale(order)
+
+        product.refresh_from_db()
+        self.assertEqual(product.stock, 10)
+        self.assertEqual(StockMovement.objects.count(), 0)
+
+    def test_an_uncaptured_order_commits_even_from_the_failed_payment_value(self):
+        # failed -> captured is the machine's declared RETRY edge, so a failed
+        # attempt's order is still sellable: the guard must not read "not
+        # captured" as "do not sell".
+        order = self.make_pending_order()
+        product = self.add_item(order, quantity=2)
+        order.payment_status = "failed"
+        order.save(update_fields=["payment_status"])
+
+        commit_order_sale(order)
+
+        product.refresh_from_db()
+        self.assertEqual(product.stock, 8)
+        self.assertEqual(StockMovement.objects.count(), 1)
+
+    def test_insufficient_stock_raises_and_writes_nothing(self):
+        # The re-check runs BEFORE the first mutation, so a caller that
+        # catches the shortage has a clean transaction — no converted holds, no
+        # ledger row, no partial decrement.
+        order = self.make_pending_order()
+        product = self.add_item(order, quantity=5)
+        hold = self.hold_for(order, product, quantity=5)
+        products.objects.filter(pk=product.pk).update(stock=2)
+
+        with self.assertRaises(StockUnavailable) as caught:
+            commit_order_sale(order)
+
+        self.assertEqual(caught.exception.product_id, product.id)
+        self.assertEqual(caught.exception.requested, 5)
+        self.assertEqual(caught.exception.available, 2)
+        product.refresh_from_db()
+        self.assertEqual(product.stock, 2)
+        hold.refresh_from_db()
+        self.assertEqual(hold.status, StockReservation.Status.ACTIVE)
+        self.assertEqual(StockMovement.objects.count(), 0)
+
+    def test_a_released_hold_is_not_resurrected_into_the_sale(self):
+        # [R-12.8]: a hold an earlier failed attempt released is terminal. The
+        # conversion filters on ACTIVE, so the retry's sale commits the stock
+        # and leaves the dead hold alone.
+        order = self.make_pending_order()
+        product = self.add_item(order, quantity=2)
+        hold = self.hold_for(order, product, quantity=2)
+        StockReservation.objects.filter(pk=hold.pk).update(
+            status=StockReservation.Status.RELEASED
+        )
+
+        commit_order_sale(order)
+
+        hold.refresh_from_db()
+        self.assertEqual(hold.status, StockReservation.Status.RELEASED)
+        product.refresh_from_db()
+        self.assertEqual(product.stock, 8)
+
+    def test_an_order_with_no_holds_commits_its_stock_unchanged_by_that(self):
+        # Legacy orders (minted before the reservation model, or with their
+        # rows swept) still sell: the conversion simply matches nothing.
+        order = self.make_pending_order()
+        product = self.add_item(order, quantity=2)
+
+        commit_order_sale(order)
+
+        product.refresh_from_db()
+        self.assertEqual(product.stock, 8)
+        self.assertFalse(StockReservation.objects.exists())
+
+    def test_the_sale_guard_covers_exactly_the_captured_payment_values(self):
+        # A hand-written oracle, not a recomputation: an expected value derived
+        # from the constant under test agrees with a wrong constant from BOTH
+        # sides (the BUG-5 lesson). And it FAILS WHEN THE MACHINE GROWS, which
+        # is what makes it a gate rather than a snapshot — add a value
+        # downstream of `captured` and the guard must widen or this pin names
+        # it.
+        self.assertEqual(
+            CAPTURED_SALE_PAYMENT_STATUSES,
+            {"captured", "partially_refunded", "refunded"},
+        )
+        # And it is not the returns set wearing the same clothes: that one
+        # answers the refund question and so excludes the dead-end value.
+        self.assertNotIn("refunded", CAPTURED_MONEY_PAYMENT_STATUSES)
+        self.assertIn("refunded", CAPTURED_SALE_PAYMENT_STATUSES)
+
+    def test_two_lines_for_one_product_cannot_oversell_it(self):
+        # Coverage measures lines executed, not states reasoned about: the
+        # ordinary order has one line per product, so a line-by-line re-check
+        # passes every test that drives the normal shape and still lets two
+        # lines of 2 sell a stock of 3. OrderItem carries no cart-style unique
+        # constraint, so this state is expressible and `stock` is unsigned.
+        order = self.make_pending_order()
+        product = self.make_product(name="Twin Lines", stock=3)
+        self.add_item(order, product=product, quantity=2)
+        self.add_item(order, product=product, quantity=2)
+
+        with self.assertRaises(StockUnavailable) as caught:
+            commit_order_sale(order)
+
+        self.assertEqual(caught.exception.product_id, product.id)
+        # The demand reported is the TOTAL the order places on that product,
+        # not whichever line happened to be walked first.
+        self.assertEqual(caught.exception.requested, 4)
+        self.assertEqual(caught.exception.available, 3)
+        product.refresh_from_db()
+        self.assertEqual(product.stock, 3)
+        self.assertEqual(StockMovement.objects.count(), 0)
+
+    def test_two_lines_for_one_product_that_is_in_stock_sell_the_sum(self):
+        # The companion: the aggregated check must not refuse an order the
+        # per-line check would have allowed.
+        order = self.make_pending_order()
+        product = self.make_product(name="Twin Lines In Stock", stock=5)
+        self.add_item(order, product=product, quantity=2)
+        self.add_item(order, product=product, quantity=2)
+
+        commit_order_sale(order)
+
+        product.refresh_from_db()
+        self.assertEqual(product.stock, 1)
+        # One ledger row per line, as the callback path has always written them.
+        self.assertEqual(StockMovement.objects.count(), 2)
+
+    def test_the_service_locks_products_in_ascending_order(self):
+        # Deadlock avoidance: unordered lock acquisition lets the plan pick the
+        # sequence, so two carts naming the same products in different
+        # insertion orders could deadlock across the handoff (the section-12
+        # verified-facts advisory). ONE total order over the lock set is the
+        # fix, and this is the pin that keeps it.
+        order = self.make_pending_order()
+        self.add_item(order, quantity=1)
+        self.add_item(order, quantity=1)
+
+        with _LockedReadRecorder() as recorded:
+            commit_order_sale(order)
+
+        product_locks = recorded.for_table(products._meta.db_table)
+        self.assertEqual(
+            len(product_locks),
+            1,
+            f"expected one locked product read: {product_locks}",
+        )
+        # Ascending by the product's own primary key - a hand-written literal,
+        # not the service's own expression recomputed here.
+        self.assertEqual(product_locks[0], ("id",))
+
+    def test_the_service_locks_the_order_row_it_decides_on(self):
+        # The idempotency guard reads committed payment state, so the Order
+        # row must be locked while that read happens - otherwise two writers
+        # can both read "not captured" and both decrement.
+        order = self.make_pending_order()
+        self.add_item(order, quantity=1)
+
+        with _LockedReadRecorder() as recorded:
+            commit_order_sale(order)
+
+        order_locks = recorded.for_table(Order._meta.db_table)
+        self.assertEqual(
+            len(order_locks), 1, f"expected one locked order read: {order_locks}"
+        )

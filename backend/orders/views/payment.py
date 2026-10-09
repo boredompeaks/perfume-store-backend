@@ -27,11 +27,14 @@ from cart.models import Cart
 from common import notifications
 from common.models import AuditEvent
 
-# [SPEC-12-02] StockReservation and StockMovement ride the existing
-# products.models import line: verify_payment converts and releases the
-# holds create_order minted.
-from products.models import StockMovement, StockReservation, products
+# [SPEC-12-02] StockReservation rides the products.models import line:
+# verify_payment releases the holds create_order minted on the failure
+# branches. The sale itself - the conversion, the decrement and the
+# StockMovement ledger rows - is orders.inventory.commit_order_sale, shared
+# with the SPEC-1-06 webhook.
+from products.models import StockReservation, products
 
+from ..inventory import StockUnavailable, commit_order_sale
 from ..models import Coupon, Order, OrderStatusEvent
 
 # [R-10.4] SPEC-10-04: the failed-verify audit trigger + the
@@ -463,37 +466,48 @@ def verify_payment(request):
                 )
 
         # [R-12.7] SPEC-12-02 §12.1 step 5: confirmation converts the
-        # order's live holds into committed sales. The decrement below
-        # stays the stock authority and the sufficiency re-check above
-        # remains the oversell backstop (R-12.12: the sale never re-learns
-        # availability from a reservation); this flip is the reservation
-        # ledger's truth. Filtering on active makes it idempotent and
-        # retry-safe: a hold released by an earlier failed attempt is
-        # terminal (never resurrected into a sale), and an order with no
-        # holds (legacy, or the post-failure retry) verifies unchanged. A
-        # lapsed TTL is deliberately NOT a conversion gate — the captured
-        # payment proceeds on the re-checked stock; expiry belongs to the
-        # SPEC-12-03 reconciler.
-        order.stock_reservations.filter(status=StockReservation.Status.ACTIVE).update(
-            status=StockReservation.Status.CONVERTED
-        )
+        # order's live holds into committed sales. The service below is the
+        # ONE writer of that sale (holds -> CONVERTED, the stock decrement and
+        # its [6.5.17] ledger rows), shared with the SPEC-1-06 webhook so the
+        # two capture writers cannot drift apart again - the callback used to
+        # decrement and the webhook not to, leaving a webhook-confirmed order
+        # paid with its stock never decremented.
+        #
+        # The sufficiency re-check above stays as the customer-facing backstop:
+        # it answers 409 and releases the attempt's holds, which is this
+        # endpoint's protocol. The service re-checks under its own locks
+        # because it is also the webhook's only stock authority, and a lost
+        # race between the two re-checks must not oversell.
+        try:
+            commit_order_sale(order)
+        except StockUnavailable as unavailable:
+            AuditEvent.record(
+                AuditEvent.EventType.PAYMENT_STOCK_CONFLICT,
+                actor=request.user,
+                order=order,
+                detail={
+                    "product_id": unavailable.product_id,
+                    "requested": unavailable.requested,
+                    "available": unavailable.available,
+                },
+            )
 
-        for item in order_items:
-            product = locked_products[item.product_id]
-            product.stock -= item.quantity
-            product.save(update_fields=["stock"])
-            # [6.5.17] No silent inventory edits: a paid sale is an inventory
-            # mutation like any other, so every decrement lands in the ledger
-            # with the order as its reference and no actor (system). The row
-            # is locked and the new value was just computed here, so
-            # stock_after is the real post-decrement quantity.
-            StockMovement.objects.create(
-                product=product,
-                delta=-item.quantity,
-                reason=StockMovement.Reason.SALE,
-                stock_after=product.stock,
-                note=f"Order #{order.id}",
-                created_by=None,
+            logger.info(
+                "Payment verify failed: order %s stock conflict "
+                "(product %s requested %s, available %s)",
+                order.id,
+                unavailable.product_id,
+                unavailable.requested,
+                unavailable.available,
+            )
+
+            order.stock_reservations.filter(
+                status=StockReservation.Status.ACTIVE
+            ).update(status=StockReservation.Status.RELEASED)
+
+            return Response(
+                {"error": "An item is no longer available in the requested quantity"},
+                status=status.HTTP_409_CONFLICT,
             )
 
         if coupon:

@@ -30,16 +30,25 @@ the endpoint, in order of how badly they are needed:
    ``orders.state`` — the same transition table, the same dimension mapping and
    the same audit-trigger vocabulary the customer-callback writer uses — inside
    ``transaction.atomic()`` with the Order row locked. Nothing here writes a
-   status literal or invents a payment amount.
+   status literal or invents a payment amount. The inventory commit is shared
+   with that writer too, which is the property the next paragraph states.
 
-**Inventory is deliberately NOT duplicated here.** The stock decrement and its
-``StockMovement`` ledger rows are SPEC-12-02's confirm step, under its own
-product locks with its own oversell re-check; a second copy here would risk the
-double decrement SPEC-1-B01 just fixed for refunds. What this endpoint does do
-is convert the order's live stock holds to CONVERTED (one idempotent
-``update``, the same statement ``verify_payment`` writes), so a paid order can
-never have its holds swept away as expired by the TTL reconciler. Finishing a
-webhook-confirmed order's inventory commit is that reconciler's job.
+**Inventory is committed here, through the ONE shared service.** The sale -
+holds to CONVERTED, the ``products.stock`` decrement and the
+``StockMovement`` ledger rows - is ``orders.inventory.commit_order_sale``,
+called by this handler and by ``verify_payment`` in the same transaction that
+writes the capture. It used NOT to be shared: this handler converted the holds
+and stopped, deferring the decrement to a "reconciler" that does not exist, so
+a payment that arrived without a browser callback left a paid order whose stock
+was never decremented with no ledger row to reconcile against - oversell with
+nothing to correct it. Sharing the service also makes the two paths idempotent
+with respect to each other: its guard reads the order's own payment dimension
+under the Order lock, so a delivery arriving after the customer callback
+confirmed the same payment moves no stock, which is the double decrement
+SPEC-1-B01 fixed once for refunds. And because the service re-checks
+availability under its own product locks, a webhook can no longer confirm an
+order whose stock is gone: that delivery is RECORDED and refused, which is what
+the reconciliation this endpoint exists for needs to read.
 
 **Refund events are recorded, not replayed.** A ``payment.refunded`` /
 ``refund.processed`` delivery means money went back at the gateway — possibly
@@ -82,6 +91,7 @@ from common.models import AuditEvent
 from common.money import quantize_money
 from products.models import StockReservation
 
+from .inventory import StockUnavailable, commit_order_sale
 from .models import Order, OrderStatusEvent, PaymentEvent
 from .state import (
     PAYMENT_CAPTURED,
@@ -364,6 +374,55 @@ def _apply_captured(event, body):
             return PaymentEvent.Outcome.REFUSED
 
         previous_status = order.status
+        # The sale itself - holds -> CONVERTED, the stock decrement and its
+        # [6.5.17] StockMovement ledger rows - is orders.inventory's, called
+        # here exactly as the customer callback calls it. That sharing is the
+        # fix: this handler used to convert the holds and STOP, so a payment
+        # that arrived without a browser callback left the order paid with its
+        # stock never decremented and no ledger row to reconcile against (the
+        # "reconciler" the previous version of this docstring deferred to does
+        # not exist). The service is idempotent against the callback, so a
+        # delivery arriving after the callback confirmed this same payment is a
+        # no-op rather than the second decrement SPEC-1-B01 had to fix once.
+        #
+        # BEFORE the order's capture state is written, deliberately. The
+        # service's idempotency guard IS the order's payment dimension, so
+        # writing "captured" first would make this call skip its own sale - and
+        # verify_payment gets the ordering right only because its capture write
+        # already sits below its commit.
+        try:
+            commit_order_sale(order)
+        except StockUnavailable as unavailable:
+            # The gateway holds this money whatever this store decides, so the
+            # capture cannot be un-applied: refusing to move stock is the only
+            # honest answer, and the recorded PaymentEvent plus this audit row
+            # are exactly what the finance operator reconciles the paid-but-
+            # unshipped order from. INFO, like the callback's identical race.
+            logger.info(
+                "Payment webhook %s: order %s has no stock for product %s "
+                "(requested %s, available %s); the capture is recorded but "
+                "nothing was sold",
+                event.event_id,
+                order.id,
+                unavailable.product_id,
+                unavailable.requested,
+                unavailable.available,
+            )
+            AuditEvent.record(
+                AuditEvent.EventType.PAYMENT_STOCK_CONFLICT,
+                order=order,
+                detail={
+                    "event_id": event.event_id,
+                    "product_id": unavailable.product_id,
+                    "requested": unavailable.requested,
+                    "available": unavailable.available,
+                },
+            )
+            order.stock_reservations.filter(
+                status=StockReservation.Status.ACTIVE
+            ).update(status=StockReservation.Status.RELEASED)
+            return PaymentEvent.Outcome.REFUSED
+
         order.status = target_status
         order.fulfilment_status = fulfilment_for_status(target_status)
         order.payment_status = PAYMENT_CAPTURED
@@ -379,13 +438,6 @@ def _apply_captured(event, body):
                 "razorpay_payment_id",
                 "paid_at",
             ]
-        )
-
-        # The order's holds become a real sale's holds: filtered on ACTIVE this
-        # is idempotent, and a paid order can no longer have its holds swept
-        # away as expired by the TTL reconciler.
-        order.stock_reservations.filter(status=StockReservation.Status.ACTIVE).update(
-            status=StockReservation.Status.CONVERTED
         )
 
         OrderStatusEvent.objects.create(

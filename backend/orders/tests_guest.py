@@ -55,7 +55,7 @@ from orders.models import Order, OrderStatusEvent, PaymentEvent, Refund
 from orders.serializers import OrderSerializer
 from orders.state import TRIGGER_ORDER_CREATE
 from orders.views import GUEST_TOKEN_HEADER, create_order
-from products.models import StockReservation
+from products.models import StockMovement, StockReservation
 
 GUEST_EMAIL = "guest@example.com"
 TOKEN_HEADER = "HTTP_" + GUEST_TOKEN_HEADER.upper().replace("-", "_")
@@ -945,11 +945,22 @@ class GuestOrderNullUserPathTests(GuestCheckoutTestBase):
         self.assertEqual(
             PaymentEvent.objects.get(event_id="evt_GUEST1").outcome, "applied"
         )
-        # Inventory is deliberately the callback writer's job (webhooks.py's
-        # own contract), so the webhook's guest-leg work is the transition,
-        # the trail and the hold conversion - all of which happened.
+        # Inventory rides the same shared commit the customer callback uses
+        # (orders.inventory.commit_order_sale), so a guest order confirmed by
+        # the DELIVERY has its stock decremented and its ledger row written
+        # exactly as one confirmed by the callback would. This assertion used
+        # to pin stock == 10 with a comment calling the omission deliberate -
+        # that was the defect, not the contract: a webhook-confirmed order left
+        # its stock un-decremented with no SALE row to reconcile against.
+        # The quantity is read off the order rather than typed, so the pin
+        # tracks the cart fixture instead of a number that can drift from it.
+        line = order.items.get()
         self.product.refresh_from_db()
-        self.assertEqual(self.product.stock, 10)
+        self.assertEqual(self.product.stock, 10 - line.quantity)
+        movement = StockMovement.objects.get()
+        self.assertEqual(movement.reason, StockMovement.Reason.SALE)
+        self.assertEqual(movement.delta, -line.quantity)
+        self.assertEqual(movement.note, f"Order #{order.id}")
         self.assertEqual(
             order.stock_reservations.get().status,
             StockReservation.Status.CONVERTED,
