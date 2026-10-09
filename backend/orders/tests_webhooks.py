@@ -30,7 +30,14 @@ from rest_framework.permissions import AllowAny
 from common.models import AuditEvent
 from common.testing import ApiTestCase
 from orders.inventory import StockUnavailable, commit_order_sale
-from orders.models import Order, OrderItem, OrderStatusEvent, PaymentEvent, Refund
+from orders.models import (
+    Coupon,
+    Order,
+    OrderItem,
+    OrderStatusEvent,
+    PaymentEvent,
+    Refund,
+)
 from orders.state import (
     CAPTURED_MONEY_PAYMENT_STATUSES,
     CAPTURED_SALE_PAYMENT_STATUSES,
@@ -79,10 +86,19 @@ class WebhookTestCase(ApiTestCase):
         )
 
     def make_pending_order(
-        self, total="1200.50", gateway_order="order_TEST9", gateway_payment=None
+        self,
+        total="1200.50",
+        gateway_order="order_TEST9",
+        gateway_payment=None,
+        username="buyer",
     ):
-        """An order awaiting its capture, as checkout + create_payment leave it."""
-        user = self.make_user()
+        """An order awaiting its capture, as checkout + create_payment leave it.
+
+        ``username`` is a parameter because a pin that needs TWO orders (one
+        coupon code, two customers) otherwise trips the unique username index
+        on the second call - a fixture failure masquerading as a product one.
+        """
+        user = self.make_user(username=username)
         order = Order.objects.create(
             user=user,
             full_name="Buyer Person",
@@ -161,6 +177,36 @@ class WebhookTestCase(ApiTestCase):
             quantity=quantity,
             status=StockReservation.Status.ACTIVE,
             expires_at=timezone.now() + timedelta(hours=1),
+        )
+
+    def attach_coupon(self, order, coupon):
+        """Bind the coupon the way checkout does.
+
+        ``total_amount`` is left alone deliberately: the discount is already
+        baked into it and the capture reconciles the gateway's amount against
+        exactly that number. What these pins are about is the coupon's USAGE.
+        """
+        order.coupon = coupon
+        order.save(update_fields=["coupon"])
+        return order
+
+    def _verify(self, order):
+        """The customer-callback verify for this order/payment, as the browser
+        would send it after a successful gateway checkout.
+
+        On the base class because BOTH writer-pairing pin classes need it, and
+        a second copy of this request would be exactly the duplicated-statement
+        drift this cycle exists to remove.
+        """
+        return self.client.post(
+            "/api/orders/payment/verify/",
+            {
+                "order_id": order.id,
+                "razorpay_order_id": order.razorpay_order_id,
+                "razorpay_payment_id": "pay_TEST9",
+                "razorpay_signature": "sig",
+            },
+            format="json",
         )
 
 
@@ -706,20 +752,6 @@ class SharedSaleCommitIdempotencyTests(WebhookTestCase):
     drive BOTH real endpoints against the same order and payment.
     """
 
-    def _verify(self, order):
-        """The customer-callback verify for this order/payment, as the browser
-        would send it after a successful gateway checkout."""
-        return self.client.post(
-            "/api/orders/payment/verify/",
-            {
-                "order_id": order.id,
-                "razorpay_order_id": order.razorpay_order_id,
-                "razorpay_payment_id": "pay_TEST9",
-                "razorpay_signature": "sig",
-            },
-            format="json",
-        )
-
     def _capture_after_callback(self, order):
         """The callback confirms, then the delivery arrives; return the response.
 
@@ -1066,6 +1098,230 @@ class _LockedReadRecorder:
 
     def for_table(self, table):
         return [order_by for name, order_by in self.locked_reads if name == table]
+
+
+class WebhookCouponUsageTests(WebhookTestCase):
+    """Property 12: a confirmed sale CONSUMES its coupon's usage.
+
+    The defect these pin: the delivery confirmed orders without touching
+    ``Coupon.used_count`` while the customer callback did, so a single-use
+    coupon redeemed by a webhook-confirmed order was still unspent and the next
+    customer could take the same discount. That is money - the discount was
+    already granted against the captured amount.
+    """
+
+    def test_capture_consumes_the_coupons_usage(self):
+        order = self.make_pending_order()
+        coupon = self.make_coupon(code="WEBHOOK10", usage_limit=1)
+        self.add_item(order, quantity=1)
+        self.attach_coupon(order, coupon)
+
+        self.deliver(self.capture_event(order))
+
+        coupon.refresh_from_db()
+        self.assertEqual(coupon.used_count, 1)
+
+    def test_capture_does_not_consume_usage_it_cannot_sell(self):
+        # The sufficiency re-check runs BEFORE the consumption, so a line that
+        # cannot be filled must not burn a single-use coupon for a sale that
+        # did not happen - the code stays redeemable by someone who can.
+        #
+        # HONEST SCOPE, recorded so the next auditor does not over-trust it:
+        # this pin does NOT prove the ORDERING. Moving the consumption above
+        # the re-check leaves it green, because the service opens its own
+        # ``transaction.atomic()`` and ``StockUnavailable`` is raised inside
+        # it, so the increment is rolled back either way. What this pin really
+        # pins is that nothing consumes the coupon on the unsold path at all -
+        # including the regression that matters, consumption moving out of the
+        # service into a caller that commits around the raise. The ordering is
+        # still the right one (no work that will be rolled back), it is simply
+        # not what is load-bearing here.
+        order = self.make_pending_order()
+        coupon = self.make_coupon(code="WEBHOOK20", usage_limit=1)
+        product = self.add_item(order, quantity=4)
+        self.attach_coupon(order, coupon)
+        products.objects.filter(pk=product.pk).update(stock=1)
+
+        self.deliver(self.capture_event(order))
+
+        coupon.refresh_from_db()
+        self.assertEqual(coupon.used_count, 0)
+
+    def test_two_webhook_confirmed_orders_consume_two_uses_of_one_code(self):
+        # Two customers, two orders, ONE single-use code, both confirmed by
+        # signed deliveries. Consumption is a record of what happened, not a
+        # gate, so both orders are recorded - what the pin fixes is that both
+        # CONSUME, which is what makes the over-redemption legible instead of
+        # invisible.
+        coupon = self.make_coupon(code="SINGLEUSE", usage_limit=1)
+        first = self.make_pending_order()
+        self.add_item(first, quantity=1)
+        self.attach_coupon(first, coupon)
+        second = self.make_pending_order(
+            gateway_order="order_TEST10", username="second-buyer"
+        )
+        self.add_item(second, quantity=1)
+        self.attach_coupon(second, coupon)
+
+        self.deliver(self.capture_event(first))
+        self.deliver(
+            self.capture_event(second, payment_id="pay_TEST10"),
+            event_id="evt_SECOND",
+        )
+
+        coupon.refresh_from_db()
+        self.assertEqual(coupon.used_count, 2)
+        self.assertEqual(PaymentEvent.objects.count(), 2)
+
+    def test_an_order_without_a_coupon_consumes_nothing(self):
+        order = self.make_pending_order()
+        self.add_item(order, quantity=1)
+
+        self.deliver(self.capture_event(order))
+
+        self.assertEqual(Coupon.objects.count(), 0)
+        self.assertEqual(
+            PaymentEvent.objects.get().outcome, PaymentEvent.Outcome.APPLIED
+        )
+
+    def test_a_deleted_coupon_leaves_the_order_committable(self):
+        # Order.coupon is on_delete=SET_NULL, so deleting the coupon must not
+        # make the order unsellable - the service skips a NULL coupon rather
+        # than raising on a row that is gone by design.
+        order = self.make_pending_order()
+        coupon = self.make_coupon(code="GONE10")
+        product = self.add_item(order, quantity=1)
+        self.attach_coupon(order, coupon)
+        coupon.delete()
+
+        self.deliver(self.capture_event(order))
+
+        product.refresh_from_db()
+        self.assertEqual(product.stock, 9)
+        self.assertEqual(
+            PaymentEvent.objects.get().outcome, PaymentEvent.Outcome.APPLIED
+        )
+
+
+class WebhookCouponIdempotencyTests(WebhookTestCase):
+    """Property 13: the two capture writers consume the coupon ONCE together.
+
+    Same payment, two writers, one coupon. The callback consumes it and the
+    arriving delivery must not consume it again - otherwise the two increments
+    stack, which is the same double effect SPEC-1-B01 had to fix once for the
+    refund decrement, one layer over from stock to money already discounted.
+    """
+
+    def setUp(self):
+        super().setUp()
+        self.coupon = self.make_coupon(code="ONCEONLY", usage_limit=1)
+
+    def _callback_then_delivery(self, order):
+        """Callback confirms the order, then the delivery arrives."""
+        self.api_login()
+        self.razorpay_mock(order_id=order.razorpay_order_id)
+        verify = self._verify(order)
+        self.assertEqual(verify.status_code, 200, verify.data)
+        return self.deliver(self.capture_event(order), event_id="evt_AFTER")
+
+    def test_a_delivery_after_the_callback_does_not_consume_twice(self):
+        order = self.make_pending_order()
+        self.add_item(order, quantity=1)
+        self.attach_coupon(order, self.coupon)
+
+        self._callback_then_delivery(order)
+
+        self.coupon.refresh_from_db()
+        self.assertEqual(self.coupon.used_count, 1)
+
+    def test_the_callback_after_a_delivery_does_not_consume_twice(self):
+        order = self.make_pending_order()
+        self.add_item(order, quantity=1)
+        self.attach_coupon(order, self.coupon)
+        self.api_login()
+        self.razorpay_mock(order_id=order.razorpay_order_id)
+
+        self.assertEqual(self.deliver(self.capture_event(order)).status_code, 200)
+        verify = self._verify(order)
+
+        self.assertEqual(verify.status_code, 400, verify.data)
+        self.coupon.refresh_from_db()
+        self.assertEqual(self.coupon.used_count, 1)
+
+    def test_a_replayed_delivery_after_the_callback_consumes_nothing_more(self):
+        order = self.make_pending_order()
+        self.add_item(order, quantity=1)
+        self.attach_coupon(order, self.coupon)
+
+        self._callback_then_delivery(order)
+
+        self.coupon.refresh_from_db()
+        self.assertEqual(self.coupon.used_count, 1)
+        self.assertEqual(
+            PaymentEvent.objects.get(event_id="evt_AFTER").outcome,
+            PaymentEvent.Outcome.REFUSED,
+        )
+
+
+class SaleCommitCouponTests(WebhookTestCase):
+    """The service's own coupon contract, driven directly."""
+
+    def test_committing_twice_consumes_the_coupon_once(self):
+        order = self.make_pending_order()
+        coupon = self.make_coupon(code="TWICE", usage_limit=1)
+        self.add_item(order, quantity=1)
+        self.attach_coupon(order, coupon)
+
+        commit_order_sale(order)
+        order.payment_status = "captured"
+        order.save(update_fields=["payment_status"])
+        commit_order_sale(order)
+
+        coupon.refresh_from_db()
+        self.assertEqual(coupon.used_count, 1)
+
+    def test_a_reused_coupon_is_consumed_per_sale_not_once_ever(self):
+        # Two different orders, one coupon: each sale consumes one use. The
+        # guard is the ORDER's payment state, not a global "this coupon was
+        # touched" flag, so a legitimately reusable code keeps working.
+        coupon = self.make_coupon(code="REUSABLE")
+        first = self.make_pending_order()
+        self.add_item(first, quantity=1)
+        self.attach_coupon(first, coupon)
+        second = self.make_pending_order(
+            gateway_order="order_TEST11", username="second-buyer"
+        )
+        self.add_item(second, quantity=1)
+        self.attach_coupon(second, coupon)
+
+        commit_order_sale(first)
+        commit_order_sale(second)
+
+        coupon.refresh_from_db()
+        self.assertEqual(coupon.used_count, 2)
+
+    def test_the_coupon_is_locked_after_the_products_not_before(self):
+        # ABBA. Both capture writers now take the Coupon inside the service, so
+        # the service's own lock order is the one that has to be right:
+        # products first, coupon second - the order verify_payment already used
+        # for its own coupon check. Taking the coupon first would invert
+        # against a transaction holding a product and wanting the coupon.
+        order = self.make_pending_order()
+        coupon = self.make_coupon(code="LOCKORDER")
+        self.add_item(order, quantity=1)
+        self.attach_coupon(order, coupon)
+
+        with _LockedReadRecorder() as recorded:
+            commit_order_sale(order)
+
+        acquired = [name for name, _ in recorded.locked_reads]
+        self.assertIn(products._meta.db_table, acquired)
+        self.assertIn(Coupon._meta.db_table, acquired)
+        self.assertLess(
+            acquired.index(products._meta.db_table),
+            acquired.index(Coupon._meta.db_table),
+            "the Coupon was locked before the products: a lock-order inversion",
+        )
 
 
 class SaleCommitServiceTests(WebhookTestCase):

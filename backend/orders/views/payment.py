@@ -2,13 +2,22 @@
 
 One of six modules split out of the former single-file `orders/views.py`. Both
 views here run inside `transaction.atomic()` with `select_for_update()`, and
-`verify_payment` is the order lifecycle's point of no return: inventory,
-coupon usage and cart cleanup happen here and NOWHERE else, deliberately after
-the gateway signature has been checked. Every failure branch below releases
-the attempt's stock holds rather than leaving phantom pressure on stock.
+`verify_payment` is the order lifecycle's point of no return, deliberately after
+the gateway signature has been checked. Every failure branch below releases the
+attempt's stock holds rather than leaving phantom pressure on stock.
 
-Nothing in this module was rewritten - the bodies moved verbatim - so the
-guarantees documented on each branch are the ones the split inherits.
+**The sale itself is NOT this module's.** The stock decrement, its ledger rows
+and the coupon-usage increment all live in `orders.inventory.commit_order_sale`,
+which this view and the SPEC-1-06 webhook both call. That module docstring
+records why; the short version is that when each capture writer carried its own
+copy of those statements the copies drifted, and a webhook-confirmed order left
+its stock un-decremented and its coupon unspent. What stays HERE is what is
+genuinely this endpoint's: the customer-facing protocol - the coupon validity
+precondition and its 409, the 409 on a lost stock race, the cart cleanup, and
+the audit rows naming the browser's verify. Cart cleanup is the one of those
+that CANNOT be shared: a `Cart` is identified only by its `session_id` and has
+no user FK, so a server-to-server webhook has no way to name this customer's
+cart - see `orders.inventory` and the WEBHOOK-COUPON note in the changelog.
 """
 
 import logging
@@ -510,9 +519,13 @@ def verify_payment(request):
                 status=status.HTTP_409_CONFLICT,
             )
 
-        if coupon:
-            coupon.used_count += 1
-            coupon.save(update_fields=["used_count"])
+        # The coupon's usage is NOT incremented here: commit_order_sale above
+        # consumed it inside the same transaction, under the same payment-
+        # dimension guard that makes the sale idempotent. Incrementing it a
+        # second time on this path is exactly the duplicated-statement drift
+        # that service was extracted to end - and the reason a webhook-
+        # confirmed order left a single-use coupon unspent. The validity gate
+        # above stays: that is this endpoint's precondition and its 409.
 
         # [R-8.16] paid_at is the business-event timestamp of exactly this
         # transition, so it is written beside it inside the same atomic

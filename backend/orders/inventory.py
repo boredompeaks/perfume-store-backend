@@ -55,6 +55,18 @@ protocol and deliberately not this module's business: the callback answers 409
 and leaves the order retryable, while the webhook cannot un-capture money the
 gateway already holds, so it records the conflict and leaves the order for the
 reconciliation the PaymentEvent row exists to feed.
+
+**Cart cleanup is deliberately NOT here, and cannot be.** ``verify_payment``
+empties the bought lines out of the caller's cart, and that is right for it -
+it has the session cookie. A webhook does not: ``Cart`` is identified only by
+``session_id`` and carries NO user FK, and nothing anywhere in the schema joins
+an Order to a Cart. So a server-to-server delivery has no way to name this
+customer's cart. The tempting "fix" - deleting cart items with these
+``product_id``s - would empty EVERY customer's cart in the store, so the
+correct answer here is that the webhook does not do it and the limitation is
+recorded rather than papered over. It is also the smaller defect: a stale cart
+line is a re-purchase nuisance, not money, whereas the two things this module
+does own (the decrement and the coupon usage) are.
 """
 
 import logging
@@ -63,7 +75,7 @@ from django.db import transaction
 
 from products.models import StockMovement, StockReservation, products
 
-from .models import Order
+from .models import Coupon, Order
 from .state import CAPTURED_SALE_PAYMENT_STATUSES
 
 logger = logging.getLogger(__name__)
@@ -160,6 +172,41 @@ def commit_order_sale(order, *, actor=None):
                     wanted,
                     product.stock if product else 0,
                 )
+
+        # The coupon's usage is consumed HERE rather than by each writer, for
+        # the same reason the decrement is: two copies of one statement drift,
+        # and a webhook-confirmed order that never consumed its coupon's usage
+        # lets a single-use coupon be burned again and again.
+        #
+        # It is a RECORD of what happened, not a gate. The discount is already
+        # baked into ``order.total_amount`` - the capture reconciles the
+        # gateway's amount against exactly that number - so a confirmed sale
+        # HAS consumed this coupon whether or not the coupon is still inside
+        # its ``usage_limit`` today. Re-validating here would ask the wrong
+        # question and would refuse to record a discount that was already
+        # given away; validity is the CALLER's precondition (verify_payment
+        # answers 409 on an invalidated coupon), and a webhook has no client to
+        # answer.
+        #
+        # AFTER the sufficiency re-check, so a line that cannot be sold does
+        # not burn usage for a sale that did not happen.
+        #
+        # The Coupon is locked by the service itself rather than trusted from
+        # the caller, for the same reason the products are. It is taken AFTER
+        # the product locks so both capture writers share the one total order
+        # Order -> products -> coupon, which is the order verify_payment
+        # already used for its own coupon check; a service that took it first
+        # would invert that against the callback and open a deadlock.
+        #
+        # ``select_for_update().get()`` cannot miss: ``Order.coupon`` is
+        # ``on_delete=SET_NULL``, so deleting this coupon issues an UPDATE
+        # against the Order row this transaction already holds locked. That
+        # delete therefore blocks until this block commits, and either the
+        # row exists or ``coupon_id`` was already NULL before the lock.
+        if locked_order.coupon_id is not None:
+            coupon = Coupon.objects.select_for_update().get(pk=locked_order.coupon_id)
+            coupon.used_count += 1
+            coupon.save(update_fields=["used_count"])
 
         # Filtering on ACTIVE makes the conversion idempotent and retry-safe: a
         # hold an earlier failed attempt released is terminal and is never
