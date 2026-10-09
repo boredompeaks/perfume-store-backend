@@ -18,6 +18,7 @@ from decimal import Decimal
 from pathlib import Path
 from urllib.parse import unquote, urlparse
 
+from celery.schedules import crontab, schedule
 from django.core.exceptions import ImproperlyConfigured
 from dotenv import load_dotenv
 
@@ -557,6 +558,190 @@ NOTIFICATION_OUTBOX_RETRY_MAX_SECONDS = _env_positive_int(
 )
 DEFAULT_FROM_EMAIL = os.getenv("DEFAULT_FROM_EMAIL", EMAIL_HOST_USER)
 FRONTEND_URL = os.getenv("FRONTEND_URL", "http://localhost:3000").rstrip("/")
+
+# ---------------------------------------------------------------------------
+# Celery: broker, result backend, and the beat schedule (SPEC-2-03 /
+# SPEC-19-1, ASYNC-INFRA)
+# ---------------------------------------------------------------------------
+#
+# The repo previously had NO worker of any kind. `expire_reservations`,
+# `drain_notification_outbox` and `purge_notification_outbox` were all built
+# and all tested, and none of them was ever SCHEDULED - so stale reservations
+# never expired and the notification outbox was never drained. That is the gap
+# the block below closes, and it is why the schedule below calls those three
+# commands rather than growing a fourth sweep.
+#
+# Read in the standard way: `config.celery` calls config_from_object with
+# namespace="CELERY", so every CELERY_* key below becomes app configuration and
+# the broker/backend/schedule live in ONE place. The app module holds only
+# wiring - it opens no socket at import, which is why the test suite can import
+# it with no Redis anywhere in the environment.
+#
+# REDIS_URL is the single knob for both the broker and the result backend, and
+# both fall back to it, so pointing a deployment at a managed Redis is one
+# variable rather than two that can disagree. The broker and the backend may be
+# split (CELERY_BROKER_URL / CELERY_RESULT_BACKEND override REDIS_URL
+# individually) for a deployment that wants result storage on a different,
+# longer-lived instance than the queue itself.
+#
+# The default host is localhost with NO password. It is a development
+# convenience, not a credential: a real deployment sets its own URL in the
+# environment and the password lives there, never in this file and never in
+# .env.example.
+REDIS_URL = os.getenv("REDIS_URL", "redis://localhost:6379/0").strip()
+CELERY_BROKER_URL = (os.getenv("CELERY_BROKER_URL") or REDIS_URL).strip()
+CELERY_RESULT_BACKEND = (os.getenv("CELERY_RESULT_BACKEND") or REDIS_URL).strip()
+
+# JSON on every serializer. Measured at this pin (celery 5.6.3): all three
+# ALREADY default to json, so these three lines change no behaviour today.
+# They are here to make the property EXPLICIT rather than inherited: pickle
+# over a result backend is remote code execution for anyone who can write to
+# it, and a security property that exists only because an upstream default has
+# not changed is a property this repo does not hold. A task that must move
+# something json cannot represent belongs in the database (as the outbox
+# does), not in a queue message.
+CELERY_TASK_SERIALIZER = "json"
+CELERY_RESULT_SERIALIZER = "json"
+CELERY_ACCEPT_CONTENT = ["json"]
+# Emit a STARTED state when a task begins. Costs one result write per task and
+# buys the distinction between "queued" and "stuck", which is the first
+# question anyone asks when a sweep looks like it stopped.
+CELERY_TASK_TRACK_STARTED = True
+# The store's time zone, not the host's. Every row these sweeps write is a UTC
+# instant (USE_TZ above); a beat whose clock is local time would fire sweeps at
+# a different hour per host, and a worker that disagreed with beat by an hour
+# would show up as an unexplained gap in a scheduled sweep.
+CELERY_TIMEZONE = TIME_ZONE
+# Timezone-aware (Django USE_TZ), so beat's own schedule arithmetic cannot drift
+# across a DST boundary the way naive local-time cron does.
+CELERY_ENABLE_UTC = True
+# Where celery logs worker/beat lifecycle lines. False because this project
+# owns its logging configuration explicitly (LOGGING above): a worker hijacking
+# the root logger would replace a documented, env-driven dictConfig with
+# celery's own handlers and levels.
+CELERY_WORKER_HIJACK_ROOT_LOGGER = False
+# The queue name. Explicit rather than celery's `celery` default so a
+# deployment sharing a Redis instance with another application cannot have
+# this store's tasks consumed by that application's worker, or vice versa.
+CELERY_TASK_DEFAULT_QUEUE = os.getenv("CELERY_TASK_DEFAULT_QUEUE", "perfume_store")
+
+# Eager execution: tasks run inline in the calling process instead of being
+# published to the broker. Off by default and NOT a test setting - it is a
+# documented deployment mode for a single-host install that runs beat inside
+# the web process, and the suite does not rely on it (the sweep pins call the
+# tasks directly, so they hold with or without a broker). Any truthy spelling
+# enables it, per _env_bool.
+CELERY_TASK_ALWAYS_EAGER = _env_bool("CELERY_TASK_ALWAYS_EAGER", False)
+
+
+# The three cadence values, bound as SETTINGS of their own and then read by
+# _beat_schedule() below. Declared here (rather than inline in the crontab
+# calls) for two reasons: an operator reading settings can see what the app
+# believes its own cadence is without knowing how celery parses a crontab,
+# and `override_settings` can move a cadence in a test, which a value computed
+# inside the function could not be made to do.
+CELERY_BEAT_EXPIRE_EVERY_MINUTES = _env_positive_int(
+    "CELERY_BEAT_EXPIRE_EVERY_MINUTES", 5
+)
+CELERY_BEAT_DRAIN_OUTBOX_SECONDS = _env_positive_int(
+    "CELERY_BEAT_DRAIN_OUTBOX_SECONDS", 60
+)
+CELERY_BEAT_PURGE_HOUR = _env_int("CELERY_BEAT_PURGE_HOUR", 3)
+
+
+def _interval_schedule(seconds):
+    """Return a beat schedule entry firing every `seconds`, for a sub-minute
+    cadence.
+
+    ``celery.schedules.schedule`` is the only one of the two that expresses
+    anything under a minute; a crontab cannot, because its minute field is the
+    smallest unit it has. Clamped at 1 for the same reason every other integer
+    knob here is: a zero-second interval is not a fast schedule, it is a
+    schedule that fires as fast as the scheduler can loop, and it would be
+    silent about the difference.
+    """
+    return schedule(run_every=max(1, seconds))
+
+
+def _beat_schedule():
+    """Return the CELERY_BEAT_SCHEDULE value: the three sweeps this repo runs.
+
+    Keyed by MANAGEMENT COMMAND name, because that is the identity a reader
+    already has - an operator who knows `manage.py drain_notification_outbox`
+    can find its tick here without learning a second vocabulary, and the tasks
+    in `common.tasks` are named identically, so key, task name and command
+    agree by construction (pinned, not assumed).
+
+    Every entry points at a task that calls its management command through
+    `call_command`, so the beat tick and the operator's manual run are the same
+    code. That is what keeps them from diverging: there is one implementation,
+    not a scheduled copy and a command copy that have to be kept in step.
+
+    Built by a function called once at import, and assigned to a module-level
+    name rather than written inline, purely so the three entries read as three
+    blocks with their reasoning attached instead of as one wall. It IS a plain
+    dict frozen at import, like every other setting here: a test that wants a
+    different cadence overrides the setting, it does not expect this to
+    recompute.
+    """
+    return {
+        # SPEC-12-03: the sweep must run well inside RESERVATION_TTL (900s
+        # above), or a hold can sit past its own expiry - unreleasable, and
+        # still gating available-to-sell. 300 is a third of the default TTL,
+        # so a tick that is late, or one worker restarting, still leaves room
+        # for two more passes before a hold goes stale.
+        "expire_reservations": {
+            "task": "common.tasks.expire_reservations",
+            "schedule": crontab(
+                minute=f"*/{CELERY_BEAT_EXPIRE_EVERY_MINUTES}",
+                hour="*",
+                day_of_week="*",
+                day_of_month="*",
+                month_of_year="*",
+            ),
+        },
+        # SPEC-19.3: the drain cadence bounds the EXTRA wait a retried row
+        # takes on top of its own backoff, so a five-minute tick would add
+        # five minutes to every retry's first wait. Every minute is the floor
+        # crontab can express, and it is deliberately NOT claimed to be inside
+        # NOTIFICATION_OUTBOX_RETRY_BASE_SECONDS (30s) above, because it is
+        # not: measured with `remaining_estimate`, a `minute="*"` entry reports
+        # up to 60s to its next fire. The honest arithmetic is that a first
+        # retry waits its 30s backoff plus up to one tick, so 30-90s - the
+        # same trade the `* * * * *` cron line this replaces already made, and
+        # the reason that cron line was itself considered adequate.
+        #
+        # Expressed in SECONDS rather than as a crontab `minute` field
+        # because this is the one cadence an operator has a real reason to
+        # tune: a store with a fast provider and a tight queue SLA wants it
+        # denser, and a crontab cannot express anything under a minute. It is
+        # clamped to at least 1s, so the schedule is always a schedule.
+        "drain_notification_outbox": {
+            "task": "common.tasks.drain_notification_outbox",
+            "schedule": _interval_schedule(CELERY_BEAT_DRAIN_OUTBOX_SECONDS),
+        },
+        # The deletion owner for spent outbox rows. Daily at 03:17 rather than
+        # on the hour: it is a retention sweep, not a delivery path, so the
+        # bound it enforces (NOTIFICATION_OUTBOX_TTL_SECONDS, in days) gives
+        # nothing to a sub-daily cadence - and the off-hour minute keeps every
+        # deployment that copied this schedule off the shared 00:00 spike,
+        # which is what a systemd timer and a cron daemon both wake up for.
+        "purge_notification_outbox": {
+            "task": "common.tasks.purge_notification_outbox",
+            "schedule": crontab(
+                minute="17",
+                hour=CELERY_BEAT_PURGE_HOUR,
+                day_of_week="*",
+                day_of_month="*",
+                month_of_year="*",
+            ),
+        },
+    }
+
+
+CELERY_BEAT_SCHEDULE = _beat_schedule()
+
+
 # SPEC-20-13: where the admin login page sends an account that MFA has
 # blocked. Mandatory MFA (R-17.9) refuses an unenrolled privileged login,
 # so without a reachable enrollment surface such an account is locked out
