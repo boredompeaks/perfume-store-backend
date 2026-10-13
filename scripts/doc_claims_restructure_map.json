@@ -242,6 +242,18 @@
     "test_slug_overflow_without_collision_currently_exceeds_max_length": {
       "successor": "test_long_name_without_collision_truncated_to_slug_max_length",
       "reason": "feaee45 (PG-2b) fixed the clamp and replaced this bug-documenting pin with the truncation pin for the same no-collision scenario"
+    },
+    "test_confirmation_send_is_registered_not_performed_inline": {
+      "successor": "test_confirmation_is_enqueued_not_sent_inline",
+      "reason": "renamed in 05cd9f4 (TIER1-ASYNC-CONVERT) when verify_payment stopped registering an inline send and began writing the NotificationOutbox row; the diff replaces one def with the other in orders/tests.py and the docstrings swap the pinned defect for the converted contract"
+    },
+    "test_verify_success_sends_confirmation_email": {
+      "successor": "test_verify_success_queues_and_the_drain_delivers",
+      "reason": "renamed in 05cd9f4 (TIER1-ASYNC-CONVERT) when the browser verify began enqueueing the order.paid confirmation for the drain worker instead of sending it; the diff replaces one def with the other in one hunk of tests/test_notifications.py"
+    },
+    "test_send_failure_does_not_break_the_payment": {
+      "successor": "test_enqueue_failure_does_not_break_the_payment",
+      "reason": "renamed in 05cd9f4 (TIER1-ASYNC-CONVERT): the never-raise payment pin moved from SMTP-503 dispatch failure to outbox enqueue failure and the diff replaces one def with the other in tests/test_notifications.py; the separate request-path pin 05cd9f4 added to orders/tests.py has a different name and is not this cite's successor"
     }
   }
 }

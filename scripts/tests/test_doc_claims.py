@@ -34,7 +34,6 @@ from doc_claims import (  # noqa: E402
     load_restructure_map,
     parse_counter_examples,
     resolve_base,
-    restructure_check,
     validate_restructure_map,
     verify_claims,
 )
