@@ -48,6 +48,7 @@ from django.utils import timezone
 from rest_framework.settings import api_settings
 from rest_framework.throttling import ScopedRateThrottle
 
+from common import notifications
 from common.models import AuditEvent
 from common.roles import ROLE_FINANCE, ROLE_INVENTORY, ROLE_SUPPORT
 from common.testing import ApiTestCase
@@ -969,15 +970,20 @@ class GuestOrderNullUserPathTests(GuestCheckoutTestBase):
 
     def test_the_order_confirmation_email_reaches_the_guest(self):
         """The notification reads the order's recipient, so the guest gets
-        the mail instead of an AttributeError swallowed into the log."""
+        the mail instead of an AttributeError swallowed into the log.
+        Since TIER1-ASYNC-CONVERT the webhook queues the confirmation;
+        the drain worker delivers it to the guest address."""
         order, _ = self.place_guest_order()
         self.pay_the_guest_order(order)
 
         self.deliver(self.capture_event(order))
 
+        # Nothing sent on the delivery thread — the intent is queued.
+        self.assertEqual(len(mail.outbox), 0)
+        self.assertEqual(order.recipient, GUEST_EMAIL)
+        notifications.drain_notifications()
         self.assertEqual(len(mail.outbox), 1)
         self.assertEqual(mail.outbox[0].to, [GUEST_EMAIL])
-        self.assertEqual(order.recipient, GUEST_EMAIL)
 
     def test_the_refund_seam_refunds_a_captured_guest_order(self):
         order, _ = self.place_guest_order()

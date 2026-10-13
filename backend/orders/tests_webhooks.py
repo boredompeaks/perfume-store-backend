@@ -21,13 +21,14 @@ from decimal import Decimal
 from unittest.mock import patch
 
 from django.core import mail
-from django.db import IntegrityError
+from django.db import IntegrityError, transaction
 from django.db.models.query import QuerySet
 from django.test import override_settings
 from django.utils import timezone
 from rest_framework.permissions import AllowAny
 
-from common.models import AuditEvent
+from common import notifications
+from common.models import AuditEvent, NotificationOutbox
 from common.testing import ApiTestCase
 from orders.inventory import StockUnavailable, commit_order_sale
 from orders.models import (
@@ -376,7 +377,17 @@ class ReplayProtectionTests(WebhookTestCase):
             ).count(),
             1,
         )
-        # One customer notification, not two.
+        # One customer notification, not two: the outbox dedup_key
+        # collapses the second delivery's enqueue, and nothing is sent
+        # on the delivery thread — the drain worker delivers the row.
+        self.assertEqual(
+            NotificationOutbox.objects.filter(
+                event_type=AuditEvent.EventType.ORDER_PAID
+            ).count(),
+            1,
+        )
+        self.assertEqual(len(mail.outbox), 0)
+        notifications.drain_notifications()
         self.assertEqual(len(mail.outbox), 1)
         order.refresh_from_db()
         self.assertEqual(order.payment_status, "captured")
@@ -577,12 +588,61 @@ class CaptureReconciliationTests(WebhookTestCase):
         self.assertEqual(released.status, StockReservation.Status.RELEASED)
 
     def test_the_customer_is_notified_by_the_reconciled_capture(self):
+        """The capture queues the confirmation (no send on the delivery
+        thread); the scheduled drain is what reaches the customer."""
         order = self.make_pending_order()
 
         self.deliver(self.capture_event(order))
 
+        self.assertEqual(len(mail.outbox), 0)
+        row = NotificationOutbox.objects.get(
+            event_type=AuditEvent.EventType.ORDER_PAID
+        )
+        self.assertEqual(row.status, NotificationOutbox.Status.PENDING)
+        notifications.drain_notifications()
         self.assertEqual(len(mail.outbox), 1)
         self.assertIn(str(order.id), mail.outbox[0].subject)
+
+    def test_the_outbox_row_is_written_inside_the_capture_transaction(self):
+        """Rollback-together, pinned at the webhook site: the row is
+        visible before the enclosing transaction commits and disappears
+        with it. A post-commit write would be invisible inside the block;
+        a separate committed write would survive the rollback. Only the
+        in-transaction placement satisfies both."""
+        order = self.make_pending_order()
+
+        with self.assertRaises(RuntimeError):
+            with transaction.atomic():
+                self.deliver(self.capture_event(order))
+                # Visible while the capture transaction is still open.
+                self.assertEqual(
+                    NotificationOutbox.objects.filter(
+                        event_type=AuditEvent.EventType.ORDER_PAID
+                    ).count(),
+                    1,
+                )
+                raise RuntimeError("force rollback after the enqueue")
+        # The capture and its notification intent rolled back together.
+        self.assertEqual(NotificationOutbox.objects.count(), 0)
+        order.refresh_from_db()
+        self.assertEqual(order.payment_status, "pending")
+
+    def test_an_enqueue_failure_never_breaks_the_capture(self):
+        """Notification outage isolation: an outbox write that raises
+        leaves the capture applied and the delivery acknowledged — the
+        notification never breaks the transaction it follows."""
+        order = self.make_pending_order()
+
+        with patch(
+            "orders.webhooks.notifications.enqueue",
+            side_effect=RuntimeError("outbox unavailable"),
+        ):
+            response = self.deliver(self.capture_event(order))
+
+        self.assertEqual(response.status_code, 200)
+        order.refresh_from_db()
+        self.assertEqual(order.payment_status, "captured")
+        self.assertEqual(NotificationOutbox.objects.count(), 0)
 
     def test_capture_audit_rows_name_the_delivery(self):
         order = self.make_pending_order()

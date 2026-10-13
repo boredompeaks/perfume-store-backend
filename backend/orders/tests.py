@@ -22,7 +22,7 @@ from rest_framework.throttling import ScopedRateThrottle
 
 from cart.models import Cart, CartItem
 from common import notifications
-from common.models import AuditEvent
+from common.models import AuditEvent, NotificationOutbox
 from common.roles import ROLE_FINANCE, ROLE_SUPPORT
 from common.testing import (
     TEST_RAZORPAY_KEY_ID,
@@ -1425,47 +1425,80 @@ class VerifyPaymentTests(OrderTestBase):
         )
         self.assertEqual(res.status_code, 404, res.data)
 
-    # ——— ASYNC-2b1: send registered, not performed under the locks ———
+    # ——— TIER1-ASYNC-CONVERT: notification queued, never sent inline ———
 
-    def test_confirmation_send_is_registered_not_performed_inline(self):
-        """The defect this pins: dispatch ran inside the atomic block that
-        holds select_for_update on Order, products and Coupon, so the SMTP
-        round trip happened with those rows locked. verify_payment must
-        register the send instead."""
+    def test_confirmation_is_enqueued_not_sent_inline(self):
+        """The converted contract: verify_payment writes a NotificationOutbox
+        row inside its money block — it never calls the send paths
+        (dispatch / dispatch_on_commit) and never opens SMTP on the request
+        thread. The beat-scheduled drain worker owns the send."""
         client_mock, order, payload = self._prepare_paid_setup()
 
-        with mock.patch("orders.views.notifications.dispatch") as sync_dispatch:
-            with mock.patch(
-                "orders.views.notifications.dispatch_on_commit"
-            ) as post_commit_dispatch:
-                res = self.client.post(
-                    "/api/orders/payment/verify/", payload, format="json"
-                )
+        with mock.patch("orders.views.notifications.enqueue") as enqueue_mock:
+            with mock.patch("orders.views.notifications.dispatch") as sync_dispatch:
+                with mock.patch(
+                    "orders.views.notifications.dispatch_on_commit"
+                ) as post_commit_dispatch:
+                    res = self.client.post(
+                        "/api/orders/payment/verify/", payload, format="json"
+                    )
 
         self.assertEqual(res.status_code, 200, res.data)
-        sync_dispatch.assert_not_called()
-        post_commit_dispatch.assert_called_once_with(
+        enqueue_mock.assert_called_once_with(
             AuditEvent.EventType.ORDER_PAID, {"order": order}
         )
+        sync_dispatch.assert_not_called()
+        post_commit_dispatch.assert_not_called()
 
-    def test_no_mail_is_sent_before_the_verify_transaction_commits(self):
-        """Ordering witness at the view: while the response is being built
-        the money block is still open, so the outbox must be empty; the
-        send only appears once the commit callback runs."""
+    def test_no_mail_is_sent_on_the_request_thread_and_the_queue_delivers(self):
+        """End-to-end conversion proof at the view: the verify response
+        sends nothing — the outbox row is already written (inside the
+        money transaction) — and the drain worker is what puts the
+        confirmation in the customer's inbox."""
         client_mock, order, payload = self._prepare_paid_setup()
+        mail.outbox.clear()
 
-        with self.captureOnCommitCallbacks(execute=True):
-            res = self.client.post(
-                "/api/orders/payment/verify/", payload, format="json"
-            )
-            self.assertEqual(res.status_code, 200, res.data)
-            self.assertEqual(len(mail.outbox), 0)
+        res = self.client.post("/api/orders/payment/verify/", payload, format="json")
 
+        self.assertEqual(res.status_code, 200, res.data)
         order.refresh_from_db()
         self.assertEqual(order.status, "confirmed")
+        # Nothing sent on the request thread; the intent is queued instead.
+        self.assertEqual(len(mail.outbox), 0)
+        row = NotificationOutbox.objects.get(
+            event_type=AuditEvent.EventType.ORDER_PAID
+        )
+        self.assertEqual(row.status, NotificationOutbox.Status.PENDING)
+        self.assertEqual(
+            row.payload, {"order": {"label": "orders.order", "pk": order.pk}}
+        )
+        # The scheduled worker turns the row into the customer's mail.
+        with self.assertLogs("common.notifications", level="INFO"):
+            notifications.drain_notifications()
         self.assertEqual(len(mail.outbox), 1)
         self.assertEqual(mail.outbox[0].to, [order.user.email])
         self.assertIn(f"#{order.id}", mail.outbox[0].subject)
+        row.refresh_from_db()
+        self.assertEqual(row.status, NotificationOutbox.Status.SENT)
+
+    def test_enqueue_failure_never_breaks_the_captured_payment(self):
+        """Notification outage isolation on the money path: an outbox write
+        that raises leaves the captured payment confirmed and the response
+        200 — the SMTP-503 account-still-created behavior, mirrored."""
+        client_mock, order, payload = self._prepare_paid_setup()
+
+        with mock.patch(
+            "orders.views.notifications.enqueue",
+            side_effect=RuntimeError("outbox unavailable"),
+        ):
+            res = self.client.post(
+                "/api/orders/payment/verify/", payload, format="json"
+            )
+
+        self.assertEqual(res.status_code, 200, res.data)
+        order.refresh_from_db()
+        self.assertEqual(order.status, "confirmed")
+        self.assertEqual(NotificationOutbox.objects.count(), 0)
 
 
 @tag("orders")
@@ -3620,11 +3653,11 @@ class ShippedPreconditionTests(OrderTestBase):
         shipped hook contract (10-05) fires for it too."""
         order = self._cod_row()
 
-        with mock.patch("orders.events.notifications.dispatch") as dispatch_mock:
+        with mock.patch("orders.events.notifications.enqueue") as enqueue_mock:
             res = self._run_admin_action("mark_shipped", [order])
 
         self.assertEqual(res.status_code, 200)
-        dispatch_mock.assert_called_once_with("order.shipped", {"order": order})
+        enqueue_mock.assert_called_once_with("order.shipped", {"order": order})
 
     # ——— the extension hook (the SPEC-1-08 attach point) ———
 
@@ -3702,10 +3735,12 @@ class ShippedPreconditionTests(OrderTestBase):
 class TransitionNotificationTests(OrderTestBase):
     """[R-10.16] SPEC-10-05: the shipped/delivered/cancelled transitions
     each fire ONE call into the shared notifications seam — the same
-    ``notifications.dispatch`` verify_payment already uses for order.paid —
-    with the transitioned order as payload. A notification failure can
-    never fail or roll back its transition (log-only, rollback isolation
-    pinned), and non-hooked transitions fire nothing."""
+    ``notifications.enqueue`` outbox seam verify_payment already uses for
+    order.paid — with the transitioned order as payload. The call writes a
+    NotificationOutbox row inside the transition's transaction (no send on
+    the request thread); a notification failure can never fail or roll
+    back its transition (log-only, rollback isolation pinned), and
+    non-hooked transitions fire nothing."""
 
     def _paid_itemful_confirmed(self):
         """A confirmed row as verify_payment leaves it: captured payment
@@ -3775,14 +3810,14 @@ class TransitionNotificationTests(OrderTestBase):
     def test_bulk_writers_fire_shipped_then_delivered_hooks(self):
         order = self._paid_itemful_confirmed()
 
-        with mock.patch("orders.events.notifications.dispatch") as dispatch_mock:
+        with mock.patch("orders.events.notifications.enqueue") as enqueue_mock:
             res = self._run_admin_action("mark_shipped", [order])
             self.assertEqual(res.status_code, 200)
-            dispatch_mock.assert_called_once_with("order.shipped", {"order": order})
-            dispatch_mock.reset_mock()
+            enqueue_mock.assert_called_once_with("order.shipped", {"order": order})
+            enqueue_mock.reset_mock()
             res = self._run_admin_action("mark_delivered", [order])
             self.assertEqual(res.status_code, 200)
-            dispatch_mock.assert_called_once_with("order.delivered", {"order": order})
+            enqueue_mock.assert_called_once_with("order.delivered", {"order": order})
         order.refresh_from_db()
         self.assertEqual(order.status, "delivered")
 
@@ -3790,10 +3825,10 @@ class TransitionNotificationTests(OrderTestBase):
         order = self._paid_itemful_confirmed()
         self._admin_login()
 
-        with mock.patch("orders.events.notifications.dispatch") as dispatch_mock:
+        with mock.patch("orders.events.notifications.enqueue") as enqueue_mock:
             res = self._change_form_post(order, "shipped")
             self.assertEqual(res.status_code, 200)
-            dispatch_mock.assert_called_once_with("order.shipped", {"order": order})
+            enqueue_mock.assert_called_once_with("order.shipped", {"order": order})
         order.refresh_from_db()
         self.assertEqual(order.status, "shipped")
 
@@ -3801,10 +3836,10 @@ class TransitionNotificationTests(OrderTestBase):
         order = self._paid_itemful_confirmed()
         support = self._staff_client("notifyfulfil")
 
-        with mock.patch("orders.events.notifications.dispatch") as dispatch_mock:
+        with mock.patch("orders.events.notifications.enqueue") as enqueue_mock:
             res = support.post(f"/api/admin/orders/{order.id}/fulfill/")
             self.assertEqual(res.status_code, 200, res.data)
-            dispatch_mock.assert_called_once_with("order.shipped", {"order": order})
+            enqueue_mock.assert_called_once_with("order.shipped", {"order": order})
         order.refresh_from_db()
         self.assertEqual(order.status, "shipped")
 
@@ -3818,19 +3853,19 @@ class TransitionNotificationTests(OrderTestBase):
         seam_order = self.create_order()
         support = self._staff_client("notifycancel")
 
-        with mock.patch("orders.events.notifications.dispatch") as dispatch_mock:
+        with mock.patch("orders.events.notifications.enqueue") as enqueue_mock:
             res = self._run_admin_action("cancel_pending", [bulk_order])
             self.assertEqual(res.status_code, 200)
-            dispatch_mock.assert_called_once_with(
+            enqueue_mock.assert_called_once_with(
                 "order.cancelled", {"order": bulk_order}
             )
         bulk_order.refresh_from_db()
         self.assertEqual(bulk_order.status, "cancelled")
 
-        with mock.patch("orders.events.notifications.dispatch") as dispatch_mock:
+        with mock.patch("orders.events.notifications.enqueue") as enqueue_mock:
             res = support.post(f"/api/admin/orders/{seam_order.id}/cancel/")
             self.assertEqual(res.status_code, 200, res.data)
-            dispatch_mock.assert_called_once_with(
+            enqueue_mock.assert_called_once_with(
                 "order.cancelled", {"order": seam_order}
             )
         seam_order.refresh_from_db()
@@ -3840,13 +3875,13 @@ class TransitionNotificationTests(OrderTestBase):
 
     def test_hook_exception_leaves_the_transition_and_event_committed(self):
         """The notify site sits inside the writer's transaction but is
-        failure-swallowing: a dispatch that raises fails NEITHER the
+        failure-swallowing: an enqueue that raises fails NEITHER the
         request, nor the transition, nor its audit row."""
         order = self._paid_itemful_confirmed()
 
         with mock.patch(
-            "orders.events.notifications.dispatch",
-            side_effect=RuntimeError("smtp down"),
+            "orders.events.notifications.enqueue",
+            side_effect=RuntimeError("outbox down"),
         ):
             res = self._run_admin_action("mark_shipped", [order])
         self.assertEqual(res.status_code, 200)
@@ -3864,12 +3899,12 @@ class TransitionNotificationTests(OrderTestBase):
     def test_non_hooked_transitions_fire_nothing(self):
         confirmed = self.create_order()  # pending
 
-        with mock.patch("orders.events.notifications.dispatch") as dispatch_mock:
+        with mock.patch("orders.events.notifications.enqueue") as enqueue_mock:
             res = self._run_admin_action("mark_confirmed", [confirmed])
             self.assertEqual(res.status_code, 200)
             confirmed.refresh_from_db()
             self.assertEqual(confirmed.status, "confirmed")
-            dispatch_mock.assert_not_called()
+            enqueue_mock.assert_not_called()
 
     def test_hook_map_pins_the_contract(self):
         """The hook set is exactly the three lifecycle transitions the

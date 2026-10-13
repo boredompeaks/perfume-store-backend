@@ -35,12 +35,14 @@ Two consequences worth stating rather than hiding:
   is in-process, not a subprocess, and it raises on a non-zero command exit, so
   celery sees a genuine task error rather than a silent success.
 
-**Nothing here converts a notification call site.** ``enqueue`` still has no
-production caller; see the module note in ``config.celery``. The ordering is
-deliberate and the dark failure it avoids is concrete: a call site converted
-before a drain exists writes a row nobody reads, and the customer's mail simply
-never arrives - a regression no suite catches unless it is looking for exactly
-that, which is why the existing drain suite pins "no call site is converted".
+**Nothing here converts a notification call site; the conversion lives in
+the call sites themselves** (TIER1-ASYNC-CONVERT turned the three business
+sites to ``enqueue``). The ordering that made that conversion safe was
+deliberate and the dark failure it avoided is concrete: a call site
+converted before a drain exists writes a row nobody reads, and the
+customer's mail simply never arrives - a regression no suite catches
+unless it is looking for exactly that, which is why the drain suite pins
+the converted sites end to end (queue, then drain, then mail).
 """
 
 from celery import shared_task
@@ -72,8 +74,9 @@ def drain_notification_outbox():
     """Run SPEC-19.3's outbox drain: claim, send, retry, dead-letter.
 
     One pass, on the cadence ``CELERY_BEAT_SCHEDULE`` sets. This is the sweep
-    that makes ``common.notifications.enqueue`` meaningful, and it is the reason
-    converting a notification call site is the NEXT task rather than this one.
+    that makes ``common.notifications.enqueue`` meaningful: since
+    TIER1-ASYNC-CONVERT the business call sites queue through it, and this
+    tick is what turns their rows into delivered mail.
 
     No ``--retry-dead`` here and no ``--purge-expired``: both are operator
     decisions with a flag for a reason. Re-opening dead letters is an

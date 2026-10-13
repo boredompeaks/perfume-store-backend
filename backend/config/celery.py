@@ -16,12 +16,13 @@ written next to it). What lives here is only the wiring that makes
 ``celery -A config worker`` work, which is a fact about the package layout and
 not a choice any deployment should make.
 
-**Nothing here converts a notification call site.**
-``common.notifications.enqueue`` still has no production caller, and that is
-the correct state of the world for this commit. Converting a site before a
-drain is proven means a notification that is silently never delivered - the
-ordering hazard this repo has already recorded once. The worker comes first;
-the call sites are the next task, against a drain this commit has made real.
+**This module converts no call site; the call sites converted themselves**
+(TIER1-ASYNC-CONVERT turned ``orders/events.py``,
+``orders/views/payment.py`` and ``orders/webhooks.py`` to ``enqueue``).
+The ordering hazard that dictated the sequencing is historical and stays
+recorded: converting a site before a drain is proven means a notification
+that is silently never delivered. The worker landed first, against a drain
+this commit made real; the sites followed once that drain was audited.
 
 **Redis is the default broker, and it is never contacted at import.** Building
 the app resolves configuration; it opens no socket. The test suite therefore
