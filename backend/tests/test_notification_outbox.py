@@ -637,9 +637,7 @@ class CallSiteConvertedTests(ApiTestCase):
         self.assertEqual(res.status_code, 200, res.data)
         # Nothing sent on the request thread; the intent is queued.
         self.assertEqual(len(mail.outbox), 0)
-        row = NotificationOutbox.objects.get(
-            event_type=AuditEvent.EventType.ORDER_PAID
-        )
+        row = NotificationOutbox.objects.get(event_type=AuditEvent.EventType.ORDER_PAID)
         self.assertEqual(row.status, NotificationOutbox.Status.PENDING)
         self.assertEqual(row.payload["order"]["pk"], order_id)
         # The scheduled worker is the only send path: drain it and the

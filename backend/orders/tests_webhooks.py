@@ -516,9 +516,7 @@ class CaptureReconciliationTests(WebhookTestCase):
         self.deliver(self.capture_event(order))
 
         self.assertEqual(len(mail.outbox), 0)
-        row = NotificationOutbox.objects.get(
-            event_type=AuditEvent.EventType.ORDER_PAID
-        )
+        row = NotificationOutbox.objects.get(event_type=AuditEvent.EventType.ORDER_PAID)
         self.assertEqual(row.status, NotificationOutbox.Status.PENDING)
         notifications.drain_notifications()
         self.assertEqual(len(mail.outbox), 1)

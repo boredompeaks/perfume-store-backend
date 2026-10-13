@@ -1451,9 +1451,7 @@ class VerifyPaymentTests(OrderTestBase):
         self.assertEqual(order.status, "confirmed")
         # Nothing sent on the request thread; the intent is queued instead.
         self.assertEqual(len(mail.outbox), 0)
-        row = NotificationOutbox.objects.get(
-            event_type=AuditEvent.EventType.ORDER_PAID
-        )
+        row = NotificationOutbox.objects.get(event_type=AuditEvent.EventType.ORDER_PAID)
         self.assertEqual(row.status, NotificationOutbox.Status.PENDING)
         self.assertEqual(
             row.payload, {"order": {"label": "orders.order", "pk": order.pk}}
