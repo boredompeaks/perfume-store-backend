@@ -4,12 +4,13 @@ from functools import partial
 
 from django import forms
 from django.contrib import admin, messages
+from django.db import transaction
 from django.forms import modelformset_factory
 from django.http import HttpResponse
 from django.shortcuts import render
 from django.utils.html import format_html, mark_safe
 
-from common.admin import RoleAwareModelAdmin
+from common.admin import DEFAULT_CONFIRM_WARNING, RoleAwareModelAdmin
 from common.saved_filters import SavedFilterMixin
 
 from .models import ProductVariant, StockMovement, products
@@ -93,10 +94,57 @@ class ProductAdmin(SavedFilterMixin, RoleAwareModelAdmin):
         # (``inline_stock_capability``): same mutation, same capability.
         "adjust_stock": "inventory.adjust",
         "export_csv": "products.read",
+        # MERCHANT-DELIST: taking a product off sale (and putting it back)
+        # rides ``products.publish`` — the capability the delete above
+        # already leans on "because it is at least as sensitive as
+        # unpublishing", which names this exact power. Deliberately NOT
+        # ``products.write``: that capability gates ordinary row edits,
+        # while this one decides whether the store sells the row at all —
+        # a narrower set of roles (catalogue + admin) may make that call.
+        "delist_products": "products.publish",
+        "relist_products": "products.publish",
     }
     # adjust_stock renders its own deliberate input form (delta/reason +
     # Apply) — that form is the explicit confirmation [6.12.4], so it stays
     # off confirmation_required_actions.
+    #
+    # MERCHANT-DELIST-C2 (spec 4814: confirmation dialogs on
+    # publishing/unpublishing large batches): delist and relist are that
+    # batch publish/unpublish, so both directions of the same flip are
+    # behind the shared interstitial the mixin already owns. Cycle 1's
+    # comment declined the interstitial because the action is reversible
+    # — but the confirmation is not about destructiveness, it is about a
+    # batch that changes what the storefront sells, and the superuser
+    # keeps the mixin's direct-execution bypass either way.
+    confirmation_required_actions = frozenset({"delist_products", "relist_products"})
+    # The shared interstitial text says the action "cannot be undone" —
+    # true of cancel_pending, FALSE of a reversible state flip whose undo
+    # is the sibling action in the same dropdown. render_confirmation
+    # takes the warning as a parameter for exactly this: the dialog says
+    # what THIS action does instead of inheriting a sentence about a
+    # different action's permanence. No new mechanism — the parameter is
+    # the existing seam; the map only exists because two actions here
+    # need a sentence the default cannot truthfully carry.
+    ACTION_WARNINGS = {
+        "delist_products": (
+            "takes the selected products off the public catalogue until "
+            "they are put back on sale. Confirm to continue."
+        ),
+        "relist_products": (
+            "puts the selected products back on the public catalogue. "
+            "Confirm to continue."
+        ),
+    }
+
+    def render_action_confirmation(self, request, action, queryset):
+        return super().render_confirmation(
+            request,
+            action_name=action.name,
+            description=action.description,
+            objects=queryset,
+            warning=self.ACTION_WARNINGS.get(action.name, DEFAULT_CONFIRM_WARNING),
+        )
+
     list_display = (
         "thumb",
         "name",
@@ -105,6 +153,7 @@ class ProductAdmin(SavedFilterMixin, RoleAwareModelAdmin):
         "size",
         "stock",
         "stock_flag",
+        "on_sale_flag",
         "created_at",
     )
     # SPEC-20-11 [R-20.35]: `stock` is inline-editable next to `price`. The
@@ -113,12 +162,12 @@ class ProductAdmin(SavedFilterMixin, RoleAwareModelAdmin):
     # StockMovement ledger row ([6.5.17]). Without the capability the field
     # is display-only again (changelist_view) and the column stays visible.
     list_editable = ("price", "stock")
-    list_filter = ("category", "created_at")
+    list_filter = ("category", "is_active", "created_at")
     search_fields = ("name", "slug", "description")
     ordering = ("-created_at",)
     readonly_fields = ("slug", "created_at", "image_preview")
     list_per_page = 25
-    actions = ("adjust_stock", "export_csv")
+    actions = ("adjust_stock", "export_csv", "delist_products", "relist_products")
     inlines = (StockMovementInline,)
 
     @property
@@ -239,6 +288,14 @@ class ProductAdmin(SavedFilterMixin, RoleAwareModelAdmin):
             )
         return obj.stock
 
+    @admin.display(description="On sale", ordering="is_active", boolean=True)
+    def on_sale_flag(self, obj):
+        # MERCHANT-DELIST: the one staff-visible marker of a delisted row.
+        # The public catalogue 404s delisted products, so without this
+        # column (and the ``is_active`` list filter) there would be no way
+        # to find a delisted row to relist it.
+        return obj.is_active
+
     @admin.display(description="Preview")
     def image_preview(self, obj):
         if obj.image:
@@ -315,6 +372,91 @@ class ProductAdmin(SavedFilterMixin, RoleAwareModelAdmin):
                 ]
             )
         return response
+
+    # ==================================
+    # MERCHANT-DELIST: delist / relist
+    # ==================================
+
+    # One wording for both surfaces of the same outcome (the LogEntry and
+    # the flash message), so the audit trail and the UI cannot drift apart.
+    DELIST_LOG_MESSAGE = "Bulk action: taken off sale (delisted)."
+    RELIST_LOG_MESSAGE = "Bulk action: put back on sale (relisted)."
+
+    def _set_on_sale(self, request, queryset, on_sale):
+        """MERCHANT-DELIST's one writer: flip ``is_active`` on the selected
+        rows that do not already hold the target state, and nothing else.
+
+        Delist is reversible state, not an inventory mutation: the stock
+        column and the StockMovement ledger are deliberately untouched
+        ([6.5.17] is about inventory changes; a state flip writes no
+        movement row). ``update()`` over the captured pks rather than
+        per-row ``save()``: the flip is an absolute value, not a
+        read-modify-write like a stock delta, so there is nothing to
+        serialize and one statement is enough. The targets are captured
+        BEFORE the update (re-filtering afterwards would match nothing --
+        the rows just left that state), so the LogEntry names exactly the
+        rows the action actually moved, matching the adjust-stock bulk
+        action's audit contract ([6.12.6]: a privileged action is never
+        unlogged).
+        """
+        targets = list(queryset.filter(is_active=not on_sale))
+        if not targets:
+            # Idempotent rest state rather than an error: selecting only
+            # already-delisted rows for delist costs nothing and changes
+            # nothing, and the no-op writes no LogEntry (an entry would
+            # claim a mutation that did not happen).
+            self.message_user(
+                request,
+                "The selected products are already "
+                + ("on sale." if on_sale else "off sale."),
+                messages.INFO,
+            )
+            return None
+        log_message = self.RELIST_LOG_MESSAGE if on_sale else self.DELIST_LOG_MESSAGE
+        with transaction.atomic():
+            products.objects.filter(pk__in=[target.pk for target in targets]).update(
+                is_active=on_sale
+            )
+            self.log_bulk_action(request, targets, log_message)
+            if on_sale:
+                # MERCHANT-DELIST-C2: the release half of the deferred
+                # back-in-stock notification. A restock that landed while
+                # the row was off sale was suppressed (the mail would link
+                # a 404 detail page), and its waiting opt-ins were never
+                # claimed -- so relist is the moment the promise "you can
+                # buy it again" becomes true, and the SAME fan-out runs
+                # then (registered on this commit hook, exactly like the
+                # stock crossing's; the claim machinery dedupes). Only
+                # rows actually in stock register: a relist at stock 0
+                # has nothing to announce, and the row's next 0 ->
+                # positive crossing -- now that it is active again --
+                # fires the usual way. The fan-out re-checks is_active
+                # from the row at fire time, so a product re-delisted
+                # between here and the hook cannot mail either.
+                for target in products.objects.filter(
+                    pk__in=[t.pk for t in targets], is_active=True, stock__gt=0
+                ):
+                    products.register_back_in_stock_release(target)
+        self.message_user(
+            request,
+            f"{len(targets)} product(s) "
+            + ("put back on sale." if on_sale else "taken off sale."),
+            messages.SUCCESS,
+        )
+        return None
+
+    @admin.action(description="Take selected products off sale")
+    def delist_products(self, request, queryset):
+        # Reversible and non-destructive (nothing is deleted, stock and the
+        # ledger are untouched), and the relist action is the undo -- but
+        # it still confirms first (see confirmation_required_actions): the
+        # interstitial is about a batch that changes what the storefront
+        # sells, not about whether the row survives [spec 4814].
+        return self._set_on_sale(request, queryset, on_sale=False)
+
+    @admin.action(description="Put selected products back on sale")
+    def relist_products(self, request, queryset):
+        return self._set_on_sale(request, queryset, on_sale=True)
 
 
 @admin.register(ProductVariant)

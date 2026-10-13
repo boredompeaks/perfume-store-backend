@@ -1,0 +1,59 @@
+{
+  "task": "MERCHANT-DELIST",
+  "title": "The mutation figures recorded for the merchant-delist slice",
+  "note": "Authored from the committed blob at the feature commit, before any replay ran. Each `find` was written by hand from the file as committed and each was counted exactly once before this manifest was saved; a replay that disagrees is a finding, not a number to adjust. `claimed_count` is deliberately absent from every entry: this is the FIRST recording, so there is no earlier measurement to re-check, and a hand-typed figure with nothing behind it is exactly the defect class this tool exists to catch. The four mutations are the slice's load-bearing pins: the catalogue exclusion (listing and detail), the checkout refusal, and the admin capability gate. The cart-add refusal has no mutation of its own because it shares the `is_active` read with the detail gate - breaking the field's readers is M2's shape - and its own pin (`test_cart_add_of_delisted_product_is_refused_as_not_found`) fails under a delist-field removal for the same reason the detail pin does.",
+  "mutations": [
+    {
+      "id": "M1",
+      "description": "the public listing serves delisted products: the base queryset drops the is_active filter, so a delisted row reappears in the catalogue and in every filtered/searched view of it",
+      "path": "backend/products/views.py",
+      "find": "        products_data = products.objects.filter(is_active=True)",
+      "replace": "        products_data = products.objects.all()",
+      "expected_failing_tests": [
+        "test_listing_excludes_delisted_products",
+        "test_listing_search_does_not_resurface_delisted"
+      ],
+      "test_scope": ["products.test_delist"]
+    },
+    {
+      "id": "M2",
+      "description": "the public detail GET serves a delisted product: the 404 gate never fires, so the row is readable by slug and the endpoint becomes an oracle that distinguishes a delisted product from a nonexistent one",
+      "path": "backend/products/views.py",
+      "find": "        if not product.is_active:\n            return Response(\n                {\"error\": \"Product not found\"}, status=status.HTTP_404_NOT_FOUND\n            )\n\n        serializer = ProductSerializer(product)",
+      "replace": "        if False:\n            return Response(\n                {\"error\": \"Product not found\"}, status=status.HTTP_404_NOT_FOUND\n            )\n\n        serializer = ProductSerializer(product)",
+      "expected_failing_tests": [
+        "test_detail_returns_404_for_delisted_product",
+        "test_delisted_detail_404_is_identical_to_unknown_slug"
+      ],
+      "test_scope": ["products.test_delist"]
+    },
+    {
+      "id": "M3",
+      "description": "checkout silently skips a delisted cart line: the delist collection becomes a pass-through, the refusal never fires and the order is minted including a product that is not for sale",
+      "path": "backend/orders/views/checkout.py",
+      "find": "        if not product.is_active:\n            delisted.append(product)\n            continue",
+      "replace": "        if not product.is_active:\n            pass",
+      "expected_failing_tests": [
+        "test_checkout_with_delisted_line_is_refused_naming_it",
+        "test_refusal_creates_nothing_and_decrements_nothing",
+        "test_checkout_succeeds_again_after_relist",
+        "test_mixed_cart_refusal_names_only_delisted_lines",
+        "test_checkout_refusal_names_every_delisted_line_in_plural_form"
+      ],
+      "test_scope": ["products.test_delist"]
+    },
+    {
+      "id": "M4",
+      "description": "the delist action's capability gate is widened from products.publish to products.read, so the inventory role (which holds products.read but not publish) can take products off sale through a directly posted admin action",
+      "path": "backend/products/admin.py",
+      "find": "        \"delist_products\": \"products.publish\",",
+      "replace": "        \"delist_products\": \"products.read\",",
+      "expected_failing_tests": [
+        "test_publish_capability_gates_both_actions",
+        "test_non_holder_cannot_delist_via_direct_post",
+        "test_product_action_availability_per_role"
+      ],
+      "test_scope": ["products.test_delist", "tests.test_admin_rbac"]
+    }
+  ]
+}

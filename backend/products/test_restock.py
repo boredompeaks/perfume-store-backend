@@ -27,7 +27,7 @@ from django.test import tag
 from django.utils import timezone
 
 from common.testing import ApiTestCase
-from products.models import RestockNotification
+from products.models import RestockNotification, products
 
 
 @tag("restock")
@@ -101,6 +101,30 @@ class RestockOptInEndpointTests(ApiTestCase):
             format="json",
         )
         self.assertEqual(res.status_code, 404, res.data)
+
+    def test_opt_in_to_delisted_product_is_uniform_with_unknown_slug(self):
+        """MERCHANT-DELIST-C2: a delisted product is not an offer, so on
+        this surface it must be indistinguishable from a nonexistent one.
+
+        The detail GET already answers the byte-identical 404 an unknown
+        slug gets; an opt-in that answered 201 with the product_id would
+        oracle "exists but delisted" against "never existed", defeating
+        exactly that behaviour one endpoint over.
+        """
+        products.objects.filter(pk=self.product.pk).update(is_active=False)
+        _, token = self.api_login(username=self.user.username)
+        delisted = self.client.post(self._url(), format="json")
+        unknown = self.client.post(
+            "/api/products/no-such-fragrance/restock-notifications/",
+            format="json",
+        )
+        self.assertEqual(delisted.status_code, 404, delisted.data)
+        # Byte-identical, not merely same-status: any body of the delisted
+        # answer that named the slug or an id would be the leak.
+        self.assertEqual(delisted.content, unknown.content)
+        # And nothing was armed: there is nothing to be notified about for
+        # a product that is not for sale.
+        self.assertEqual(RestockNotification.objects.count(), 0)
 
     def test_ownership_is_scoped_to_the_caller(self):
         other = self.make_user("otherbuyer")
@@ -478,6 +502,107 @@ class RestockTriggerTests(ApiTestCase):
                 format="json",
             )
         self.assertEqual(res.status_code, 201, res.data)
+        self.assertEqual(len(mail.outbox), 1)
+        self.assertIn("Back in stock", mail.outbox[0].subject)
+
+    # ------------------------------------------------------------------
+    # MERCHANT-DELIST-C2: the delist interaction. A restock that lands
+    # while the product is off sale mails "Back in stock" with a link to
+    # a 404 detail page, so the fan-out is SUPPRESSED while the product
+    # is delisted and RELEASED when it is relisted (the rows are never
+    # claimed in between, so the release is the same fan-out, not a
+    # second sender).
+    # ------------------------------------------------------------------
+
+    def _delist(self):
+        products.objects.filter(pk=self.product.pk).update(is_active=False)
+
+    def test_a_restock_while_delisted_sends_no_mail_and_leaves_optins_waiting(self):
+        self._opt_in(self.buyer)
+        self._delist()
+        with self.captureOnCommitCallbacks(execute=True):
+            self.product.adjust_stock(None, 5, "restock")
+        self.assertEqual(len(mail.outbox), 0)
+        # The waiting opt-in is untouched: still armed and never claimed,
+        # because the claim IS the spent stamp and the suppression must
+        # not spend a row no mail went out for.
+        preference = RestockNotification.objects.get(user=self.buyer)
+        self.assertTrue(preference.active)
+        self.assertIsNone(preference.notified_at)
+
+    def test_relist_releases_the_waiting_optins(self):
+        """Suppression is not silence: relist is the moment the product is
+        buyable again, and the waiting rows are released then — through the
+        real admin action, which is the only relist door there is."""
+        from django.contrib.auth.models import User
+
+        User.objects.create_superuser(
+            "releaser", "releaser@example.com", "S3cure-Passphrase!"
+        )
+        self._opt_in(self.buyer)
+        self._delist()
+        with self.captureOnCommitCallbacks(execute=True):
+            self.product.adjust_stock(None, 5, "restock")
+        self.assertEqual(len(mail.outbox), 0)
+        self.assertTrue(
+            self.client.login(username="releaser", password="S3cure-Passphrase!")
+        )
+        with self.captureOnCommitCallbacks(execute=True):
+            res = self.client.post(
+                "/admin/products/products/",
+                {
+                    "action": "relist_products",
+                    "_selected_action": [str(self.product.id)],
+                    "select_across": "0",
+                },
+                follow=True,
+            )
+        self.assertEqual(res.status_code, 200)
+        self.product.refresh_from_db()
+        self.assertIs(self.product.is_active, True)
+        self.assertEqual(len(mail.outbox), 1)
+        self.assertIn("Back in stock", mail.outbox[0].subject)
+        self.assertIsNotNone(
+            RestockNotification.objects.get(user=self.buyer).notified_at
+        )
+
+    def test_relist_with_no_stock_releases_nothing(self):
+        """A relist at stock 0 has nothing to announce: the waiting rows
+        stay armed, and the product's NEXT 0 -> positive crossing (now
+        that it is active again) is what mails them."""
+        from django.contrib.auth.models import User
+
+        User.objects.create_superuser(
+            "releaser2", "releaser2@example.com", "S3cure-Passphrase!"
+        )
+        self._opt_in(self.buyer)
+        self._delist()
+        with self.captureOnCommitCallbacks(execute=True):
+            self.product.adjust_stock(None, 5, "restock")
+        # Sell out while still delisted: the re-arm fires, harmless —
+        # nothing was ever claimed to re-arm.
+        with self.captureOnCommitCallbacks(execute=True):
+            self.product.adjust_stock(None, -5, "sale")
+        del mail.outbox[:]
+        self.assertTrue(
+            self.client.login(username="releaser2", password="S3cure-Passphrase!")
+        )
+        with self.captureOnCommitCallbacks(execute=True):
+            res = self.client.post(
+                "/admin/products/products/",
+                {
+                    "action": "relist_products",
+                    "_selected_action": [str(self.product.id)],
+                    "select_across": "0",
+                },
+                follow=True,
+            )
+        self.assertEqual(res.status_code, 200)
+        self.assertEqual(len(mail.outbox), 0)
+        self.assertIsNone(RestockNotification.objects.get(user=self.buyer).notified_at)
+        # And the next crossing on the now-active product mails normally.
+        with self.captureOnCommitCallbacks(execute=True):
+            self.product.adjust_stock(None, 4, "restock")
         self.assertEqual(len(mail.outbox), 1)
         self.assertIn("Back in stock", mail.outbox[0].subject)
 

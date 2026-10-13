@@ -576,10 +576,25 @@ def create_order(request):
     # row lock before decrementing; that remains the authoritative backstop.
     unavailable = []
 
+    # MERCHANT-DELIST: a line whose product was taken off sale after it was
+    # added is not buyable at ANY quantity, so it is collected for its own
+    # refusal below rather than the stock gate -- fixing the quantity can
+    # never fix it. The whole checkout is refused (never a silent skip of
+    # the line, which would charge the customer for a cart they did not
+    # submit), and the line itself is deliberately left in the cart:
+    # removal is the customer's call -- they see the line and the refusal
+    # names it -- and a relist makes the line buyable again without the
+    # customer having to rebuild the cart.
+    delisted = []
+
     subtotal_amount = Decimal("0.00")
 
     for cart_item in cart_items:
         product = cart_item.product
+
+        if not product.is_active:
+            delisted.append(product)
+            continue
 
         if cart_item.quantity > product.stock:
             unavailable.append(
@@ -591,6 +606,29 @@ def create_order(request):
             )
 
         subtotal_amount += product.price * cart_item.quantity
+
+    if delisted:
+        # The delist refusal takes precedence over the stock one: a line
+        # that is not for sale is unfixable by quantity, so telling the
+        # customer to "reduce the quantity" first would be wrong advice.
+        # Sorted by pk: the cart queryset carries no ORDER BY, and a
+        # deterministic body (same names, same order, every retry) is what
+        # lets a client reliably match refusal entries to cart lines.
+        delisted.sort(key=lambda product: product.id)
+        names = ", ".join(f'"{product.name}"' for product in delisted)
+        if len(delisted) == 1:
+            action = "Remove the item from the cart to continue."
+        else:
+            action = "Remove these items from the cart to continue."
+        return Response(
+            {
+                "error": f"No longer available for purchase: {names}. {action}",
+                "products": [
+                    {"id": product.id, "name": product.name} for product in delisted
+                ],
+            },
+            status=status.HTTP_400_BAD_REQUEST,
+        )
 
     if unavailable:
         details = ", ".join(
