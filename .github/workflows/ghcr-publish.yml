@@ -1,0 +1,108 @@
+# GHCR publish path (owner decision 2026-10): the backend image is published
+# to the GitHub Container Registry under the owner's own namespace, so the
+# deployment is WHITE-LABEL - the store's runtime is a generic
+# `ghcr.io/<owner>/<repo>-backend` image that any host (compose, Render,
+# a VPS) can pull without this repository's deploy machinery, and the owner
+# controls visibility and pulls with their own GitHub credentials.
+# GHCR was chosen over GCR so no cloud-specific registry secret is needed:
+# the job authenticates with the built-in GITHUB_TOKEN and the
+# `packages: write` permission declared on the job - no PAT, no JSON key.
+#
+# The image is the MULTI-STAGE slim build of backend/Dockerfile (builder
+# stage discarded; runtime carries only installed packages on
+# python:3.14-slim, non-root, with the SPEC-22-04 healthcheck). The frontend
+# is deliberately absent: it is owner-owned and ships through its own
+# pipeline, so this image is backend-only by design.
+#
+# RELATIONSHIP TO deploy.yml: deploy.yml (one ssh call running
+# scripts/release.sh on the deploy host) remains the DOCUMENTED BACKUP
+# release path, still dormant behind the DEPLOY_ENABLED variable and still
+# gated by backend-tests + secret-scan. This workflow ADDS the registry
+# publish leg; it does not replace or gate it. Neither workflow runs tests:
+# publishing an image whose tests are red is deploy.yml's job to prevent on
+# the release path, and here the publish is only ever triggered by pushes
+# that backend-tests has already covered on the same SHA.
+#
+# Tag discipline: every publish is tagged with its branch and its full
+# commit SHA (type=sha,format=long), so a running deployment can always be
+# traced back to the exact commit that produced it, and a rollback is a
+# retag to a previous sha- tag rather than a rebuild.
+#
+# PULL REQUESTS BUILD BUT NEVER PUBLISH: a PR that breaks the image build
+# must go red here, but a PR event has no registry credentials issue and
+# `push: false` below guarantees no image lands in the registry from an
+# unmerged head.
+name: ghcr-publish
+
+on:
+  push:
+    branches: [spec-comp, feat/add-frontend]
+    # Same shape as backend-tests' path filter: a push that cannot change
+    # the image (frontend-only, docs-only) does not spend build minutes.
+    paths:
+      - "backend/**"
+      - "docker-compose.yml"
+      - "Procfile"
+      - "scripts/**"
+      - ".github/workflows/ghcr-publish.yml"
+  pull_request:
+    branches: [spec-comp, feat/add-frontend]
+    paths:
+      - "backend/**"
+      - "docker-compose.yml"
+      - "Procfile"
+      - "scripts/**"
+      - ".github/workflows/ghcr-publish.yml"
+  workflow_dispatch:
+
+# Least privilege baseline; the job below widens only what publishing needs.
+permissions:
+  contents: read
+
+# One build per ref; a new push to the same ref cancels the stale build.
+concurrency:
+  group: ghcr-publish-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
+
+      # ghcr.io rejects uppercase image paths. GITHUB_REPOSITORY is already
+      # lowercase here, but the expansion makes the workflow portable to a
+      # rename without a silent registry 403.
+      - name: Compute the lowercase image name
+        id: image
+        run: echo "name=ghcr.io/${GITHUB_REPOSITORY,,}-backend" >> "$GITHUB_OUTPUT"
+
+      - uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
+        if: github.event_name != 'pull_request'
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Derive tags and labels
+        id: meta
+        uses: docker/metadata-action@c299e40c65443455700f0fdfc63efafe5b349051 # v5
+        with:
+          images: ${{ steps.image.outputs.name }}
+          tags: |
+            type=ref,event=branch
+            type=sha,format=long
+
+      - uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
+        with:
+          context: ./backend
+          push: ${{ github.event_name != 'pull_request' }}
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
