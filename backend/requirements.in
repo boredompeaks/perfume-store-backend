@@ -67,6 +67,24 @@ sentry-sdk==2.71.0
 # WSGI server for config.wsgi (the Dockerfile CMD); Django's dev server is
 # not a production server.
 gunicorn==26.2.0
+# SPEC-2-03 / SPEC-19-1 (ASYNC-INFRA): celery, the task queue and the beat
+# scheduler the repo LACKED. Nothing scheduled expire_reservations,
+# drain_notification_outbox or purge_notification_outbox before this pin, so
+# reservations never expired and the notification outbox was never drained -
+# a real audit finding, not a hypothetical. Pinned like everything else here
+# because the resolved TRANSITIVE set (kombu, amqp, billiard, vine, the
+# click-* chain and its re-exports, prompt_toolkit, python-dateutil, six,
+# tzlocal, wcwidth) is what CI installs, and a floating celery resolves a
+# different one each time it runs.
+celery==5.6.3
+# The Redis protocol client, pinned as a DIRECT dependency rather than left
+# implicit in celery's extras, for the same reason the broker URL is
+# env-driven rather than hardcoded: config.settings hands it to celery as the
+# broker and result-backend transport, so this package is on the worker's
+# import path for the worker to boot at all. The default broker being Redis is
+# not a constraint - a deployment pointing CELERY_BROKER_URL elsewhere installs
+# that broker's own client.
+redis==8.1.0
 # Serves STATIC_ROOT from the app process, so DEBUG=false deployments still
 # ship admin CSS/JS without a separate web server or object store.
 whitenoise==6.11.0
