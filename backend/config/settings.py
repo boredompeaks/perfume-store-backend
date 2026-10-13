@@ -784,10 +784,10 @@ def _env_dotted_path(name, default):
 
 # SPEC-2-04 [V-13]: STORAGES makes the media backend env-switchable, so a
 # deployment can move uploads off the app filesystem with configuration
-# alone - a mounted volume today (DJANGO_MEDIA_ROOT above), an object store
-# later (DJANGO_MEDIA_BACKEND), with no code change and no storage-bucket
-# model. Defaults are Django's own backends, so an unconfigured deployment
-# behaves exactly as it did before.
+# alone - a mounted volume (DJANGO_MEDIA_ROOT above), or the S3-compatible
+# object store below (DJANGO_MEDIA_BACKEND) - with no code change and no
+# storage-bucket model. Defaults are Django's own backends, so an
+# unconfigured deployment behaves exactly as it did before.
 #
 # The staticfiles backend is deliberately left as StaticFilesStorage:
 # whitenoise serves what collectstatic gathered from STATIC_ROOT, and a
@@ -795,8 +795,64 @@ def _env_dotted_path(name, default):
 MEDIA_BACKEND = _env_dotted_path(
     "DJANGO_MEDIA_BACKEND", "django.core.files.storage.FileSystemStorage"
 )
+
+# TIER1-S3-MEDIA: options for the object-storage backend behind the seam
+# above - Cloudflare R2 preferred, AWS S3 the alternative, ONE
+# implementation: django-storages' S3Storage, which speaks S3 and honours a
+# custom endpoint_url, so the provider is configuration and not code. Every
+# value is read from the environment here; no bucket name, credential or
+# endpoint exists anywhere in this repository, because this is a
+# white-label product and a tenant's config in the source would be every
+# tenant's config. Selecting the S3 backend without a bucket name is
+# refused at BOOT - the same fail-early contract as _env_dotted_path above,
+# because the alternative is discovering the gap on the first production
+# upload.
+_S3_MEDIA_BACKEND = "storages.backends.s3.S3Storage"
+
+
+def _env_media_storage_options(backend):
+    """STORAGES["default"]["OPTIONS"] for the resolved media backend.
+
+    Only the S3-compatible backend carries options, and only when it is the
+    selected one. The bucket name is the single required key; every other
+    key appears only when its env var is set, so an unset
+    AWS_S3_ENDPOINT_URL means "talk to AWS S3 itself" while a set one is
+    what makes Cloudflare R2 (or any other S3-compatible service) work.
+    file_overwrite=False keeps collision behaviour identical to the
+    FileSystemStorage default: a second upload of an existing name gets a
+    suffixed key instead of silently replacing the stored object.
+    """
+    if backend != _S3_MEDIA_BACKEND:
+        return {}
+    bucket = (os.getenv("AWS_STORAGE_BUCKET_NAME") or "").strip()
+    if not bucket:
+        raise ImproperlyConfigured(
+            "DJANGO_MEDIA_BACKEND selects the S3-compatible storage backend "
+            "but AWS_STORAGE_BUCKET_NAME is unset or empty; set it (see "
+            ".env.example) or point DJANGO_MEDIA_BACKEND at another backend."
+        )
+    options = {
+        "bucket_name": bucket,
+        "file_overwrite": False,
+    }
+    for env_name, option_name in (
+        ("AWS_S3_ENDPOINT_URL", "endpoint_url"),
+        ("AWS_S3_REGION_NAME", "region_name"),
+        ("AWS_ACCESS_KEY_ID", "access_key"),
+        ("AWS_SECRET_ACCESS_KEY", "secret_key"),
+        ("AWS_S3_CUSTOM_DOMAIN", "custom_domain"),
+    ):
+        value = (os.getenv(env_name) or "").strip()
+        if value:
+            options[option_name] = value
+    return options
+
+
 STORAGES = {
-    "default": {"BACKEND": MEDIA_BACKEND},
+    "default": {
+        "BACKEND": MEDIA_BACKEND,
+        "OPTIONS": _env_media_storage_options(MEDIA_BACKEND),
+    },
     "staticfiles": {"BACKEND": "django.contrib.staticfiles.storage.StaticFilesStorage"},
 }
 

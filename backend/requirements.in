@@ -89,6 +89,19 @@ redis==8.1.0
 # ship admin CSS/JS without a separate web server or object store.
 whitenoise==6.11.0
 python-dotenv==1.2.3
+# TIER1-S3-MEDIA: the storage backend behind the DJANGO_MEDIA_BACKEND seam
+# (SPEC-2-04 [V-13]) - Cloudflare R2 preferred, AWS S3 the alternative, ONE
+# implementation: django-storages' S3Storage, which is S3-compatible and
+# honours a custom endpoint_url, so either provider is pure configuration
+# (settings._env_media_storage_options reads the AWS_* keys; no bucket,
+# credential or endpoint is written into this repository - white-label). The
+# [s3] extra pulls boto3 (the S3 client) with it; boto3 is deliberately NOT
+# pinned directly, because application code never imports it - storages
+# does - unlike redis, which celery needs on ITS import path to boot. Pinned
+# like everything else here: the storage behaviour (URL signing, upload
+# batching, credential lookup) is version-sensitive, and a floating pin here
+# would change what production uploads do without a commit.
+django-storages[s3]==1.14.6
 Pillow==12.3.0
 coverage==7.16.1
 # GATE-1 (2026-10-04): ruff is both the linter and the FORMATTER OF RECORD

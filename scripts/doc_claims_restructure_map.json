@@ -204,6 +204,10 @@
       "targets": ["backend/orders/tests_returns.py"],
       "mode": "all",
       "reason": "byte-eaten head of tests_returns.py at c873b27, quoted as corruption evidence; the intact file still exists and this entry pins the fragment to it"
+    },
+    "handlers/base.py": {
+      "external": true,
+      "reason": "the TIER1-launch ENVELOPE-WIRE backlog row's bare cite is Django's OWN django/core/handlers/base.py (the request-handler entry that renders the DRF response before ErrorEnvelopeMiddleware can rewrite it), installed in site-packages and outside this repository; recorded external like django/contrib/admin/options.py so the fully qualified location lives in this reason and the cite prints every run instead of passing silently"
     }
   },
   "tests": {
@@ -254,6 +258,46 @@
     "test_send_failure_does_not_break_the_payment": {
       "successor": "test_enqueue_failure_does_not_break_the_payment",
       "reason": "renamed in 05cd9f4 (TIER1-ASYNC-CONVERT): the never-raise payment pin moved from SMTP-503 dispatch failure to outbox enqueue failure and the diff replaces one def with the other in tests/test_notifications.py; the separate request-path pin 05cd9f4 added to orders/tests.py has a different name and is not this cite's successor"
+    },
+    "test_a_stolen_email_and_key_buy_the_attacker_nothing": {
+      "successor": "test_an_anonymous_keyed_replay_never_reaches_an_account_order",
+      "reason": "7e63658 deleted this def from backend/orders/tests_guest.py with the guest-creation machinery it exercised (anonymous checkout is refused before the email or the key is ever read), and the shipped successor pins the same leak closed for an anonymous keyed replay"
+    },
+    "test_the_trailing_space_variant_of_a_stolen_email_buys_nothing": {
+      "successor": "test_every_guest_reason_gets_the_byte_identical_refusal",
+      "reason": "7e63658 removed the canonicalisation path this variant pinned because guest checkout is refused (a trailing-space address is never stored and never resolves to an owner); the whitespace-casefold guest_email survives only as one of the byte-identical refusal reasons the successor pins"
+    },
+    "test_a_keyed_replay_with_a_drifted_payload_is_refused": {
+      "successor": "test_an_anonymous_keyed_replay_never_reaches_an_account_order",
+      "reason": "7e63658 deleted this def together with the keyed guest-agreement 409 it pinned: the guest keyed path is gone because anonymous checkout is refused before the Idempotency-Key is read, and the successor refuses an anonymous keyed replay outright"
+    },
+    "test_a_collapse_never_hands_back_the_credential": {
+      "successor": "test_the_refusal_response_carries_no_order_fields",
+      "reason": "7e63658 removed the guest collapse this invariant guarded (no collapse can occur: anonymous checkout is refused and mints nothing), and the successor pins the same no-credential property on the refusal body, asserting guest_token is absent from the response"
+    },
+    "test_a_keyed_guest_resubmission_collapses_onto_the_first_order": {
+      "successor": "test_an_anonymous_keyed_replay_never_reaches_an_account_order",
+      "reason": "7e63658 deleted this def with the keyed guest resubmission machinery it pinned (guest checkout is refused uniformly, so no guest resubmission can collapse onto a first order), and the successor pins that an anonymous keyed replay reaches no order"
+    },
+    "test_an_over_length_guest_email_is_refused_before_the_row_exists": {
+      "successor": "test_every_guest_reason_gets_the_byte_identical_refusal",
+      "reason": "7e63658 removed the guest-side email length gate this pin held because anonymous checkout is refused before any validation could write; over-length guest_email is now one of the byte-identical refusal reasons the successor pins across the guest reasons"
+    },
+    "test_an_over_length_shipping_field_is_refused_before_the_row_exists": {
+      "successor": "test_an_over_length_shipping_field_is_still_refused_for_an_account",
+      "reason": "7e63658 deleted this two-path def: the guest half died with guest creation (anonymous submissions get the uniform refusal, pinned inside the refusal class) and the account half was re-pinned under this successor, whose docstring records the width gate is an account gate now"
+    },
+    "test_the_guest_email_is_stored_in_one_canonical_form": {
+      "successor": "test_every_guest_reason_gets_the_byte_identical_refusal",
+      "reason": "7e63658 removed the canonical guest_email storage this pin asserted because guest checkout is refused and no guest address is ever stored; the whitespace-casefold address survives only as a refusal reason, pinned byte-identical by the successor"
+    },
+    "test_a_case_variant_of_the_guest_email_is_one_owner_not_two": {
+      "successor": "test_every_guest_reason_gets_the_byte_identical_refusal",
+      "reason": "7e63658 removed the guest owner resolver this consequence pin depended on (no guest owner exists to double, since anonymous checkout is refused), and the casefold-variant guest_email survives only as a byte-identical refusal reason the successor pins"
+    },
+    "test_an_identical_resubmission_collapses_onto_the_first_order": {
+      "successor": "test_the_refusal_creates_no_order_row_reservation_or_trail",
+      "reason": "7e63658 removed the unkeyed guest collapse this pin asserted because anonymous checkout is refused before idempotency is considered, so a resubmission mints nothing; the successor pins that a refused submission creates no order row, reservation or trail"
     }
   }
 }

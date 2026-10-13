@@ -547,12 +547,10 @@ class CheckoutTests(OrderTestBase):
         self.assertEqual(Order.objects.count(), 0)
 
     def test_checkout_requires_a_cart_and_an_owner(self):
-        """[R-1.13] SPEC-1-B04 dropped the login wall but kept every gate
-        behind it: the session cart still has to exist (F-18's documented 404),
-        and a caller with no account must now name itself with a guest_email
-        instead of being turned away at the door. A sessionless or cartless
-        caller is refused before any row is written, whichever side of the wall
-        it is on.
+        """TIER1-GUEST-DEADEND: the session cart still has to exist for an
+        account caller (F-18's documented 404), and an anonymous caller is
+        refused outright with the one uniform guest-checkout refusal --
+        before the cart is even looked at, creating nothing.
         """
         # authenticated, no cart in this session -> documented 404 (F-18)
         client = self.fresh_client()
@@ -563,15 +561,18 @@ class CheckoutTests(OrderTestBase):
         self.assertEqual(res.status_code, 404, res.data)
         self.assertEqual(res.data["error"], "Cart not found")
 
-        # [R-1.13] anonymous with a cart but no guest_email: refused with the
-        # one thing a guest submission cannot do without.
+        # anonymous, cart or no cart: the uniform refusal, never an order.
         guest = self.fresh_client()
         self.seed_session_cart([(self.product, 1)], client=guest)
         res = guest.post(
             "/api/orders/checkout/", self.checkout_payload(), format="json"
         )
-        self.assertEqual(res.status_code, 400, res.data)
-        self.assertEqual(res.data["error"], "guest_email is required")
+        self.assertEqual(res.status_code, 403, res.data)
+        self.assertEqual(
+            res.data["error"],
+            "Guest checkout is not available. "
+            "Sign in or create an account to place an order.",
+        )
         self.assertEqual(Order.objects.count(), 0)
 
     def test_checkout_with_empty_cart_rejected(self):
