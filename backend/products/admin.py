@@ -10,7 +10,7 @@ from django.http import HttpResponse
 from django.shortcuts import render
 from django.utils.html import format_html, mark_safe
 
-from common.admin import RoleAwareModelAdmin
+from common.admin import DEFAULT_CONFIRM_WARNING, RoleAwareModelAdmin
 from common.saved_filters import SavedFilterMixin
 
 from .models import ProductVariant, StockMovement, products
@@ -107,6 +107,44 @@ class ProductAdmin(SavedFilterMixin, RoleAwareModelAdmin):
     # adjust_stock renders its own deliberate input form (delta/reason +
     # Apply) — that form is the explicit confirmation [6.12.4], so it stays
     # off confirmation_required_actions.
+    #
+    # MERCHANT-DELIST-C2 (spec 4814: confirmation dialogs on
+    # publishing/unpublishing large batches): delist and relist are that
+    # batch publish/unpublish, so both directions of the same flip are
+    # behind the shared interstitial the mixin already owns. Cycle 1's
+    # comment declined the interstitial because the action is reversible
+    # — but the confirmation is not about destructiveness, it is about a
+    # batch that changes what the storefront sells, and the superuser
+    # keeps the mixin's direct-execution bypass either way.
+    confirmation_required_actions = frozenset({"delist_products", "relist_products"})
+    # The shared interstitial text says the action "cannot be undone" —
+    # true of cancel_pending, FALSE of a reversible state flip whose undo
+    # is the sibling action in the same dropdown. render_confirmation
+    # takes the warning as a parameter for exactly this: the dialog says
+    # what THIS action does instead of inheriting a sentence about a
+    # different action's permanence. No new mechanism — the parameter is
+    # the existing seam; the map only exists because two actions here
+    # need a sentence the default cannot truthfully carry.
+    ACTION_WARNINGS = {
+        "delist_products": (
+            "takes the selected products off the public catalogue until "
+            "they are put back on sale. Confirm to continue."
+        ),
+        "relist_products": (
+            "puts the selected products back on the public catalogue. "
+            "Confirm to continue."
+        ),
+    }
+
+    def render_action_confirmation(self, request, action, queryset):
+        return super().render_confirmation(
+            request,
+            action_name=action.name,
+            description=action.description,
+            objects=queryset,
+            warning=self.ACTION_WARNINGS.get(action.name, DEFAULT_CONFIRM_WARNING),
+        )
+
     list_display = (
         "thumb",
         "name",
@@ -380,6 +418,25 @@ class ProductAdmin(SavedFilterMixin, RoleAwareModelAdmin):
                 is_active=on_sale
             )
             self.log_bulk_action(request, targets, log_message)
+            if on_sale:
+                # MERCHANT-DELIST-C2: the release half of the deferred
+                # back-in-stock notification. A restock that landed while
+                # the row was off sale was suppressed (the mail would link
+                # a 404 detail page), and its waiting opt-ins were never
+                # claimed -- so relist is the moment the promise "you can
+                # buy it again" becomes true, and the SAME fan-out runs
+                # then (registered on this commit hook, exactly like the
+                # stock crossing's; the claim machinery dedupes). Only
+                # rows actually in stock register: a relist at stock 0
+                # has nothing to announce, and the row's next 0 ->
+                # positive crossing -- now that it is active again --
+                # fires the usual way. The fan-out re-checks is_active
+                # from the row at fire time, so a product re-delisted
+                # between here and the hook cannot mail either.
+                for target in products.objects.filter(
+                    pk__in=[t.pk for t in targets], is_active=True, stock__gt=0
+                ):
+                    products.register_back_in_stock_release(target)
         self.message_user(
             request,
             f"{len(targets)} product(s) "
@@ -391,8 +448,10 @@ class ProductAdmin(SavedFilterMixin, RoleAwareModelAdmin):
     @admin.action(description="Take selected products off sale")
     def delist_products(self, request, queryset):
         # Reversible and non-destructive (nothing is deleted, stock and the
-        # ledger are untouched), so unlike delete it needs no confirmation
-        # interstitial -- the relist action is the undo.
+        # ledger are untouched), and the relist action is the undo -- but
+        # it still confirms first (see confirmation_required_actions): the
+        # interstitial is about a batch that changes what the storefront
+        # sells, not about whether the row survives [spec 4814].
         return self._set_on_sale(request, queryset, on_sale=False)
 
     @admin.action(description="Put selected products back on sale")

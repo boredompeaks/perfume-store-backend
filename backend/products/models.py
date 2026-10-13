@@ -235,6 +235,23 @@ class products(models.Model):
             product=product, active=True, notified_at__isnull=False
         ).update(notified_at=None)
 
+    @classmethod
+    def register_back_in_stock_release(cls, product):
+        """The relist half of the deferred back-in-stock notification.
+
+        MERCHANT-DELIST-C2: a restock that lands while the product is off
+        sale is SUPPRESSED — ``_notify_back_in_stock`` refuses an inactive
+        product, because its mail says "you can buy it again" and links a
+        detail page that 404s while the row is delisted. Suppression is
+        not silence, though: the suppressed pass never claims any row, so
+        every waiting opt-in is still armed, and THIS method is what
+        releases them — the same fan-out, registered on the commit hook of
+        the relist that made the product buyable again. One implementation,
+        two doors (the stock crossing and the relist), and the claim
+        machinery keeps one stock cycle to one email whichever door fired.
+        """
+        transaction.on_commit(partial(cls._notify_back_in_stock, product))
+
     @staticmethod
     def _notify_back_in_stock(product):
         """Email every armed opt-in for ``product`` via the single send
@@ -268,6 +285,24 @@ class products(models.Model):
         does not reintroduce one; what a longer transaction does change is
         how long the armed list waits before it is claimed.
 
+        MERCHANT-DELIST-C2 — the product must be ON SALE for this to send.
+        The mail's whole claim is "you can buy it again", and for a
+        delisted product that is false: its detail page 404s and checkout
+        refuses it, so the mail would promise a purchase the store does
+        not offer. The choice taken is DEFER, not silence: an inactive
+        product's fan-out returns without claiming anything, so every
+        waiting row stays armed, and the relist action registers the same
+        fan-out (``register_back_in_stock_release``) as the moment the
+        promise becomes true. The gate reads the row's CURRENT state
+        rather than the passed instance because both callers hand over an
+        instance captured BEFORE their own write — the stock crossing's
+        locked row, the relist's pre-update targets — and because a
+        product delisted between the crossing and this hook firing must
+        not mail either. The stock>0 half of the trigger stays at the
+        call sites (a 0->positive crossing by construction; the relist
+        registers only rows in stock), so this gate changes nothing about
+        an active product's behaviour.
+
         Each row is CLAIMED before its send, not after. The claim is the
         conditional UPDATE whose filter is the arming predicate
         (``active=True AND notified_at IS NULL``), so it is the mutual
@@ -297,6 +332,9 @@ class products(models.Model):
         next sell-out re-arms the row.
         """
         from common import notifications
+
+        if not products.objects.filter(pk=product.pk, is_active=True).exists():
+            return
 
         armed = RestockNotification.objects.filter(
             product=product,

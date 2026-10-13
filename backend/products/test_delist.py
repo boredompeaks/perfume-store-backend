@@ -340,16 +340,48 @@ class DelistAdminCapabilityGateTests(ApiTestCase):
             ProductAdmin.action_capabilities["relist_products"], "products.publish"
         )
 
+    def test_delist_and_relist_declare_confirmation(self):
+        # Hand-written literal: spec line 4814 asks for a confirmation
+        # dialog on publishing/unpublishing large batches, so BOTH
+        # directions of the same flip are behind the interstitial the
+        # repo already has (the mechanism orders/admin's cancel_pending
+        # uses) -- neither is left direct-execution for a role holder.
+        self.assertEqual(
+            ProductAdmin.confirmation_required_actions,
+            frozenset({"delist_products", "relist_products"}),
+        )
+
     def test_catalogue_role_can_delist_via_direct_post(self):
         # The capability holder path, through the real admin POST: the
-        # non-superuser RBAC route works end to end.
+        # non-superuser RBAC route works end to end -- in two steps now,
+        # because a batch that changes what the storefront sells asks
+        # first (spec 4814) and executes on the explicit confirm.
         role_staff(ROLE_CATALOGUE, "cat-delister")
         self.assertTrue(
             self.client.login(username="cat-delister", password=ADMIN_PASSWORD)
         )
         product = self.make_product(name="Gate Rose")
-        res = self._post_action("delist_products", product)
-        self.assertEqual(res.status_code, 200)
+        selected = {"_selected_action": [str(product.id)], "select_across": "0"}
+        first = self.client.post(
+            "/admin/products/products/",
+            {"action": "delist_products", **selected},
+            follow=True,
+        )
+        self.assertEqual(first.status_code, 200)
+        # The interstitial, not the mutation: nothing moved until the
+        # operator confirmed. And the dialog does not inherit the shared
+        # warning's "cannot be undone" -- delist is exactly the action
+        # whose undo is the sibling action in the same dropdown, so the
+        # interstitial states what this one actually does.
+        self.assertNotContains(first, "cannot be undone")
+        product.refresh_from_db()
+        self.assertIs(product.is_active, True)
+        second = self.client.post(
+            "/admin/products/products/",
+            {"action": "delist_products", "confirm": "yes", **selected},
+            follow=True,
+        )
+        self.assertEqual(second.status_code, 200)
         product.refresh_from_db()
         self.assertIs(product.is_active, False)
 
