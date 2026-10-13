@@ -564,19 +564,34 @@ def verify_payment(request):
             },
         )
         # [R-19.0] Event-driven customer notification beside the audit
-        # hook, in this same atomic block. Registered, not sent: the send
-        # itself moves to transaction.on_commit (ASYNC-2b1) so this block's
-        # select_for_update rows (Order, products, Coupon) are released at
-        # commit instead of being held for the length of the SMTP round
-        # trip — a slow mail provider no longer blocks other checkouts on
-        # the same SKU or coupon. dispatch never raises: a send failure is
-        # logged on the notifications channel at ERROR with its traceback
-        # and the captured payment stays confirmed (the SMTP-503
-        # account-still-created behavior, mirrored).
-        notifications.dispatch_on_commit(
-            AuditEvent.EventType.ORDER_PAID,
-            {"order": order},
-        )
+        # hook, in this same atomic block. Since TIER1-ASYNC-CONVERT the
+        # call is ``enqueue``: the INTENT to notify is written as a
+        # NotificationOutbox row inside this transaction (rollback-
+        # together — a verify that rolls back leaves no notification
+        # behind). This also closes the window dispatch_on_commit could
+        # not: a crash between commit and its callback lost the
+        # notification entirely, with no row and no failure anywhere.
+        # No SMTP socket opens on the request thread — the beat-scheduled
+        # drain worker claims the row and sends, so this block's
+        # select_for_update rows (Order, products, Coupon) are released
+        # at commit rather than held for a provider round trip. A failed
+        # outbox write is logged and swallowed here (site contract:
+        # dispatch/enqueue never breaks the transaction it follows): the
+        # payment is already captured at the gateway, and rolling the
+        # confirmation back over a notification fault would strand a
+        # paid order — the SMTP-503 account-still-created behavior,
+        # mirrored.
+        try:
+            notifications.enqueue(
+                AuditEvent.EventType.ORDER_PAID,
+                {"order": order},
+            )
+        except Exception:
+            logger.exception(
+                "order.paid notification enqueue failed; payment stays "
+                "confirmed order=%s",
+                order.id,
+            )
 
     return Response(
         {

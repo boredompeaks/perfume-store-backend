@@ -4,12 +4,12 @@ The substrate ``tests/test_notification_outbox.py`` builds is inert; this is
 what makes it move. What is pinned here, and against which plausible wrong
 implementation:
 
-- **No call site is converted.** The last class asserts the customer's side of
-  the wire — the mail still arrives from ``verify_payment``, and the outbox is
-  still empty afterwards. Converting a site before a drain exists would mean a
-  notification that is never delivered, and only a test rewritten to count
-  queue rows would notice. That is the dark regression this whole task is
-  ordered around, so it is pinned rather than asserted in prose.
+- **The call sites are converted and the worker is their only send path.**
+  The last class asserts the customer's side of the wire — the mail does NOT
+  arrive from ``verify_payment`` (the outbox holds the intent instead) and
+  DOES arrive once this loop drains it. The dark regression the conversion
+  was ordered around (a queued row nothing ever delivers) is pinned on both
+  sides of that wire rather than asserted in prose.
 - **The guarantee is at-least-once, and the tests prove it rather than
   trusting the docstring.** ``WorkerCrashTests`` kills a worker between the send
   and the stamp and asserts the row is sent AGAIN once its lease lapses. A
@@ -1064,13 +1064,16 @@ class OutboxTwoWorkerTests(TransactionTestCase):
 
 
 @tag("notifications")
-class NoCallSiteConvertedByWorkerTests(ApiTestCase):
-    """The load-bearing constraint, pinned on the customer's side of the wire.
+class CallSiteConvertedByWorkerTests(ApiTestCase):
+    """The conversion, pinned on the customer's side of the wire.
 
-    ASYNC-2c3 converts call sites; this task makes that safe. If anything here
-    were converted, the notification would exist only as a row and no test that
-    counted rows would notice, so these assert an email ARRIVES — with the real
-    ``api_login`` token, never ``force_authenticate``.
+    TIER1-ASYNC-CONVERT turned the call sites to ``enqueue``; this class
+    makes that safe to rely on. If the verify path regressed to an inline
+    send, the customer would get the mail from the request thread and the
+    outbox would sit idle; if the queue regressed to nothing, the row
+    would never be delivered. So these assert BOTH — no mail before the
+    drain, mail after it — with the real ``api_login`` token, never
+    ``force_authenticate``.
     """
 
     def setUp(self):
@@ -1078,7 +1081,7 @@ class NoCallSiteConvertedByWorkerTests(ApiTestCase):
         _, self.token = self.api_login(username=self.user.username)
         self.product = self.make_product(stock=5)
 
-    def test_verify_payment_still_sends_inline_and_queues_nothing(self):
+    def test_verify_payment_queues_and_only_the_worker_sends(self):
         self.seed_session_cart([(self.product, 1)])
         res = self.checkout()
         self.assertEqual(res.status_code, 201, res.data)
@@ -1086,27 +1089,30 @@ class NoCallSiteConvertedByWorkerTests(ApiTestCase):
         self.client.post(
             "/api/orders/payment/", {"order_id": res.data["id"]}, format="json"
         )
-        with self.captureOnCommitCallbacks(execute=True):
-            res = self.client.post(
-                "/api/orders/payment/verify/",
-                {
-                    "razorpay_order_id": "order_TEST0001",
-                    "razorpay_payment_id": "pay_TEST0001",
-                    "razorpay_signature": "sig",
-                    "order_id": res.data["id"],
-                },
-                format="json",
-            )
+        res = self.client.post(
+            "/api/orders/payment/verify/",
+            {
+                "razorpay_order_id": "order_TEST0001",
+                "razorpay_payment_id": "pay_TEST0001",
+                "razorpay_signature": "sig",
+                "order_id": res.data["id"],
+            },
+            format="json",
+        )
         self.assertEqual(res.status_code, 200, res.data)
+        # The request path sends nothing; the intent is queued.
+        self.assertEqual(len(mail.outbox), 0)
+        self.assertEqual(NotificationOutbox.objects.count(), 1)
+        # The worker is the only send path.
+        notifications.drain_notifications()
         self.assertEqual(len(mail.outbox), 1)
         self.assertEqual(mail.outbox[0].to, [self.user.email])
-        self.assertEqual(NotificationOutbox.objects.count(), 0)
 
     def test_draining_an_empty_outbox_sends_nothing(self):
         """A worker with nothing to do must not send, or would double-mail.
 
-        Once call sites ARE converted this is the assertion that keeps the
-        drain loop from being a second sender.
+        With call sites converted this is the assertion that keeps the
+        drain loop from being a second sender alongside the request path.
         """
         result = notifications.drain_notifications()
         self.assertEqual(result.examined, 0)

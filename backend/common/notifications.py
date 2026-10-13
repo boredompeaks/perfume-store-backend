@@ -37,13 +37,18 @@ type, called beside the transition itself), because a transition that only
 wrote a log line left an operator dependent on reading a scheduler's output to
 learn a customer's confirmation had been dropped.
 
-**No call site is converted by either task, deliberately.** The sites still
-call ``dispatch``/``dispatch_on_commit`` and still send, so nothing is
-silently undelivered and the table is still empty and inert as shipped. That
-is the ordering constraint the whole pair is built around: converting a site
-(ASYNC-2c3) before anything drains it would mean a notification that exists
-nowhere and is never sent — a silent, permanent loss. The drain loop landing
-first is what makes that conversion safe.
+**Call-site conversion (TIER1-ASYNC-CONVERT) has happened for the three
+business sites.** ``orders/events.py`` (lifecycle transitions),
+``orders/views/payment.py`` (the browser verify) and ``orders/webhooks.py``
+(the gateway hook) now call ``enqueue``: the outbox row is written inside
+their transaction and the beat-scheduled drain worker performs the send, so
+no SMTP round trip ever runs on a request thread. The ordering constraint
+that made the conversion safe is historical and worth keeping visible: a
+site converted before anything drained it would be a notification that
+exists nowhere and is never sent — the drain loop had to land first
+(ASYNC-2c2), and it did. ``dispatch``/``dispatch_on_commit`` remain for
+callers that deliberately want an in-process send (the accounts recovery
+views' ``send_email`` path is separate and untouched).
 
 What the queue's delivery guarantee is, precisely, because it was previously
 overstated here: ``dedup_key`` stops the same notification being QUEUED twice,
@@ -182,8 +187,9 @@ def dispatch(event_type, context=None):
     so a notification outage can never break the business transaction.
 
     This sends immediately, locks held. Sites that must not sit on their
-    ``select_for_update`` rows for an SMTP round trip register the send
-    with ``dispatch_on_commit`` instead.
+    ``select_for_update`` rows for an SMTP round trip use ``enqueue``
+    (the converted business sites do) or register the send with
+    ``dispatch_on_commit``.
     """
     handler = _EVENT_HANDLERS.get(event_type)
     if handler is None:
@@ -242,22 +248,23 @@ def dispatch_on_commit(event_type, context=None):
     Still on the response path: ``on_commit`` fires before the response is
     returned, so the SMTP latency is unchanged. Only the lock hold is gone.
 
-    Deliberately opt-in rather than folded into ``dispatch``: making the
-    registry itself defer would silently convert the other registry hook
-    sites - shipped/delivered (``orders/events.py``) and the webhook
-    callback (``orders/webhooks.py``) - and remove any caller's ability to
-    send inside its own transaction. The back-in-stock notice is NOT one of
-    them: ``products/models.py`` calls ``send_email`` directly and never
-    reaches this registry, so no change here could convert it and ASYNC-2b2
-    has to move it explicitly. All three are converted one at a time in
-    ASYNC-2b2/2b3.
+    Deliberately opt-in rather than folded into ``dispatch``, and now
+    SUPERSEDED for the business sites by ``enqueue`` (TIER1-ASYNC-CONVERT
+    converted them): an outbox row written inside the transaction gives
+    both the lock release this function bought AND the rollback-together
+    it could not. What remains here is the primitive itself — a deferred
+    in-process send for a caller that wants one — plus its pinned
+    behaviour. The back-in-stock notice was never a registry site:
+    ``products/models.py`` calls ``send_email`` directly and never
+    reaches this registry.
     """
     transaction.on_commit(lambda: dispatch(event_type, context))
 
 
 # ---------------------------------------------------------------------------
-# ASYNC-2c1: the durable outbox. Storage + enqueue only — no drain, and no
-# call site converted. See the module docstring for why that is safe today.
+# ASYNC-2c1: the durable outbox. Storage + enqueue; the drain half is
+# ASYNC-2c2 below, and the business call sites converted onto this in
+# TIER1-ASYNC-CONVERT (see the module docstring for the ordering).
 # ---------------------------------------------------------------------------
 
 # A stored context value is an identifier, not prose. A notification context

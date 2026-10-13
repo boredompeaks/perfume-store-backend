@@ -412,13 +412,29 @@ def _apply_captured(event, body):
                 "total_amount": str(order.total_amount),
             },
         )
-        # Same customer notification the customer-callback writer sends: a
-        # payment that arrived without a browser callback must still reach the
-        # customer. dispatch never raises.
-        notifications.dispatch(
-            AuditEvent.EventType.ORDER_PAID,
-            {"order": order},
-        )
+        # Same customer notification the customer-callback writer queues: a
+        # payment that arrived without a browser callback must still reach
+        # the customer. Since TIER1-ASYNC-CONVERT this is ``enqueue`` —
+        # the NotificationOutbox row is written inside this transaction
+        # (rollback-together with the capture) and the beat-scheduled drain
+        # worker performs the send off the delivery thread. The browser
+        # callback and this hook are the two paths that fire for one
+        # payment; the outbox dedup_key collapses the second enqueue so
+        # the customer gets one confirmation, not two. A failed outbox
+        # write is logged and swallowed (site contract: the notification
+        # never breaks the capture it follows — the gateway will retry a
+        # 5xx, and a half-recorded capture is worse than a retried one).
+        try:
+            notifications.enqueue(
+                AuditEvent.EventType.ORDER_PAID,
+                {"order": order},
+            )
+        except Exception:
+            logger.exception(
+                "order.paid notification enqueue failed; capture stays "
+                "applied order=%s",
+                order.id,
+            )
 
     return PaymentEvent.Outcome.APPLIED
 
