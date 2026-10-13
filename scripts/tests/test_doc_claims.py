@@ -26,11 +26,15 @@ from doc_claims import (  # noqa: E402
     _inside_any_span,
     _path_exists,
     _resolve_path,
+    _target_present,
+    build_index,
     check_byte_integrity,
     empty_scan_notice,
     extract_claims,
+    load_restructure_map,
     parse_counter_examples,
     resolve_base,
+    validate_restructure_map,
     verify_claims,
 )
 
@@ -1392,6 +1396,353 @@ class BaselineShapeTests(unittest.TestCase):
         baseline = json.loads(path.read_text(encoding="utf-8"))
         for doc in baseline:
             self.assertIn(".", doc, f"{doc} is not a documentation path")
+
+
+class RestructureMapTests(unittest.TestCase):
+    """The map resolves historical cites; it never suppresses a claim.
+
+    Every branch is driven BOTH ways -- the pass, and the case where the
+    map's own target has vanished -- because a map that can only ever pass
+    is a baseline wearing a new name.
+    """
+
+    KNOWN_TESTS = {"test_real_one", "test_successor_one"}
+    PATHS = {
+        "backend/orders/views/__init__.py": 10,
+        "backend/orders/views/checkout.py": 10,
+        "backend/ops/models.py": 10,
+        "backend/accounts/urls.py": 49,
+    }
+    REASON = "a reason long enough to clear the floor and say what moved"
+
+    def entry(self, **fields):
+        entry = {"reason": self.REASON}
+        entry.update(fields)
+        return entry
+
+    def verify(self, line, paths, tests=None, tracked=None, known_paths=None):
+        return verify_claims(
+            extract_claims(line, DOC),
+            self.KNOWN_TESTS,
+            self.PATHS if known_paths is None else known_paths,
+            {"paths": paths, "tests": tests or {}, "tracked": tracked},
+        )
+
+    def test_flat_module_cite_resolves_to_the_package(self):
+        errors, warnings = self.verify(
+            "changed `orders/views.py`",
+            {"orders/views.py": self.entry(targets=["backend/orders/views/"])},
+        )
+        self.assertEqual(errors, [])
+        self.assertTrue(warnings[0].note.startswith("restructure map: resolves to"))
+
+    def test_a_deleted_package_fails_the_cite_it_used_to_resolve(self):
+        errors, _ = self.verify(
+            "changed `orders/views.py`",
+            {"orders/views.py": self.entry(targets=["backend/orders/views/"])},
+            known_paths={"backend/ops/models.py": 10},
+        )
+        self.assertEqual([c.kind for c in errors], ["module_path"])
+        self.assertIn("target(s) missing", errors[0].detail)
+        self.assertIn(self.REASON, errors[0].detail)
+
+    def test_path_line_resolves_the_location_and_downgrades_the_line(self):
+        errors, warnings = self.verify(
+            "see `orders/views.py:99999`",
+            {"orders/views.py": self.entry(targets=["backend/orders/views/"])},
+        )
+        self.assertEqual(errors, [])
+        self.assertIn("NOT verified", warnings[0].note)
+
+    def test_path_line_still_fails_when_the_map_target_is_gone(self):
+        errors, _ = self.verify(
+            "see `orders/views.py:99999`",
+            {"orders/views.py": self.entry(targets=["backend/orders/views/"])},
+            known_paths={"backend/ops/models.py": 10},
+        )
+        self.assertEqual([c.kind for c in errors], ["path_line"])
+        self.assertIn("target(s) missing", errors[0].detail)
+
+    def test_map_downgrades_a_past_end_line_on_a_live_mapped_file(self):
+        # Without the entry this is a past-the-end error (the file has 49
+        # lines and the cite says 9000); with it the location is verified,
+        # the line is skipped OUT LOUD, and the warning says which.
+        errors, warnings = self.verify(
+            "see `backend/accounts/urls.py:9000`",
+            {
+                "backend/accounts/urls.py": self.entry(
+                    targets=["backend/accounts/urls.py"]
+                )
+            },
+        )
+        self.assertEqual(errors, [])
+        self.assertIn("NOT verified", warnings[0].note)
+
+    def test_any_mode_needs_only_one_candidate_alive(self):
+        entry = self.entry(
+            targets=["backend/gone/one.py", "backend/ops/models.py"], mode="any"
+        )
+        errors, warnings = self.verify("changed `views.py`", {"views.py": entry})
+        self.assertEqual(errors, [])
+        self.assertTrue(warnings[0].note.startswith("restructure map: resolves to"))
+
+    def test_any_mode_fails_when_no_candidate_exists(self):
+        entry = self.entry(
+            targets=["backend/gone/one.py", "backend/gone/two.py"], mode="any"
+        )
+        errors, _ = self.verify("changed `views.py`", {"views.py": entry})
+        self.assertEqual([c.kind for c in errors], ["module_path"])
+        self.assertIn("target(s) missing", errors[0].detail)
+
+    def test_all_mode_passes_only_when_every_target_exists(self):
+        good = self.entry(
+            targets=["backend/ops/models.py", "backend/orders/views/"], mode="all"
+        )
+        errors, _ = self.verify("changed `views.py`", {"views.py": good})
+        self.assertEqual(errors, [])
+        bad = self.entry(targets=["backend/ops/models.py", "backend/gone/two.py"])
+        errors, _ = self.verify("changed `views.py`", {"views.py": bad})
+        self.assertEqual(len(errors), 1)
+        self.assertIn("backend/gone/two.py", errors[0].detail)
+
+    def test_untracked_entry_passes_while_the_file_stays_uncommitted(self):
+        errors, warnings = self.verify(
+            "`loadtest.py` was purged",
+            {"loadtest.py": self.entry(untracked=["loadtest.py"])},
+            tracked=frozenset(),
+        )
+        self.assertEqual(errors, [])
+        self.assertIn("untracked as recorded", warnings[0].note)
+
+    def test_untracked_entry_fails_once_the_file_is_committed(self):
+        errors, _ = self.verify(
+            "`loadtest.py` was purged",
+            {"loadtest.py": self.entry(untracked=["loadtest.py"])},
+            tracked=frozenset({"loadtest.py"}),
+        )
+        self.assertEqual([c.kind for c in errors], ["module_path"])
+        self.assertIn("must stay out of the tree but is tracked", errors[0].detail)
+
+    def test_untracked_entry_fails_closed_without_a_tracked_list(self):
+        # No evidence is not evidence of absence: with no tree list the entry
+        # cannot be verified, and unverifiable here means ERROR, not pass.
+        errors, _ = self.verify(
+            "`loadtest.py` was purged",
+            {"loadtest.py": self.entry(untracked=["loadtest.py"])},
+            tracked=None,
+        )
+        self.assertEqual([c.kind for c in errors], ["module_path"])
+        self.assertIn("cannot verify", errors[0].detail)
+
+    def test_external_entry_passes_and_admits_it_cannot_be_checked(self):
+        errors, warnings = self.verify(
+            "gate: `django/contrib/admin/options.py`",
+            {"django/contrib/admin/options.py": self.entry(external=True)},
+        )
+        self.assertEqual(errors, [])
+        self.assertIn("external path", warnings[0].note)
+
+    def test_renamed_test_resolves_through_its_shipped_successor(self):
+        errors, warnings = self.verify(
+            "fixed `test_old_pin`",
+            {},
+            tests={
+                "test_old_pin": {
+                    "successor": "test_successor_one",
+                    "reason": self.REASON,
+                }
+            },
+        )
+        self.assertEqual(errors, [])
+        self.assertIn("renamed", warnings[0].note)
+        self.assertIn("test_successor_one", warnings[0].note)
+
+    def test_a_renamed_test_whose_successor_died_is_still_an_error(self):
+        errors, _ = self.verify(
+            "fixed `test_old_pin`",
+            {},
+            tests={
+                "test_old_pin": {
+                    "successor": "test_buried_pin",
+                    "reason": self.REASON,
+                }
+            },
+        )
+        self.assertEqual([c.kind for c in errors], ["test_name"])
+        self.assertIn("does not exist either", errors[0].detail)
+
+    def test_a_map_entry_never_covers_an_unmapped_cite(self):
+        errors, _ = self.verify(
+            "changed `backend/nope/gone.py`",
+            {"orders/views.py": self.entry(targets=["backend/orders/views/"])},
+        )
+        self.assertEqual([c.kind for c in errors], ["module_path"])
+        self.assertIn("no such file in the tree", errors[0].detail)
+
+    def test_without_a_map_the_original_behaviour_is_untouched(self):
+        # The shipped suite calls verify_claims with three arguments; the map
+        # must be opt-in per call or those 138 assertions quietly change.
+        errors, warnings = verify_claims(
+            extract_claims("see `views.py:40`", DOC), set(), self.PATHS
+        )
+        self.assertEqual([c.kind for c in errors], ["path_line"])
+        self.assertIn("no such file: views.py", errors[0].detail)
+        errors, warnings = verify_claims(
+            extract_claims("`test_real_one`", DOC), self.KNOWN_TESTS, self.PATHS
+        )
+        self.assertEqual(errors, [])
+        self.assertEqual(len(warnings), 1)
+
+
+class RestructureMapValidationTests(unittest.TestCase):
+    """Shape is checked at load and a structurally broken map aborts.
+
+    Existence deliberately is not: a rotted TARGET fails the cite that named
+    it (naming the missing path) instead of taking the whole scan down.
+    """
+
+    REASON = "a reason long enough to clear the floor and say what moved"
+
+    def test_a_minimal_well_formed_map_validates_and_loses_readme(self):
+        data = {
+            "_readme": ["how to extend"],
+            "paths": {"orders/views.py": {"targets": ["x/y/"], "reason": self.REASON}},
+            "tests": {"test_x": {"successor": "test_y", "reason": self.REASON}},
+        }
+        result = validate_restructure_map(data)
+        self.assertEqual(set(result), {"paths", "tests"})
+
+    def test_a_missing_map_file_raises_rather_than_scanning_without_it(self):
+        absent = Path(__file__).resolve().parent / "no_such_restructure_map.json"
+        with self.assertRaises(RuntimeError):
+            load_restructure_map(absent)
+
+    def test_a_missing_reason_is_rejected(self):
+        data = {"paths": {"a.py": {"targets": ["b/c.py"]}}, "tests": {}}
+        with self.assertRaises(RuntimeError):
+            validate_restructure_map(data)
+
+    def test_a_reason_under_the_floor_is_rejected(self):
+        data = {"paths": {"a.py": {"targets": ["b/c.py"], "reason": "short"}}, "tests": {}}
+        with self.assertRaises(RuntimeError):
+            validate_restructure_map(data)
+
+    def test_two_shapes_at_once_is_rejected(self):
+        data = {
+            "paths": {
+                "a.py": {
+                    "targets": ["b/c.py"],
+                    "external": True,
+                    "reason": self.REASON,
+                }
+            },
+            "tests": {},
+        }
+        with self.assertRaises(RuntimeError):
+            validate_restructure_map(data)
+
+    def test_no_shape_at_all_is_rejected(self):
+        data = {"paths": {"a.py": {"reason": self.REASON}}, "tests": {}}
+        with self.assertRaises(RuntimeError):
+            validate_restructure_map(data)
+
+    def test_an_unknown_entry_key_is_rejected_not_ignored(self):
+        # A typo'd key must not park an entry in silent no-op limbo.
+        data = {
+            "paths": {"a.py": {"targets": ["b/c.py"], "rsaeon": self.REASON}},
+            "tests": {},
+        }
+        with self.assertRaises(RuntimeError):
+            validate_restructure_map(data)
+
+    def test_an_unknown_mode_is_rejected(self):
+        data = {
+            "paths": {
+                "a.py": {"targets": ["b/c.py"], "mode": "some", "reason": self.REASON}
+            },
+            "tests": {},
+        }
+        with self.assertRaises(RuntimeError):
+            validate_restructure_map(data)
+
+    def test_an_empty_targets_list_is_rejected(self):
+        data = {"paths": {"a.py": {"targets": [], "reason": self.REASON}}, "tests": {}}
+        with self.assertRaises(RuntimeError):
+            validate_restructure_map(data)
+
+    def test_a_test_entry_requires_a_successor(self):
+        data = {"paths": {}, "tests": {"test_x": {"reason": self.REASON}}}
+        with self.assertRaises(RuntimeError):
+            validate_restructure_map(data)
+
+    def test_test_keys_must_look_like_test_names(self):
+        data = {
+            "paths": {},
+            "tests": {"whatever": {"successor": "test_y", "reason": self.REASON}},
+        }
+        with self.assertRaises(RuntimeError):
+            validate_restructure_map(data)
+
+    def test_top_level_requires_both_maps(self):
+        with self.assertRaises(RuntimeError):
+            validate_restructure_map({"paths": {}})
+        with self.assertRaises(RuntimeError):
+            validate_restructure_map({"tests": {}})
+
+    def test_an_unknown_top_level_key_is_rejected(self):
+        data = {"paths": {}, "tests": {}, "known_errors": {"a.py": True}}
+        with self.assertRaises(RuntimeError):
+            validate_restructure_map(data)
+
+    def test_an_entry_that_is_not_an_object_is_rejected(self):
+        data = {"paths": {"a.py": "backend/orders/views/"}, "tests": {}}
+        with self.assertRaises(RuntimeError):
+            validate_restructure_map(data)
+
+
+class ShippedRestructureMapTests(unittest.TestCase):
+    """The shipped map held to the tree, in the unit suite and not only at
+    night: the map rots the way prose does -- by target -- so a deleted
+    package or a lost successor has to be red on every push (GATE-5), not
+    just on the nightly's schedule.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        cls.map = load_restructure_map()
+        cls.known_tests, cls.known_paths = build_index()
+
+    def test_the_shipped_map_loads_and_validates(self):
+        self.assertTrue(self.map["paths"], "the shipped map has no path entries")
+        self.assertTrue(self.map["tests"], "the shipped map has no test entries")
+
+    def test_every_shipped_present_target_still_exists(self):
+        for cited, entry in self.map["paths"].items():
+            for target in entry.get("targets", []):
+                with self.subTest(cited=cited, target=target):
+                    self.assertTrue(
+                        _target_present(target, self.known_paths),
+                        f"{cited} resolves to {target}, which is not in the tree",
+                    )
+
+    def test_every_shipped_successor_still_exists(self):
+        for name, entry in self.map["tests"].items():
+            with self.subTest(name=name):
+                self.assertIn(
+                    entry["successor"],
+                    self.known_tests,
+                    f"{name} resolves to {entry['successor']}, with no def",
+                )
+
+    def test_every_shipped_untracked_path_is_out_of_the_index(self):
+        # Index-scoped: the root-level scratch names are not under a walked
+        # source root, so the load-bearing check for those is run()'s
+        # ls-tree one; this still catches the in-tree cases (a seed command
+        # built before its row is rewritten).
+        for cited, entry in self.map["paths"].items():
+            for target in entry.get("untracked", []):
+                with self.subTest(cited=cited, target=target):
+                    self.assertNotIn(target, self.known_paths)
 
 
 if __name__ == "__main__":

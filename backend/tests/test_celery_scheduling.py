@@ -36,11 +36,14 @@ implementation rather than against the code as written:
   were made at import, importing the app in this suite would fail outright, so
   the import itself is part of what is pinned.
 
-**No notification call site is converted.** The last class pins that
-``enqueue`` still has no production caller and that the mail still arrives from
-the request path. Converting a call site before a drain is proven would mean a
-notification silently never delivered, which is the ordering hazard this task is
-deliberately sequenced around: the worker lands first, the call sites next.
+**The call sites are converted and the worker delivers what they queue.**
+The last class pins the TIER1-ASYNC-CONVERT state: the production modules
+that call ``enqueue`` are named exactly (a surprise fourth fails, and one
+of the named three going quiet fails too), the request path sends no mail,
+and the drain — the same command this module schedules — is what turns the
+queued row into the customer's confirmation. The ordering hazard this
+class originally guarded against (converting a site before a drain is
+proven) is historical: the worker landed first, the sites followed.
 """
 
 import pathlib
@@ -620,31 +623,37 @@ class CommandAndTaskDoNotDivergeTests(ApiTestCase):
         return notifications.enqueue(AuditEvent.EventType.ORDER_PAID, {"order": order})
 
 
-class NoCallSiteConvertedBySchedulerTests(ApiTestCase):
-    """The ordering this task is sequenced around, pinned rather than asserted.
+class ConvertedCallSiteSchedulerTests(ApiTestCase):
+    """The conversion this worker was sequenced for, pinned at both ends.
 
     Converting a notification call site before a drain is proven means the
-    notification is queued and never delivered, and no test that counts mail
-    rather than queue rows would notice. The worker lands first; this class
-    proves it, and the NEXT task is the one that changes it deliberately.
+    notification is queued and never delivered, and no test that counts
+    mail rather than queue rows would notice. The worker landed first
+    (the classes above prove it runs); this class proves the sites now
+    queue through ``enqueue`` AND that the drain command — the same one
+    the schedule fires — delivers what they queued.
     """
 
-    def test_enqueue_has_no_production_call_site_yet(self):
-        """`enqueue` is still called only from its own module and the suite.
+    def test_enqueue_production_call_sites_are_exactly_the_converted_three(self):
+        """Pinned structurally rather than behaviourally: the claim is about
+        WHICH MODULES call it, and a coverage-based reading would be
+        satisfied by a call site the suite happens to execute.
 
-        Pinned structurally rather than behaviourally: the claim is about WHICH
-        MODULE calls it, and a coverage-based reading would be satisfied by a
-        call site the suite happens to execute.
+        Exactly three, by name: the lifecycle seam, the browser verify and
+        the gateway hook. A surprise fourth module joining the list fails
+        here (convert deliberately, with a test), and one of the three
+        falling silent fails too (a site quietly reverting to inline send
+        is the dark regression this whole sequence exists to catch).
         """
         self.assertEqual(
             self._production_callers_of_enqueue(),
-            [],
-            "ASYNC-INFRA deliberately wires the WORKER only; converting a "
-            "notification call site to enqueue() is the next task",
+            ["orders/events.py", "orders/views/payment.py", "orders/webhooks.py"],
+            "the converted notification call sites are exactly the lifecycle "
+            "seam, the browser verify and the gateway hook",
         )
 
     def _production_callers_of_enqueue(self):
-        """Module paths outside the test tree that reference notifications.enqueue.
+        """Module paths outside the test tree that call notifications.enqueue.
 
         Read from source because the claim is about the caller's identity. Two
         exclusions are deliberate rather than convenient: `common/notifications.py`
@@ -678,12 +687,14 @@ class NoCallSiteConvertedBySchedulerTests(ApiTestCase):
                 offenders.append(rel.as_posix())
         return sorted(offenders)
 
-    def test_the_mail_still_arrives_from_the_request_path(self):
-        """The customer's side of the wire, unchanged by adding a worker.
+    def test_the_mail_arrives_from_the_worker_not_the_request_path(self):
+        """The customer's side of the wire, end to end through the queue.
 
-        Checkout alone does not send the order confirmation - it is
+        Checkout alone does not queue the order confirmation - it is
         `verify_payment` that does, after the gateway confirms - so the whole
-        payment path is driven here rather than stopping at the order.
+        payment path is driven here rather than stopping at the order. The
+        verify response itself must contain no mail; the drain command this
+        module's schedule fires is what delivers it.
         """
         self.make_user("buyer")
         self.api_login(username="buyer")
@@ -699,27 +710,27 @@ class NoCallSiteConvertedBySchedulerTests(ApiTestCase):
             "/api/orders/payment/", {"order_id": res.data["id"]}, format="json"
         )
         mail.outbox.clear()
-        with self.captureOnCommitCallbacks(execute=True):
-            verified = self.client.post(
-                "/api/orders/payment/verify/",
-                {
-                    "razorpay_order_id": "order_TEST0001",
-                    "razorpay_payment_id": "pay_TEST0001",
-                    "razorpay_signature": "sig",
-                    "order_id": res.data["id"],
-                },
-                format="json",
-            )
+        verified = self.client.post(
+            "/api/orders/payment/verify/",
+            {
+                "razorpay_order_id": "order_TEST0001",
+                "razorpay_payment_id": "pay_TEST0001",
+                "razorpay_signature": "sig",
+                "order_id": res.data["id"],
+            },
+            format="json",
+        )
         self.assertEqual(verified.status_code, 200, verified.data)
-        self.assertEqual(len(mail.outbox), 1)
-        # Nothing queued either: the site is not converted yet, which is the
-        # state ASYNC-INFRA deliberately leaves for the next task.
-        self.assertEqual(NotificationOutbox.objects.count(), 0)
-        # And the manual command still works, which is the compatibility the
-        # task shim must not have broken.
+        # The request path sends nothing; the intent is queued instead.
+        self.assertEqual(len(mail.outbox), 0)
+        self.assertEqual(NotificationOutbox.objects.count(), 1)
+        # And the manual command — the same code the schedule fires —
+        # delivers it, which is the compatibility the conversion must not
+        # have broken.
         out = StringIO()
         call_command("drain_notification_outbox", stdout=out)
         self.assertIn("drain_notification_outbox", out.getvalue())
+        self.assertEqual(len(mail.outbox), 1)
 
 
 class CadenceTests(SimpleTestCase):

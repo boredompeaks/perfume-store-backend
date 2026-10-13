@@ -1,12 +1,14 @@
-"""ASYNC-2c1: the durable notification outbox — storage and enqueue only.
+"""ASYNC-2c1/2c2: the durable notification outbox — storage, enqueue, drain.
 
-The substrate ASYNC-2c2 drains and ASYNC-2c3 converts call sites onto. It is
-built and tested here with **no live call site converted**, which is the whole
-safety argument for landing it early: converting a site before a drain loop
-exists would mean the notification is silently never delivered, and only a test
-rewritten to assert on queue rows instead of mail would notice. So the last
-class here pins the current behaviour — sites still send inline, nothing is
-queued — and it fails the moment someone converts one.
+The substrate the business call sites queue through. It landed before any
+site was converted (the safety argument for that ordering is historical and
+recorded in ``common.notifications``: converting a site before a drain loop
+exists would mean the notification is silently never delivered). Since
+TIER1-ASYNC-CONVERT the sites HAVE converted, and the last class here pins
+that converted state end to end — the call site writes a row and never
+sends, the row lives and dies with its business transaction, the drain
+worker is what puts the mail in the customer's inbox, and a notification
+outage cannot break the transaction it follows.
 
 What is pinned, and against which plausible wrong implementation:
 
@@ -598,14 +600,15 @@ class OutboxResolveFailureTests(ApiTestCase):
 
 
 @tag("notifications")
-class NoCallSiteConvertedTests(ApiTestCase):
-    """ASYNC-2c3 has not happened. This is what must still be true.
+class CallSiteConvertedTests(ApiTestCase):
+    """TIER1-ASYNC-CONVERT has happened. This is what must now be true.
 
-    The dark regression this task is sized to avoid: converting a site to
-    ``enqueue`` before ASYNC-2c2 lands a drain loop means the customer is
-    never emailed, and a suite that had been rewritten to count queue rows
-    would report it green. These tests keep the assertion on the customer's
-    side of the wire — the mail — while the substrate waits for its worker.
+    The dark regression the conversion was sequenced to avoid: a site
+    converted to ``enqueue`` while nothing drained the row means the
+    customer is never emailed, and a suite that asserts only on queue
+    rows would report it green. So these tests hold BOTH ends — the call
+    site writes a row and never sends inline, and the drain worker is
+    what turns that row into the customer's mail.
     """
 
     def setUp(self):
@@ -613,39 +616,47 @@ class NoCallSiteConvertedTests(ApiTestCase):
         _, self.token = self.api_login(username=self.user.username)
         self.product = self.make_product(stock=5)
 
-    def test_verify_payment_still_sends_inline_and_queues_nothing(self):
+    def test_verify_payment_queues_the_confirmation_and_sends_nothing_inline(self):
         self.seed_session_cart([(self.product, 1)])
         res = self.checkout()
         self.assertEqual(res.status_code, 201, res.data)
         order_id = res.data["id"]
         self.razorpay_mock()
         self.client.post("/api/orders/payment/", {"order_id": order_id}, format="json")
-        with self.captureOnCommitCallbacks(execute=True):
-            res = self.client.post(
-                "/api/orders/payment/verify/",
-                {
-                    "razorpay_order_id": "order_TEST0001",
-                    "razorpay_payment_id": "pay_TEST0001",
-                    "razorpay_signature": "sig",
-                    "order_id": order_id,
-                },
-                format="json",
-            )
+        mail.outbox.clear()
+        res = self.client.post(
+            "/api/orders/payment/verify/",
+            {
+                "razorpay_order_id": "order_TEST0001",
+                "razorpay_payment_id": "pay_TEST0001",
+                "razorpay_signature": "sig",
+                "order_id": order_id,
+            },
+            format="json",
+        )
         self.assertEqual(res.status_code, 200, res.data)
-        # The mail arrives, and the outbox is untouched — the queue is a
-        # substrate, not yet a participant.
+        # Nothing sent on the request thread; the intent is queued.
+        self.assertEqual(len(mail.outbox), 0)
+        row = NotificationOutbox.objects.get(event_type=AuditEvent.EventType.ORDER_PAID)
+        self.assertEqual(row.status, NotificationOutbox.Status.PENDING)
+        self.assertEqual(row.payload["order"]["pk"], order_id)
+        # The scheduled worker is the only send path: drain it and the
+        # customer's mail appears, addressed to the buyer.
+        notifications.drain_notifications()
         self.assertEqual(len(mail.outbox), 1)
         self.assertEqual(mail.outbox[0].to, [self.user.email])
-        self.assertEqual(NotificationOutbox.objects.count(), 0)
+        row.refresh_from_db()
+        self.assertEqual(row.status, NotificationOutbox.Status.SENT)
 
-    def test_a_lifecycle_transition_still_dispatches_inline(self):
+    def test_a_lifecycle_transition_enqueues_through_the_seam(self):
         from orders.events import notify_transition
 
         order = _make_order(self.user)
-        with mock.patch("orders.events.notifications.dispatch") as dispatch_mock:
+        with mock.patch("orders.events.notifications.enqueue") as enqueue_mock:
             notify_transition(order, "confirmed", "shipped")
-        dispatch_mock.assert_called_once_with("order.shipped", {"order": order})
-        self.assertEqual(NotificationOutbox.objects.count(), 0)
+        # The seam call is enqueue, and nothing was sent on this thread.
+        enqueue_mock.assert_called_once_with("order.shipped", {"order": order})
+        self.assertEqual(len(mail.outbox), 0)
 
 
 class OutboxCommitVisibilityTests(TransactionTestCase):
