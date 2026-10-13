@@ -27,12 +27,13 @@ falls, xf never grows, coverage never drops.
 | WEBHOOK-RECONCILE | Webhook-confirmed order never decremented stock (P1) | B | SHIPPED @ 333ddaf (auditor SHIP cycle-1 combined with WEBHOOK-COUPON; 1972 OK xf 3 both engines, cov 99.77%) | 1 |
 | WEBHOOK-COUPON | Webhook never consumed coupon usage; single-use coupon burnable | B | SHIPPED @ cf3c65e (same combined audit; coupon consumption in the shared service, idempotent both directions) | 1 |
 | MERCHANT-DELIST | Merchant cannot take a product off sale | B | SHIPPED @ df146f2 (auditor FIX cycle-1: P2 restock surface leaked delisted existence + mailed 404 links; RE-AUDIT cycle-2 SHIP; 2003 OK xf 3, cov 99.77%; pushed origin/lane/b) | 2 |
+| ASYNC-CONVERT | Business notification call sites still send synchronously | A | SHIPPED @ 05cd9f4 (auditor SHIP cycle-1; pushed origin/lane/a; 3 sites route through enqueue, in-transaction outbox row, log-and-swallow isolation pinned per site; floor 1976->1979 OK xf 3 cov 99.80->99.81%; P3: changelog files column lists 13 of 15 diff files — rides next build) | 1 |
+| DOC-CLAIMS-SCAN | Nightly full-corpus claim scan red 5+ days (245 stale-path errors) | B | SHIPPED @ cc476f4 (auditor SHIP cycle-1; pushed origin/lane/b; explicit restructure-map RESOLVES not suppresses — deleted-package probe failed 128 errors proving it; 245->0 re-derived from pre-task blob; 296 unit tests; P3s: dead import test_doc_claims.py:37, pre-existing \x0c pair changes.md:682/686, token-keyed map not time-scoped — all ride next build) | 1 |
 
 ## Open items (tracked, deliberately not built)
 
 | Item | What | Owner lane | Status |
 |---|---|---|---|
-| ASYNC-CONVERT | Convert notification call sites to `enqueue()` (worker now exists; sites still synchronous) | A | PENDING — the other half of the async-email blocker; must follow a proven drain |
 | THROTTLE-CACHE | DRF throttle cache still per-process (coupon limit effectively 30/min across 3 workers) | B | PENDING — needs Redis in CI; deliberately not switched in ASYNC-INFRA |
 | PG-ONLY-CI | Remove the SQLite CI job; PostgreSQL becomes the single engine (saves builder/auditor time; SQLite is the unsound oracle) | B | PENDING — touches settings, CI workflow, pg_gate/baseline, engine-conditional tests |
 | WEBHOOK-CART | Cart cleanup on webhook capture IMPOSSIBLE — Cart has no user FK, only session_id; schema gap, not a bug | A | PENDING — needs a schema decision (cart-to-order link) if wanted at all; stale line is a nuisance, not money |
