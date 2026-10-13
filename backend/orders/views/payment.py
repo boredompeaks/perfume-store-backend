@@ -2,13 +2,22 @@
 
 One of six modules split out of the former single-file `orders/views.py`. Both
 views here run inside `transaction.atomic()` with `select_for_update()`, and
-`verify_payment` is the order lifecycle's point of no return: inventory,
-coupon usage and cart cleanup happen here and NOWHERE else, deliberately after
-the gateway signature has been checked. Every failure branch below releases
-the attempt's stock holds rather than leaving phantom pressure on stock.
+`verify_payment` is the order lifecycle's point of no return, deliberately after
+the gateway signature has been checked. Every failure branch below releases the
+attempt's stock holds rather than leaving phantom pressure on stock.
 
-Nothing in this module was rewritten - the bodies moved verbatim - so the
-guarantees documented on each branch are the ones the split inherits.
+**The sale itself is NOT this module's.** The stock decrement, its ledger rows
+and the coupon-usage increment all live in `orders.inventory.commit_order_sale`,
+which this view and the SPEC-1-06 webhook both call. That module docstring
+records why; the short version is that when each capture writer carried its own
+copy of those statements the copies drifted, and a webhook-confirmed order left
+its stock un-decremented and its coupon unspent. What stays HERE is what is
+genuinely this endpoint's: the customer-facing protocol - the coupon validity
+precondition and its 409, the 409 on a lost stock race, the cart cleanup, and
+the audit rows naming the browser's verify. Cart cleanup is the one of those
+that CANNOT be shared: a `Cart` is identified only by its `session_id` and has
+no user FK, so a server-to-server webhook has no way to name this customer's
+cart - see `orders.inventory` and the WEBHOOK-COUPON note in the changelog.
 """
 
 import logging
@@ -27,11 +36,14 @@ from cart.models import Cart
 from common import notifications
 from common.models import AuditEvent
 
-# [SPEC-12-02] StockReservation and StockMovement ride the existing
-# products.models import line: verify_payment converts and releases the
-# holds create_order minted.
-from products.models import StockMovement, StockReservation, products
+# [SPEC-12-02] StockReservation rides the products.models import line:
+# verify_payment releases the holds create_order minted on the failure
+# branches. The sale itself - the conversion, the decrement and the
+# StockMovement ledger rows - is orders.inventory.commit_order_sale, shared
+# with the SPEC-1-06 webhook.
+from products.models import StockReservation, products
 
+from ..inventory import StockUnavailable, commit_order_sale
 from ..models import Coupon, Order, OrderStatusEvent
 
 # [R-10.4] SPEC-10-04: the failed-verify audit trigger + the
@@ -463,42 +475,57 @@ def verify_payment(request):
                 )
 
         # [R-12.7] SPEC-12-02 §12.1 step 5: confirmation converts the
-        # order's live holds into committed sales. The decrement below
-        # stays the stock authority and the sufficiency re-check above
-        # remains the oversell backstop (R-12.12: the sale never re-learns
-        # availability from a reservation); this flip is the reservation
-        # ledger's truth. Filtering on active makes it idempotent and
-        # retry-safe: a hold released by an earlier failed attempt is
-        # terminal (never resurrected into a sale), and an order with no
-        # holds (legacy, or the post-failure retry) verifies unchanged. A
-        # lapsed TTL is deliberately NOT a conversion gate — the captured
-        # payment proceeds on the re-checked stock; expiry belongs to the
-        # SPEC-12-03 reconciler.
-        order.stock_reservations.filter(status=StockReservation.Status.ACTIVE).update(
-            status=StockReservation.Status.CONVERTED
-        )
-
-        for item in order_items:
-            product = locked_products[item.product_id]
-            product.stock -= item.quantity
-            product.save(update_fields=["stock"])
-            # [6.5.17] No silent inventory edits: a paid sale is an inventory
-            # mutation like any other, so every decrement lands in the ledger
-            # with the order as its reference and no actor (system). The row
-            # is locked and the new value was just computed here, so
-            # stock_after is the real post-decrement quantity.
-            StockMovement.objects.create(
-                product=product,
-                delta=-item.quantity,
-                reason=StockMovement.Reason.SALE,
-                stock_after=product.stock,
-                note=f"Order #{order.id}",
-                created_by=None,
+        # order's live holds into committed sales. The service below is the
+        # ONE writer of that sale (holds -> CONVERTED, the stock decrement and
+        # its [6.5.17] ledger rows), shared with the SPEC-1-06 webhook so the
+        # two capture writers cannot drift apart again - the callback used to
+        # decrement and the webhook not to, leaving a webhook-confirmed order
+        # paid with its stock never decremented.
+        #
+        # The sufficiency re-check above stays as the customer-facing backstop:
+        # it answers 409 and releases the attempt's holds, which is this
+        # endpoint's protocol. The service re-checks under its own locks
+        # because it is also the webhook's only stock authority, and a lost
+        # race between the two re-checks must not oversell.
+        try:
+            commit_order_sale(order)
+        except StockUnavailable as unavailable:
+            AuditEvent.record(
+                AuditEvent.EventType.PAYMENT_STOCK_CONFLICT,
+                actor=request.user,
+                order=order,
+                detail={
+                    "product_id": unavailable.product_id,
+                    "requested": unavailable.requested,
+                    "available": unavailable.available,
+                },
             )
 
-        if coupon:
-            coupon.used_count += 1
-            coupon.save(update_fields=["used_count"])
+            logger.info(
+                "Payment verify failed: order %s stock conflict "
+                "(product %s requested %s, available %s)",
+                order.id,
+                unavailable.product_id,
+                unavailable.requested,
+                unavailable.available,
+            )
+
+            order.stock_reservations.filter(
+                status=StockReservation.Status.ACTIVE
+            ).update(status=StockReservation.Status.RELEASED)
+
+            return Response(
+                {"error": "An item is no longer available in the requested quantity"},
+                status=status.HTTP_409_CONFLICT,
+            )
+
+        # The coupon's usage is NOT incremented here: commit_order_sale above
+        # consumed it inside the same transaction, under the same payment-
+        # dimension guard that makes the sale idempotent. Incrementing it a
+        # second time on this path is exactly the duplicated-statement drift
+        # that service was extracted to end - and the reason a webhook-
+        # confirmed order left a single-use coupon unspent. The validity gate
+        # above stays: that is this endpoint's precondition and its 409.
 
         # [R-8.16] paid_at is the business-event timestamp of exactly this
         # transition, so it is written beside it inside the same atomic

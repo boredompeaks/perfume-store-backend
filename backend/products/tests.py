@@ -1149,6 +1149,15 @@ EXPECTED_PRODUCT_FIELDS = [
     "created_at",
 ]
 
+# MERCHANT-DELIST: model columns deliberately NOT exposed on the public
+# product payload. ``is_active`` is delist state — a bare flag in the
+# payload is exactly the existence/state leak the detail 404 exists to
+# avoid — and the surfaces that need it (the Django admin's delist/relist
+# actions) do not read it through this serializer. A new entry here is a
+# decision that must be justified in place, exactly like the whitelist
+# itself.
+SERIALIZER_EXCLUDED_FIELDS = {"is_active"}
+
 
 @tag("products")
 class IsAdminUserOrReadOnlyUnitTests(ApiTestCase):
@@ -1365,11 +1374,19 @@ class ProductSerializerFieldsTests(ApiTestCase):
         self.assertIsInstance(fields, (list, tuple))
         self.assertEqual(list(fields), EXPECTED_PRODUCT_FIELDS)
 
-    def test_whitelist_still_covers_every_concrete_model_field(self):
-        """The explicit list must equal what '__all__' exposed — a new model
-        column must force a conscious decision here, never auto-leak."""
+    def test_whitelist_covers_every_field_or_declares_its_exclusion(self):
+        """The explicit list must equal what '__all__' exposed, minus the
+        columns a written decision excludes — a new model column must force
+        a conscious decision here (into the whitelist or into the exclusion
+        set with a reason), never auto-leak and never silently vanish."""
         concrete = {field.name for field in products._meta.concrete_fields}
-        self.assertEqual(set(ProductSerializer.Meta.fields), concrete)
+        self.assertEqual(
+            set(ProductSerializer.Meta.fields),
+            concrete - SERIALIZER_EXCLUDED_FIELDS,
+        )
+        # Every exclusion is a real column: a name here that is not on the
+        # model is a stale entry silently widening the gap.
+        self.assertLessEqual(SERIALIZER_EXCLUDED_FIELDS, concrete)
 
     def test_stock_writable_on_create_read_only_on_update(self):
         """SPEC-6-02 (audit cycle-1 BUG-1): a REST stock write on an existing

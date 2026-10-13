@@ -265,6 +265,26 @@ CAPTURED_MONEY_PAYMENT_STATUSES = frozenset(
     if PAYMENT_ALLOWED_TRANSITIONS.get(value)
 )
 
+# The payment values that prove a CAPTURE already happened for this order -
+# the capture point plus everything the machine places downstream of it,
+# INCLUDING the values with no outgoing edge.
+#
+# This is the same closure as :data:`CAPTURED_MONEY_PAYMENT_STATUSES` WITHOUT
+# the sink filter, and the difference is the whole point: the two answer
+# different questions and a writer that inherits the wrong one's answer writes
+# a real defect.
+#
+# * ``CAPTURED_MONEY_PAYMENT_STATUSES`` asks "can this store still move a
+#   REFUND out of this order" (the returns seam), so it drops the dead ends -
+#   an order in that state has nothing left to send a refund against.
+# * This set asks "did a capture already commit this order's SALE"
+#   (``orders.inventory``'s idempotency guard), and ``refunded`` answers YES:
+#   the only route to ``refunded`` runs through ``captured``, so the sale was
+#   committed and then unwound. Dropping it would let that guard treat a
+#   refunded order as never sold and commit its stock a second time - a double
+#   decrement against stock the refund already returned.
+CAPTURED_SALE_PAYMENT_STATUSES = frozenset(_reachable_payment_values(PAYMENT_CAPTURED))
+
 # The lifecycle order the dimension mapping above is read in. status_for_payment
 # needs a progression, not a set: one payment value spans several statuses
 # (captured covers confirmed/shipped/delivered) and the answer to "which status
