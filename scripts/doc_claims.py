@@ -54,6 +54,23 @@ hatch, and it cannot be produced by editing the sentence: "there is not a
 test named ``test_x``" is still an error. The full grammar, and every rule
 that keeps it narrow, are on ``parse_counter_examples``.
 
+The directive is line-local: its author has to be present to write it, which
+works for new prose and not at all for history that is already append-only.
+``changes.md`` rows cannot be annotated after the fact, and restructures move
+the tree UNDER those rows -- the flat ``orders/views.py`` cited throughout the
+ledger became a package, bare ``views.py`` cites span apps that were never
+pinnable, and nine test names were renamed. Those cites were true when
+written and cannot be edited forward, so the scanner carries their resolution
+itself: ``scripts/doc_claims_restructure_map.json`` holds one explicit,
+reviewed entry per restructure (old cite -> where it lives now), loaded and
+shape-checked by ``load_restructure_map``. It RESOLVES, it does not suppress:
+a map entry passes only while its target exists (delete the package and the
+cites fail again), every pass prints a ``RESTRUCTURED`` line carrying the
+entry's reason, and a ``path_line`` cite resolved through the map has its
+line check downgraded to a warning that says the line was NOT verified -- the
+map pins locations, never historical line numbers. The next restructure is
+one entry in that file: no doc edit, no workflow change, no baseline.
+
 Everything else is reported, never failed, because a machine cannot decide
 whether "kills 7 tests" was true. Those become the auditor's checklist:
 
@@ -114,6 +131,7 @@ from typing import Iterable
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 BASELINE_PATH = REPO_ROOT / "scripts" / "doc_claims_baseline.json"
+RESTRUCTURE_MAP_PATH = REPO_ROOT / "scripts" / "doc_claims_restructure_map.json"
 
 DEFAULT_DOCS = ("backend/docs/",)
 BYTE_INTEGRITY_DOCS = ("backend/docs/changes.md",)
@@ -677,13 +695,30 @@ def verify_claims(
     claims: Iterable[Claim],
     known_tests: set[str],
     known_paths: dict[str, int],
+    restructure: dict | None = None,
 ) -> tuple[list[Claim], list[Claim]]:
     """Split claims into hard errors and unverified warnings.
 
     ``known_paths`` maps a repo-relative posix path to its line count.
+
+    ``restructure`` is the parsed restructure map (``load_restructure_map``)
+    plus, optionally, ``tracked`` -- the HEAD tree's file list, for entries
+    that promise a path stays uncommitted. When a CITED token has a map
+    entry, THE MAP DECIDES: it preempts the direct index lookup, any
+    counter-example directive on the line, and the numeric line check. The
+    path half is still verified (the entry's targets must exist, or the
+    claim is an error naming the missing target); the line half of a
+    path_line cite is downgraded to a warning that says the line was not
+    verified, because a location that moved cannot vouch for the line
+    numbers prose remembers. Without a map entry every branch below is the
+    original behaviour, unchanged.
     """
     errors: list[Claim] = []
     warnings: list[Claim] = []
+    restructure = restructure or {}
+    path_map: dict[str, dict] = restructure.get("paths", {})
+    test_map: dict[str, dict] = restructure.get("tests", {})
+    tracked = restructure.get("tracked")
     for claim in claims:
         # Computed once, and handed to the error text, so the message cannot
         # describe a different failure from the one that actually happened.
@@ -695,6 +730,40 @@ def verify_claims(
         if claim.kind == "test_name":
             if claim.value in known_tests:
                 warnings.append(claim)
+            elif claim.value in test_map:
+                # The map pins the renamed successor, and the pass requires
+                # the SUCCESSOR to exist: a rename resolves, a deletion of
+                # the replacement fails the old cite again.
+                entry = test_map[claim.value]
+                successor = entry["successor"]
+                if successor in known_tests:
+                    warnings.append(
+                        Claim(
+                            claim.kind,
+                            claim.value,
+                            claim.path,
+                            claim.line,
+                            note=(
+                                f"restructure map: renamed, the shipped pin is "
+                                f"{successor} -- {entry['reason']}"
+                            ),
+                        )
+                    )
+                else:
+                    errors.append(
+                        Claim(
+                            claim.kind,
+                            claim.value,
+                            claim.path,
+                            claim.line,
+                            detail=_absent_detail(
+                                claim,
+                                f"restructure-map successor {successor} does "
+                                "not exist either",
+                                failure,
+                            ),
+                        )
+                    )
             elif claim.directive is not None and not failure:
                 # The author stated this name is being reported ABSENT and the
                 # statement survives the one check a machine can make on it.
@@ -714,7 +783,30 @@ def verify_claims(
                     )
                 )
         elif claim.kind == "module_path":
-            if _path_exists(claim.value, known_paths):
+            entry = path_map.get(claim.value)
+            if entry is not None:
+                ok, note = restructure_check(entry, known_paths, tracked)
+                if ok:
+                    warnings.append(
+                        Claim(
+                            claim.kind,
+                            claim.value,
+                            claim.path,
+                            claim.line,
+                            note=note,
+                        )
+                    )
+                else:
+                    errors.append(
+                        Claim(
+                            claim.kind,
+                            claim.value,
+                            claim.path,
+                            claim.line,
+                            detail=note,
+                        )
+                    )
+            elif _path_exists(claim.value, known_paths):
                 warnings.append(claim)
             elif claim.directive is not None and not failure:
                 warnings.append(claim)
@@ -731,6 +823,39 @@ def verify_claims(
         elif claim.kind == "path_line":
             _, _, rest = claim.detail.partition("path=")
             cited, _, tail = rest.partition(" line=")
+            entry = path_map.get(cited)
+            if entry is not None:
+                # The map preempts the line check outright: a location that
+                # moved cannot vouch for the line numbers prose remembers, so
+                # the path half is verified (targets must exist) and the line
+                # half becomes a warning that SAYS it was not verified -- a
+                # claim silently waved through is the failure mode this
+                # whole branch exists to avoid.
+                ok, note = restructure_check(entry, known_paths, tracked)
+                if ok:
+                    warnings.append(
+                        Claim(
+                            claim.kind,
+                            claim.value,
+                            claim.path,
+                            claim.line,
+                            note=(
+                                f"{note}; cited line {tail} NOT verified "
+                                "under a map resolution"
+                            ),
+                        )
+                    )
+                else:
+                    errors.append(
+                        Claim(
+                            claim.kind,
+                            claim.value,
+                            claim.path,
+                            claim.line,
+                            detail=note,
+                        )
+                    )
+                continue
             resolved = _resolve_path(cited, known_paths)
             if resolved is None:
                 if claim.directive is not None and not failure:
@@ -867,6 +992,201 @@ def _same_basename(tracked: str, cited: str) -> bool:
 def _path_exists(candidate: str, known_paths: dict[str, int]) -> bool:
     """Whether a cited module path names exactly one file in the tree."""
     return _resolve_path(candidate, known_paths) is not None
+
+
+# --------------------------------------------------------------------------
+# The restructure map: historical cites whose target moved, pinned in data.
+#
+# Prose written before a restructure cites the path AS IT WAS -- orders/views.py
+# before the views split, a bare views.py when the app was implied, a test name
+# that was later renamed. Those cites were true when written; the tree moved
+# underneath them, and append-only history (changes.md most of all) means the
+# cite itself cannot be brought forward. The map is the scanner's side of that
+# bargain: an explicit, reviewed entry per restructure that resolves the old
+# cite to where the thing lives now, and still fails the day that target
+# disappears. No regex guesses, no baseline suppresses: every pass through the
+# map prints a RESTRUCTURED line naming the entry's reason, and an entry whose
+# own target is gone is an error like any other.
+# --------------------------------------------------------------------------
+
+# One of these three keys, exactly, per path entry -- and nothing else beyond
+# the reason (and ``mode`` for targets). Unknown keys are rejected rather than
+# ignored so a typo cannot park an entry in silent no-op limbo.
+_MAP_ENTRY_KEYS = {
+    "targets": frozenset({"reason", "targets", "mode"}),
+    "untracked": frozenset({"reason", "untracked"}),
+    "external": frozenset({"reason", "external"}),
+}
+_MAP_MODES = frozenset({"all", "any"})
+
+
+def _map_error(where: str, problem: str) -> RuntimeError:
+    location = f" {where}" if where else ""
+    return RuntimeError(f"restructure map{location}: {problem}")
+
+
+def _validate_reason(where: str, entry: dict) -> str:
+    """The entry's reason, or raise: an unexplained pass is a defect.
+
+    The same floor the counter-example directives clear, for the same reason:
+    a reason short enough to be filler is not an audit trail, and the reason
+    is what the RESTRUCTURED log line prints.
+    """
+    reason = entry.get("reason")
+    if not isinstance(reason, str) or len(reason.strip()) < MIN_REASON_CHARS:
+        raise _map_error(
+            where, f"reason must be a sentence of at least {MIN_REASON_CHARS} chars"
+        )
+    return reason
+
+
+def _validate_path_list(where: str, key: str, value: object) -> None:
+    if (
+        not isinstance(value, list)
+        or not value
+        or not all(isinstance(item, str) and item for item in value)
+    ):
+        raise _map_error(where, f"{key} must be a non-empty list of paths")
+
+
+def _validate_path_entry(where: str, entry: object) -> None:
+    if not isinstance(entry, dict):
+        raise _map_error(where, "entry must be an object")
+    kinds = [key for key in _MAP_ENTRY_KEYS if key in entry]
+    if len(kinds) != 1:
+        raise _map_error(
+            where, "needs exactly one of targets, untracked or external"
+        )
+    allowed = _MAP_ENTRY_KEYS[kinds[0]]
+    unknown = set(entry) - allowed
+    if unknown:
+        raise _map_error(where, f"unknown keys: {sorted(unknown)}")
+    _validate_reason(where, entry)
+    if kinds[0] == "targets":
+        _validate_path_list(where, "targets", entry["targets"])
+        mode = entry.get("mode", "all")
+        if mode not in _MAP_MODES:
+            raise _map_error(
+                where, f"mode must be one of {sorted(_MAP_MODES)}, got {mode!r}"
+            )
+    elif kinds[0] == "untracked":
+        _validate_path_list(where, "untracked", entry["untracked"])
+    elif entry["external"] is not True:
+        raise _map_error(where, "external must be true")
+
+
+def _validate_test_entry(where: str, entry: object) -> None:
+    if not isinstance(entry, dict):
+        raise _map_error(where, "entry must be an object")
+    unknown = set(entry) - {"reason", "successor"}
+    if unknown:
+        raise _map_error(where, f"unknown keys: {sorted(unknown)}")
+    _validate_reason(where, entry)
+    successor = entry.get("successor")
+    if not isinstance(successor, str) or not successor:
+        raise _map_error(where, "successor must be a non-empty test name")
+
+
+def validate_restructure_map(data: object) -> dict:
+    """Shape-check a parsed map, or raise. Existence is NOT checked here.
+
+    Whether a target still exists is the CLAIM's question, answered per claim
+    so a rotted target fails the cite that named it (and says which) instead
+    of aborting every scan at load time. A structurally broken map does
+    abort: a scanner quietly running without its map would report every
+    mapped cite as missing and teach its red to be ignored.
+    """
+    if not isinstance(data, dict):
+        raise _map_error("", "top level must be an object")
+    unknown = set(data) - {"_readme", "paths", "tests"}
+    if unknown:
+        raise _map_error("", f"unknown top-level keys: {sorted(unknown)}")
+    paths = data.get("paths")
+    tests = data.get("tests")
+    if not isinstance(paths, dict) or not isinstance(tests, dict):
+        raise _map_error("", "'paths' and 'tests' objects are both required")
+    for cited, entry in paths.items():
+        if not isinstance(cited, str) or not cited:
+            raise _map_error("paths", f"cite keys must be non-empty strings: {cited!r}")
+        _validate_path_entry(f"paths[{cited!r}]", entry)
+    for name, entry in tests.items():
+        if not isinstance(name, str) or not name.startswith("test_"):
+            raise _map_error("tests", f"keys must be test names: {name!r}")
+        _validate_test_entry(f"tests[{name!r}]", entry)
+    return {"paths": dict(paths), "tests": dict(tests)}
+
+
+def load_restructure_map(path: Path = RESTRUCTURE_MAP_PATH) -> dict:
+    """Read and shape-validate the map file. Missing or unreadable raises:
+    a scan without its map is a scan that lies by omission.
+    """
+    try:
+        raw = path.read_text(encoding="utf-8")
+    except OSError as error:
+        raise _map_error(str(path), f"cannot read: {error}") from error
+    try:
+        data = json.loads(raw)
+    except ValueError as error:
+        raise _map_error(str(path), f"invalid JSON: {error}") from error
+    return validate_restructure_map(data)
+
+
+def _target_present(target: str, known_paths: dict[str, int]) -> bool:
+    """Whether one map target exists in the index.
+
+    A target ending in ``/`` is a PACKAGE: present while any indexed file
+    lives under it, so a cite of the old flat module resolves to the package
+    and fails the day the package does.
+    """
+    if target.endswith("/"):
+        return any(path.startswith(target) for path in known_paths)
+    return target in known_paths
+
+
+def restructure_check(
+    entry: dict,
+    known_paths: dict[str, int],
+    tracked: frozenset[str] | None,
+) -> tuple[bool, str]:
+    """``(holds, note)`` for one map entry against THIS tree.
+
+    The note is written for both outcomes and always names the entry's
+    reason: it is the pass line printed as RESTRUCTURED, and -- unchanged --
+    the error detail when the entry no longer holds, so the log cannot
+    describe a different failure from the one that happened. ``tracked`` is
+    the HEAD tree's file list; an untracked entry without it cannot be
+    verified and answers False rather than passing on absent evidence.
+    """
+    reason = entry["reason"]
+    if "external" in entry:
+        return True, (
+            "restructure map: external path, outside this repository and not "
+            f"machine-checkable from the tree -- {reason}"
+        )
+    if "untracked" in entry:
+        if tracked is None:
+            return False, (
+                "restructure map: cannot verify this must-stay-untracked entry "
+                f"without the tracked file list -- {reason}"
+            )
+        ghosts = [item for item in entry["untracked"] if item in tracked]
+        if ghosts:
+            return False, (
+                "restructure map: must stay out of the tree but is tracked: "
+                f"{', '.join(ghosts)} -- {reason}"
+            )
+        return True, f"restructure map: untracked as recorded -- {reason}"
+    targets = entry["targets"]
+    missing = [item for item in targets if not _target_present(item, known_paths)]
+    if entry.get("mode", "all") == "any":
+        holds = len(missing) < len(targets)
+    else:
+        holds = not missing
+    if holds:
+        return True, f"restructure map: resolves to {', '.join(targets)} -- {reason}"
+    return False, (
+        f"restructure map target(s) missing: {', '.join(missing)} -- {reason}"
+    )
 
 
 def check_byte_integrity(blob: bytes, baseline: dict) -> dict:
@@ -1098,6 +1418,15 @@ def write_baseline() -> dict:
 
 def run(base: str, head: str, base_source: str = "") -> Report:
     known_tests, known_paths = build_index()
+    restructure = load_restructure_map()
+    # The HEAD tree, for the map's must-stay-untracked entries: those cite
+    # files purged from (or never admitted to) history, and the promise being
+    # verified is that they are never COMMITTED -- a walk of the source roots
+    # cannot see a root-level scratch file, but `ls-tree` sees the tree the
+    # doc row swore about.
+    restructure["tracked"] = frozenset(
+        _git("ls-tree", "-r", "--name-only", head).splitlines()
+    )
     files = added_lines(base, head, DEFAULT_DOCS)
 
     claims: list[Claim] = []
@@ -1110,7 +1439,9 @@ def run(base: str, head: str, base_source: str = "") -> Report:
             if 1 <= number <= len(blob_lines):
                 claims.extend(extract_claims(blob_lines[number - 1], path, number))
 
-    errors, warnings = verify_claims(claims, known_tests, known_paths)
+    errors, warnings = verify_claims(
+        claims, known_tests, known_paths, restructure
+    )
 
     baseline = load_baseline()
     integrity: list[dict] = []
@@ -1218,13 +1549,18 @@ def main(argv: list[str] | None = None) -> int:
                 f"({entry['control_bytes']} control, CR {entry['cr']}, "
                 f"LF {entry['trailing_lf']})"
             )
-        # Every honoured counter-example is printed, never silently dropped: a
-        # directive that leaves no trace in the log is not reviewable, and
-        # "reviewable" is the entire control on the weakest kind.
+        # Every honoured counter-example and every map resolution is printed,
+        # never silently dropped: a pass that leaves no trace in the log is
+        # not reviewable, and reviewability is the entire control on both.
         for claim in report.warnings:
             if claim.directive is not None:
                 print(
                     f"  ABSENT {claim.path}:{claim.line} [{claim.kind}] "
+                    f"{claim.value} — {claim.note}"
+                )
+            elif claim.note.startswith("restructure map:"):
+                print(
+                    f"  RESTRUCTURED {claim.path}:{claim.line} [{claim.kind}] "
                     f"{claim.value} — {claim.note}"
                 )
         if report.warnings:
