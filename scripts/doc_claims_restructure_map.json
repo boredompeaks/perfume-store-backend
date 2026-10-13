@@ -1,0 +1,247 @@
+{
+  "_readme": [
+    "The restructure map for scripts/doc_claims.py: an explicit, reviewed entry",
+    "per known restructure, so a historical cite that was true when written",
+    "resolves to where the thing lives NOW instead of erroring against the",
+    "current tree. Loaded by load_restructure_map(); a structurally broken map",
+    "aborts the scan (exit 2) rather than silently running without it.",
+    "",
+    "Schema -- every path entry is keyed by the CITED token (no line number)",
+    "and carries exactly one of:",
+    "  targets : [paths...]  present-check. A path ending in '/' is a PACKAGE,",
+    "            present while any indexed file lives under it. mode 'all'",
+    "            (default) requires every target; mode 'any' requires one.",
+    "  untracked : [repo paths]  the listed paths must NOT be in the HEAD tree",
+    "            (the promise a doc row makes about purged or never-built",
+    "            files); a recommitted file fails the cite that called it gone.",
+    "  external : true  the cite names code outside this repository (installed",
+    "            packages); existence is not machine-checkable from the tree,",
+    "            and the entry is printed as RESTRUCTURED on every run so the",
+    "            honest gap stays visible instead of silent.",
+    "Every entry requires a 'reason' of at least 24 characters: the reason is",
+    "what the RESTRUCTURED log line prints, so an unexplained pass is a",
+    "validation error, not a quiet one.",
+    "",
+    "Test entries map a historical test name to its shipped successor",
+    "('successor'); the pass requires the SUCCESSOR to exist, so deleting the",
+    "replacement fails the old cite again.",
+    "",
+    "Precedence: for a cite that has an entry, THE MAP DECIDES -- it preempts",
+    "the direct index lookup, any counter-example directive on the line, and",
+    "the numeric line check. path_line cites resolved through the map are",
+    "downgraded to warnings: the location is verified, the historical line",
+    "number is not, and the log says exactly that.",
+    "",
+    "To extend: add one entry, then run",
+    "  python scripts/doc_claims.py --base 84c8fa71164c23f1a955c67cfc71bd324545519f",
+    "  python -m unittest discover -s scripts -p \"test_*.py\"",
+    "The unit suite validates this file's shape and that every targets/successor",
+    "still resolves, so a map entry that rots is red in CI, not just at night."
+  ],
+  "paths": {
+    "orders/views.py": {
+      "targets": ["backend/orders/views/"],
+      "mode": "all",
+      "reason": "flat orders/views.py was split into the orders/views/ package (VIEWS-SPLIT: __init__, checkout, payment, refund, return, order, admin); a line number from the flat file has no meaning inside a package, so path_line cites resolve the package and carry a line-check warning"
+    },
+    "backend/orders/views.py": {
+      "targets": ["backend/orders/views/"],
+      "mode": "all",
+      "reason": "the repo-root-qualified cite of the same flat module (see the orders/views.py entry); both cite forms resolve to the views package and must fail the day the package is deleted"
+    },
+    "views.py": {
+      "targets": [
+        "backend/accounts/views.py",
+        "backend/cart/views.py",
+        "backend/ops/views.py",
+        "backend/orders/views/",
+        "backend/products/views.py",
+        "backend/shipping/views.py"
+      ],
+      "mode": "any",
+      "reason": "bare views.py cites span the orders monolith prose, products (changes row 44), accounts (section-20 MFA) and the shipping skeleton; append-only history cannot say which app each line meant, so the claim is resolved existentially over this explicit list and fails when the last listed views module is gone"
+    },
+    "urls.py": {
+      "targets": [
+        "backend/accounts/urls.py",
+        "backend/cart/urls.py",
+        "backend/config/urls.py",
+        "backend/orders/urls.py",
+        "backend/products/urls.py",
+        "backend/shipping/urls.py"
+      ],
+      "mode": "any",
+      "reason": "bare urls.py cites span the config root router, accounts refresh/logout prose, the orders refund row and the shipping skeleton; no single file is pinnable from append-only history, so the claim passes while any listed urls module exists"
+    },
+    "tests.py": {
+      "targets": [
+        "backend/accounts/tests.py",
+        "backend/cart/tests.py",
+        "backend/config/tests.py",
+        "backend/ops/tests.py",
+        "backend/orders/tests.py",
+        "backend/products/tests.py",
+        "backend/shipping/tests.py"
+      ],
+      "mode": "any",
+      "reason": "bare tests.py cites are mostly .coveragerc globs (*/tests.py) and app-generic references, never one app's file; existential over every tests.py in the tree so the claim dies only when the last one does"
+    },
+    "serializers.py": {
+      "targets": [
+        "backend/accounts/serializers.py",
+        "backend/cart/serializers.py",
+        "backend/orders/serializers.py",
+        "backend/products/serializers.py",
+        "backend/shipping/serializers.py"
+      ],
+      "mode": "any",
+      "reason": "bare serializers.py cites belong to the shipping app-skeleton rows and the B07 returns rows, i.e. more than one app; existential over this explicit list"
+    },
+    "admin.py": {
+      "targets": [
+        "backend/accounts/admin.py",
+        "backend/cart/admin.py",
+        "backend/common/admin.py",
+        "backend/config/admin.py",
+        "backend/ops/admin.py",
+        "backend/orders/admin.py",
+        "backend/orders/views/admin.py",
+        "backend/products/admin.py",
+        "backend/shipping/admin.py"
+      ],
+      "mode": "any",
+      "reason": "bare admin.py cites span orders, the shipping app-skeleton rows and the SPEC-18-1 products row; existential over this explicit list rather than guessed per line"
+    },
+    "models.py": {
+      "targets": [
+        "backend/accounts/models.py",
+        "backend/cart/models.py",
+        "backend/common/models.py",
+        "backend/ops/models.py",
+        "backend/orders/models.py",
+        "backend/products/models.py",
+        "backend/shipping/models.py"
+      ],
+      "mode": "any",
+      "reason": "bare models.py cites are orders-machine prose (changes Black/coverage rows, spec-run-state B07a COD lines) plus app-generic mentions; existential over this explicit list"
+    },
+    "apps.py": {
+      "targets": ["backend/shipping/apps.py"],
+      "mode": "all",
+      "reason": "the only bare apps.py cite is the shipping app-skeleton row in changes (the file list a new shipping app needs), and shipping/apps.py exists, so this is pinned strict"
+    },
+    "__init__.py": {
+      "targets": ["backend/shipping/__init__.py"],
+      "mode": "all",
+      "reason": "the only bare __init__.py cite is the same shipping app-skeleton row, pinned strict to the package marker that row was asking for"
+    },
+    "migrations/0001_initial.py": {
+      "targets": ["backend/shipping/migrations/0001_initial.py"],
+      "mode": "all",
+      "reason": "the only bare cite is the shipping app-skeleton row naming the initial migration a new app needs; shipping/migrations/0001_initial.py exists, so pinned strict"
+    },
+    "commands/__init__.py": {
+      "targets": ["backend/products/management/commands/__init__.py"],
+      "mode": "all",
+      "reason": "the only cite is the changes row that created the repo's first management-command package under products; pinned strict to that package marker"
+    },
+    "views.py/urls.py": {
+      "targets": [
+        "backend/accounts/views.py",
+        "backend/accounts/urls.py"
+      ],
+      "mode": "all",
+      "reason": "slash-joined accounts cite from the LogoutView row ('verified against views.py/urls.py'); both accounts files must exist for the verification the row describes to have happened"
+    },
+    "models.py/admin.py/views.py": {
+      "targets": [
+        "backend/orders/models.py",
+        "backend/orders/admin.py",
+        "backend/orders/views/"
+      ],
+      "mode": "all",
+      "reason": "slash-joined orders cite from the state-machine consolidation row: ADMIN_FULFILMENT_NEXT was consolidated verbatim from these three homes, so all three must still exist"
+    },
+    "admin.py/views.py": {
+      "targets": [
+        "backend/orders/admin.py",
+        "backend/orders/views/"
+      ],
+      "mode": "all",
+      "reason": "slash-joined orders cite from the consolidation row where admin and views import the machine from orders.state; both homes must still exist"
+    },
+    "accounts/urls.py": {
+      "targets": ["backend/accounts/urls.py"],
+      "mode": "all",
+      "reason": "the S20 compliance row cites the mfa route block at lines 59-75; the ruff reformat (b6e887c) compacted the file after that was written and the mfa/* routes now sit at 42-48 of a 49-line file, so the location is verified and the historical line numbers are not (cite refresh is a separate task)"
+    },
+    "products/management/commands/seed_demo.py": {
+      "untracked": ["backend/products/management/commands/seed_demo.py"],
+      "reason": "the SPEC-14-1 row cites this as a PENDING proposal, a command nobody has written; it must stay out of the tree until that row is rewritten, so building it first fails this entry on purpose"
+    },
+    "loadtest.py": {
+      "untracked": ["loadtest.py", "backend/loadtest.py"],
+      "reason": "the spec-run-state hygiene note (2026-09-30) names this scratch file as purged and gitignored and forbids committing it; the entry checks that promise in both plausible locations instead of demanding the file exist"
+    },
+    "red_team_probe.py": {
+      "untracked": ["red_team_probe.py", "backend/red_team_probe.py"],
+      "reason": "same hygiene note; backend/red_team_probe.py was tracked once (c07e139) and purged, so both plausible locations must stay out of the HEAD tree"
+    },
+    "django/contrib/admin/options.py": {
+      "external": true,
+      "reason": "Django's own source, installed as a package and outside this repository; the scanner indexes only repo files (stdlib-only by design per the nightly header), so the cite is recorded as external and printed every run rather than silently passed"
+    },
+    "coverage.py": {
+      "external": true,
+      "reason": "test-gaps cites the coverage TOOL as a gate name, not a repository path; it is an installed dependency the tree index never contains, so the cite is recorded as external and printed every run"
+    },
+    "iews.py": {
+      "targets": ["backend/orders/views/"],
+      "mode": "all",
+      "reason": "byte-eaten head of views.py at c873b27, quoted as corruption evidence; the intact cite's home is the restructured orders/views/ package, so the fragment resolves there and dies with it"
+    },
+    "ests_returns.py": {
+      "targets": ["backend/orders/tests_returns.py"],
+      "mode": "all",
+      "reason": "byte-eaten head of tests_returns.py at c873b27, quoted as corruption evidence; the intact file still exists and this entry pins the fragment to it"
+    }
+  },
+  "tests": {
+    "test_the_gate_reads_no_clock_at_all": {
+      "successor": "test_the_retired_no_clock_invariant_now_names_what_the_gate_reads",
+      "reason": "B07d inverted the tripwire and the changelog records 'It is replaced by' the successor, which asserts the inverse on the same gate"
+    },
+    "test_the_gate_reads_the_window_on_every_call_and_not_from_a_cached_one": {
+      "successor": "test_the_gate_reads_the_window_on_every_call_and_not_from_a_cache",
+      "reason": "the changelog's BUG-2 row recorded this spelling as never shipped ('the shipped method is') and corrected the row to the successor's name"
+    },
+    "test_the_projection_reveals_nothing_the_allowlist_does_not_name": {
+      "successor": "test_the_projection_names_no_field_outside_the_permitted_set",
+      "reason": "renamed in B07b cycle 2 because the old name oversold the check (changelog: 'RENAMED this cycle from')"
+    },
+    "test_no_field_is_writable": {
+      "successor": "test_no_field_is_writable_so_a_client_can_never_write_a_return",
+      "reason": "the changelog quotes this name in ellipsis truncation; the shipped pin's full def is the successor and no shorter name of its own ever existed"
+    },
+    "test_failed_verify_appends_no_event": {
+      "successor": "test_failed_verify_appends_the_payment_failed_event",
+      "reason": "renamed in b5581f9 (SPEC-10-04) when a failed verify began appending the payment-failed event; the diff replaces one def with the other in one hunk"
+    },
+    "test_customer_totp_field_ignored": {
+      "successor": "test_customer_door_has_no_totp_field",
+      "reason": "SPEC-20-10 rewrote the pin when the storefront stopped serving a totp field (changelog: 'is now test_customer_door_has_no_totp_field')"
+    },
+    "test_webhooks_prefix_reserved_until_webhook_endpoint_exists": {
+      "successor": "test_webhooks_family_carries_the_payment_webhook_endpoint",
+      "reason": "SPEC-1-06 replaced the absence pin with the endpoint pin it had been waiting for (changelog: 'It is now')"
+    },
+    "test_checkout_requires_authentication_and_cart": {
+      "successor": "test_checkout_requires_a_cart_and_an_owner",
+      "reason": "renamed in 0d9c438 (B04 guest checkout removed the auth requirement); the diff replaces one def with the other and the cart gate is kept"
+    },
+    "test_slug_overflow_without_collision_currently_exceeds_max_length": {
+      "successor": "test_long_name_without_collision_truncated_to_slug_max_length",
+      "reason": "feaee45 (PG-2b) fixed the clamp and replaced this bug-documenting pin with the truncation pin for the same no-collision scenario"
+    }
+  }
+}
