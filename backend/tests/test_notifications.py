@@ -254,9 +254,7 @@ class OrderPaidProofEventTests(ApiTestCase):
         self.assertEqual(order.status, "confirmed")
         # Nothing sent on the request thread; the intent is queued.
         self.assertEqual(len(mail.outbox), 0)
-        row = NotificationOutbox.objects.get(
-            event_type=AuditEvent.EventType.ORDER_PAID
-        )
+        row = NotificationOutbox.objects.get(event_type=AuditEvent.EventType.ORDER_PAID)
         self.assertEqual(row.status, NotificationOutbox.Status.PENDING)
         # The scheduled worker is the only send path.
         notifications.drain_notifications()
