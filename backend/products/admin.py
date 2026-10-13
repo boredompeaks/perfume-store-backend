@@ -4,6 +4,7 @@ from functools import partial
 
 from django import forms
 from django.contrib import admin, messages
+from django.db import transaction
 from django.forms import modelformset_factory
 from django.http import HttpResponse
 from django.shortcuts import render
@@ -93,6 +94,15 @@ class ProductAdmin(SavedFilterMixin, RoleAwareModelAdmin):
         # (``inline_stock_capability``): same mutation, same capability.
         "adjust_stock": "inventory.adjust",
         "export_csv": "products.read",
+        # MERCHANT-DELIST: taking a product off sale (and putting it back)
+        # rides ``products.publish`` — the capability the delete above
+        # already leans on "because it is at least as sensitive as
+        # unpublishing", which names this exact power. Deliberately NOT
+        # ``products.write``: that capability gates ordinary row edits,
+        # while this one decides whether the store sells the row at all —
+        # a narrower set of roles (catalogue + admin) may make that call.
+        "delist_products": "products.publish",
+        "relist_products": "products.publish",
     }
     # adjust_stock renders its own deliberate input form (delta/reason +
     # Apply) — that form is the explicit confirmation [6.12.4], so it stays
@@ -105,6 +115,7 @@ class ProductAdmin(SavedFilterMixin, RoleAwareModelAdmin):
         "size",
         "stock",
         "stock_flag",
+        "on_sale_flag",
         "created_at",
     )
     # SPEC-20-11 [R-20.35]: `stock` is inline-editable next to `price`. The
@@ -113,12 +124,12 @@ class ProductAdmin(SavedFilterMixin, RoleAwareModelAdmin):
     # StockMovement ledger row ([6.5.17]). Without the capability the field
     # is display-only again (changelist_view) and the column stays visible.
     list_editable = ("price", "stock")
-    list_filter = ("category", "created_at")
+    list_filter = ("category", "is_active", "created_at")
     search_fields = ("name", "slug", "description")
     ordering = ("-created_at",)
     readonly_fields = ("slug", "created_at", "image_preview")
     list_per_page = 25
-    actions = ("adjust_stock", "export_csv")
+    actions = ("adjust_stock", "export_csv", "delist_products", "relist_products")
     inlines = (StockMovementInline,)
 
     @property
@@ -239,6 +250,14 @@ class ProductAdmin(SavedFilterMixin, RoleAwareModelAdmin):
             )
         return obj.stock
 
+    @admin.display(description="On sale", ordering="is_active", boolean=True)
+    def on_sale_flag(self, obj):
+        # MERCHANT-DELIST: the one staff-visible marker of a delisted row.
+        # The public catalogue 404s delisted products, so without this
+        # column (and the ``is_active`` list filter) there would be no way
+        # to find a delisted row to relist it.
+        return obj.is_active
+
     @admin.display(description="Preview")
     def image_preview(self, obj):
         if obj.image:
@@ -315,6 +334,70 @@ class ProductAdmin(SavedFilterMixin, RoleAwareModelAdmin):
                 ]
             )
         return response
+
+    # ==================================
+    # MERCHANT-DELIST: delist / relist
+    # ==================================
+
+    # One wording for both surfaces of the same outcome (the LogEntry and
+    # the flash message), so the audit trail and the UI cannot drift apart.
+    DELIST_LOG_MESSAGE = "Bulk action: taken off sale (delisted)."
+    RELIST_LOG_MESSAGE = "Bulk action: put back on sale (relisted)."
+
+    def _set_on_sale(self, request, queryset, on_sale):
+        """MERCHANT-DELIST's one writer: flip ``is_active`` on the selected
+        rows that do not already hold the target state, and nothing else.
+
+        Delist is reversible state, not an inventory mutation: the stock
+        column and the StockMovement ledger are deliberately untouched
+        ([6.5.17] is about inventory changes; a state flip writes no
+        movement row). ``update()`` over the captured pks rather than
+        per-row ``save()``: the flip is an absolute value, not a
+        read-modify-write like a stock delta, so there is nothing to
+        serialize and one statement is enough. The targets are captured
+        BEFORE the update (re-filtering afterwards would match nothing --
+        the rows just left that state), so the LogEntry names exactly the
+        rows the action actually moved, matching the adjust-stock bulk
+        action's audit contract ([6.12.6]: a privileged action is never
+        unlogged).
+        """
+        targets = list(queryset.filter(is_active=not on_sale))
+        if not targets:
+            # Idempotent rest state rather than an error: selecting only
+            # already-delisted rows for delist costs nothing and changes
+            # nothing, and the no-op writes no LogEntry (an entry would
+            # claim a mutation that did not happen).
+            self.message_user(
+                request,
+                "The selected products are already "
+                + ("on sale." if on_sale else "off sale."),
+                messages.INFO,
+            )
+            return None
+        log_message = self.RELIST_LOG_MESSAGE if on_sale else self.DELIST_LOG_MESSAGE
+        with transaction.atomic():
+            products.objects.filter(pk__in=[target.pk for target in targets]).update(
+                is_active=on_sale
+            )
+            self.log_bulk_action(request, targets, log_message)
+        self.message_user(
+            request,
+            f"{len(targets)} product(s) "
+            + ("put back on sale." if on_sale else "taken off sale."),
+            messages.SUCCESS,
+        )
+        return None
+
+    @admin.action(description="Take selected products off sale")
+    def delist_products(self, request, queryset):
+        # Reversible and non-destructive (nothing is deleted, stock and the
+        # ledger are untouched), so unlike delete it needs no confirmation
+        # interstitial -- the relist action is the undo.
+        return self._set_on_sale(request, queryset, on_sale=False)
+
+    @admin.action(description="Put selected products back on sale")
+    def relist_products(self, request, queryset):
+        return self._set_on_sale(request, queryset, on_sale=True)
 
 
 @admin.register(ProductVariant)

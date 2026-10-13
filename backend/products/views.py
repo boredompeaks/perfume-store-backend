@@ -39,8 +39,11 @@ def product_list(request):
         max_price = request.query_params.get("max_price")
         ordering = request.query_params.get("ordering")
 
-        # Start with all products
-        products_data = products.objects.all()
+        # MERCHANT-DELIST: the base queryset is the on-sale catalogue, so
+        # no downstream filter/search can reintroduce a delisted row. The
+        # staff surfaces (Django admin) do not go through this view and
+        # keep seeing every row.
+        products_data = products.objects.filter(is_active=True)
 
         # Search
         if search:
@@ -199,6 +202,21 @@ def product_detail(request, slug):
     # =========================
 
     if request.method == "GET":
+        # MERCHANT-DELIST: the public read must not serve a delisted row,
+        # and the refusal is this same 404 the unknown slug gets — the
+        # bodies are byte-identical — so the endpoint cannot be used to
+        # tell "never existed" from "taken off sale". Reads of delisted
+        # rows live on the staff admin surface, which lists every row.
+        # PUT/PATCH/DELETE deliberately still address delisted rows: they
+        # are already capability-gated (403 for everyone else, so no
+        # existence oracle opens up), and "delist → fix the price → relist"
+        # is the natural staff workflow — hiding the row from its own edit
+        # path would force a relist just to change a number.
+        if not product.is_active:
+            return Response(
+                {"error": "Product not found"}, status=status.HTTP_404_NOT_FOUND
+            )
+
         serializer = ProductSerializer(product)
 
         return Response(serializer.data)

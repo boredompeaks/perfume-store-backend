@@ -79,6 +79,18 @@ def cart_detail(request):
                 {"error": "Product not found"}, status=status.HTTP_404_NOT_FOUND
             )
 
+        # MERCHANT-DELIST: the buying surface treats a delisted product
+        # exactly like an unknown one — this same 404, byte-identical body
+        # — so a cart add is refused without becoming an oracle that
+        # distinguishes "never existed" from "taken off sale" (the public
+        # detail endpoint does the same). The customer's cart is untouched;
+        # a line already holding a delisted product is checkout's problem,
+        # refused there with a message that names it.
+        if not product.is_active:
+            return Response(
+                {"error": "Product not found"}, status=status.HTTP_404_NOT_FOUND
+            )
+
         # Check quantity
         try:
             quantity = int(quantity)

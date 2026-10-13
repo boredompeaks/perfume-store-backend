@@ -196,7 +196,21 @@ class CurrencyBackfillMigrationTests(TransactionTestCase):
                 " '', 'Legacy', 100.00, 1, 100.00)"
             )
 
-        call_command("migrate", "orders", verbosity=0, interactive=False)
+        # MERCHANT-DELIST (found while proving 0013): the restore leg MUST
+        # be a full migrate, not an orders-scoped one. The backwards leg
+        # above ("migrate orders 0007") unapplies every applied migration
+        # outside that target's ancestor closure — in EVERY app, because
+        # reaching "orders at 0007 and nothing else" is what the command
+        # promises — which on this tree also strips products 0009+ (and
+        # every other app past the closure). The old orders-scoped forward
+        # leg restored one app and left the shared test database missing
+        # the rest: invisible while products' own table was unchanged from
+        # 0008 to 0012, detonated the moment 0013 added a column — every
+        # test that ran after this one inserted into a products_products
+        # whose schema predated the model. The full migrate leaves the
+        # database as this test found it, which is the roundtrip's own
+        # contract ("migrate to head" per the class docstring).
+        call_command("migrate", verbosity=0, interactive=False)
 
         order = Order.objects.get(full_name="Backfill")
         self.assertEqual(order.currency, "INR")
@@ -2565,7 +2579,11 @@ class LifecycleBackfillMigrationTests(TransactionTestCase):
                     [user_id, f"Backfill-{legacy_status}", legacy_status],
                 )
 
-        call_command("migrate", "orders", verbosity=0, interactive=False)
+        # Same reasoning as CurrencyBackfillMigrationTests' restore leg: a
+        # full migrate, because the backwards leg above stripped every app
+        # outside the "orders at 0011" closure and an orders-scoped forward
+        # would leave the suite's shared database in that stripped state.
+        call_command("migrate", verbosity=0, interactive=False)
 
         for legacy_status, (
             payment,

@@ -62,6 +62,14 @@ class products(models.Model):
     size = models.PositiveBigIntegerField()
     stock = models.PositiveBigIntegerField(default=0)
     category = models.CharField(max_length=50)
+    # MERCHANT-DELIST: whether the storefront may sell this row. A delist
+    # is a reversible state flip ONLY -- it must never touch ``stock`` or
+    # write a StockMovement row (that ledger is for inventory changes;
+    # destroying history is what ``delete`` is for). The default is on-sale
+    # so the migration that adds the column leaves every existing row
+    # buyable: a False default would silently empty a live catalogue the
+    # moment the deploy ran.
+    is_active = models.BooleanField(default=True)
     image = models.ImageField(
         upload_to="products/",
         blank=True,
