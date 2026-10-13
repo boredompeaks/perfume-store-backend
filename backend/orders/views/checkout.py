@@ -3,23 +3,28 @@ bracket it (the guest's own order, and the coupon preview).
 
 One of six modules split out of the former single-file `orders/views.py`. The
 two collapse guards (the SPEC-21-1 accidental-duplicate window and SPEC-9-01's
-header-keyed idempotency) and the guest-credential invariant both live here
-because they are properties of ORDER CREATION, not of payment: the token is
-minted by the 201 below and disclosed by that response alone.
+header-keyed idempotency) live here because they are properties of ORDER
+CREATION, not of payment.
 
-Nothing in this module was rewritten - the bodies moved verbatim - so the
-guarantees documented on each helper are the ones the split inherits.
+TIER1-GUEST-DEADEND: checkout is ACCOUNT-ONLY. Full guest checkout is deferred
+(owner decision 2026-10-09, recorded in ``backend/docs/run/TIER1-launch.md``:
+SPEC-3-02 off the Tier-1 list), and what the store did in the meantime was
+worse than not having it - an anonymous POST minted an order that could never
+be paid (the payment endpoints are account-scoped) while it held a stock
+reservation and carried the coupon FK: a dead end that parked saleable
+inventory. ``create_order`` now refuses every anonymous submission with ONE
+uniform answer before anything is read or written (``_guest_checkout_refused``).
+The guest ORDER READ below (``guest_order_detail``) stays: rows minted before
+the refusal are still data, and a later section rebuilding guest checkout
+around a real checkout session (spec route rule 3) will decide their fate.
 """
 
 import logging
-import secrets
 from datetime import timedelta
 from decimal import Decimal
 
 from django.conf import settings
 from django.contrib.auth.models import User
-from django.core.exceptions import ValidationError
-from django.core.validators import validate_email
 from django.db import IntegrityError, transaction
 from django.db.models import Q
 from django.utils import timezone
@@ -58,57 +63,51 @@ IDEMPOTENCY_KEY_HEADER = "Idempotency-Key"
 IDEMPOTENCY_KEY_MAX_LENGTH = 128
 
 # ==================================
-# [R-1.13] SPEC-1-B04: guest checkout
+# Guest checkout refusal (TIER1-GUEST-DEADEND)
 # ==================================
 
-# Spec line 74 gives the guest one role: "browse products and optionally
-# check out without an account", and spec 9.3 requires a checkout session to
-# be bound "to the correct customer or guest session". The guest's session is
-# the cart it built; its durable identity is the pair below.
-
-# How the guest presents the token on a read. A header, never a query param:
-# a URL ends up in access logs, browser history and Referer, and this value is
-# the sole credential for someone else's order details.
+# How a guest (legacy row) presents its read credential on the guest order
+# lookup below. A header, never a query param: a URL ends up in access logs,
+# browser history and Referer, and this value is the sole credential for
+# someone else's order details. No NEW token is minted while the refusal
+# stands - the column, the constraint and the read all survive for rows
+# created before it.
 GUEST_TOKEN_HEADER = "X-Guest-Order-Token"
 
-# 32 bytes of CSPRNG entropy (secrets, never random) render as 43 URL-safe
-# characters. The column is 64 wide, so this leaves headroom for a format
-# change without a migration, and the read below rejects anything wider
-# before it can reach the index.
-GUEST_TOKEN_BYTES = 32
+# The read accepts nothing wider than the column it is matched against
+# (64), so an oversized value is refused before it can reach the index.
 GUEST_TOKEN_MAX_LENGTH = 64
 
 
-def _mint_guest_token():
-    """A fresh guest credential.
+def _guest_checkout_refused():
+    """The ONE answer every anonymous checkout submission gets.
 
-    ``secrets`` is the whole point: the token is the only thing standing
-    between a stranger and a stranger's address, so a predictable one (a
-    counter, a uuid4 the caller can correlate, ``random``) would make guest
-    checkout an order-enumeration oracle.
+    The dead-end this gate closes: an anonymous POST used to mint a guest
+    order that could never be paid (create_payment/verify_payment are
+    account-scoped), while the row held a stock reservation and the coupon
+    FK - saleable inventory parked on a purchase nobody could complete. The
+    gate therefore runs before the cart is read, the coupon resolved or the
+    atomic block opens: the refusal creates NOTHING - no order, no
+    reservation, no audit row, no coupon attachment, no burnt order number.
+
+    ONE body for every reason an anonymous submission might otherwise fail
+    (missing, invalid or over-length guest_email; no cart; empty cart; a
+    spent Idempotency-Key; an unserviceable destination): a differentiated
+    answer would let a caller probe which inputs any guest path accepts
+    (conventions.md: uniform responses on anonymous flows, no existence
+    leaks). The SPEC-9-03 envelope middleware wraps this into the store-wide
+    {"error", "code", "details"} shape, and the status family label is
+    "permission_denied" on every reason alike.
     """
-    return secrets.token_urlsafe(GUEST_TOKEN_BYTES)
-
-
-def _canonical_guest_email(raw):
-    """The ONE form of a guest address this store writes and matches on.
-
-    Surrounding whitespace is a typo, not a different mailbox, and RFC 5321
-    makes the domain case-insensitive (local-part case sensitivity is
-    deprecated in practice: no mainstream mailbox treats
-    ``Victim@Corp.Example`` and ``victim@corp.example`` as two people).
-    Stored un-normalized, those spellings are two different strings to the
-    owner filter below, so one buyer ends up with two addressable order rows
-    and the (guest_email, idempotency_key) constraint stops being an
-    authority across them. Folding here — at the boundary, before the row
-    exists — makes the identity single-valued.
-
-    ``casefold`` over ``lower`` because it is the aggressive, idempotent
-    fold: the only thing this value is used for is scoping and matching, so
-    folding two spellings together is always the safe direction, and the
-    equality classes never split.
-    """
-    return (raw or "").strip().casefold()
+    return Response(
+        {
+            "error": (
+                "Guest checkout is not available. "
+                "Sign in or create an account to place an order."
+            )
+        },
+        status=status.HTTP_403_FORBIDDEN,
+    )
 
 
 def _field_length_rejection(field, value):
@@ -131,70 +130,6 @@ def _field_length_rejection(field, value):
     )
 
 
-def _checkout_owner(user, guest_email):
-    """Queryset kwargs scoping an order lookup to ONE checkout owner.
-
-    An account order and a guest order are disjoint sets, so the guest branch
-    is ``user IS NULL AND guest_email = ...`` rather than a bare
-    ``user=None`` — the latter is every guest order in the table, which would
-    let one guest collapse onto (and read) another's order. The guest email
-    arrives already canonicalised (``_canonical_guest_email``), so this
-    comparison is against the same value the row stores.
-    """
-    if user is None:
-        return {"user__isnull": True, "guest_email": guest_email}
-    return {"user": user}
-
-
-def _resolve_checkout_owner(request):
-    """(user, guest_email, rejection) for one checkout submission.
-
-    An authenticated caller owns their account: ``guest_email`` in the body
-    is ignored outright rather than stored, because the Meta constraint on
-    Order allows exactly one owner per row and an order with both is refused
-    at the database.
-
-    An anonymous caller has no account, so the guest email IS the identity
-    spec 9.3 binds the session to — required input, canonicalised
-    (``_canonical_guest_email``) so it is single-valued, and validated with
-    the same validator the model field declares, so the store never records
-    an address it would refuse to mail.
-
-    The width gate comes BEFORE the validator on purpose: ``validate_email``
-    accepts any length, and SQLite does not enforce ``varchar(254)``, so an
-    over-length address would reach the INSERT and only blow up on the
-    production Postgres (``_field_length_rejection``).
-    """
-    if request.user.is_authenticated:
-        return request.user, "", None
-
-    guest_email = _canonical_guest_email(request.data.get("guest_email"))
-    if not guest_email:
-        return (
-            None,
-            "",
-            Response(
-                {"error": "guest_email is required"},
-                status=status.HTTP_400_BAD_REQUEST,
-            ),
-        )
-    length_rejection = _field_length_rejection("guest_email", guest_email)
-    if length_rejection is not None:
-        return None, "", length_rejection
-    try:
-        validate_email(guest_email)
-    except ValidationError:
-        return (
-            None,
-            "",
-            Response(
-                {"error": "guest_email must be a valid email address"},
-                status=status.HTTP_400_BAD_REQUEST,
-            ),
-        )
-    return None, guest_email, None
-
-
 def _guest_lookup_miss():
     """The one answer every guest lookup failure gets.
 
@@ -211,32 +146,16 @@ def _guest_lookup_miss():
     )
 
 
-def _checkout_response(order, status_code, disclose_guest_token):
-    """The checkout body: the order, plus the guest's token on a mint.
+def _checkout_response(order, status_code):
+    """The checkout body: the order as the serializer shapes it.
 
-    INVARIANT (the P1 fix, SPEC-1-B04 audit cycle 2): ``guest_token`` is
-    disclosed by exactly ONE response in the whole system — the 201 that
-    mints it — and by no collapse, keyed or keyless, ever.
-
-    The token is a permanent read credential for that order, so every
-    response that is not the mint is one more place a mistake could disclose
-    it: a collapse reached with a caller who only knows a low-entropy key, a
-    payload that drifted, or a future guard added without thought. Disclosing
-    it only where it is created makes the disclosure independent of how
-    carefully any collapse guard is written; no serializer, list, detail or
-    admin read carries it either, so a leaked order read cannot be replayed
-    as a guest lookup.
-
-    The cost is deliberate and worth stating: a guest whose 201 never reached
-    their client gets the order back from a replay but NOT the credential,
-    so they cannot read that order through the token. That is the price of
-    not making a permanent credential replayable, and it is paid on a path
-    whose order is unpayable anyway while guest payment is a spec gap.
+    No guest credential is disclosed here because none exists to disclose:
+    while the TIER1-GUEST-DEADEND refusal stands this view mints no guest
+    rows, and ``OrderSerializer`` never carries ``guest_token`` - so even a
+    legacy guest row cannot leak its read credential through any response
+    this module produces.
     """
-    data = dict(OrderSerializer(order).data)
-    if disclose_guest_token and order.user_id is None:
-        data["guest_token"] = order.guest_token
-    return Response(data, status=status_code)
+    return Response(OrderSerializer(order).data, status=status_code)
 
 
 # ==================================
@@ -262,14 +181,15 @@ def _same_purchase(order, cart_items, coupon, payload):
     Four agreements beyond owner identity: the cart lines (order-
     independent, via ``_order_lines``), the coupon, the complete
     shipping payload, and the delivery option. The owner filter already
-    checked identity; this is the "same purchase attempt" test both collapse
-    guards ask, so it is asked once, here, and both of them use the same
-    answer.
+    checked identity; this is the "same purchase attempt" test the
+    keyless dedup guard asks, so it is asked once, here.
 
-    This is the P1 fix's first line of defence: an attacker holding only a
-    guest's email and a low-entropy Idempotency-Key has to reproduce the
-    victim's exact cart, coupon, six shipping fields and delivery option to
-    make a collapse agree -- knowledge the email and the key do not give them.
+    Historically this also gated the keyed GUEST replay (a guest proved
+    only an email and a low-entropy key, so the whole purchase had to
+    agree). That branch died with the TIER1-GUEST-DEADEND refusal: an
+    authenticated caller's (user, key) pair is strong enough that
+    SPEC-9-01's "collapse regardless of payload drift" stands for them,
+    and no anonymous caller gets past the gate at all.
     """
     if _order_lines(order.items.all()) != _order_lines(cart_items):
         return False
@@ -306,11 +226,11 @@ def _same_shipping_choice(order, payload):
     """Does the delivery option this submission names agree with the order's?
 
     A submission that NAMES a method must name the one the order was priced
-    with, so a keyed guest replay cannot ride a collapse onto an order priced
-    a different way while supplying everything else the guard checks.
+    with, so a keyless duplicate cannot collapse onto an order priced a
+    different way while supplying everything else the guard checks.
 
     A submission that names NOTHING agrees with whatever the server chose,
-    because the server chose it: pricing happens after both collapse guards,
+    because the server chose it: pricing happens after the collapse guard,
     so the order already holds a resolved method and a replay that never
     expressed a preference cannot disagree with it. This is what the SPEC-1-
     B05 client-amount property rests on - a collapse returns the ORIGINAL
@@ -322,31 +242,6 @@ def _same_shipping_choice(order, payload):
         return True
     priced_as = order.shipping_method.code if order.shipping_method_id else None
     return priced_as == requested
-
-
-def _idempotency_key_conflict():
-    """The one answer a keyed submission gets when its key is already spent
-    on a DIFFERENT purchase.
-
-    SPEC-9-01 collapses a retry onto the original order; it cannot mint a
-    second one for the same key, because the (owner, key) constraint forbids
-    it. So a guest who presents a key held by an order that disagrees on the
-    cart, the coupon or the shipping payload gets this instead of that
-    order's body and its credential. It is a 409 rather than a silent second
-    order because "your key is spent" is what the client has to be told --
-    the same contract a payment provider's idempotency endpoint gives -- and
-    it carries no order data, no token and no existence signal beyond the
-    key the caller supplied themselves.
-    """
-    return Response(
-        {
-            "error": (
-                "This Idempotency-Key was already used for a different "
-                "checkout submission"
-            )
-        },
-        status=status.HTTP_409_CONFLICT,
-    )
 
 
 def _find_duplicate_pending_order(owner, cart_items, coupon, payload):
@@ -465,25 +360,35 @@ def _mint_order_reservations(order, lines, user):
 
 
 @api_view(["POST"])
-# [R-1.13] SPEC-1-B04: opened deliberately (conventions.md:26). Spec line 74
-# ("optionally check out without an account") and 9.3's guest-session binding
-# both require it, and the authorization the endpoint used to lean on is not
-# removed, it is REPLACED: an authenticated caller is still scoped to their own
-# orders everywhere below, and an anonymous one is scoped to the guest email
-# they present plus the token this response mints for them. Nothing here reads
-# a body-supplied user id.
+# AllowAny is deliberate (conventions.md:26) even though guests are refused:
+# the refusal is OURS to write, not the auth stack's. An IsAuthenticated
+# permission would answer the anonymous caller DRF's generic 401 body, which
+# says nothing about guest checkout; the explicit gate below answers the one
+# clear, uniform message instead. An authenticated caller is still scoped to
+# their own orders everywhere below, and nothing here reads a body-supplied
+# user id.
 @permission_classes([AllowAny])
-# [R-1.13] A public MUTATING endpoint, so conventions.md:24 requires a scope.
-# It shares the cart budget on purpose: checkout is the terminal mutation of
-# exactly the session-cart flow those two rates already govern (add to cart ->
-# apply coupon -> submit), so a guest's whole funnel draws on one budget
-# rather than two that can be spent independently.
+# A public MUTATING endpoint, so conventions.md:24 requires a scope. It
+# shares the cart budget on purpose: checkout is the terminal mutation of
+# exactly the session-cart flow those two rates already govern (add to cart
+# -> apply coupon -> submit), so the whole funnel draws on one budget rather
+# than two that can be spent independently. The throttle runs before the
+# view body, so an anonymous caller can be rate-limited into the same 429 a
+# logged-in one gets - never past it into the refusal below.
 @throttle_scope("cart")
 def create_order(request):
 
+    # [TIER1-GUEST-DEADEND] FIRST line of the body, before the idempotency
+    # header is even read: every anonymous submission - any payload, any
+    # headers, with or without a cart - gets the one uniform refusal, so no
+    # input can move a guest onto a different answer (and nothing below this
+    # gate can write anything on a guest's behalf).
+    if not request.user.is_authenticated:
+        return _guest_checkout_refused()
+
     # [R-9.3.14] Honor the Idempotency-Key header when the client sends it:
     # every retry carrying the same value is the SAME submission, so the
-    # atomic block below dedupes on (owner, key). Keyless clients keep the
+    # atomic block below dedupes on (user, key). Keyless clients keep the
     # legacy contract (the SPEC-21-1 guard plus window). Blank means no
     # key, since an empty value carries no submission identity.
     idempotency_key = (
@@ -501,11 +406,13 @@ def create_order(request):
     # [R-1.13] Who this submission belongs to, settled once and reused by
     # every writer below (dedup probe, key binding, the row, the status
     # event and the stock holds), so no two of them can disagree about it.
-    user, guest_email, owner_rejection = _resolve_checkout_owner(request)
-    if owner_rejection is not None:
-        return owner_rejection
-
-    owner = _checkout_owner(user, guest_email)
+    # Only an account caller is past the gate, so the owner is just the
+    # user; a body-supplied guest_email is ignored outright rather than
+    # stored (the Meta constraint allows exactly one owner per row, and an
+    # account row carries the empty guest_email, never NULL).
+    user = request.user
+    guest_email = ""
+    owner = {"user": user}
 
     # =========================
     # Get current session
@@ -779,20 +686,14 @@ def create_order(request):
                     duplicate.customer_name,
                 )
 
-                # [R-1.13] The collapse returns the order but NOT the credential
-                # (`_checkout_response` discloses the token on a mint only):
-                # returning it here would make a permanent read credential
-                # replayable by anyone who can reach a collapse. Scoped by
-                # `owner` above AND by `_same_purchase`, so this can only ever
-                # hand back a submission that agrees with the caller's on
-                # identity (the guest email), on the complete shipping payload,
+                # Scoped by `owner` above AND by `_same_purchase`, so this
+                # can only ever hand back a submission that agrees with the
+                # caller's own identity, on the complete shipping payload,
                 # on the delivery option, on the cart contents and on the
                 # coupon, inside the dedup window -- five independent
-                # agreements, which is what "the same purchase attempt" means
-                # for a caller whose only identity is the address they typed.
-                return _checkout_response(
-                    duplicate, status.HTTP_200_OK, disclose_guest_token=False
-                )
+                # agreements, which is what "the same purchase attempt"
+                # means for a double-click or a client retry.
+                return _checkout_response(duplicate, status.HTTP_200_OK)
 
             # [R-9.3.14]/[R-9.3.19] SPEC-9-01: key-based replay collapse. The
             # user row is locked first so two cross-session submissions carrying
@@ -805,14 +706,7 @@ def create_order(request):
             # original order regardless of payload drift, the dedup window, or
             # a settled first attempt, and never mints a second order_number.
             if idempotency_key is not None:
-                # [R-1.13] Only an account submission has a user row to serialize
-                # on. A guest submission is already serialized by the cart lock
-                # above (a same-session replay queues there), and its cross-session
-                # authority is the (guest_email, idempotency_key) constraint the
-                # migration adds -- declared conditional so the account pair keeps
-                # answering for account rows.
-                if user is not None:
-                    User.objects.select_for_update().get(pk=user.pk)
+                User.objects.select_for_update().get(pk=user.pk)
 
                 replay = (
                     Order.objects.filter(**owner, idempotency_key=idempotency_key)
@@ -821,22 +715,13 @@ def create_order(request):
                 )
 
                 if replay is not None:
-                    # [R-1.13] P1 FIX: the agreement requirement is scoped to the
-                    # guest branch on purpose. An authenticated caller proved who
-                    # they are at login, so (user, key) is a strong pair and
-                    # SPEC-9-01's "collapse regardless of payload drift" stands
-                    # for them. A guest proved only an email and a
-                    # low-entropy key -- so this guard additionally requires the
-                    # whole purchase to agree (`_same_purchase`, the same
-                    # question the keyless dedup guard asks), and a disagreement
-                    # is a 409 rather than another guest's order body. Without
-                    # this, one email plus one guessable key was enough to read a
-                    # stranger's address and take their token.
-                    if user is None and not _same_purchase(
-                        replay, cart_items, coupon, request.data
-                    ):
-                        return _idempotency_key_conflict()
-
+                    # An authenticated caller proved who they are at login,
+                    # so (user, key) is a strong pair and SPEC-9-01's
+                    # "collapse regardless of payload drift" stands for
+                    # them. (The keyed GUEST branch that additionally
+                    # demanded whole-purchase agreement died with the
+                    # TIER1-GUEST-DEADEND refusal.)
+                    #
                     # Benign keyed retry, so INFO: same judgement as the dedup
                     # guard's collapse log above.
                     logger.info(
@@ -846,10 +731,7 @@ def create_order(request):
                         replay.customer_name,
                     )
 
-                    # No token: see the invariant on `_checkout_response`.
-                    return _checkout_response(
-                        replay, status.HTTP_200_OK, disclose_guest_token=False
-                    )
+                    return _checkout_response(replay, status.HTTP_200_OK)
 
             # [R-1.07] SPEC-1-B05: price the delivery, HERE - after both
             # collapse guards and inside the same atomic block as the order
@@ -905,7 +787,7 @@ def create_order(request):
                     "Checkout priced with NO shipping charge for %s: the store "
                     "has no active shipping method configured (seed one with "
                     "`manage.py seed_shipping_methods` to start charging)",
-                    guest_email or user,
+                    user,
                 )
             total_amount = quantize_money(merchandise_total + shipping_amount)
 
@@ -917,18 +799,15 @@ def create_order(request):
             # reach this loop -- the dedup guard above returns first.
             for attempt in range(ORDER_NUMBER_ATTEMPTS):
                 candidate = _generate_order_number()
-                # [R-1.13] The guest token is minted in the same loop and is
-                # equally unique-constrained, so a collision on it converges the
-                # same way the number race does (conventions.md:17 — the
-                # constraint is the authority, the retry is how it is honored).
-                # Account orders never mint one: their token stays NULL.
-                guest_token = None if user is not None else _mint_guest_token()
                 try:
                     with transaction.atomic():
                         order = Order.objects.create(
                             user=user,
+                            # The two-owner constraint: an account row carries
+                            # the empty guest_email (never NULL) and no
+                            # guest_token (TIER1-GUEST-DEADEND: no token is
+                            # ever minted while the refusal stands).
                             guest_email=guest_email,
-                            guest_token=guest_token,
                             full_name=request.data.get("full_name"),
                             phone=request.data.get("phone"),
                             address=request.data.get("address"),
@@ -944,12 +823,12 @@ def create_order(request):
                             order_number=candidate,
                         )
                 except IntegrityError:
-                    # Lost the number (or token) race: the unique constraint
-                    # rejected the candidate, so the savepoint above rolled the
-                    # failed insert back and this transaction stays usable for the
-                    # retry. The bound is a safety net, not the expected path: one
-                    # retry converges because the collision window is a single
-                    # insert.
+                    # Lost the number race: the unique constraint rejected the
+                    # candidate, so the savepoint above rolled the failed
+                    # insert back and this transaction stays usable for the
+                    # retry. The bound is a safety net, not the expected path:
+                    # one retry converges because the collision window is a
+                    # single insert.
                     if attempt == ORDER_NUMBER_ATTEMPTS - 1:
                         raise
                     continue
@@ -960,10 +839,9 @@ def create_order(request):
             # here — inside the same outer atomic block as the order row, the
             # minted number, the snapshots and the key binding. A rolled-back
             # checkout leaves no order and no event; the actor is the customer
-            # who placed the order — and NULL for a guest, because there is no
-            # account to attribute it to (the row's own guest_email is the record
-            # of who placed it, and OrderStatusEvent.actor is nullable for
-            # exactly this case, like StockMovement.created_by).
+            # who placed the order (OrderStatusEvent.actor stays nullable for
+            # the guest rows that predate the TIER1-GUEST-DEADEND refusal,
+            # like StockMovement.created_by).
             OrderStatusEvent.objects.create(
                 order=order,
                 from_status=None,
@@ -1014,10 +892,8 @@ def create_order(request):
             # [R-12.6] SPEC-12-02 §12.1 step 3: mint the checkout's time-limited
             # holds inside this same atomic block, so a rolled-back checkout
             # never leaves a hold behind (helper above carries the semantics).
-            # [R-1.13] `user` is None for a guest, which is exactly what the
-            # nullable StockReservation.owner column accepts: a guest checkout
-            # reserves its units the same way an account one does, so the
-            # oversell guarantee is unchanged for the new caller.
+            # StockReservation.owner stays nullable for the guest rows that
+            # predate the refusal; a new hold always carries the account user.
             _mint_order_reservations(order, cart_items, user)
 
             # [R-7.20] Business-event trail: the order's creation is recorded in
@@ -1058,25 +934,25 @@ def create_order(request):
     # Return order
     # =========================
 
-    # This is the ONLY response that carries the credential, because it is
-    # the only one that minted it (`_checkout_response`'s invariant).
-    return _checkout_response(order, status.HTTP_201_CREATED, disclose_guest_token=True)
+    return _checkout_response(order, status.HTTP_201_CREATED)
 
 
 # ==================================
-# Guest order lookup (SPEC-1-B04)
+# Guest order lookup (SPEC-1-B04, legacy rows)
 # ==================================
 
 
 @api_view(["GET"])
-# [R-1.13] Opened deliberately (conventions.md:26): a guest has no session to
+# Opened deliberately (conventions.md:26): a guest has no session to
 # authorize against, which is precisely why the credential is a 256-bit token
-# minted at checkout. AllowAny here does NOT mean unguarded - the lookup below
-# is the guard, and it is a guard by possession, not by identity: it can only
-# ever return the one row whose stored token equals the presented one.
+# (minted by the pre-refusal checkout path for rows that still exist --
+# TIER1-GUEST-DEADEND mints no new ones). AllowAny here does NOT mean
+# unguarded - the lookup below is the guard, and it is a guard by possession,
+# not by identity: it can only ever return the one row whose stored token
+# equals the presented one.
 @permission_classes([AllowAny])
 def guest_order_detail(request, order_number=None):
-    """[R-1.13] GET /api/orders/guest/[<order_number>/] - a guest's OWN order.
+    """GET /api/orders/guest/[<order_number>/] - a guest's OWN order.
 
     Two shapes, one view, because ``guest_token`` is UNIQUE: a token alone
     identifies exactly one order, and the order number is an optional

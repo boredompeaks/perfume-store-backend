@@ -8,8 +8,9 @@ they moved verbatim into the six domain modules below.
 
 WHAT MOVED WHERE:
 
-* `checkout` - order creation, the two collapse guards, the guest credential
-  invariant, the guest order read, and the coupon preview.
+* `checkout` - order creation (account-only since TIER1-GUEST-DEADEND: an
+  anonymous submission is refused uniformly), the two collapse guards, the
+  guest order read, and the coupon preview.
 * `payment`  - the gateway intent and the verify that confirms money.
 * `refund`   - the staff refund seam.
 * `return`   - the customer's returns family (create, list, detail).
@@ -26,12 +27,15 @@ needs no per-name "re-exported" noqa: the names below are this package's
 published surface, not unused imports. Three groups are in it that are not view
 code, each for a stated reason:
 
-* the four module objects (`razorpay`, `notifications`, `secrets`, `timezone`)
-  that the test suite patches THROUGH this package - e.g. the Razorpay client
-  faked at `orders.views.razorpay.Client`, and the clock frozen at
+* the two module objects (`razorpay`, `timezone`) that the test suite patches
+  THROUGH this package - e.g. the Razorpay client faked at
+  `orders.views.razorpay.Client`, and the clock frozen at
   `orders.views.timezone.now`. Patching an attribute on the real module object
   reaches every importer, so re-exporting the object keeps those patch targets
-  resolving without any of them knowing about the split.
+  resolving without any of them knowing about the split. (`notifications` is
+  bound the same way for the same reason; `secrets` left this list with the
+  guest-token mint it served - TIER1-GUEST-DEADEND - and nothing patches
+  `orders.views.secrets`.)
 * three names from `orders.state`, so the suite's identity pins
   (`orders_views.ALLOWED_TRANSITIONS is order_state.ALLOWED_TRANSITIONS` and
   its two siblings) compare the one object rather than a copy.
@@ -48,7 +52,6 @@ domain record because a child logger propagates to its ancestors' handlers.
 """
 
 # Module objects the suite patches through this package's own attribute path.
-import secrets
 
 # `return` is a Python KEYWORD, so `from .return import x` is a SyntaxError and
 # that module is unreachable by ordinary import syntax however it is named. The
@@ -77,28 +80,23 @@ from .admin import (
 )
 from .checkout import (
     _SHIPPING_FIELDS,
-    GUEST_TOKEN_BYTES,
     GUEST_TOKEN_HEADER,
     GUEST_TOKEN_MAX_LENGTH,
     IDEMPOTENCY_KEY_HEADER,
     IDEMPOTENCY_KEY_MAX_LENGTH,
     ORDER_NUMBER_ATTEMPTS,
     SHIPPING_METHOD_FIELD,
-    _canonical_guest_email,
-    _checkout_owner,
     _checkout_response,
     _current_year,
     _field_length_rejection,
     _find_duplicate_pending_order,
     _generate_order_number,
+    _guest_checkout_refused,
     _guest_lookup_miss,
-    _idempotency_key_conflict,
-    _mint_guest_token,
     _mint_order_reservations,
     _next_order_sequence,
     _order_lines,
     _requested_shipping_code,
-    _resolve_checkout_owner,
     _same_purchase,
     _same_shipping_choice,
     _uniform_coupon_rejection,
@@ -149,7 +147,6 @@ __all__ = [
     # module objects the suite patches through this package
     "notifications",
     "razorpay",
-    "secrets",
     "timezone",
     # admin
     "_may_fulfil",
@@ -158,7 +155,6 @@ __all__ = [
     "admin_order_fulfill",
     "admin_order_list",
     # checkout
-    "GUEST_TOKEN_BYTES",
     "GUEST_TOKEN_HEADER",
     "GUEST_TOKEN_MAX_LENGTH",
     "IDEMPOTENCY_KEY_HEADER",
@@ -166,21 +162,17 @@ __all__ = [
     "ORDER_NUMBER_ATTEMPTS",
     "SHIPPING_METHOD_FIELD",
     "_SHIPPING_FIELDS",
-    "_canonical_guest_email",
-    "_checkout_owner",
     "_checkout_response",
     "_current_year",
     "_field_length_rejection",
     "_find_duplicate_pending_order",
     "_generate_order_number",
+    "_guest_checkout_refused",
     "_guest_lookup_miss",
-    "_idempotency_key_conflict",
-    "_mint_guest_token",
     "_mint_order_reservations",
     "_next_order_sequence",
     "_order_lines",
     "_requested_shipping_code",
-    "_resolve_checkout_owner",
     "_same_purchase",
     "_same_shipping_choice",
     "_uniform_coupon_rejection",

@@ -4,8 +4,9 @@ from .views import (
     apply_coupon,
     create_order,
     create_payment,
-    # [R-1.13] SPEC-1-B04: the guest's own order, keyed on the token minted
-    # at checkout rather than on a session.
+    # The guest's own order, keyed on the token minted by the pre-refusal
+    # checkout path rather than on a session (TIER1-GUEST-DEADEND mints no
+    # new ones; rows that carry one still answer here).
     guest_order_detail,
     order_detail,
     order_list,
