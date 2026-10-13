@@ -22,7 +22,7 @@ guest checkout DEFERRED, SPEC-3-02 off the Tier-1 list).
 | Pre-flight (before any edit) | `coverage run manage.py test --verbosity 0` (PG) | Ran 2044 tests, OK (expected failures=3), 414.8s |
 | Pre-flight coverage | `coverage report` | TOTAL 10185 stmts, 5 miss, cov 99.78% |
 | New guest suite | `manage.py test orders.tests_guest` (PG) | OK (44 tests at first rewrite; 53 after the count-restoring pins) |
-| Targeted affected files | `manage.py test orders.tests_guest orders.test_idempotency shipping.tests tests.test_e2e_purchase_flow` (PG) | Ran 178 tests, OK (expected failures=1 — the pre-existing F-18 flip test) |
+| Targeted affected files | `manage.py test` over the four affected modules (`backend/orders/tests_guest.py`, `backend/orders/test_idempotency.py`, `backend/shipping/tests.py`, `backend/tests/test_e2e_purchase_flow.py`) (PG) | Ran 178 tests, OK (expected failures=1 — the pre-existing F-18 flip test) |
 | Orders app | `manage.py test orders` (PG) | Ran 543 tests, OK |
 | Full suite + migrations | `coverage run manage.py test` + `coverage report` + `makemigrations --check` (PG) | Ran 2044 tests, OK (expected failures=3); TOTAL 10152 stmts, 5 miss, cov 99.77%; `No changes detected` |
 | Changelog floor artifact (pre-format) | `python ../scripts/changelog_figures.py floor --task TIER1-GUEST-DEADEND --pg-url ...` | sqlite + postgresql: Ran 2044 tests, OK (expected failures=3), cov 99.77% (10152 stmts, 5 missed, 1380 branches, 21 partial), both exits 0; artifact `scripts/figures/TIER1-GUEST-DEADEND.json` |
