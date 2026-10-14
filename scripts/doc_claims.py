@@ -68,8 +68,13 @@ a map entry passes only while its target exists (delete the package and the
 cites fail again), every pass prints a ``RESTRUCTURED`` line carrying the
 entry's reason, and a ``path_line`` cite resolved through the map has its
 line check downgraded to a warning that says the line was NOT verified -- the
-map pins locations, never historical line numbers. The next restructure is
-one entry in that file: no doc edit, no workflow change, no baseline.
+map pins locations, never historical line numbers. Each path entry also
+records ``cites_in``, the doc file(s) whose historical rows it was written
+for, and only a claim MADE IN one of those files is resolved by it: without
+that scope a bare token entry would silently satisfy the same token cited in
+an unrelated doc -- a false pass, the exact defect the resolve-not-suppress
+rule exists to avoid. The next restructure is one entry in that file: no doc
+edit, no workflow change, no baseline.
 
 Everything else is reported, never failed, because a machine cannot decide
 whether "kills 7 tests" was true. Those become the auditor's checklist:
@@ -691,6 +696,31 @@ def extract_claims(text: str, path: str, first_line: int = 1) -> list[Claim]:
     return claims
 
 
+def _map_entry_for(
+    token: str, claim_path: str, path_map: dict[str, dict]
+) -> dict | None:
+    """The map entry allowed to resolve THIS cite, or ``None``.
+
+    Matching on the token is exact (``dict`` lookup, never substring), and
+    the entry must also record the citing doc file in ``cites_in``: an entry
+    is written for the historical rows of specific files, and without that
+    scope a bare token (``views.py``, ``handlers/base.py``) would silently
+    satisfy the same token cited in an unrelated doc -- a false pass, the
+    defect resolve-not-suppress exists to prevent.
+
+    Fail-closed: an entry with no recorded scope resolves nothing. A silent
+    no-op entry is loud the day its own rows stop resolving; an entry that
+    resolved everything would keep passing long after its reason stopped
+    describing the cite in front of it.
+    """
+    entry = path_map.get(token)
+    if entry is None:
+        return None
+    if claim_path in entry.get("cites_in", ()):
+        return entry
+    return None
+
+
 def verify_claims(
     claims: Iterable[Claim],
     known_tests: set[str],
@@ -704,14 +734,18 @@ def verify_claims(
     ``restructure`` is the parsed restructure map (``load_restructure_map``)
     plus, optionally, ``tracked`` -- the HEAD tree's file list, for entries
     that promise a path stays uncommitted. When a CITED token has a map
-    entry, THE MAP DECIDES: it preempts the direct index lookup, any
-    counter-example directive on the line, and the numeric line check. The
-    path half is still verified (the entry's targets must exist, or the
-    claim is an error naming the missing target); the line half of a
-    path_line cite is downgraded to a warning that says the line was not
-    verified, because a location that moved cannot vouch for the line
-    numbers prose remembers. Without a map entry every branch below is the
-    original behaviour, unchanged.
+    entry scoped to the citing file (``cites_in``), THE MAP DECIDES: it
+    preempts the direct index lookup, any counter-example directive on the
+    line, and the numeric line check. The path half is still verified (the
+    entry's targets must exist, or the claim is an error naming the missing
+    target); the line half of a path_line cite is downgraded to a warning
+    that says the line was not verified, because a location that moved
+    cannot vouch for the line numbers prose remembers. An entry is scoped
+    to the doc file(s) it records: a cite of the same token in any other
+    file falls through to the original behaviour, because an entry written
+    for one file's historical rows must not silently satisfy unrelated
+    prose. Without a map entry -- or outside its scope -- every branch below
+    is the original behaviour, unchanged.
     """
     errors: list[Claim] = []
     warnings: list[Claim] = []
@@ -783,7 +817,7 @@ def verify_claims(
                     )
                 )
         elif claim.kind == "module_path":
-            entry = path_map.get(claim.value)
+            entry = _map_entry_for(claim.value, claim.path, path_map)
             if entry is not None:
                 ok, note = restructure_check(entry, known_paths, tracked)
                 if ok:
@@ -823,7 +857,7 @@ def verify_claims(
         elif claim.kind == "path_line":
             _, _, rest = claim.detail.partition("path=")
             cited, _, tail = rest.partition(" line=")
-            entry = path_map.get(cited)
+            entry = _map_entry_for(cited, claim.path, path_map)
             if entry is not None:
                 # The map preempts the line check outright: a location that
                 # moved cannot vouch for the line numbers prose remembers, so
@@ -1006,16 +1040,23 @@ def _path_exists(candidate: str, known_paths: dict[str, int]) -> bool:
 # cite to where the thing lives now, and still fails the day that target
 # disappears. No regex guesses, no baseline suppresses: every pass through the
 # map prints a RESTRUCTURED line naming the entry's reason, and an entry whose
-# own target is gone is an error like any other.
+# own target is gone is an error like any other. An entry carries ``cites_in``,
+# the doc file(s) its rows live in, and resolves only claims made there: a bare
+# token keyed globally would green the same token in an unrelated doc, and a
+# map that greens what it was not written for is a suppress list wearing a
+# resolver's name.
 # --------------------------------------------------------------------------
 
 # One of these three keys, exactly, per path entry -- and nothing else beyond
 # the reason (and ``mode`` for targets). Unknown keys are rejected rather than
-# ignored so a typo cannot park an entry in silent no-op limbo.
+# ignored so a typo cannot park an entry in silent no-op limbo. ``cites_in``
+# is required on every shape: the doc file(s) whose claims the entry may
+# resolve, so an entry written for one file's historical rows cannot silently
+# satisfy the same token cited anywhere else.
 _MAP_ENTRY_KEYS = {
-    "targets": frozenset({"reason", "targets", "mode"}),
-    "untracked": frozenset({"reason", "untracked"}),
-    "external": frozenset({"reason", "external"}),
+    "targets": frozenset({"reason", "targets", "mode", "cites_in"}),
+    "untracked": frozenset({"reason", "untracked", "cites_in"}),
+    "external": frozenset({"reason", "external", "cites_in"}),
 }
 _MAP_MODES = frozenset({"all", "any"})
 
@@ -1073,6 +1114,18 @@ def _validate_path_entry(where: str, entry: object) -> None:
         _validate_path_list(where, "untracked", entry["untracked"])
     elif entry["external"] is not True:
         raise _map_error(where, "external must be true")
+    # Scope last, so a bad targets/mode still reports as itself. A cites_in
+    # outside the scanned doc prefixes can never hold a claim, so it is a
+    # load error rather than a silent no-op -- the same rule unknown keys
+    # and short reasons are held to.
+    _validate_path_list(where, "cites_in", entry.get("cites_in"))
+    for cited_doc in entry["cites_in"]:
+        if not cited_doc.startswith(DEFAULT_DOCS):
+            raise _map_error(
+                where,
+                f"cites_in {cited_doc!r} is outside the scanned doc prefixes "
+                f"{tuple(DEFAULT_DOCS)} and can never hold a claim",
+            )
 
 
 def _validate_test_entry(where: str, entry: object) -> None:
