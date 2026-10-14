@@ -1,3 +1,4 @@
+{% extends "admin/change_list.html" %}
 {% comment %}
 SPEC-20-6 [R-20.11]: the orders changelist renders the saved-view bar
 below the delivered grid. block.super keeps the shipped changelist
@@ -13,7 +14,6 @@ empty arguments and 500 the very grid the narrowing was written to give
 that operator. saved_filter_meta is set by saved_filter_context, so its
 presence IS "the mixin ran for this request".
 {% endcomment %}
-{% extends "admin/change_list.html" %}
 
 {% block content %}
   {{ block.super }}

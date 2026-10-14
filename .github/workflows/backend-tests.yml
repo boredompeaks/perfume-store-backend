@@ -59,51 +59,138 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  test:
+  # GATE-3: PostgreSQL is the SINGLE CI engine (PG-ONLY-CI). Until this
+  # commit the suite also ran on a separate SQLite job; SQLite serialises
+  # writes and has no row-level locking, so the oversell/double-spend/TOCTOU
+  # class of defect cannot manifest on it at all, and it silently ignores
+  # varchar(n) limits Postgres enforces -- a green SQLite job said nothing
+  # about the engine production runs on -- so that job was removed and every
+  # gate it carried was moved into THIS job: Django system check, migration
+  # drift (makemigrations --check), the doc_claims claim scan, the changelog
+  # figure gate and the scripts/tests unit suite all run here, and this job
+  # alone is the backend gate.
+  #
+  # The suite is GREEN on PostgreSQL (floor: 2077 tests OK, 3 expected
+  # failures, cov 99.77% on PostgreSQL 17.11), but pg_gate still enforces the
+  # SET rather than a count: scripts/pg_gate.py compares the run against
+  # scripts/pg_baseline.json and fails on any failure OUTSIDE it, while a
+  # baseline entry that stopped failing is only a warning -- the six
+  # certified PG-2b/PG-2e ids are healed, so they warn and do not fail. A
+  # count could not do this -- "failures=6" is identical for the six known
+  # failures and for those six plus a new regression, and only the set tells
+  # them apart.
+  #
+  # CI-REDIS-SERVICE: THROTTLE-CACHE's two live-Redis shared-cache pins skip
+  # loudly when REDIS_URL is undeclared, which is how CI ran them -- as
+  # skips -- until this commit. The redis service + REDIS_URL env below
+  # declare it, so CI now EXECUTES the real two-connection and
+  # spawned-process 30-budget pins (0 skips), the same shape the shipped
+  # floors were certified with.
+  postgres:
     runs-on: ubuntu-latest
     defaults:
       run:
         working-directory: backend
+    services:
+      postgres:
+        # Pinned to an exact tag, not `latest` and not a floating minor: the
+        # certified baseline was measured on this version, and a silent
+        # version bump can add or remove a failure without any commit here
+        # changing. A moving tag would make the baseline untrustworthy in
+        # exactly the way this job exists to prevent.
+        image: postgres:17.11-alpine
+        env:
+          POSTGRES_DB: perfume_store
+          POSTGRES_USER: perfume
+          # Ephemeral, throwaway CI-only credential for a database that lives
+          # and dies inside this job's runner. Not a secret: nothing outside
+          # this job can reach it, and .env/RDS credentials are never read
+          # here. Same reasoning as the dummy Razorpay values in the env
+          # block below.
+          POSTGRES_PASSWORD: ci_pg_only_not_a_secret
+        ports:
+          - 5432:5432
+        # Without the health check, a fast test step can reach Postgres before
+        # initdb has finished and fail every test with a connection error --
+        # which would look exactly like a real regression and train everyone
+        # to ignore this job.
+        options: >-
+          --health-cmd "pg_isready -U perfume -d perfume_store"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 10
+      # CI-REDIS-SERVICE: the live-Redis half of the THROTTLE-CACHE pins.
+      # Tag rationale: what those pins certify is cache BUDGET behaviour (30
+      # spent across two independent connections and across a spawned OS
+      # process), which is client+settings behaviour and not a
+      # server-version detail, and this repo already floats the same minor
+      # for the same reason (docker-compose.yml pins postgres:17-alpine);
+      # the redis CLIENT that actually speaks the protocol is hash-pinned in
+      # backend/requirements.lock.
+      redis:
+        image: redis:7-alpine
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 10
     env:
       # CI never reads a real .env; dummy Razorpay values prove the suite
       # never depends on live credentials (V-01 containment).
       DJANGO_DEBUG: "true"
       RAZORPAY_KEY_ID: rzp_test_CI_DUMMY
       RAZORPAY_KEY_SECRET: ci-dummy-secret
+      # Honoured by config/settings.py; an unset or unparseable value falls
+      # back to SQLite silently, and this job would then certify a SQLite run
+      # under a Postgres name -- so the engine is asserted below rather than
+      # assumed from the presence of this variable.
+      DATABASE_URL: postgres://perfume:ci_pg_only_not_a_secret@localhost:5432/perfume_store
+      # CI-REDIS-SERVICE: DECLARING REDIS_URL is the switch that flips the
+      # default cache alias from LocMemCache to RedisCache
+      # (config/settings.py; an empty value would fall back to LocMem, so the
+      # URL is a real one pointed at the redis service above). With it
+      # declared, the two live-Redis throttle pins RUN instead of skipping,
+      # and the spawned-process pin's child inherits this env. The hermetic
+      # LocMem pins are unaffected: the settings-import harness scrubs
+      # REDIS_URL from every subprocess it boots, so both shapes stay pinned.
+      REDIS_URL: redis://localhost:6379/0
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
-          # Full history, and the remote-tracking refs, because the claim scan
-          # below is DIFF-SCOPED: it runs `git diff --unified=0 <base>...HEAD`
-          # where <base> is a SHA resolved at RUN TIME -- the step's own
-          # DOC_CLAIMS_BASE env, further down. The default fetch-depth: 1
-          # checkout fetches neither that SHA nor the history, so the diff
-          # would abort with a git error and the step would exit 2, turning
-          # the gate red on a green tree. A 3-dot diff also needs a merge base,
-          # which a shallow clone cannot compute. The byte-integrity half needs
-          # no history, but it is the same command, so the whole step pays this
-          # once.
+          # Full history, and the remote-tracking refs, because the claim
+          # scan below is DIFF-SCOPED: it runs `git diff --unified=0
+          # <base>...HEAD` where <base> is a SHA resolved at RUN TIME -- the
+          # step's own DOC_CLAIMS_BASE env, further down. The default
+          # fetch-depth: 1 checkout fetches neither that SHA nor the history,
+          # so the diff would abort with a git error and the step would exit
+          # 2, turning the gate red on a green tree. A 3-dot diff also needs
+          # a merge base, which a shallow clone cannot compute. The
+          # byte-integrity half needs no history, but it is the same command,
+          # so the whole step pays this once. (PG-ONLY-CI: this checkout
+          # belonged to the removed SQLite job and moved here with the scan.)
           fetch-depth: 0
 
       - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
         with:
           python-version: "3.14"
           cache: pip
-          # The LOCK, not requirements.txt: it is the file whose contents decide
-          # what gets installed, so it is what the cache key must follow.
-          # requirements.txt is a pointer to it and changes far less often, so
-          # keying on the pointer would keep serving a cache built from a lock
-          # nobody re-read.
+          # The LOCK, not requirements.txt: it is the file whose contents
+          # decide what gets installed, so it is what the cache key must
+          # follow. requirements.txt is a pointer to it and changes far less
+          # often, so keying on the pointer would keep serving a cache built
+          # from a lock nobody re-read.
           cache-dependency-path: backend/requirements.lock
 
       # requirements.lock is the compiled, hash-pinned resolution of
-      # requirements.in, and it is what every job here installs. Two reasons it
-      # is the install source rather than requirements.txt: it pins the
-      # TRANSITIVE dependencies (asgiref, sqlparse, tzdata, urllib3 and the rest
-      # -- nothing in this repo imports those directly, so no hand-written file
-      # can pin them), and its `--hash` lines make pip verify every wheel it
-      # downloads. requirements.txt is a one-line pointer to it, kept so the
-      # documented developer command in backend/README.md still works.
+      # requirements.in, and it is what every job here installs. Two reasons
+      # it is the install source rather than requirements.txt: it pins the
+      # TRANSITIVE dependencies (asgiref, sqlparse, tzdata, urllib3 and the
+      # rest -- nothing in this repo imports those directly, so no hand-written
+      # file can pin them), and its `--hash` lines make pip verify every wheel
+      # it downloads. requirements.txt is a one-line pointer to it, kept so
+      # the documented developer command in backend/README.md still works.
       - name: Install pinned dependencies from the lock
         run: pip install -r requirements.lock
 
@@ -113,10 +200,38 @@ jobs:
       - name: Migration drift check
         run: python manage.py makemigrations --check --dry-run
 
-      - name: Test suite with coverage gate (fail under 90%)
+      # settings.py falls back to SQLite without complaint when DATABASE_URL is
+      # unset or malformed, so "the job ran" would otherwise not mean "PG ran".
+      - name: Assert the engine is PostgreSQL
         run: |
-          python -m coverage run manage.py test
-          python -m coverage report
+          set -euo pipefail
+          engine="$(python -c "import os,django;os.environ.setdefault('DJANGO_SETTINGS_MODULE','config.settings');django.setup();from django.db import connection;print(connection.settings_dict['ENGINE'])")"
+          echo "engine=${engine}"
+          if [ "${engine}" != "django.db.backends.postgresql" ]; then
+            echo "::error::expected django.db.backends.postgresql, got ${engine} -- this job would certify a SQLite run as PostgreSQL."
+            exit 1
+          fi
+
+      # The suite is expected GREEN on PostgreSQL, but this step still does
+      # not fail on the suite's own exit code: `pipefail` is deliberately NOT
+      # set, which leaves the pipeline's status as tee's (0), and the gate
+      # below judges the run -- by SET, not by count. pg_gate exits non-zero
+      # on any failure outside scripts/pg_baseline.json, on a missing or
+      # unreadable runner summary (exit 2), and on a failure-header count the
+      # runner's own summary disagrees with (exit 2) -- so a crashed or
+      # truncated run cannot read as clean, and a NEW failure is red even
+      # though this step is green. The log is tee'd because that is what
+      # pg_gate.py reads.
+      - name: Test suite on PostgreSQL (failures judged as a set below)
+        run: |
+          python -m coverage run manage.py test 2>&1 | tee pg-suite.log
+
+      - name: Coverage report
+        run: python -m coverage report
+
+      - name: Certified PostgreSQL failure-set gate (pg_gate)
+        working-directory: ${{ github.workspace }}
+        run: python scripts/pg_gate.py --log backend/pg-suite.log
 
       # Prose had no oracle until SPEC-1-B07d (scripts/doc_claims.py). This is
       # a SIBLING step, not a wrapper around the runner, on purpose: the gate
@@ -258,7 +373,6 @@ jobs:
           fi
           exit "${status}"
 
-
       # `coverage report` is the gate (fail_under=90 in .coveragerc); the HTML
       # report is a separate step so the upload below always has an artifact to
       # publish -- including on a red gate, where it is the diagnostic.
@@ -271,7 +385,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
-          name: coverage-html
+          name: coverage-html-postgres
           path: backend/htmlcov/
           retention-days: 7
 
@@ -282,7 +396,7 @@ jobs:
   # disagree about which ruff ran. TIER-2 cycle 2 (BUG-3): this comment named
   # backend/requirements.txt, which since TIER-2-LOCK is a one-line POINTER
   # holding no pins of its own, so it named a file that no longer decides
-  # anything. A separate job rather than more steps inside `test`: a
+  # anything. A separate job rather than more steps inside the suite job: a
   # dirty tree should be reported without waiting on the full suite, and a
   # red suite should never be what hides an unformatted commit.
   lint:
@@ -291,11 +405,11 @@ jobs:
       run:
         working-directory: backend
     steps:
-      # Same two SHAs the `test` job pins above, tags in trailing comments --
-      # the SPEC-22-11 rule in this file's header applies to every job in it.
-      # Checkout stays at the default fetch-depth: 1 on purpose: ruff reads
-      # the working tree, not history, so the full-history fetch above is
-      # paid only by the claim scan, which is not part of this job.
+      # Same two SHAs the `postgres` job pins above, tags in trailing comments
+      # -- the SPEC-22-11 rule in this file's header applies to every job in
+      # it. Checkout stays at the default fetch-depth: 1 on purpose: ruff
+      # reads the working tree, not history, so the full-history fetch above
+      # is paid only by the claim scan, which is not part of this job.
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
 
       - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
@@ -350,8 +464,8 @@ jobs:
       # what the weekly mutation job targets.
       #
       # The paths are passed on the command line rather than left to a config
-      # `files` setting, so this step and a local run cannot disagree about what
-      # is in scope; the config carries the RULES (ignore_missing_imports,
+      # `files` setting, so this step and a local run cannot disagree about
+      # what is in scope; the config carries the RULES (ignore_missing_imports,
       # check_untyped_defs, the two measured per-module suppressions) and this
       # line carries the SCOPE. A new module is added to the gate by editing
       # this line, which is a visible diff in the workflow rather than a
@@ -369,115 +483,3 @@ jobs:
       # not a dependency, see tests/test_deployment_contract.py).
       - name: "mypy (scoped: common/ + orders/state.py)"
         run: mypy common/ orders/state.py
-
-  # GATE-3: the suite is read on TWO engines, and until this job only one of
-  # them ran here. PostgreSQL is the engine that matters -- SQLite serialises
-  # writes and has no row-level locking, so the oversell/double-spend/TOCTOU
-  # class of defect cannot manifest on it at all, and it silently ignores
-  # varchar(n) limits Postgres enforces. A green SQLite job says nothing about
-  # the engine production runs on.
-  #
-  # This job does NOT require the suite to be green on PostgreSQL. It is
-  # certified-red by design: a known set of tests fails only on PG (index
-  # introspection sees Postgres-only varchar_pattern_ops duplicates; PG
-  # sequences are not transactional, so hardcoded primary keys do not survive a
-  # rollback). Those are tracked as PG-2b / PG-2e and are fixed there. What
-  # this job enforces is the SET: scripts/pg_gate.py compares the run against
-  # scripts/pg_baseline.json and fails on any failure OUTSIDE it, while a
-  # baseline entry that stopped failing is a warning. A count could not do this
-  # -- "failures=6" is identical for the six known failures and for those six
-  # plus a new regression, and only the set tells them apart.
-  postgres:
-    runs-on: ubuntu-latest
-    defaults:
-      run:
-        working-directory: backend
-    services:
-      postgres:
-        # Pinned to an exact tag, not `latest` and not a floating minor: the
-        # certified baseline was measured on this version, and a silent
-        # version bump can add or remove a failure without any commit here
-        # changing. A moving tag would make the baseline untrustworthy in
-        # exactly the way this job exists to prevent.
-        image: postgres:17.11-alpine
-        env:
-          POSTGRES_DB: perfume_store
-          POSTGRES_USER: perfume
-          # Ephemeral, throwaway CI-only credential for a database that lives
-          # and dies inside this job's runner. Not a secret: nothing outside
-          # this job can reach it, and .env/RDS credentials are never read
-          # here. Same reasoning as the dummy Razorpay values in the `test`
-          # job above.
-          POSTGRES_PASSWORD: ci_pg_only_not_a_secret
-        ports:
-          - 5432:5432
-        # Without the health check, a fast test step can reach Postgres before
-        # initdb has finished and fail every test with a connection error --
-        # which would look exactly like the certified failure set plus a
-        # hundred new failures, and train everyone to ignore this job.
-        options: >-
-          --health-cmd "pg_isready -U perfume -d perfume_store"
-          --health-interval 10s
-          --health-timeout 5s
-          --health-retries 10
-    env:
-      DJANGO_DEBUG: "true"
-      RAZORPAY_KEY_ID: rzp_test_CI_DUMMY
-      RAZORPAY_KEY_SECRET: ci-dummy-secret
-      # Honoured by config/settings.py; an unset or unparseable value falls
-      # back to SQLite silently, and this job would then certify a SQLite run
-      # under a Postgres name -- so the engine is asserted below rather than
-      # assumed from the presence of this variable.
-      DATABASE_URL: postgres://perfume:ci_pg_only_not_a_secret@localhost:5432/perfume_store
-    steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
-
-      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
-        with:
-          python-version: "3.14"
-          cache: pip
-          cache-dependency-path: backend/requirements.lock
-
-      - name: Install pinned dependencies
-        run: pip install -r requirements.lock
-
-      # settings.py falls back to SQLite without complaint when DATABASE_URL is
-      # unset or malformed, so "the job ran" would otherwise not mean "PG ran".
-      - name: Assert the engine is PostgreSQL
-        run: |
-          set -euo pipefail
-          engine="$(python -c "import os,django;os.environ.setdefault('DJANGO_SETTINGS_MODULE','config.settings');django.setup();from django.db import connection;print(connection.settings_dict['ENGINE'])")"
-          echo "engine=${engine}"
-          if [ "${engine}" != "django.db.backends.postgresql" ]; then
-            echo "::error::expected django.db.backends.postgresql, got ${engine} -- this job would certify a SQLite run as PostgreSQL."
-            exit 1
-          fi
-
-      # The suite is red here on purpose (see the job comment), so this step
-      # must not treat a non-zero exit as a step failure: `pipefail` is
-      # deliberately NOT set, which leaves the pipeline's status as tee's (0),
-      # and without a summary line in the log the gate below exits 2 rather
-      # than passing -- a crashed or truncated run cannot read as clean. The
-      # log is tee'd because that is what pg_gate.py reads.
-      - name: Test suite on PostgreSQL (failures expected; set is gated below)
-        run: |
-          python -m coverage run manage.py test 2>&1 | tee pg-suite.log
-
-      - name: Coverage report
-        run: python -m coverage report
-
-      - name: Certified PostgreSQL failure-set gate (pg_gate)
-        working-directory: ${{ github.workspace }}
-        run: python scripts/pg_gate.py --log backend/pg-suite.log
-
-      - name: Generate coverage HTML report
-        if: always()
-        run: python -m coverage html
-
-      - name: Upload coverage HTML report
-        if: always()
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
-        with:
-          name: coverage-html-postgres
-          path: backend/htmlcov/
-          retention-days: 7
