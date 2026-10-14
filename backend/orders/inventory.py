@@ -288,8 +288,8 @@ def commit_order_sale(order, *, actor=None):
         # for an order with no linked cart (pre-link, guest) is a silent
         # skip, and an already-empty relation makes the DELETE a no-op, so
         # neither a missing nor a previously-cleared cart can raise.
-        linked_cart = Cart.objects.select_for_update().filter(
-            order=locked_order
-        ).first()
+        linked_cart = (
+            Cart.objects.select_for_update().filter(order=locked_order).first()
+        )
         if linked_cart is not None:
             linked_cart.items.all().delete()

@@ -61,6 +61,14 @@
 
 name: perfume-store
 
+# The ONE definition of the app's DATABASE_URL, referenced by backend, worker
+# and beat below (compose v2 supports x- extension fields anywhere top-level).
+# Assembled from the same POSTGRES_* variables the db service reads, so the
+# password has exactly one home (.env). The :? operator is a deliberate
+# fail-closed guard: an unset password variable must abort compose rather than
+# boot a half-configured URL - never weaken or remove it.
+x-database-url: &database-url "${DATABASE_URL:-postgres://${POSTGRES_USER:-perfume}:${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in the repo-root .env}@db:5432/${POSTGRES_DB:-perfume_store}?sslmode=disable}"
+
 services:
   db:
     image: postgres:17-alpine
@@ -98,15 +106,17 @@ services:
       - path: .env
         required: false
     environment:
-      # Assembled from the same POSTGRES_* variables the db service reads, so
-      # the password has exactly one home (.env) and cannot drift out of sync
+      # Assembled once in the x-database-url anchor at the top of this file,
+      # from the same POSTGRES_* variables the db service reads, so the
+      # password has exactly one home (.env) and cannot drift out of sync
       # with the database it names. sslmode=disable is correct HERE and only
       # here: this is the in-network container, not a remote managed database
       # (settings forwards query params into the Postgres OPTIONS dict, so the
       # value is real, not decorative). A DATABASE_URL in .env overrides the
       # whole thing for a managed database - which is why it is interpolated
-      # here rather than left to env_file, which this block would outrank.
-      DATABASE_URL: "${DATABASE_URL:-postgres://${POSTGRES_USER:-perfume}:${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in the repo-root .env}@db:5432/${POSTGRES_DB:-perfume_store}?sslmode=disable}"
+      # once in the anchor above rather than left to env_file, which this
+      # block would outrank.
+      DATABASE_URL: *database-url
       # Static files live inside the image (SPEC-22-01): whitenoise serves
       # them from the app process, so the release only has to re-collect.
       DJANGO_STATIC_ROOT: /app/staticfiles
@@ -243,10 +253,10 @@ services:
       - path: .env
         required: false
     environment:
-      # The same assembled URL the backend service uses, for the same reason:
-      # one home for the password (.env) and one database the sweeps and the
-      # app cannot disagree about.
-      DATABASE_URL: "${DATABASE_URL:-postgres://${POSTGRES_USER:-perfume}:${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in the repo-root .env}@db:5432/${POSTGRES_DB:-perfume_store}?sslmode=disable}"
+      # The same x-database-url anchor the backend service references, for
+      # the same reason: one home for the password (.env) and one database
+      # the sweeps and the app cannot disagree about.
+      DATABASE_URL: *database-url
       # The broker, defaulted HERE rather than inherited: settings.py's
       # fallback is redis://localhost:6379/0, which inside a container is the
       # container itself, so a worker started without this key would boot and
@@ -300,9 +310,9 @@ services:
       - path: .env
         required: false
     environment:
-      # Same assembled URL and boot-guard keys as the worker above - beat
-      # imports the same settings and publishes through the same broker.
-      DATABASE_URL: "${DATABASE_URL:-postgres://${POSTGRES_USER:-perfume}:${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in the repo-root .env}@db:5432/${POSTGRES_DB:-perfume_store}?sslmode=disable}"
+      # Same x-database-url anchor and boot-guard keys as the worker above -
+      # beat imports the same settings and publishes through the same broker.
+      DATABASE_URL: *database-url
       REDIS_URL: "${REDIS_URL:-redis://redis:6379/0}"
       DJANGO_ENV: "${DJANGO_ENV:-production}"
       CSRF_TRUSTED_ORIGINS: "${CSRF_TRUSTED_ORIGINS:?set CSRF_TRUSTED_ORIGINS in the repo-root .env}"

@@ -186,6 +186,28 @@
       "figures": [
         [
           "coverage",
+          "cov 99.81%"
+        ],
+        [
+          "expected_failures",
+          "xf 3"
+        ],
+        [
+          "stmts",
+          "10346 stmts"
+        ],
+        [
+          "tests",
+          "2093 tests"
+        ]
+      ],
+      "reason": "The promotion gate-fix row, exempted by explicit orchestrator instruction (never via --update-baseline): the change is three ruff-format-only Python files (each proven AST-equal to its HEAD blob) plus a compose YAML anchor hoist with a byte-identical config render, and the row's figures are the builder's own in-session PostgreSQL verification run on this exact tree, not a claim of new measurement. The release-engineer re-runs the full suite pair at promotion anyway, so a floor artifact would duplicate a measurement the same session already printed rather than back a new claim; the inventory carries the exemption instead.",
+      "task": "GATE-FIX-CYCLE3"
+    },
+    {
+      "figures": [
+        [
+          "coverage",
           "cov 99.77%"
         ],
         [
