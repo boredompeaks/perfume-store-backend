@@ -128,6 +128,15 @@ class AuditEvent(models.Model):
             "payment.coupon_invalid",
             "Payment coupon invalid",
         )
+        # The capture-path over-redemption: a confirmed sale whose coupon
+        # increment pushed used_count past usage_limit. The consumption is a
+        # RECORD, never a gate (see orders.inventory.commit_order_sale), so
+        # this event is what makes the deliberate over-grant legible to an
+        # operator instead of invisible in the usage counter alone.
+        PAYMENT_COUPON_OVER_LIMIT = (
+            "payment.coupon_over_limit",
+            "Payment coupon over limit",
+        )
         PAYMENT_VERIFIED = "payment.verified", "Payment verified"
         # Authentication lifecycle.
         AUTH_REGISTERED = "auth.registered", "Account registered"
