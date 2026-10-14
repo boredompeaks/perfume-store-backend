@@ -4237,6 +4237,117 @@ class ReservationLifecycleTests(OrderTestBase):
         self.product.refresh_from_db()
         self.assertEqual(self.product.stock, 8)
 
+    # ——— [R-12.12] StockUnavailable handler in verify (summed re-check loser) ———
+
+    def _twin_line_stock_race_setup(self):
+        """Reach payment.py's ``except StockUnavailable`` handler — the
+        branch the two 409 tests above cannot fire.
+
+        The customer-facing backstop compares stock to EACH line while
+        commit_order_sale compares it to the SUM per product, so on a
+        single-line order the view answers its own identical 409 and the
+        service never raises. Checkout mints one line per product (the
+        cart is unique per product), but OrderItem carries no such
+        constraint — the service's summed re-check exists for exactly
+        that shape — so the fixture attaches a twin line after the real
+        checkout + payment intent: the order needs 4 units, a concurrent
+        sale leaves 3 — at/above each line's 2 (the view's per-line
+        backstop passes), below the sum (the service refuses)."""
+        _, order, payload = self._checkout_and_pay()
+        _attach_order_item(order, self.product, 2)
+        products.objects.filter(pk=self.product.pk).update(stock=3)
+        return order, payload
+
+    def test_stock_unavailable_handler_answers_the_wire_envelope(self):
+        """The handler's 409 as the client sees it: SPEC-9-03 envelope
+        bytes exactly once (ENVELOPE-WIRE: res.content, never .data), and
+        the audit row carries the SUMMED demand — the view's per-line
+        backstop would have written requested=2, so requested=4 proves
+        this row came from the service's conflict inside the handler."""
+        order, payload = self._twin_line_stock_race_setup()
+
+        res = self.client.post("/api/orders/payment/verify/", payload, format="json")
+
+        self.assertEqual(res.status_code, 409, res.data)
+        self.assertEqual(
+            res.content,
+            b'{"error":"An item is no longer available in the requested quantity",'
+            b'"code":"conflict","details":{}}',
+        )
+        event = AuditEvent.objects.get(
+            event_type=AuditEvent.EventType.PAYMENT_STOCK_CONFLICT
+        )
+        self.assertEqual(event.order_id, order.id)
+        self.assertEqual(event.detail["product_id"], self.product.pk)
+        self.assertEqual(event.detail["requested"], 4)
+        self.assertEqual(event.detail["available"], 3)
+
+    def test_stock_unavailable_handler_half_applies_nothing_and_releases_holds(
+        self,
+    ):
+        """commit_order_sale raises BEFORE its first mutation, and the
+        handler only audits, logs and releases the attempt's holds: no
+        ledger row, no decrement, no capture transition, ACTIVE hold ->
+        RELEASED — the failed capture leaves the books untouched."""
+        order, payload = self._twin_line_stock_race_setup()
+        hold = order.stock_reservations.get()
+        self.assertEqual(hold.status, StockReservation.Status.ACTIVE)
+        movements_before = StockMovement.objects.count()
+        transitions_before = OrderStatusEvent.objects.filter(order=order).count()
+
+        res = self.client.post("/api/orders/payment/verify/", payload, format="json")
+
+        self.assertEqual(res.status_code, 409, res.data)
+        # No half-applied sale: stock keeps the degraded value and
+        # SPEC-6-02's movement ledger gains no row.
+        self.product.refresh_from_db()
+        self.assertEqual(self.product.stock, 3)
+        self.assertEqual(StockMovement.objects.count(), movements_before)
+        # The order did not transition: no capture claim, no paid_at, and
+        # the payment dimension keeps its untouched default — this handler
+        # does NOT mark it failed (only the signature-rejected path does).
+        order.refresh_from_db()
+        self.assertEqual(order.status, "pending")
+        self.assertEqual(order.payment_status, "pending")
+        self.assertIsNone(order.razorpay_payment_id)
+        self.assertIsNone(order.paid_at)
+        self.assertEqual(
+            OrderStatusEvent.objects.filter(order=order).count(),
+            transitions_before,
+        )
+        # The handler's hold protocol: release, so the failed attempt
+        # leaves no phantom pressure on available-to-sell.
+        hold.refresh_from_db()
+        self.assertEqual(hold.status, StockReservation.Status.RELEASED)
+
+    def test_stock_unavailable_handler_retry_after_restock_captures(self):
+        """The handler is a failed attempt, not a dead end: once the
+        raced units are back, the same payload verifies again — the
+        released hold stays terminal (never resurrected into the sale)
+        and both twin lines commit from live stock."""
+        order, payload = self._twin_line_stock_race_setup()
+
+        first = self.client.post("/api/orders/payment/verify/", payload, format="json")
+        self.assertEqual(first.status_code, 409, first.data)
+
+        products.objects.filter(pk=self.product.pk).update(stock=10)
+
+        second = self.client.post("/api/orders/payment/verify/", payload, format="json")
+        self.assertEqual(second.status_code, 200, second.data)
+
+        order.refresh_from_db()
+        self.assertEqual(order.status, "confirmed")
+        self.assertEqual(order.payment_status, "captured")
+        self.assertEqual(order.razorpay_payment_id, "pay_RESV001")
+        self.assertIsNotNone(order.paid_at)
+        self.product.refresh_from_db()
+        self.assertEqual(self.product.stock, 6)  # both twin lines sold: 10-2-2
+        self.assertEqual(StockMovement.objects.count(), 2)  # one ledger row per line
+        self.assertEqual(
+            order.stock_reservations.get().status,
+            StockReservation.Status.RELEASED,
+        )
+
     def test_coupon_conflict_verify_releases_holds(self):
         """A verify that fails a checkout precondition (coupon gone) is a
         failed checkout: the holds release, the order stays pending."""
