@@ -83,6 +83,11 @@ _LEAKED_ENV_NAMES = frozenset(
         "MAX_UPLOAD_MB",
         "MFA_TRUST_DAYS",
         "NUM_PROXIES",
+        # Pins a documented default (TIER1-THROTTLE-CACHE): the default
+        # cache alias resolves to RedisCache when REDIS_URL is declared, so
+        # a developer's local .env value would flip the LocMemCache pins in
+        # this module and in tests.test_throttle_shared_cache.
+        "REDIS_URL",
         "SECURE_HSTS_INCLUDE_SUBDOMAINS",
         "SECURE_HSTS_PRELOAD",
         "SECURE_HSTS_SECONDS",
@@ -1367,8 +1372,10 @@ class CacheAliasTests(SimpleTestCase):
     """ASYNC-2d: the admin-alert cooldown has to hold across gunicorn
     workers, so it gets its own `alerts` cache alias on a shared backend
     instead of living on the per-process default cache. The default alias
-    stays LocMemCache because it holds DRF throttle history and sessions,
-    and re-pointing it would change throttle semantics.
+    stays LocMemCache when REDIS_URL is undeclared and flips to RedisCache
+    when it is declared (TIER1-THROTTLE-CACHE, pinned in
+    tests.test_throttle_shared_cache.py); this class pins the shape that
+    a Redis-less run sees, plus the alerts alias itself.
 
     Pinned in a subprocess because the aliases are built at settings-import
     time from the environment, like every other documented default here.

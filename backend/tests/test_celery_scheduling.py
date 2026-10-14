@@ -908,20 +908,45 @@ class EnvDocumentationTests(SimpleTestCase):
             )
 
 
-class ThrottleCacheLeftAloneTests(SimpleTestCase):
-    """CACHES is deliberately untouched by this task, and that is a decision
-    worth pinning rather than leaving to a reader's memory.
+class ThrottleCacheSwitchTests(SimpleTestCase):
+    """TIER1-THROTTLE-CACHE supersedes the old "CACHES is left alone" pin.
 
-    Redis is not present in the test environment, so moving the DRF throttle
-    cache onto it would break CI. The per-process throttle cache remains an
-    open finding, tracked separately; this class records that adding a broker
-    did NOT quietly resolve or quietly worsen it.
+    The per-process default cache was an open finding, not a design: a
+    30/min scope admitted about 3x30/min behind three workers. The switch
+    is now on, and what is worth pinning here is its shape - REDIS_URL
+    declared resolves the default alias to RedisCache so the count is
+    held once for the deployment; REDIS_URL absent keeps the per-process
+    LocMemCache so local dev and Redis-less CI need no new service. Both
+    shapes are subprocess-pinned through the shared harness in
+    tests.test_settings_security (settings build CACHES at import time,
+    so an in-process read proves only what this run imported). The
+    behavioural half - the count actually being shared across cache
+    instances and across a spawned process - lives in
+    tests.test_throttle_shared_cache.py against a live Redis.
     """
 
-    def test_the_default_cache_is_still_per_process(self):
-        from django.conf import settings
+    _PRINT = (
+        "import config.settings as s; print('BACKEND', s.CACHES['default']['BACKEND'])"
+    )
 
-        self.assertIn("LocMemCache", settings.CACHES["default"]["BACKEND"])
+    def test_the_default_cache_stays_per_process_without_redis_url(self):
+        from tests.test_settings_security import _DEV_ENV, run_settings_import
+
+        res = run_settings_import(dict(_DEV_ENV), snippet=self._PRINT)
+        self.assertEqual(res.returncode, 0, res.stderr)
+        self.assertIn(
+            "BACKEND django.core.cache.backends.locmem.LocMemCache", res.stdout
+        )
+
+    def test_the_default_cache_is_shared_redis_with_redis_url(self):
+        from tests.test_settings_security import _DEV_ENV, run_settings_import
+
+        res = run_settings_import(
+            {**_DEV_ENV, "REDIS_URL": "redis://127.0.0.1:6390/14"},
+            snippet=self._PRINT,
+        )
+        self.assertEqual(res.returncode, 0, res.stderr)
+        self.assertIn("BACKEND django.core.cache.backends.redis.RedisCache", res.stdout)
 
     def test_the_alerts_alias_is_still_present_and_separate(self):
         from django.conf import settings

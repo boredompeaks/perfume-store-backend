@@ -886,23 +886,33 @@ MFA_TRUST_COOKIE_SAMESITE = os.getenv("MFA_TRUST_COOKIE_SAMESITE", "Strict")
 # mailboxes; empty disables admin alerts entirely (no guessed recipient).
 ALERT_RECIPIENTS = os.getenv("ALERT_RECIPIENTS", "")
 
-# Cache backends. The default stays per-process LocMemCache (DRF throttle
-# history, sessions) — changing it would alter throttle semantics, which is
-# a separate defect class. The alert cooldown gets its own alias on a
-# SHARED backend so the documented mail-bomb bound holds across gunicorn
-# workers (ASYNC-2d): LocMemCache is per-process, so each worker kept its
-# own window and the bound did not hold. FileBasedCache is the zero-
-# dependency shared backend (no redis/memcached in requirements); point
-# ALERT_CACHE_BACKEND at Redis/Memcached once SPEC-2-03 wires one.
-# Locations use the `or default` shape so a stray empty value in .env
-# cannot resolve to "" — FileBasedCache treats that as the process CWD and
-# would scatter cache files wherever the app happens to be started.
+# Cache backends. TIER1-THROTTLE-CACHE: DRF's SimpleRateThrottle keeps its
+# per-identity history on the `default` alias, and LocMemCache is
+# per-process - with N gunicorn workers each kept its own window, so a
+# 30/min scope admitted roughly N*30/min. When REDIS_URL is DECLARED in
+# the environment (Celery's single knob, above), the default alias
+# resolves to Django's own RedisCache, so the throttle count is held once
+# for the whole deployment; when it is not - local dev, Redis-less CI -
+# the per-process LocMemCache stays and nothing needs a Redis to boot.
+# CACHE_BACKEND / CACHE_LOCATION override either resolution for a
+# deployment that wants a different store, and the alerts alias keeps its
+# own shared FileBasedCache (ASYNC-2d): the mail-bomb bound must hold
+# across workers even where no Redis is declared. Locations use the `or
+# default` shape so a stray empty value in .env cannot resolve to "":
+# FileBasedCache treats that as the process CWD and would scatter cache
+# files wherever the app happens to be started, and RedisCache would be
+# handed an empty URL.
+_REDIS_URL = (os.getenv("REDIS_URL") or "").strip()
 CACHES = {
     "default": {
         "BACKEND": _env_dotted_path(
-            "CACHE_BACKEND", "django.core.cache.backends.locmem.LocMemCache"
+            "CACHE_BACKEND",
+            "django.core.cache.backends.redis.RedisCache"
+            if _REDIS_URL
+            else "django.core.cache.backends.locmem.LocMemCache",
         ),
-        "LOCATION": (os.getenv("CACHE_LOCATION") or "").strip() or "default",
+        "LOCATION": (os.getenv("CACHE_LOCATION") or "").strip()
+        or (_REDIS_URL or "default"),
     },
     "alerts": {
         "BACKEND": _env_dotted_path(
