@@ -155,6 +155,24 @@
       ],
       "reason": "The nightly claim-scan row. Its headline figure is the scanner's own error count over the whole corpus and the exit code it decided the job on, read from `scripts/doc_claims.py --base`; `floor` records a suite run and a coverage TOTAL row and has no field for either, so there is nothing here for an artifact to match.",
       "task": "GATE-6"
+    },
+    {
+      "figures": [
+        [
+          "coverage",
+          "cov 99.77%"
+        ],
+        [
+          "expected_failures",
+          "xf 3"
+        ],
+        [
+          "tests",
+          "6 tests"
+        ]
+      ],
+      "reason": "An orchestrator-appended DOC-ONLY evidence row quoting the integration auditor's own verified figures for commit 9164a38 (a test-only P3). The row records what the auditor measured on that commit, not a fresh run of the current tree, so a `floor --task P3-CONFIRM-INTERSTITIAL` artifact written now would attach a measurement of a later tree to a sentence describing an earlier one - exactly the dishonest backfill the ASYNC-2c1 entry refuses. The authoritative measurement lives in the audit report and in the `changelog_figures.py floor` artifacts of the tasks that did re-run the suite; this row points to them rather than fabricating its own.",
+      "task": "P3-CONFIRM-INTERSTITIAL"
     }
   ]
 }
