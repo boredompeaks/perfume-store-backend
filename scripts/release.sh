@@ -5,17 +5,33 @@
 # below is the only place a release migrates. There is deliberately no
 # `release:` line in the Procfile and no migrate step in docker-compose.yml -
 # a second path is a second thing to keep correct, and they always disagree.
-# CI: .github/workflows/deploy.yml runs this exact script, only after the
-# existing backend-tests and secret-scan workflows have passed on that commit.
+# CI: .github/workflows/deploy.yml reaches its release through one ssh call
+# that runs the repo's release script on the deploy host - and since
+# scripts/release-uat.sh is tracked executable, deploy.yml's `-x` test selects
+# THAT script (the UAT flow over the perfume-net network); this script is
+# what runs when it is absent, and what an operator runs by hand. Either way
+# the call happens only after the existing backend-tests and secret-scan
+# workflows have passed on that commit.
 #
 # Sequence (every step is idempotent, so a re-run is a no-op):
-#   1. pull     build the released image, refresh the database image
-#   2. database start it and wait until it accepts connections
+#   1. pull     build the released image, refresh the database and redis images
+#   2. substrate start db and redis, wait until both accept connections
 #   3. review   migration-review checkpoint (R-22.11) - refuses to release
 #               when `makemigrations --check` would write a migration
 #   4. migrate  manage.py migrate --noinput
 #   5. assets   manage.py collectstatic --noinput
-#   6. restart  recreate the app on the released image, wait for /health/
+#   6. restart  recreate the app on the released image, wait for /health/,
+#               then recreate the celery worker/beat on that same image
+#
+# The async substrate (redis + worker + beat in docker-compose.yml) is part
+# of a release, not a side effect of one. Step 2 starts the broker before
+# anything may need it; step 6 recreates worker and beat right after the
+# app's /health/ gate, and compose replaces any container whose image id
+# changed - so the beat-scheduled sweeps (expire_reservations, the outbox
+# drain and purge) run on the released code the moment the release finishes.
+# A release that only rebuilt the web container would leave every sweep on
+# the previous release's image, quietly, with no failing step anywhere to
+# say so.
 #
 # Migration review (R-22.11): step 3 IS the checkpoint, and it is fail-closed.
 # A model change must arrive with its migration file already committed, so the
@@ -36,7 +52,8 @@
 #   RELEASE_GIT_PULL=1  also `git pull --ff-only` the checkout first. Off by
 #                       default: on a deploy host the workflow has already
 #                       checked out the exact released commit.
-#   DB_WAIT_SECONDS     how long to wait for the database (default 120)
+#   DB_WAIT_SECONDS     how long to wait for the database and redis (default
+#                       120)
 #   APP_WAIT_SECONDS    how long to wait for /health/ after the restart
 #                       (default 180)
 
@@ -47,6 +64,11 @@ cd "$(dirname "$0")/.."
 COMPOSE_FILE=docker-compose.yml
 SERVICE=backend
 DB_SERVICE=db
+REDIS_SERVICE=redis
+# The Celery processes that must be running the released image when a
+# release ends. An array so each name survives `set -u` and word-splitting
+# stays deliberate.
+ASYNC_SERVICES=(worker beat)
 DB_WAIT_SECONDS=${DB_WAIT_SECONDS:-120}
 APP_WAIT_SECONDS=${APP_WAIT_SECONDS:-180}
 
@@ -72,16 +94,20 @@ if [ "${RELEASE_GIT_PULL:-0}" = "1" ]; then
   git pull --ff-only
 fi
 
-log 'pull: build the released image and refresh the database image'
+log 'pull: build the released image and refresh the database and redis images'
 compose build --pull "$SERVICE"
 compose pull --quiet "$DB_SERVICE"
+compose pull --quiet "$REDIS_SERVICE"
 
-# 2. Database -----------------------------------------------------------
+# 2. Database and broker --------------------------------------------------
 # Migrations run against the live database, so it has to be up and accepting
-# connections first - `--wait` blocks on the service healthcheck
-# (pg_isready) instead of racing it.
-log 'database: start and wait until it accepts connections'
-compose up -d --wait --wait-timeout "$DB_WAIT_SECONDS" "$DB_SERVICE"
+# connections first - `--wait` blocks on the service healthcheck (pg_isready)
+# instead of racing it. Redis comes up in the same step because step 6
+# starts worker and beat, whose broker it is; `--wait` blocks on its
+# healthcheck (redis-cli ping) for the same reason, so the async processes
+# are never created against a broker that has not answered yet.
+log 'database and broker: start and wait until both accept connections'
+compose up -d --wait --wait-timeout "$DB_WAIT_SECONDS" "$DB_SERVICE" "$REDIS_SERVICE"
 
 # 3. Migration-review checkpoint (R-22.11) ------------------------------
 # Exit code is the signal: makemigrations --check exits non-zero when a model
@@ -111,4 +137,20 @@ manage collectstatic --noinput
 # finished once the app actually serves traffic.
 log 'restart: run the app on the released image and wait for /health/'
 compose up -d --wait --wait-timeout "$APP_WAIT_SECONDS" --remove-orphans "$SERVICE"
+#
+# The worker and the beat scheduler are recreated in their own `up` right
+# after: compose replaces any container whose image id changed, so both land
+# on the image built in step 1 and the beat-scheduled sweeps execute released
+# code rather than the previous release's. They are NOT in the `--wait` call
+# above, and that is measured rather than assumed: Docker Compose refuses
+# `--wait` for a service with no healthcheck ("container ... has no
+# healthcheck configured", exit 1), and the inherited image healthcheck is
+# disabled for them in docker-compose.yml because it probes gunicorn's
+# /health/, which a Celery container does not serve - it marks a healthy
+# worker unhealthy, which is worse than having none. A real replacement does
+# not exist for beat (`inspect ping` answers workers, not the scheduler), so
+# the release gates on the ONE honest signal - the app's /health/ - and
+# `compose ps` below prints the async processes' state for the operator.
+log 'restart: recreate worker and beat on the released image'
+compose up -d "${ASYNC_SERVICES[@]}"
 compose ps
