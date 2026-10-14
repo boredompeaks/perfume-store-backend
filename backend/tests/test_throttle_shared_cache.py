@@ -47,8 +47,10 @@ from tests.test_settings_security import _DEV_ENV, run_settings_import
 
 BACKEND_DIR = Path(__file__).resolve().parent.parent
 
-# The literal budget under test, written by hand rather than derived from
-# RATE_UNDER_TEST: a recomputed oracle is not an oracle.
+# The literal budget under test. RATE_UNDER_TEST is spelled from it, and
+# every assertion compares against this hand-written number, never against
+# a value parsed back out of the rate string: a recomputed oracle is not
+# an oracle.
 BUDGET = 30
 RATE_UNDER_TEST = f"{BUDGET}/min"
 # TEST-NET-3: never a real caller, stable across the parent and child legs.
