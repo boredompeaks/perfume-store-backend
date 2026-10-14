@@ -1,9 +1,11 @@
 {% extends "admin/base_site.html" %}
 
-{# SPEC-5-10, spec 5.1: the ONE global search entry point — "Search orders,
-   products, customers…". Groups appear only for the models this caller may
-   view (common/admin_search.py gates each one on its ModelAdmin's own
-   view permission), so this page can never name a model they cannot list. #}
+{% comment %}
+SPEC-5-10, spec 5.1: the ONE global search entry point — "Search orders,
+products, customers…". Groups appear only for the models this caller may
+view (common/admin_search.py gates each one on its ModelAdmin's own
+view permission), so this page can never name a model they cannot list.
+{% endcomment %}
 {% block content %}
   <h1>Search</h1>
   <form id="global-search-form" method="get" action="{% url 'admin-global-search' %}" role="search">

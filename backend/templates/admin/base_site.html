@@ -1,12 +1,14 @@
 {% extends "admin/base.html" %}
 
-{# Django's own admin/base_site.html plus the SPEC-5-10 global search box.
-   The chrome block is the admin's documented place for site-wide header
-   extras and is rendered on EVERY admin page, which is what "one global
-   search entry point" needs; the model-specific search box Django puts on
-   a changelist (``change_list.html``'s own ``search`` block) is untouched
-   and still sits above the grid. Anonymous callers see no box, so the
-   login page is unchanged. #}
+{% comment %}
+Django's own admin/base_site.html plus the SPEC-5-10 global search box.
+The chrome block is the admin's documented place for site-wide header
+extras and is rendered on EVERY admin page, which is what "one global
+search entry point" needs; the model-specific search box Django puts on
+a changelist (``change_list.html``'s own ``search`` block) is untouched
+and still sits above the grid. Anonymous callers see no box, so the
+login page is unchanged.
+{% endcomment %}
 {% block title %}{% if subtitle %}{{ subtitle }} | {% endif %}{{ title }} | {{ site_title|default:_('Django site admin') }}{% endblock %}
 
 {% block branding %}
