@@ -140,6 +140,18 @@ def _env_bool(name, default):
 
 CSRF_COOKIE_SECURE = _env_bool("CSRF_COOKIE_SECURE", not DEBUG)
 
+# Split-origin SPA on one registrable domain (e.g. test. + api. under
+# boredompeaks.me): without a parent Domain the csrftoken cookie is host-
+# scoped to the API host, so document.cookie on the storefront origin can
+# never read it and the double-submit X-CSRFToken header is impossible.
+# Empty keeps Django's default (host-only). Leading dot is the classic
+# parent-domain form; modern browsers treat ".example.com" and "example.com"
+# the same for subdomains.
+SESSION_COOKIE_DOMAIN = (os.getenv("SESSION_COOKIE_DOMAIN") or "").strip() or None
+CSRF_COOKIE_DOMAIN = (os.getenv("CSRF_COOKIE_DOMAIN") or "").strip() or None
+# Must stay false: the SPA reads csrftoken from document.cookie.
+CSRF_COOKIE_HTTPONLY = _env_bool("CSRF_COOKIE_HTTPONLY", False)
+
 
 # Application definition
 
