@@ -23,6 +23,7 @@ from doc_claims import (  # noqa: E402
     RE_MODULE_PATH,
     RE_PATH_LINE,
     RE_REASON_REFERENCE,
+    REPO_ROOT,
     _inside_any_span,
     _path_exists,
     _resolve_path,
@@ -39,6 +40,9 @@ from doc_claims import (  # noqa: E402
 )
 
 DOC = "backend/docs/changes.md"
+# A second doc, for scoping pins: an entry written for DOC's historical rows
+# must not resolve the same token cited here.
+OTHER_DOC = "backend/docs/fix-plan.md"
 
 # A well-formed counter-example directive. The reason clears MIN_REASON_CHARS
 # and names a task id, because both are required: the floor keeps it a fragment
@@ -1416,13 +1420,14 @@ class RestructureMapTests(unittest.TestCase):
     REASON = "a reason long enough to clear the floor and say what moved"
 
     def entry(self, **fields):
-        entry = {"reason": self.REASON}
+        entry = {"reason": self.REASON, "cites_in": [DOC]}
         entry.update(fields)
         return entry
 
-    def verify(self, line, paths, tests=None, tracked=None, known_paths=None):
+    def verify(self, line, paths, tests=None, tracked=None, known_paths=None,
+               doc=DOC):
         return verify_claims(
-            extract_claims(line, DOC),
+            extract_claims(line, doc),
             self.KNOWN_TESTS,
             self.PATHS if known_paths is None else known_paths,
             {"paths": paths, "tests": tests or {}, "tracked": tracked},
@@ -1579,6 +1584,87 @@ class RestructureMapTests(unittest.TestCase):
         self.assertEqual([c.kind for c in errors], ["module_path"])
         self.assertIn("no such file in the tree", errors[0].detail)
 
+    def test_an_entry_scoped_to_one_doc_does_not_resolve_anothers_cite(self):
+        # The token-keyed false pass, pinned shut: the entry resolves the
+        # historical cite in its own file, and the IDENTICAL token in any
+        # other doc falls through to the plain tree lookup and errors --
+        # an entry written for one file's rows must not green unrelated
+        # prose that happens to cite the same bare token.
+        entry = {"orders/views.py": self.entry(targets=["backend/orders/views/"])}
+        errors, warnings = self.verify("changed `orders/views.py`", entry)
+        self.assertEqual(errors, [])
+        self.assertTrue(warnings[0].note.startswith("restructure map:"))
+        errors, warnings = self.verify(
+            "changed `orders/views.py`", entry, doc=OTHER_DOC
+        )
+        self.assertEqual([c.kind for c in errors], ["module_path"])
+        self.assertIn("no such file in the tree", errors[0].detail)
+        self.assertEqual(warnings, [])
+
+    def test_a_scoped_out_path_line_is_not_line_waived(self):
+        # The line-check downgrade is part of the map's privileges, so it
+        # leaks with the rest if scoping is skipped: out of scope, the past
+        # -the-end line is an error again, exactly as without any map.
+        entry = {
+            "backend/accounts/urls.py": self.entry(
+                targets=["backend/accounts/urls.py"]
+            )
+        }
+        errors, _ = self.verify(
+            "see `backend/accounts/urls.py:9000`", entry, doc=OTHER_DOC
+        )
+        self.assertEqual([c.kind for c in errors], ["path_line"])
+        self.assertIn("line is past the end", errors[0].detail)
+
+    def test_an_external_entry_cannot_green_another_docs_cite(self):
+        # The concrete P3 case: the external entry (written for one backlog
+        # row) greens the cite in its own file, but a new doc claiming the
+        # same bare token names a repo file that does not exist -- that must
+        # be an error, not a silent "external" pass.
+        entry = {"handlers/base.py": self.entry(external=True)}
+        errors, warnings = self.verify("gate: `handlers/base.py`", entry)
+        self.assertEqual(errors, [])
+        self.assertIn("external path", warnings[0].note)
+        errors, warnings = self.verify(
+            "moved the wrapper into `handlers/base.py`", entry, doc=OTHER_DOC
+        )
+        self.assertEqual([c.kind for c in errors], ["module_path"])
+        self.assertIn("no such file in the tree", errors[0].detail)
+        self.assertEqual(warnings, [])
+
+    def test_an_entry_recording_no_scope_resolves_nothing(self):
+        # Fail closed: an entry without cites_in is a validation error on
+        # the shipped path; reaching verify_claims unvalidated (a hand-built
+        # map), it must resolve nothing rather than everything.
+        entry = {
+            "orders/views.py": {
+                "reason": self.REASON,
+                "targets": ["backend/orders/views/"],
+            }
+        }
+        errors, warnings = self.verify("changed `orders/views.py`", entry)
+        self.assertEqual([c.kind for c in errors], ["module_path"])
+        self.assertIn("no such file in the tree", errors[0].detail)
+        self.assertEqual(warnings, [])
+
+    def test_a_renamed_test_still_resolves_in_any_doc(self):
+        # Deliberate asymmetry, pinned: a def name is a unique identifier
+        # and a rename keeps its referent wherever the old name is quoted,
+        # so test entries carry no cites_in and resolve across files.
+        errors, warnings = self.verify(
+            "fixed `test_old_pin`",
+            {},
+            tests={
+                "test_old_pin": {
+                    "successor": "test_successor_one",
+                    "reason": self.REASON,
+                }
+            },
+            doc=OTHER_DOC,
+        )
+        self.assertEqual(errors, [])
+        self.assertIn("renamed", warnings[0].note)
+
     def test_without_a_map_the_original_behaviour_is_untouched(self):
         # The shipped suite calls verify_claims with three arguments; the map
         # must be opt-in per call or those 138 assertions quietly change.
@@ -1606,7 +1692,13 @@ class RestructureMapValidationTests(unittest.TestCase):
     def test_a_minimal_well_formed_map_validates_and_loses_readme(self):
         data = {
             "_readme": ["how to extend"],
-            "paths": {"orders/views.py": {"targets": ["x/y/"], "reason": self.REASON}},
+            "paths": {
+                "orders/views.py": {
+                    "targets": ["x/y/"],
+                    "reason": self.REASON,
+                    "cites_in": [DOC],
+                }
+            },
             "tests": {"test_x": {"successor": "test_y", "reason": self.REASON}},
         }
         result = validate_restructure_map(data)
@@ -1667,6 +1759,52 @@ class RestructureMapValidationTests(unittest.TestCase):
 
     def test_an_empty_targets_list_is_rejected(self):
         data = {"paths": {"a.py": {"targets": [], "reason": self.REASON}}, "tests": {}}
+        with self.assertRaises(RuntimeError):
+            validate_restructure_map(data)
+
+    def test_cites_in_is_required_on_every_path_entry(self):
+        # Without a recorded scope the entry would resolve the token in any
+        # doc -- the token-keyed false pass -- so a missing cites_in is a
+        # load error, not a silent global entry.
+        for shape in (
+            {"targets": ["b/c.py"], "reason": self.REASON},
+            {"untracked": ["b/c.py"], "reason": self.REASON},
+            {"external": True, "reason": self.REASON},
+        ):
+            with self.subTest(shape=sorted(shape)):
+                with self.assertRaises(RuntimeError):
+                    validate_restructure_map(
+                        {"paths": {"a.py": shape}, "tests": {}}
+                    )
+
+    def test_an_empty_cites_in_is_rejected(self):
+        data = {
+            "paths": {
+                "a.py": {
+                    "targets": ["b/c.py"],
+                    "reason": self.REASON,
+                    "cites_in": [],
+                }
+            },
+            "tests": {},
+        }
+        with self.assertRaises(RuntimeError):
+            validate_restructure_map(data)
+
+    def test_cites_in_outside_the_scanned_docs_is_rejected(self):
+        # Claims are only extracted from the scanned doc prefixes, so a
+        # scope naming any other file can never hold a claim: a silent
+        # no-op entry is the same defect as a typo'd key.
+        data = {
+            "paths": {
+                "a.py": {
+                    "targets": ["b/c.py"],
+                    "reason": self.REASON,
+                    "cites_in": ["scripts/notes.md"],
+                }
+            },
+            "tests": {},
+        }
         with self.assertRaises(RuntimeError):
             validate_restructure_map(data)
 
@@ -1743,6 +1881,19 @@ class ShippedRestructureMapTests(unittest.TestCase):
             for target in entry.get("untracked", []):
                 with self.subTest(cited=cited, target=target):
                     self.assertNotIn(target, self.known_paths)
+
+    def test_every_shipped_cites_in_file_exists(self):
+        # A scope naming a file that no longer exists can never hold a
+        # claim: the entry would resolve nothing while looking well-formed.
+        # Shape validation is pure, so the existence half lives here, next
+        # to the same check for targets and successors.
+        for cited, entry in self.map["paths"].items():
+            for doc in entry["cites_in"]:
+                with self.subTest(cited=cited, doc=doc):
+                    self.assertTrue(
+                        (REPO_ROOT / doc).is_file(),
+                        f"{cited} is scoped to {doc}, which is not in the tree",
+                    )
 
 
 if __name__ == "__main__":

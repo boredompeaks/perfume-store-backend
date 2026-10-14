@@ -18,19 +18,27 @@
     "            packages); existence is not machine-checkable from the tree,",
     "            and the entry is printed as RESTRUCTURED on every run so the",
     "            honest gap stays visible instead of silent.",
+    "Every path entry also requires 'cites_in': the backend/docs/ file(s)",
+    "whose historical rows the entry was written for. A claim is resolved",
+    "only when it is MADE IN one of those files; the same bare token cited",
+    "in any other doc falls through to the plain tree lookup, so an entry",
+    "cannot silently green unrelated prose (token-keyed false pass).",
     "Every entry requires a 'reason' of at least 24 characters: the reason is",
     "what the RESTRUCTURED log line prints, so an unexplained pass is a",
     "validation error, not a quiet one.",
     "",
     "Test entries map a historical test name to its shipped successor",
     "('successor'); the pass requires the SUCCESSOR to exist, so deleting the",
-    "replacement fails the old cite again.",
+    "replacement fails the old cite again. Test entries are deliberately NOT",
+    "scoped by cites_in: a def name is a unique identifier and a rename keeps",
+    "its referent wherever the old name is quoted.",
     "",
-    "Precedence: for a cite that has an entry, THE MAP DECIDES -- it preempts",
-    "the direct index lookup, any counter-example directive on the line, and",
-    "the numeric line check. path_line cites resolved through the map are",
-    "downgraded to warnings: the location is verified, the historical line",
-    "number is not, and the log says exactly that.",
+    "Precedence: for a cite that has an entry scoped to the citing file, THE",
+    "MAP DECIDES -- it preempts the direct index lookup, any counter-example",
+    "directive on the line, and the numeric line check. path_line cites",
+    "resolved through the map are downgraded to warnings: the location is",
+    "verified, the historical line number is not, and the log says exactly",
+    "that.",
     "",
     "To extend: add one entry, then run",
     "  python scripts/doc_claims.py --base 84c8fa71164c23f1a955c67cfc71bd324545519f",
@@ -42,12 +50,14 @@
     "orders/views.py": {
       "targets": ["backend/orders/views/"],
       "mode": "all",
-      "reason": "flat orders/views.py was split into the orders/views/ package (VIEWS-SPLIT: __init__, checkout, payment, refund, return, order, admin); a line number from the flat file has no meaning inside a package, so path_line cites resolve the package and carry a line-check warning"
+      "reason": "flat orders/views.py was split into the orders/views/ package (VIEWS-SPLIT: __init__, checkout, payment, refund, return, order, admin); a line number from the flat file has no meaning inside a package, so path_line cites resolve the package and carry a line-check warning",
+      "cites_in": ["backend/docs/audit.md", "backend/docs/changes.md", "backend/docs/conventions.md", "backend/docs/run/PG-1-damage-report.md", "backend/docs/run/section-00-infrastructure.md", "backend/docs/run/section-06.md", "backend/docs/run/section-07.md", "backend/docs/run/section-08.md", "backend/docs/run/section-11.md", "backend/docs/run/section-12.md", "backend/docs/run/section-14.md", "backend/docs/runbook-incident-recovery.md", "backend/docs/spec-run-state.md", "backend/docs/vulnerabilities.md"]
     },
     "backend/orders/views.py": {
       "targets": ["backend/orders/views/"],
       "mode": "all",
-      "reason": "the repo-root-qualified cite of the same flat module (see the orders/views.py entry); both cite forms resolve to the views package and must fail the day the package is deleted"
+      "reason": "the repo-root-qualified cite of the same flat module (see the orders/views.py entry); both cite forms resolve to the views package and must fail the day the package is deleted",
+      "cites_in": ["backend/docs/changes.md", "backend/docs/run/PG-1-damage-report.md", "backend/docs/run/section-00-infrastructure.md", "backend/docs/spec-run-state.md"]
     },
     "views.py": {
       "targets": [
@@ -59,7 +69,8 @@
         "backend/shipping/views.py"
       ],
       "mode": "any",
-      "reason": "bare views.py cites span the orders monolith prose, products (changes row 44), accounts (section-20 MFA) and the shipping skeleton; append-only history cannot say which app each line meant, so the claim is resolved existentially over this explicit list and fails when the last listed views module is gone"
+      "reason": "bare views.py cites span the orders monolith prose, products (changes row 44), accounts (section-20 MFA) and the shipping skeleton; append-only history cannot say which app each line meant, so the claim is resolved existentially over this explicit list and fails when the last listed views module is gone",
+      "cites_in": ["backend/docs/changes.md", "backend/docs/run/section-01.md", "backend/docs/run/section-08.md", "backend/docs/run/section-11.md", "backend/docs/run/section-12.md", "backend/docs/run/section-18.md", "backend/docs/run/section-20.md", "backend/docs/spec-run-state.md"]
     },
     "urls.py": {
       "targets": [
@@ -71,7 +82,8 @@
         "backend/shipping/urls.py"
       ],
       "mode": "any",
-      "reason": "bare urls.py cites span the config root router, accounts refresh/logout prose, the orders refund row and the shipping skeleton; no single file is pinnable from append-only history, so the claim passes while any listed urls module exists"
+      "reason": "bare urls.py cites span the config root router, accounts refresh/logout prose, the orders refund row and the shipping skeleton; no single file is pinnable from append-only history, so the claim passes while any listed urls module exists",
+      "cites_in": ["backend/docs/architecture.md", "backend/docs/changes.md", "backend/docs/compliance/S22.md", "backend/docs/run/section-01.md", "backend/docs/run/section-20.md", "backend/docs/spec-run-state.md"]
     },
     "tests.py": {
       "targets": [
@@ -84,7 +96,8 @@
         "backend/shipping/tests.py"
       ],
       "mode": "any",
-      "reason": "bare tests.py cites are mostly .coveragerc globs (*/tests.py) and app-generic references, never one app's file; existential over every tests.py in the tree so the claim dies only when the last one does"
+      "reason": "bare tests.py cites are mostly .coveragerc globs (*/tests.py) and app-generic references, never one app's file; existential over every tests.py in the tree so the claim dies only when the last one does",
+      "cites_in": ["backend/docs/audit.md", "backend/docs/changes.md", "backend/docs/test-gaps.md"]
     },
     "serializers.py": {
       "targets": [
@@ -95,7 +108,8 @@
         "backend/shipping/serializers.py"
       ],
       "mode": "any",
-      "reason": "bare serializers.py cites belong to the shipping app-skeleton rows and the B07 returns rows, i.e. more than one app; existential over this explicit list"
+      "reason": "bare serializers.py cites belong to the shipping app-skeleton rows and the B07 returns rows, i.e. more than one app; existential over this explicit list",
+      "cites_in": ["backend/docs/changes.md", "backend/docs/spec-run-state.md"]
     },
     "admin.py": {
       "targets": [
@@ -110,7 +124,8 @@
         "backend/shipping/admin.py"
       ],
       "mode": "any",
-      "reason": "bare admin.py cites span orders, the shipping app-skeleton rows and the SPEC-18-1 products row; existential over this explicit list rather than guessed per line"
+      "reason": "bare admin.py cites span orders, the shipping app-skeleton rows and the SPEC-18-1 products row; existential over this explicit list rather than guessed per line",
+      "cites_in": ["backend/docs/changes.md", "backend/docs/run/section-07.md", "backend/docs/run/section-18.md"]
     },
     "models.py": {
       "targets": [
@@ -123,27 +138,32 @@
         "backend/shipping/models.py"
       ],
       "mode": "any",
-      "reason": "bare models.py cites are orders-machine prose (changes Black/coverage rows, spec-run-state B07a COD lines) plus app-generic mentions; existential over this explicit list"
+      "reason": "bare models.py cites are orders-machine prose (changes Black/coverage rows, spec-run-state B07a COD lines) plus app-generic mentions; existential over this explicit list",
+      "cites_in": ["backend/docs/changes.md", "backend/docs/spec-run-state.md"]
     },
     "apps.py": {
       "targets": ["backend/shipping/apps.py"],
       "mode": "all",
-      "reason": "the only bare apps.py cite is the shipping app-skeleton row in changes (the file list a new shipping app needs), and shipping/apps.py exists, so this is pinned strict"
+      "reason": "the only bare apps.py cite is the shipping app-skeleton row in changes (the file list a new shipping app needs), and shipping/apps.py exists, so this is pinned strict",
+      "cites_in": ["backend/docs/changes.md"]
     },
     "__init__.py": {
       "targets": ["backend/shipping/__init__.py"],
       "mode": "all",
-      "reason": "the only bare __init__.py cite is the same shipping app-skeleton row, pinned strict to the package marker that row was asking for"
+      "reason": "the only bare __init__.py cite is the same shipping app-skeleton row, pinned strict to the package marker that row was asking for",
+      "cites_in": ["backend/docs/changes.md", "backend/docs/run/TIER1-launch.md"]
     },
     "migrations/0001_initial.py": {
       "targets": ["backend/shipping/migrations/0001_initial.py"],
       "mode": "all",
-      "reason": "the only bare cite is the shipping app-skeleton row naming the initial migration a new app needs; shipping/migrations/0001_initial.py exists, so pinned strict"
+      "reason": "the only bare cite is the shipping app-skeleton row naming the initial migration a new app needs; shipping/migrations/0001_initial.py exists, so pinned strict",
+      "cites_in": ["backend/docs/changes.md"]
     },
     "commands/__init__.py": {
       "targets": ["backend/products/management/commands/__init__.py"],
       "mode": "all",
-      "reason": "the only cite is the changes row that created the repo's first management-command package under products; pinned strict to that package marker"
+      "reason": "the only cite is the changes row that created the repo's first management-command package under products; pinned strict to that package marker",
+      "cites_in": ["backend/docs/changes.md"]
     },
     "views.py/urls.py": {
       "targets": [
@@ -151,7 +171,8 @@
         "backend/accounts/urls.py"
       ],
       "mode": "all",
-      "reason": "slash-joined accounts cite from the LogoutView row ('verified against views.py/urls.py'); both accounts files must exist for the verification the row describes to have happened"
+      "reason": "slash-joined accounts cite from the LogoutView row ('verified against views.py/urls.py'); both accounts files must exist for the verification the row describes to have happened",
+      "cites_in": ["backend/docs/changes.md"]
     },
     "models.py/admin.py/views.py": {
       "targets": [
@@ -160,7 +181,8 @@
         "backend/orders/views/"
       ],
       "mode": "all",
-      "reason": "slash-joined orders cite from the state-machine consolidation row: ADMIN_FULFILMENT_NEXT was consolidated verbatim from these three homes, so all three must still exist"
+      "reason": "slash-joined orders cite from the state-machine consolidation row: ADMIN_FULFILMENT_NEXT was consolidated verbatim from these three homes, so all three must still exist",
+      "cites_in": ["backend/docs/changes.md"]
     },
     "admin.py/views.py": {
       "targets": [
@@ -168,46 +190,56 @@
         "backend/orders/views/"
       ],
       "mode": "all",
-      "reason": "slash-joined orders cite from the consolidation row where admin and views import the machine from orders.state; both homes must still exist"
+      "reason": "slash-joined orders cite from the consolidation row where admin and views import the machine from orders.state; both homes must still exist",
+      "cites_in": ["backend/docs/changes.md"]
     },
     "accounts/urls.py": {
       "targets": ["backend/accounts/urls.py"],
       "mode": "all",
-      "reason": "the S20 compliance row cites the mfa route block at lines 59-75; the ruff reformat (b6e887c) compacted the file after that was written and the mfa/* routes now sit at 42-48 of a 49-line file, so the location is verified and the historical line numbers are not (cite refresh is a separate task)"
+      "reason": "the S20 compliance row cites the mfa route block at lines 59-75; the ruff reformat (b6e887c) compacted the file after that was written and the mfa/* routes now sit at 42-48 of a 49-line file, so the location is verified and the historical line numbers are not (cite refresh is a separate task)",
+      "cites_in": ["backend/docs/api-contract.md", "backend/docs/changes.md", "backend/docs/compliance/S20.md", "backend/docs/run/section-17.md", "backend/docs/run/section-20.md"]
     },
     "products/management/commands/seed_demo.py": {
       "untracked": ["backend/products/management/commands/seed_demo.py"],
-      "reason": "the SPEC-14-1 row cites this as a PENDING proposal, a command nobody has written; it must stay out of the tree until that row is rewritten, so building it first fails this entry on purpose"
+      "reason": "the SPEC-14-1 row cites this as a PENDING proposal, a command nobody has written; it must stay out of the tree until that row is rewritten, so building it first fails this entry on purpose",
+      "cites_in": ["backend/docs/run/section-14.md"]
     },
     "loadtest.py": {
       "untracked": ["loadtest.py", "backend/loadtest.py"],
-      "reason": "the spec-run-state hygiene note (2026-09-30) names this scratch file as purged and gitignored and forbids committing it; the entry checks that promise in both plausible locations instead of demanding the file exist"
+      "reason": "the spec-run-state hygiene note (2026-09-30) names this scratch file as purged and gitignored and forbids committing it; the entry checks that promise in both plausible locations instead of demanding the file exist",
+      "cites_in": ["backend/docs/spec-run-state.md"]
     },
     "red_team_probe.py": {
       "untracked": ["red_team_probe.py", "backend/red_team_probe.py"],
-      "reason": "same hygiene note; backend/red_team_probe.py was tracked once (c07e139) and purged, so both plausible locations must stay out of the HEAD tree"
+      "reason": "same hygiene note; backend/red_team_probe.py was tracked once (c07e139) and purged, so both plausible locations must stay out of the HEAD tree",
+      "cites_in": ["backend/docs/spec-run-state.md"]
     },
     "django/contrib/admin/options.py": {
       "external": true,
-      "reason": "Django's own source, installed as a package and outside this repository; the scanner indexes only repo files (stdlib-only by design per the nightly header), so the cite is recorded as external and printed every run rather than silently passed"
+      "reason": "Django's own source, installed as a package and outside this repository; the scanner indexes only repo files (stdlib-only by design per the nightly header), so the cite is recorded as external and printed every run rather than silently passed",
+      "cites_in": ["backend/docs/spec-run-state.md"]
     },
     "coverage.py": {
       "external": true,
-      "reason": "test-gaps cites the coverage TOOL as a gate name, not a repository path; it is an installed dependency the tree index never contains, so the cite is recorded as external and printed every run"
+      "reason": "test-gaps cites the coverage TOOL as a gate name, not a repository path; it is an installed dependency the tree index never contains, so the cite is recorded as external and printed every run",
+      "cites_in": ["backend/docs/test-gaps.md"]
     },
     "iews.py": {
       "targets": ["backend/orders/views/"],
       "mode": "all",
-      "reason": "byte-eaten head of views.py at c873b27, quoted as corruption evidence; the intact cite's home is the restructured orders/views/ package, so the fragment resolves there and dies with it"
+      "reason": "byte-eaten head of views.py at c873b27, quoted as corruption evidence; the intact cite's home is the restructured orders/views/ package, so the fragment resolves there and dies with it",
+      "cites_in": ["backend/docs/run/section-00-infrastructure.md", "backend/docs/spec-run-state.md"]
     },
     "ests_returns.py": {
       "targets": ["backend/orders/tests_returns.py"],
       "mode": "all",
-      "reason": "byte-eaten head of tests_returns.py at c873b27, quoted as corruption evidence; the intact file still exists and this entry pins the fragment to it"
+      "reason": "byte-eaten head of tests_returns.py at c873b27, quoted as corruption evidence; the intact file still exists and this entry pins the fragment to it",
+      "cites_in": ["backend/docs/run/section-00-infrastructure.md", "backend/docs/spec-run-state.md"]
     },
     "handlers/base.py": {
       "external": true,
-      "reason": "the TIER1-launch ENVELOPE-WIRE backlog row's bare cite is Django's OWN django/core/handlers/base.py (the request-handler entry that renders the DRF response before ErrorEnvelopeMiddleware can rewrite it), installed in site-packages and outside this repository; recorded external like django/contrib/admin/options.py so the fully qualified location lives in this reason and the cite prints every run instead of passing silently"
+      "reason": "the TIER1-launch ENVELOPE-WIRE backlog row's bare cite is Django's OWN django/core/handlers/base.py (the request-handler entry that renders the DRF response before ErrorEnvelopeMiddleware can rewrite it), installed in site-packages and outside this repository; recorded external like django/contrib/admin/options.py so the fully qualified location lives in this reason and the cite prints every run instead of passing silently",
+      "cites_in": ["backend/docs/changes.md", "backend/docs/run/TIER1-launch.md", "backend/docs/spec-run-state.md"]
     }
   },
   "tests": {
