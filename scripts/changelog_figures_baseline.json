@@ -26,6 +26,32 @@
       "figures": [
         [
           "coverage",
+          "cov 99.77%"
+        ],
+        [
+          "expected_failures",
+          "expected failures=3"
+        ],
+        [
+          "expected_failures",
+          "xf 3"
+        ],
+        [
+          "stmts",
+          "10235 stmts"
+        ],
+        [
+          "tests",
+          "2077 tests"
+        ]
+      ],
+      "reason": "A repair row for another session's ungated commit f8168a1: its figures are this builder's own in-session re-derivations on PostgreSQL container pg2a (the pre-edit red run and the post-fix green run of the full suite with coverage, plus the engine probe), typed into the row from those command outputs rather than printed by the floor printer. `floor --task FIX-TPL-COMMENT-EXTENDS` run now would execute both engines fresh and write an artifact describing that later execution, attaching a different run to a sentence that quotes the one measured here -- the dishonest backfill the ASYNC-2c1 entry refuses; no artifact the printer can produce vouches for the single-engine leg this row quotes.",
+      "task": "FIX-TPL-COMMENT-EXTENDS"
+    },
+    {
+      "figures": [
+        [
+          "coverage",
           "cov 100.00%"
         ],
         [

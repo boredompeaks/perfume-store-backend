@@ -1,10 +1,10 @@
+{% extends "admin/change_list.html" %}
 {% comment %}
 SPEC-20-6 [R-20.11]: the products changelist renders the saved-view bar
 below the delivered grid. block.super keeps the shipped changelist
 markup — filters, inline-editable stock cells, actions — byte-identical;
 the bar is additive chrome.
 {% endcomment %}
-{% extends "admin/change_list.html" %}
 
 {% block content %}
   {{ block.super }}
