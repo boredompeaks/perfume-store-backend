@@ -1,9 +1,9 @@
 # Perfume Store
 
 A monorepo with two deployables that ship independently through their own CI
-paths: a Django/DRF backend API and a Next.js storefront. Everything is
-configured through the environment — the `.env.example` files document every
-key; no secret, URL or mode flag lives in code.
+paths: a Django/DRF backend API and a Next.js storefront. Configuration is
+environment-driven (`.env` at runtime; the `.env.example` files document the
+keys); no secret or deployment URL lives in code.
 
 - **`backend/`** — Django 6.1 / Django REST Framework e-commerce API:
   JWT accounts, session cart, coupons, Razorpay payments, Celery async
@@ -74,8 +74,8 @@ venv\Scripts\python manage.py makemigrations --check --dry-run   # zero migratio
 
 CI runs exactly these on PostgreSQL 17 and judges failures as a set against
 `scripts/pg_baseline.json`, alongside ruff, pre-commit, mypy and the doc
-gates (`.github/workflows/backend-tests.yml`). The store pair runs in
-`frontend/`:
+gates (`.github/workflows/backend-tests.yml`). The storefront's own gates
+run in `frontend/`:
 
 ```powershell
 npm run test          # vitest unit tests
