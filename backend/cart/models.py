@@ -20,6 +20,23 @@ class Cart(models.Model):
         related_name="+",
     )
 
+    # TIER1-WEBHOOK-CARCH: the Order this cart checked out into, bound at
+    # order creation (orders.views.checkout.create_order) so a later capture
+    # - browser verify or a much-later gateway webhook, which has no session
+    # cookie - can find this cart and empty it (the clear lives in
+    # orders.inventory.commit_order_sale). Nullable: a browsing or abandoned
+    # cart has no order yet. OneToOne: one checkout submission snapshots one
+    # cart into one order. SET_NULL: deleting an order (admin cleanup, test
+    # teardown) must never cascade-destroy cart rows - the link exists for
+    # capture-time cleanup, not for the cart's existence.
+    order = models.OneToOneField(
+        "orders.Order",
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="cart",
+    )
+
     created_at = models.DateTimeField(auto_now_add=True)
 
     updated_at = models.DateTimeField(auto_now=True)

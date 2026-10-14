@@ -330,6 +330,10 @@
     "test_an_identical_resubmission_collapses_onto_the_first_order": {
       "successor": "test_the_refusal_creates_no_order_row_reservation_or_trail",
       "reason": "7e63658 removed the unkeyed guest collapse this pin asserted because anonymous checkout is refused before idempotency is considered, so a resubmission mints nothing; the successor pins that a refused submission creates no order row, reservation or trail"
+    },
+    "test_verify_without_session_cookie_skips_cart_cleanup": {
+      "successor": "test_verify_without_session_cookie_clears_the_linked_cart",
+      "reason": "TIER1-WEBHOOK-CARCH renamed this def in place in backend/orders/tests.py: the old pin asserted a cookie-less verify left the cart full, which is the exact bug the Cart.order link closes; the successor keeps the same cookie-less scenario and pins the order-linked clear, and the TIER1-WEBHOOK-CARCH changelog row records the supersession"
     }
   }
 }
