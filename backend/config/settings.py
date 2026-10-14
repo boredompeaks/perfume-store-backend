@@ -193,10 +193,14 @@ MIDDLEWARE = [
     "django.contrib.messages.middleware.MessageMiddleware",
     "django.middleware.clickjacking.XFrameOptionsMiddleware",
     # SPEC-9-03 (R-9.2.19, spec line 3002 "consistent error responses"):
-    # every JSON error response is rewritten into the single uniform
-    # {"error", "code", "details"} shape in one place — middleware-level,
-    # because the ad-hoc {"error": ...} view returns raise no exception a
-    # DRF EXCEPTION_HANDLER could see.
+    # ad-hoc {"error": ...} view returns (which raise no exception, so the
+    # REST_FRAMEWORK exception handler never sees them) are rewritten into
+    # the single uniform {"error", "code", "details"} shape here. DRF
+    # EXCEPTION bodies are enveloped at the source by the handler below;
+    # the middleware recognises that envelope and leaves it alone, so every
+    # error response is wrapped exactly once and the bytes on the wire
+    # carry the envelope (rewriting .data after the base handler has
+    # rendered would not reach the wire).
     "common.errors.ErrorEnvelopeMiddleware",
 ]
 
@@ -1102,6 +1106,13 @@ REST_FRAMEWORK = {
         # issues the csrftoken cookie the SPA replays as X-CSRFToken.
         "common.authentication.SessionCartCSRFAuthentication",
     ),
+    # SPEC-9-03 [R-9.2.19]: every DRF exception response (401 auth, 403
+    # permission, 400 validation, 404/405, 429 throttling) is enveloped
+    # HERE, before the response is rendered, so the uniform shape reaches
+    # the wire as bytes. The ErrorEnvelopeMiddleware above owns only the
+    # ad-hoc {"error": ...} view returns that raise no exception, and is
+    # idempotent on this handler's output — one shape, one wrap.
+    "EXCEPTION_HANDLER": "common.errors.error_envelope_exception_handler",
     # Scoped throttling: every public mutating endpoint opts in by declaring
     # a `throttle_scope`; views without a scope are left unthrottled by this
     # class (conventions.md "Every public mutating endpoint gets a throttle
