@@ -20,7 +20,7 @@ class Cart(models.Model):
         related_name="+",
     )
 
-    # TIER1-WEBHOOK-CARCH: the Order this cart checked out into, bound at
+    # TIER1-WEBHOOK-CART: the Order this cart checked out into, bound at
     # order creation (orders.views.checkout.create_order) so a later capture
     # - browser verify or a much-later gateway webhook, which has no session
     # cookie - can find this cart and empty it (the clear lives in

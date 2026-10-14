@@ -57,7 +57,7 @@ gateway already holds, so it records the conflict and leaves the order for the
 reconciliation the PaymentEvent row exists to feed.
 
 **The linked cart is emptied HERE, past the idempotency gate
-(TIER1-WEBHOOK-CARCH).** It used to be true that only the browser callback
+(TIER1-WEBHOOK-CART).** It used to be true that only the browser callback
 could empty the caller's cart - it has the session cookie - because ``Cart``
 was keyed only by ``session_id`` with no FK to an Order, so a server-to-server
 webhook had no way to name this customer's cart, and a returning customer saw
@@ -76,7 +76,7 @@ import logging
 
 from django.db import transaction
 
-# TIER1-WEBHOOK-CARCH: the linked-cart clear needs the Cart model. String
+# TIER1-WEBHOOK-CART: the linked-cart clear needs the Cart model. String
 # FK reference on Cart.order ("orders.Order") means no import cycle.
 from cart.models import Cart
 from products.models import StockMovement, StockReservation, products
@@ -237,7 +237,7 @@ def commit_order_sale(order, *, actor=None):
                 created_by=actor,
             )
 
-        # TIER1-WEBHOOK-CARCH: empty the cart that produced this order, in
+        # TIER1-WEBHOOK-CART: empty the cart that produced this order, in
         # this transaction (rollback-together with the sale) and only past
         # the payment-dimension guard above - a replayed capture returns
         # there and never reaches this line. The cart row is locked like the

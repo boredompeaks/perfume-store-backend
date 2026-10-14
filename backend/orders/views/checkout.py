@@ -834,7 +834,7 @@ def create_order(request):
                     continue
                 break
 
-            # TIER1-WEBHOOK-CARCH: bind this cart to the order inside the
+            # TIER1-WEBHOOK-CART: bind this cart to the order inside the
             # same atomic block that mints the order (rollback-together), so
             # the capture - browser verify or a much-later gateway webhook,
             # which has no session cookie - can find this cart and empty it

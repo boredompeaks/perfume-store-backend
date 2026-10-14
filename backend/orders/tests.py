@@ -1266,7 +1266,7 @@ class VerifyPaymentTests(OrderTestBase):
         """JWT-only client (no cookies): payment succeeds, and the ORDER's
         linked cart is still emptied.
 
-        Supersedes the pre-TIER1-WEBHOOK-CARCH pin of the same scenario
+        Supersedes the pre-TIER1-WEBHOOK-CART pin of the same scenario
         ("cart untouched, not the verify's job here"): cart cleanup now
         follows the Cart.order link inside commit_order_sale, so it no
         longer depends on the request carrying the session cookie — the
@@ -4391,7 +4391,7 @@ class ReservationLifecycleTests(OrderTestBase):
 
 @tag("orders")
 class CartOrderCaptureClearTests(OrderTestBase):
-    """TIER1-WEBHOOK-CARCH: the Cart->Order link and the capture-time clear.
+    """TIER1-WEBHOOK-CART: the Cart->Order link and the capture-time clear.
 
     Closes the WEBHOOK-CART open item: ``Cart`` carried no user FK and
     nothing joined an Order to a Cart, so the gateway webhook (no session

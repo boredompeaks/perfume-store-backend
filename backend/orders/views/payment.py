@@ -15,7 +15,7 @@ its stock un-decremented and its coupon unspent. What stays HERE is what is
 genuinely this endpoint's: the customer-facing protocol - the coupon validity
 precondition and its 409, the 409 on a lost stock race, the session-scoped
 sweep of the bought lines (still needed for orders with no linked cart, since
-pre-TIER1-WEBHOOK-CARCH rows predate `Cart.order`; the LINKED cart clear is
+pre-TIER1-WEBHOOK-CART rows predate `Cart.order`; the LINKED cart clear is
 `orders.inventory.commit_order_sale`'s, shared with the webhook through the
 order link), and the audit rows naming the browser's verify.
 """

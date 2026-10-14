@@ -333,7 +333,7 @@
     },
     "test_verify_without_session_cookie_skips_cart_cleanup": {
       "successor": "test_verify_without_session_cookie_clears_the_linked_cart",
-      "reason": "TIER1-WEBHOOK-CARCH renamed this def in place in backend/orders/tests.py: the old pin asserted a cookie-less verify left the cart full, which is the exact bug the Cart.order link closes; the successor keeps the same cookie-less scenario and pins the order-linked clear, and the TIER1-WEBHOOK-CARCH changelog row records the supersession"
+      "reason": "TIER1-WEBHOOK-CART renamed this def in place in backend/orders/tests.py: the old pin asserted a cookie-less verify left the cart full, which is the exact bug the Cart.order link closes; the successor keeps the same cookie-less scenario and pins the order-linked clear, and the TIER1-WEBHOOK-CART changelog row records the supersession"
     }
   }
 }
