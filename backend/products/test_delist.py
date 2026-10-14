@@ -16,6 +16,8 @@ The slice has four load-bearing properties, each pinned here:
   the ``products.publish`` capability through the existing RBAC gate.
 """
 
+from decimal import Decimal
+
 from django.contrib.admin.models import CHANGE, LogEntry
 from django.contrib.auth.models import Group, User
 from django.test import tag
@@ -420,3 +422,149 @@ class DelistAdminCapabilityGateTests(ApiTestCase):
             },
             follow=True,
         )
+
+
+@tag("products")
+class DelistWritePathScopeTests(ApiTestCase):
+    """P3-CONFIRM-INTERSTITIAL: pin the write-path half of the delist contract.
+
+    The public GET refuses a delisted row with the byte-identical 404 an
+    unknown slug gets (pinned above on ``.data``, here again on the
+    rendered bytes), while PUT/PATCH/DELETE deliberately still ADDRESS the
+    row: "delist → fix the price → relist" is the natural staff workflow,
+    and hiding the row from its own edit path would force a relist just to
+    change a number. That asymmetry is safe ONLY because the write methods
+    ride the ``products.write`` capability gate, which runs before the view
+    body — so everyone without the capability sees one 403 for a delisted
+    row, an on-sale row, and a slug that never existed, and no status code
+    distinguishes them. These tests pin both halves so neither can rot: the
+    gate (no oracle) and the intentional 204 on a privileged DELETE (a
+    future reader must not "fix" that 204 into a 404 and break the staff
+    workflow the view comment documents).
+    """
+
+    def setUp(self):
+        self.delisted = make_delisted_product(name="Scope Amber")
+        # The shared staff fixture holds the admin role, which grants
+        # products.write; the customer holds no staff role at all.
+        self.staff = self.make_staff()
+        self.customer = self.make_user("scope-buyer")
+
+    def _client_for(self, user=None):
+        """A fresh client; anonymous when ``user`` is None."""
+        client = self.fresh_client()
+        if user is not None:
+            self.api_login(user.username, client=client)
+        return client
+
+    def test_public_get_of_delisted_is_byte_identical_to_unknown_slug(self):
+        # The rendered bytes, not res.data: ErrorEnvelopeWireTests documents
+        # that .data can be rewritten after rendering, so the wire body is
+        # the only surface that proves an outside client cannot tell
+        # "taken off sale" from "never existed".
+        delisted = self.client.get(f"/api/products/{self.delisted.slug}/")
+        unknown = self.client.get("/api/products/never-existed/")
+        self.assertEqual(delisted.status_code, 404)
+        self.assertEqual(unknown.status_code, 404)
+        self.assertEqual(delisted.content, unknown.content)
+
+    def test_unprivileged_delete_of_delisted_is_denied_and_row_survives(self):
+        # The capability gate answers before the view body: a caller with
+        # no products.write never reaches the is_active branch or the
+        # delete, so the delisted row is untouched by the refused attempt.
+        for label, client in (
+            ("anon", self._client_for()),
+            ("customer", self._client_for(self.customer)),
+        ):
+            with self.subTest(caller=label):
+                res = client.delete(f"/api/products/{self.delisted.slug}/")
+                self.assertEqual(res.status_code, 403, res.data)
+                self.assertEqual(res.data["error"], "Administrator access is required.")
+        self.assertTrue(products.objects.filter(pk=self.delisted.pk).exists())
+
+    def test_unprivileged_writes_cannot_tell_delisted_from_never_existed(self):
+        # The no-oracle property for every write method: for a caller
+        # without the capability the delisted row and the unknown slug
+        # answer with the same status AND byte-identical bodies, because
+        # the gate denies before the view body can look the slug up at all.
+        payloads = {
+            "put": {
+                "name": "Scope Amber",
+                "description": "A fragrance with amber and vanilla notes.",
+                "price": "1.00",
+                "size": 50,
+                "category": "Amber",
+            },
+            "patch": {"price": "1.00"},
+            "delete": None,
+        }
+        for label, client in (
+            ("anon", self._client_for()),
+            ("customer", self._client_for(self.customer)),
+        ):
+            for method, payload in payloads.items():
+                with self.subTest(caller=label, method=method.upper()):
+                    delisted = getattr(client, method)(
+                        f"/api/products/{self.delisted.slug}/",
+                        payload,
+                        format="json",
+                    )
+                    unknown = getattr(client, method)(
+                        "/api/products/never-existed/", payload, format="json"
+                    )
+                    self.assertEqual(delisted.status_code, 403, delisted.data)
+                    self.assertEqual(unknown.status_code, 403, unknown.data)
+                    self.assertEqual(delisted.content, unknown.content)
+        # No refused attempt mutated the row either.
+        self.assertTrue(products.objects.filter(pk=self.delisted.pk).exists())
+
+    def test_privileged_patch_addresses_delisted_row_for_the_price_fix(self):
+        # The "fix the price" step of delist -> fix -> relist: the write
+        # path addresses the off-sale row on purpose (the view comment
+        # documents this), and the edit does NOT flip it back on sale —
+        # relisting is the admin action's separate, deliberate call.
+        client = self._client_for(self.staff)
+        res = client.patch(
+            f"/api/products/{self.delisted.slug}/",
+            {"price": "399.99"},
+            format="json",
+        )
+        self.assertEqual(res.status_code, 200, res.data)
+        self.delisted.refresh_from_db()
+        self.assertEqual(self.delisted.price, Decimal("399.99"))
+        self.assertIs(self.delisted.is_active, False)
+
+    def test_privileged_put_addresses_delisted_row(self):
+        # Full replacement of an off-sale row is addressed too — same
+        # rationale as PATCH, and stock stays read-only on update so the
+        # edit cannot touch the ledger (SPEC-6-02).
+        client = self._client_for(self.staff)
+        res = client.put(
+            f"/api/products/{self.delisted.slug}/",
+            {
+                "name": "Scope Amber Clearance",
+                "description": "A fragrance with amber and vanilla notes.",
+                "price": "299.99",
+                "size": 50,
+                "category": "Amber",
+            },
+            format="json",
+        )
+        self.assertEqual(res.status_code, 200, res.data)
+        self.delisted.refresh_from_db()
+        self.assertEqual(self.delisted.price, Decimal("299.99"))
+        self.assertIs(self.delisted.is_active, False)
+
+    def test_privileged_delete_of_delisted_row_is_204_by_design(self):
+        # DELIBERATE, not an inconsistency with the public GET's 404: the
+        # write path addresses delisted rows on purpose so staff can run
+        # delist -> fix the price -> relist (the view comment states the
+        # rationale), and it is gated by products.write — the 403s above —
+        # so no existence oracle opens. Do NOT "fix" this 204 into a 404:
+        # that would hide the row from its own staff edit path and force a
+        # relist just to delete it. The gate runs before the view body, so
+        # only a capability holder ever learns the row existed.
+        client = self._client_for(self.staff)
+        res = client.delete(f"/api/products/{self.delisted.slug}/")
+        self.assertEqual(res.status_code, 204, res.data)
+        self.assertFalse(products.objects.filter(pk=self.delisted.pk).exists())
