@@ -13,11 +13,11 @@ records why; the short version is that when each capture writer carried its own
 copy of those statements the copies drifted, and a webhook-confirmed order left
 its stock un-decremented and its coupon unspent. What stays HERE is what is
 genuinely this endpoint's: the customer-facing protocol - the coupon validity
-precondition and its 409, the 409 on a lost stock race, the cart cleanup, and
-the audit rows naming the browser's verify. Cart cleanup is the one of those
-that CANNOT be shared: a `Cart` is identified only by its `session_id` and has
-no user FK, so a server-to-server webhook has no way to name this customer's
-cart - see `orders.inventory` and the WEBHOOK-COUPON note in the changelog.
+precondition and its 409, the 409 on a lost stock race, the session-scoped
+sweep of the bought lines (still needed for orders with no linked cart, since
+pre-TIER1-WEBHOOK-CART rows predate `Cart.order`; the LINKED cart clear is
+`orders.inventory.commit_order_sale`'s, shared with the webhook through the
+order link), and the audit rows naming the browser's verify.
 """
 
 import logging

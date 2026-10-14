@@ -834,6 +834,17 @@ def create_order(request):
                     continue
                 break
 
+            # TIER1-WEBHOOK-CART: bind this cart to the order inside the
+            # same atomic block that mints the order (rollback-together), so
+            # the capture - browser verify or a much-later gateway webhook,
+            # which has no session cookie - can find this cart and empty it
+            # (orders.inventory.commit_order_sale). The cart row is already
+            # locked above; the OneToOne unique constraint on Cart.order is
+            # the last-resort authority should two sessions ever share a
+            # cart row.
+            cart.order = order
+            cart.save(update_fields=["order"])
+
             # [R-10.12]/[R-10.17] SPEC-10-02: creation is the lifecycle's first
             # transition (no source state -> pending), so the audit trail opens
             # here — inside the same outer atomic block as the order row, the

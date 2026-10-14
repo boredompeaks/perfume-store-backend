@@ -4,6 +4,9 @@ Razorpay is always mocked (``self.razorpay_mock``); no test touches the
 network or the real keys from ``.env`` (V-01 containment).
 """
 
+import hashlib
+import hmac
+import json
 import os
 from datetime import timedelta
 from decimal import Decimal
@@ -34,7 +37,8 @@ from config.settings import _env_currency
 from orders import events as order_events
 from orders import state as order_state
 from orders.admin import OrderAdmin
-from orders.models import Coupon, Order, OrderItem, OrderStatusEvent
+from orders.inventory import commit_order_sale
+from orders.models import Coupon, Order, OrderItem, OrderStatusEvent, PaymentEvent
 from orders.serializers import OrderItemSerializer, OrderSerializer
 from orders.views import _mint_order_reservations, apply_coupon, create_payment
 from products.models import StockMovement, StockReservation, products
@@ -1258,9 +1262,18 @@ class VerifyPaymentTests(OrderTestBase):
         self.assertEqual(self.product.stock, 8)
         self.assertEqual(second.stock, 3)
 
-    def test_verify_without_session_cookie_skips_cart_cleanup(self):
-        """JWT-only client (no cookies): payment succeeds; there is simply no
-        session cart to clean (documented hybrid-auth behaviour)."""
+    def test_verify_without_session_cookie_clears_the_linked_cart(self):
+        """JWT-only client (no cookies): payment succeeds, and the ORDER's
+        linked cart is still emptied.
+
+        Supersedes the pre-TIER1-WEBHOOK-CART pin of the same scenario
+        ("cart untouched, not the verify's job here"): cart cleanup now
+        follows the Cart.order link inside commit_order_sale, so it no
+        longer depends on the request carrying the session cookie — the
+        owner-decided property that also lets the gateway webhook clear the
+        cart. The cookie-less session sweep at the end of verify is not
+        what emptied this cart; the order link is.
+        """
         coupon = self.make_coupon(code="PCT10", discount_value="10")
         order = self.create_order(coupon=coupon)
         self.razorpay_mock(order_id="order_NOPAY")
@@ -1281,8 +1294,8 @@ class VerifyPaymentTests(OrderTestBase):
 
         self.assertEqual(res.status_code, 200, res.data)
         self.assertEqual(
-            CartItem.objects.count(), 1
-        )  # cart untouched, not the verify's job here
+            CartItem.objects.count(), 0
+        )  # cleared via the order link, not the (absent) cookie
 
     # 39. idempotency; insufficient stock -> 409 (V-03: no refund path yet) ------------------
     def test_second_verify_rejected_idempotent(self):
@@ -4224,6 +4237,117 @@ class ReservationLifecycleTests(OrderTestBase):
         self.product.refresh_from_db()
         self.assertEqual(self.product.stock, 8)
 
+    # ——— [R-12.12] StockUnavailable handler in verify (summed re-check loser) ———
+
+    def _twin_line_stock_race_setup(self):
+        """Reach payment.py's ``except StockUnavailable`` handler — the
+        branch the two 409 tests above cannot fire.
+
+        The customer-facing backstop compares stock to EACH line while
+        commit_order_sale compares it to the SUM per product, so on a
+        single-line order the view answers its own identical 409 and the
+        service never raises. Checkout mints one line per product (the
+        cart is unique per product), but OrderItem carries no such
+        constraint — the service's summed re-check exists for exactly
+        that shape — so the fixture attaches a twin line after the real
+        checkout + payment intent: the order needs 4 units, a concurrent
+        sale leaves 3 — at/above each line's 2 (the view's per-line
+        backstop passes), below the sum (the service refuses)."""
+        _, order, payload = self._checkout_and_pay()
+        _attach_order_item(order, self.product, 2)
+        products.objects.filter(pk=self.product.pk).update(stock=3)
+        return order, payload
+
+    def test_stock_unavailable_handler_answers_the_wire_envelope(self):
+        """The handler's 409 as the client sees it: SPEC-9-03 envelope
+        bytes exactly once (ENVELOPE-WIRE: res.content, never .data), and
+        the audit row carries the SUMMED demand — the view's per-line
+        backstop would have written requested=2, so requested=4 proves
+        this row came from the service's conflict inside the handler."""
+        order, payload = self._twin_line_stock_race_setup()
+
+        res = self.client.post("/api/orders/payment/verify/", payload, format="json")
+
+        self.assertEqual(res.status_code, 409, res.data)
+        self.assertEqual(
+            res.content,
+            b'{"error":"An item is no longer available in the requested quantity",'
+            b'"code":"conflict","details":{}}',
+        )
+        event = AuditEvent.objects.get(
+            event_type=AuditEvent.EventType.PAYMENT_STOCK_CONFLICT
+        )
+        self.assertEqual(event.order_id, order.id)
+        self.assertEqual(event.detail["product_id"], self.product.pk)
+        self.assertEqual(event.detail["requested"], 4)
+        self.assertEqual(event.detail["available"], 3)
+
+    def test_stock_unavailable_handler_half_applies_nothing_and_releases_holds(
+        self,
+    ):
+        """commit_order_sale raises BEFORE its first mutation, and the
+        handler only audits, logs and releases the attempt's holds: no
+        ledger row, no decrement, no capture transition, ACTIVE hold ->
+        RELEASED — the failed capture leaves the books untouched."""
+        order, payload = self._twin_line_stock_race_setup()
+        hold = order.stock_reservations.get()
+        self.assertEqual(hold.status, StockReservation.Status.ACTIVE)
+        movements_before = StockMovement.objects.count()
+        transitions_before = OrderStatusEvent.objects.filter(order=order).count()
+
+        res = self.client.post("/api/orders/payment/verify/", payload, format="json")
+
+        self.assertEqual(res.status_code, 409, res.data)
+        # No half-applied sale: stock keeps the degraded value and
+        # SPEC-6-02's movement ledger gains no row.
+        self.product.refresh_from_db()
+        self.assertEqual(self.product.stock, 3)
+        self.assertEqual(StockMovement.objects.count(), movements_before)
+        # The order did not transition: no capture claim, no paid_at, and
+        # the payment dimension keeps its untouched default — this handler
+        # does NOT mark it failed (only the signature-rejected path does).
+        order.refresh_from_db()
+        self.assertEqual(order.status, "pending")
+        self.assertEqual(order.payment_status, "pending")
+        self.assertIsNone(order.razorpay_payment_id)
+        self.assertIsNone(order.paid_at)
+        self.assertEqual(
+            OrderStatusEvent.objects.filter(order=order).count(),
+            transitions_before,
+        )
+        # The handler's hold protocol: release, so the failed attempt
+        # leaves no phantom pressure on available-to-sell.
+        hold.refresh_from_db()
+        self.assertEqual(hold.status, StockReservation.Status.RELEASED)
+
+    def test_stock_unavailable_handler_retry_after_restock_captures(self):
+        """The handler is a failed attempt, not a dead end: once the
+        raced units are back, the same payload verifies again — the
+        released hold stays terminal (never resurrected into the sale)
+        and both twin lines commit from live stock."""
+        order, payload = self._twin_line_stock_race_setup()
+
+        first = self.client.post("/api/orders/payment/verify/", payload, format="json")
+        self.assertEqual(first.status_code, 409, first.data)
+
+        products.objects.filter(pk=self.product.pk).update(stock=10)
+
+        second = self.client.post("/api/orders/payment/verify/", payload, format="json")
+        self.assertEqual(second.status_code, 200, second.data)
+
+        order.refresh_from_db()
+        self.assertEqual(order.status, "confirmed")
+        self.assertEqual(order.payment_status, "captured")
+        self.assertEqual(order.razorpay_payment_id, "pay_RESV001")
+        self.assertIsNotNone(order.paid_at)
+        self.product.refresh_from_db()
+        self.assertEqual(self.product.stock, 6)  # both twin lines sold: 10-2-2
+        self.assertEqual(StockMovement.objects.count(), 2)  # one ledger row per line
+        self.assertEqual(
+            order.stock_reservations.get().status,
+            StockReservation.Status.RELEASED,
+        )
+
     def test_coupon_conflict_verify_releases_holds(self):
         """A verify that fails a checkout precondition (coupon gone) is a
         failed checkout: the holds release, the order stays pending."""
@@ -4374,3 +4498,200 @@ class ReservationLifecycleTests(OrderTestBase):
             order.stock_reservations.get().status,
             StockReservation.Status.RELEASED,
         )
+
+
+@tag("orders")
+class CartOrderCaptureClearTests(OrderTestBase):
+    """TIER1-WEBHOOK-CART: the Cart->Order link and the capture-time clear.
+
+    Closes the WEBHOOK-CART open item: ``Cart`` carried no user FK and
+    nothing joined an Order to a Cart, so the gateway webhook (no session
+    cookie) could not empty the originating cart and a returning customer
+    saw a phantom full cart. The fix binds ``Cart.order`` at checkout and
+    clears the linked cart inside ``commit_order_sale`` past the
+    idempotency gate — ONE clear, both capture writers.
+    """
+
+    # The webhook contract recomputed here rather than imported from
+    # orders.tests_webhooks: importing that module's TestCase would
+    # re-collect every one of its tests inside this module as well.
+    WEBHOOK_SECRET = "TESTINGONLY-WEBHOOK-SECRET-CART-CLEAR"
+
+    def _session_cart(self):
+        """The buyer's session cart, as checkout leaves it."""
+        return Cart.objects.get(session_id=self.client.session.session_key)
+
+    # (e) The link is SET at order creation, inside the checkout transaction.
+    def test_checkout_links_the_cart_to_the_created_order(self):
+        order = self.create_order()
+
+        cart = self._session_cart()
+        self.assertEqual(cart.order, order)
+        self.assertEqual(order.cart, cart)
+        # Checkout itself still does not clear: cleanup is capture's job.
+        self.assertEqual(cart.items.count(), 1)
+
+    # (a) A successful capture empties the linked cart (cart row survives).
+    def test_commit_order_sale_empties_the_linked_cart(self):
+        order = self.create_order()
+        cart = self._session_cart()
+        self.assertEqual(cart.items.count(), 1)
+
+        commit_order_sale(order)
+
+        cart.refresh_from_db()
+        self.assertEqual(cart.items.count(), 0)
+        self.assertEqual(cart.order, order)  # the row stays, the lines go
+        self.product.refresh_from_db()
+        self.assertEqual(self.product.stock, 8)  # the sale still committed
+
+    # (b) Idempotent: a replayed capture no-ops at the gate and cannot
+    # re-clear — a line added AFTER the capture survives the replay.
+    def test_a_replayed_capture_does_not_reclear_the_cart(self):
+        order = self.create_order()
+        cart = self._session_cart()
+        commit_order_sale(order)
+        # Both real writers record the capture in their own transaction;
+        # mirror that so the second call meets the payment-dimension gate.
+        order.payment_status = "captured"
+        order.save(update_fields=["payment_status"])
+        extra = self.make_product(name="Post-buy Extra", price="10.00", stock=3)
+        CartItem.objects.create(cart=cart, product=extra, quantity=1)
+
+        commit_order_sale(order)
+
+        cart.refresh_from_db()
+        self.assertEqual(cart.items.count(), 1)
+        self.assertEqual(cart.items.get().product, extra)
+        self.product.refresh_from_db()
+        self.assertEqual(self.product.stock, 8)  # once, not twice
+        self.assertEqual(StockMovement.objects.count(), 1)
+
+    # (c) An order with NO linked cart captures fine and clears nothing.
+    def test_an_order_with_no_linked_cart_captures_without_raising(self):
+        order = Order.objects.create(
+            user=self.buyer,
+            full_name="Unlinked Buyer",
+            phone="9876543210",
+            address="3 Plain Street",
+            city="Mumbai",
+            state="Maharashtra",
+            pincode="400001",
+            total_amount=Decimal("1000.00"),
+        )
+        OrderItem.objects.create(
+            order=order,
+            product=self.product,
+            product_name=self.product.name,
+            price=self.product.price,
+            quantity=2,
+            subtotal=Decimal("1000.00"),
+        )
+        self.assertFalse(Cart.objects.filter(order=order).exists())
+
+        commit_order_sale(order)
+
+        self.product.refresh_from_db()
+        self.assertEqual(self.product.stock, 8)
+        # The buyer's (unlinked) session cart is untouched by this capture.
+        self.assertEqual(self._session_cart().items.count(), 1)
+
+    # (d) on_delete=SET_NULL: deleting the order nulls the link, never
+    # cascades the cart away.
+    def test_deleting_the_order_nulls_the_link_and_keeps_the_cart(self):
+        order = self.create_order()
+        cart = self._session_cart()
+
+        order.delete()
+
+        cart.refresh_from_db()
+        self.assertIsNone(cart.order)
+        self.assertEqual(cart.items.count(), 1)  # no cascade
+
+    # (f) The reported bug: a gateway webhook capture (no browser, no
+    # session cookie) clears the cart through the order link.
+    def test_a_webhook_capture_clears_the_cart_without_a_browser(self):
+        user = self.make_user("webhook-buyer")
+        product = self.make_product(name="Noir Absolu", price="500.00", stock=10)
+        order = Order.objects.create(
+            user=user,
+            full_name="Webhook Buyer",
+            phone="9876500000",
+            address="9 Gateway Road",
+            city="Mumbai",
+            state="Maharashtra",
+            pincode="400001",
+            total_amount=Decimal("1000.00"),
+            razorpay_order_id="order_CARTCLEAR",
+        )
+        OrderItem.objects.create(
+            order=order,
+            product=product,
+            product_name=product.name,
+            price=product.price,
+            quantity=2,
+            subtotal=Decimal("1000.00"),
+        )
+        cart = Cart.objects.create(session_id="session-webhook-cart-clear")
+        CartItem.objects.create(cart=cart, product=product, quantity=2)
+        cart.order = order
+        cart.save(update_fields=["order"])
+
+        body = {
+            "entity": "event",
+            "account_id": "acc_TEST",
+            "event": "payment.captured",
+            "contains": ["payment"],
+            "payload": {
+                "payment": {
+                    "entity": "payment",
+                    "id": "pay_CARTCLEAR",
+                    "amount": 100000,
+                    "currency": "INR",
+                    "order_id": "order_CARTCLEAR",
+                    "captured": True,
+                    "status": "captured",
+                }
+            },
+        }
+        payload = json.dumps(body).encode("utf-8")
+        signature = hmac.new(
+            self.WEBHOOK_SECRET.encode("utf-8"), payload, hashlib.sha256
+        ).hexdigest()
+
+        with override_settings(RAZORPAY_WEBHOOK_SECRET=self.WEBHOOK_SECRET):
+            res = self.client.post(
+                "/api/v1/webhooks/razorpay/",
+                data=payload,
+                content_type="application/json",
+                HTTP_X_RAZORPAY_EVENT_ID="evt_CARTCLEAR",
+                HTTP_X_RAZORPAY_SIGNATURE=signature,
+            )
+
+        self.assertEqual(res.status_code, 200, res.data)
+        order.refresh_from_db()
+        self.assertEqual(order.payment_status, "captured")
+        cart.refresh_from_db()
+        self.assertEqual(cart.items.count(), 0)  # the bug this task closes
+        product.refresh_from_db()
+        self.assertEqual(product.stock, 8)
+        self.assertEqual(
+            PaymentEvent.objects.get(event_id="evt_CARTCLEAR").outcome,
+            PaymentEvent.Outcome.APPLIED,
+        )
+
+    # (g) TIER1-GUEST-DEADEND regression: the link changes nothing about
+    # the uniform anonymous refusal.
+    def test_guest_checkout_is_still_refused_and_links_nothing(self):
+        guest = self.fresh_client()
+        self.seed_session_cart([(self.product, 1)], client=guest)
+
+        res = guest.post(
+            "/api/orders/checkout/", self.checkout_payload(), format="json"
+        )
+
+        self.assertEqual(res.status_code, 403, res.data)
+        self.assertEqual(Order.objects.count(), 0)
+        cart = Cart.objects.get(session_id=guest.session.session_key)
+        self.assertIsNone(cart.order)
+        self.assertEqual(cart.items.count(), 1)  # the refusal writes nothing

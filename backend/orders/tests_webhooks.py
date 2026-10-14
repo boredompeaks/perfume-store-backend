@@ -1382,6 +1382,170 @@ class SaleCommitCouponTests(WebhookTestCase):
         )
 
 
+class CouponOverLimitAuditTests(WebhookTestCase):
+    """TIER1-COUPON-AUDIT: an over-limit redemption is RECORDED, visible.
+
+    The consumption in ``commit_order_sale`` is deliberately not a gate (see
+    the comment there): money is captured and the discount was already granted
+    against the reconciled amount, so refusing the capture would be worse than
+    over-granting. What was missing is any trace an operator can see — these
+    pins make the over-limit event a row in the audit trail, and pin the
+    properties around it: the in-limit path stays quiet, the audit row commits
+    and rolls back WITH the capture, and a failing audit sink can never break
+    the capture.
+    """
+
+    def over_limit_events(self):
+        return AuditEvent.objects.filter(
+            event_type=AuditEvent.EventType.PAYMENT_COUPON_OVER_LIMIT
+        )
+
+    def test_a_capture_within_the_limit_writes_no_over_limit_audit_row(self):
+        # One use of a limit-1 code is INSIDE the limit: the normal path must
+        # not gain spurious audit noise.
+        order = self.make_pending_order()
+        coupon = self.make_coupon(code="WITHIN1", usage_limit=1)
+        self.add_item(order, quantity=1)
+        self.attach_coupon(order, coupon)
+
+        response = self.deliver(self.capture_event(order))
+
+        self.assertEqual(response.status_code, 200)
+        coupon.refresh_from_db()
+        self.assertEqual(coupon.used_count, 1)
+        self.assertEqual(self.over_limit_events().count(), 0)
+
+    def test_a_capture_past_the_limit_records_exactly_one_audit_row(self):
+        # The limit was already spent when this capture landed (the race
+        # between cart-add validation and capture): the increment pushes
+        # 1 -> 2 past a limit of 1, and the row carries everything an
+        # operator needs — which code, which order, the new count, the limit,
+        # and that it was recorded rather than prevented.
+        order = self.make_pending_order()
+        coupon = self.make_coupon(code="OVER1", usage_limit=1, used_count=1)
+        self.add_item(order, quantity=1)
+        self.attach_coupon(order, coupon)
+
+        self.deliver(self.capture_event(order))
+
+        coupon.refresh_from_db()
+        self.assertEqual(coupon.used_count, 2)
+        event = self.over_limit_events().get()
+        self.assertEqual(event.category, AuditEvent.Category.PAYMENT)
+        self.assertEqual(event.order, order)
+        self.assertEqual(event.detail["coupon_code"], "OVER1")
+        self.assertEqual(event.detail["used_count"], 2)
+        self.assertEqual(event.detail["usage_limit"], 1)
+        self.assertEqual(event.detail["prevention"], "recorded_not_prevented")
+
+    def test_the_over_limit_capture_still_succeeds(self):
+        # The row is a RECORD, not a PREVENTION: money is captured and stock
+        # moves exactly as an in-limit capture would.
+        order = self.make_pending_order()
+        coupon = self.make_coupon(code="STILLGO", usage_limit=1, used_count=1)
+        product = self.add_item(order, quantity=2)
+        self.attach_coupon(order, coupon)
+
+        response = self.deliver(self.capture_event(order))
+
+        self.assertEqual(response.status_code, 200)
+        order.refresh_from_db()
+        self.assertEqual(order.payment_status, "captured")
+        product.refresh_from_db()
+        self.assertEqual(product.stock, 8)
+        self.assertEqual(
+            PaymentEvent.objects.get(event_id="evt_TEST0001").outcome,
+            PaymentEvent.Outcome.APPLIED,
+        )
+        self.assertEqual(self.over_limit_events().count(), 1)
+
+    def test_the_over_limit_audit_row_rolls_back_with_the_capture(self):
+        # Written inside the capture's transaction: a failure AFTER the
+        # service returns that rolls the capture back takes the audit row
+        # with it — trail and effect can never disagree.
+        order = self.make_pending_order()
+        coupon = self.make_coupon(code="ROLLBK", usage_limit=1, used_count=1)
+        product = self.add_item(order, quantity=1)
+        self.attach_coupon(order, coupon)
+
+        class _CaptureRolledBack(Exception):
+            pass
+
+        with self.assertRaises(_CaptureRolledBack):
+            with transaction.atomic():
+                commit_order_sale(order)
+                raise _CaptureRolledBack
+
+        self.assertEqual(self.over_limit_events().count(), 0)
+        coupon.refresh_from_db()
+        self.assertEqual(coupon.used_count, 1)
+        product.refresh_from_db()
+        self.assertEqual(product.stock, 10)
+
+    def test_a_faulting_audit_write_never_breaks_the_capture(self):
+        # The never-raise contract: the audit sink going down is a monitoring
+        # failure, not a reason to roll back captured money. Only the
+        # over-limit record is faulted — the webhook's other audit rows are
+        # load-bearing writers and stay honest.
+        order = self.make_pending_order()
+        coupon = self.make_coupon(code="SINKDOWN", usage_limit=1, used_count=1)
+        product = self.add_item(order, quantity=2)
+        self.attach_coupon(order, coupon)
+        original = AuditEvent.record
+
+        def selective_explode(event_type, *args, **kwargs):
+            if str(event_type) == str(AuditEvent.EventType.PAYMENT_COUPON_OVER_LIMIT):
+                raise RuntimeError("audit sink is down")
+            return original(event_type, *args, **kwargs)
+
+        with patch.object(AuditEvent, "record", staticmethod(selective_explode)):
+            with self.assertLogs("orders.inventory", level="ERROR") as logs:
+                response = self.deliver(self.capture_event(order))
+
+        self.assertIn(
+            "over-limit coupon redemption audit write failed",
+            "\n".join(logs.output),
+        )
+        self.assertEqual(response.status_code, 200)
+        order.refresh_from_db()
+        self.assertEqual(order.payment_status, "captured")
+        product.refresh_from_db()
+        self.assertEqual(product.stock, 8)
+        coupon.refresh_from_db()
+        self.assertEqual(coupon.used_count, 2)
+        self.assertEqual(self.over_limit_events().count(), 0)
+
+    def test_the_second_burn_of_a_single_use_code_records_the_over_limit(self):
+        # The reported race, through the actual writer: two customers, one
+        # single-use code, both captures confirmed by signed deliveries. The
+        # first burn is inside the limit and stays quiet; the second burn
+        # pushes usage 1 -> 2 and IS the over-limit event, named against the
+        # order that burned it.
+        coupon = self.make_coupon(code="DOUBLEBURN", usage_limit=1)
+        first = self.make_pending_order()
+        self.add_item(first, quantity=1)
+        self.attach_coupon(first, coupon)
+        second = self.make_pending_order(
+            gateway_order="order_TEST12", username="burn-two"
+        )
+        self.add_item(second, quantity=1)
+        self.attach_coupon(second, coupon)
+
+        self.deliver(self.capture_event(first))
+        self.deliver(
+            self.capture_event(second, payment_id="pay_TEST12"),
+            event_id="evt_BURN2",
+        )
+
+        coupon.refresh_from_db()
+        self.assertEqual(coupon.used_count, 2)
+        event = self.over_limit_events().get()
+        self.assertEqual(event.order, second)
+        self.assertEqual(event.detail["coupon_code"], "DOUBLEBURN")
+        self.assertEqual(event.detail["used_count"], 2)
+        self.assertEqual(event.detail["usage_limit"], 1)
+
+
 class SaleCommitServiceTests(WebhookTestCase):
     """The shared service's own contract, driven directly.
 
