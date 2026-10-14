@@ -56,23 +56,29 @@ and leaves the order retryable, while the webhook cannot un-capture money the
 gateway already holds, so it records the conflict and leaves the order for the
 reconciliation the PaymentEvent row exists to feed.
 
-**Cart cleanup is deliberately NOT here, and cannot be.** ``verify_payment``
-empties the bought lines out of the caller's cart, and that is right for it -
-it has the session cookie. A webhook does not: ``Cart`` is identified only by
-``session_id`` and carries NO user FK, and nothing anywhere in the schema joins
-an Order to a Cart. So a server-to-server delivery has no way to name this
-customer's cart. The tempting "fix" - deleting cart items with these
-``product_id``s - would empty EVERY customer's cart in the store, so the
-correct answer here is that the webhook does not do it and the limitation is
-recorded rather than papered over. It is also the smaller defect: a stale cart
-line is a re-purchase nuisance, not money, whereas the two things this module
-does own (the decrement and the coupon usage) are.
+**The linked cart is emptied HERE, past the idempotency gate
+(TIER1-WEBHOOK-CART).** It used to be true that only the browser callback
+could empty the caller's cart - it has the session cookie - because ``Cart``
+was keyed only by ``session_id`` with no FK to an Order, so a server-to-server
+webhook had no way to name this customer's cart, and a returning customer saw
+a phantom full cart after a webhook capture. ``Cart.order`` (SET_NULL, bound
+at checkout) now names the cart from the order, so this service - the ONE
+place both capture writers already share - clears the linked cart in the same
+transaction as the sale. Idempotent by construction: the clear runs only past
+the payment-dimension guard, so a replayed capture returns before it and a
+second clear never happens; an order with no linked cart (pre-link rows, guest
+rows) is skipped silently. The whole linked cart is emptied, not just the
+ordered lines: checkout snapshots every cart line into the order, so the
+linked cart's contents ARE the order's.
 """
 
 import logging
 
 from django.db import transaction
 
+# TIER1-WEBHOOK-CART: the linked-cart clear needs the Cart model. String
+# FK reference on Cart.order ("orders.Order") means no import cycle.
+from cart.models import Cart
 from products.models import StockMovement, StockReservation, products
 
 from .models import Coupon, Order
@@ -230,3 +236,20 @@ def commit_order_sale(order, *, actor=None):
                 note=f"Order #{locked_order.id}",
                 created_by=actor,
             )
+
+        # TIER1-WEBHOOK-CART: empty the cart that produced this order, in
+        # this transaction (rollback-together with the sale) and only past
+        # the payment-dimension guard above - a replayed capture returns
+        # there and never reaches this line. The cart row is locked like the
+        # other side-effect targets (conventions.md:16); the lock lands
+        # after Order -> products -> coupon, the shared order both capture
+        # writers already use, so no lock-order cycle is introduced.
+        # filter().first() rather than the reverse OneToOne accessor: None
+        # for an order with no linked cart (pre-link, guest) is a silent
+        # skip, and an already-empty relation makes the DELETE a no-op, so
+        # neither a missing nor a previously-cleared cart can raise.
+        linked_cart = Cart.objects.select_for_update().filter(
+            order=locked_order
+        ).first()
+        if linked_cart is not None:
+            linked_cart.items.all().delete()
