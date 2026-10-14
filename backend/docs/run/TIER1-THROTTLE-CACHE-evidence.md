@@ -25,7 +25,8 @@ Ran 2058 tests, OK (expected failures=3); TOTAL 10165 stmts, 5 missed,
 
 ## New-test fail-fast proof
 
-Before the settings change, `manage.py test tests.test_throttle_shared_cache`:
+Before the settings change, `manage.py test` pointed at the new test module
+(`backend/tests/test_throttle_shared_cache.py`):
 8 found, FAILED (failures=1, skipped=2) — the failure is
 `ThrottleCacheConfigTests.test_with_redis_url_the_default_alias_resolves_to_redis`
 (observed LocMemCache where the spec requires RedisCache); the 2 skips are the
