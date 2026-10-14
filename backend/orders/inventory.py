@@ -79,6 +79,7 @@ from django.db import transaction
 # TIER1-WEBHOOK-CART: the linked-cart clear needs the Cart model. String
 # FK reference on Cart.order ("orders.Order") means no import cycle.
 from cart.models import Cart
+from common.models import AuditEvent
 from products.models import StockMovement, StockReservation, products
 
 from .models import Coupon, Order
@@ -213,6 +214,45 @@ def commit_order_sale(order, *, actor=None):
             coupon = Coupon.objects.select_for_update().get(pk=locked_order.coupon_id)
             coupon.used_count += 1
             coupon.save(update_fields=["used_count"])
+            # The increment above is a RECORD, never a gate (see the block
+            # comment): when it pushes usage PAST the limit — a race between
+            # cart-add validation and capture, or a limit reached while this
+            # payment was in flight — the over-redemption is made VISIBLE in
+            # the audit trail instead of silent in the usage counter. Written
+            # inside this same atomic block so it rolls back with the capture,
+            # and savepoint-wrapped so a failing audit sink can never poison
+            # the transaction or roll back captured money (the trailing-write
+            # never-raise contract orders.webhooks uses for the notification
+            # enqueue).
+            if (
+                coupon.usage_limit is not None
+                and coupon.used_count > coupon.usage_limit
+            ):
+                try:
+                    with transaction.atomic():
+                        AuditEvent.record(
+                            AuditEvent.EventType.PAYMENT_COUPON_OVER_LIMIT,
+                            order=locked_order,
+                            detail={
+                                "coupon_code": coupon.code,
+                                "used_count": coupon.used_count,
+                                "usage_limit": coupon.usage_limit,
+                                # Named "prevention", not
+                                # "recorded_not_prevented": the audit
+                                # sanitizer drops any key whose normalized
+                                # form contains a credential marker, and
+                                # "recorded_not_prevented" contains "otp"
+                                # ("notp"). The value carries the phrase.
+                                "prevention": "recorded_not_prevented",
+                            },
+                        )
+                except Exception:
+                    logger.exception(
+                        "over-limit coupon redemption audit write failed; "
+                        "capture stays committed order=%s coupon=%s",
+                        locked_order.id,
+                        coupon.code,
+                    )
 
         # Filtering on ACTIVE makes the conversion idempotent and retry-safe: a
         # hold an earlier failed attempt released is terminal and is never
