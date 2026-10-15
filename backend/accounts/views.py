@@ -4,6 +4,7 @@ from django.contrib.auth.models import User
 from django.contrib.auth.password_validation import validate_password
 from django.contrib.auth.tokens import default_token_generator
 from django.core.exceptions import ValidationError
+from django.core.signing import BadSignature, TimestampSigner
 from django.db import transaction
 from django.utils import timezone
 from django.utils.encoding import force_bytes, force_str
@@ -269,9 +270,78 @@ def _send_verification_email(user):
     )
 
 
+# Q-S3 [F3 ACCESS GATE]: domain separation and payload for the signed access
+# challenge. Literals on purpose, not settings: they are the minting contract
+# the owner-side edge gate must reproduce character-for-character, and a
+# constant in the source is what a non-Django minter can read (the env contract
+# that varies per deployment lives in ACCOUNT_CHALLENGE_* settings below).
+CHALLENGE_SALT = "accounts.access-challenge"
+CHALLENGE_VALUE = "accounts-access"
+CHALLENGE_REFUSAL = "Access challenge required."
+
+
+def _enforce_access_challenge(request):
+    """Q-S3 [F3 ACCESS GATE]: the optional signed-challenge hook.
+
+    Env contract (both keys are documented in ``.env.example``):
+
+    - ``ACCOUNT_CHALLENGE_SECRET`` unset — the zero-config default — the hook
+      is DISABLED: every request passes with no ``challenge`` parameter, which
+      is what keeps a deployment that has not wired an edge gate (and every
+      existing test) green.
+    - Set to the edge gate's shared secret, the request must carry
+      ``challenge=<token>`` in the JSON body or the query string: a Django
+      ``TimestampSigner`` token minted with that same secret, the
+      ``CHALLENGE_SALT`` domain and the ``CHALLENGE_VALUE`` payload —
+      ``TimestampSigner(key=secret, salt=CHALLENGE_SALT).sign(CHALLENGE_VALUE)``
+      is the exact mint — a one-liner beside any Python edge gate, or
+      reproduced byte-for-byte elsewhere from TimestampSigner's recipe (b62
+      timestamp, then base64 HMAC-SHA-256 keyed with the salt label mixed
+      into the secret). Missing, foreign-key, tampered, wrong-payload
+      and stale tokens are all refused with the SAME ``PermissionDenied``
+      detail, so the refusal distinguishes nothing.
+    - ``ACCOUNT_CHALLENGE_MAX_AGE`` freshness window in seconds (default 300);
+      a value below 1 disables only the age check — the signature stays
+      required.
+
+    Runs inside the view, i.e. AFTER DRF throttling has already gated the
+    request, so guessing at tokens is bounded by the endpoint's scope budget
+    too. Raises only ``PermissionDenied``, which the uniform error envelope
+    renders as the same 403 body on both endpoints.
+    """
+    secret = settings.ACCOUNT_CHALLENGE_SECRET
+    if not secret:
+        return
+    token = request.query_params.get("challenge")
+    if token is None and isinstance(request.data, dict):
+        token = request.data.get("challenge")
+    if not token or not isinstance(token, str):
+        raise PermissionDenied(CHALLENGE_REFUSAL)
+    max_age = settings.ACCOUNT_CHALLENGE_MAX_AGE
+    try:
+        # SignatureExpired subclasses BadSignature, so one catch covers both.
+        payload = TimestampSigner(key=secret, salt=CHALLENGE_SALT).unsign(
+            token, max_age=max_age if max_age > 0 else None
+        )
+    except BadSignature:
+        raise PermissionDenied(CHALLENGE_REFUSAL)
+    if payload != CHALLENGE_VALUE:
+        raise PermissionDenied(CHALLENGE_REFUSAL)
+
+
 @api_view(["POST"])
-@throttle_scope("auth")
+@throttle_scope("register")
 def register(request):
+    """POST /api/accounts/register/ — Q-S3 [F3 ACCESS GATE].
+
+    Throttled on its own ``register`` scope (tighter default than the shared
+    ``auth`` budget it left) and gated by the signed-challenge hook when
+    ``ACCOUNT_CHALLENGE_SECRET`` is configured — see
+    ``_enforce_access_challenge`` for the env contract. The response carries
+    no numeric ``user.id``: an auto-incrementing account id in an anonymous
+    response leaks sign-up ordering for free.
+    """
+    _enforce_access_challenge(request)
 
     serializer = RegisterSerializer(data=request.data)
 
@@ -300,7 +370,6 @@ def register(request):
             {
                 "message": "User registered. Check your email to verify the account.",
                 "user": {
-                    "id": user.id,
                     "username": user.username,
                     "email": user.email,
                 },
@@ -312,11 +381,20 @@ def register(request):
 
 
 @api_view(["GET"])
-@throttle_scope("auth")
+@throttle_scope("username-probe")
 def username_available(request):
-    """The scope also throttles GET (ScopedRateThrottle has no safe-method
-    exemption): this endpoint is a public username-existence oracle, so
-    without a rate limit it enables cheap username enumeration."""
+    """Q-S3 [F3 ACCESS GATE]: the public username-existence oracle.
+
+    The scope also throttles GET (ScopedRateThrottle has no safe-method
+    exemption): without a rate limit this endpoint enables cheap username
+    enumeration, and its own ``username-probe`` budget is tighter by default
+    than the shared ``auth`` budget it left. On top of that, the signed-
+    challenge hook refuses every probe once ``ACCOUNT_CHALLENGE_SECRET`` is
+    configured (see ``_enforce_access_challenge`` for the env contract); with
+    the zero-config default the endpoint stays open but bounded, by design —
+    the edge gate half is the owner's to switch on.
+    """
+    _enforce_access_challenge(request)
     username = request.query_params.get("username", "").strip()
 
     if len(username) < 3:

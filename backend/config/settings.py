@@ -894,6 +894,30 @@ MFA_TRUST_DAYS = _env_int("MFA_TRUST_DAYS", 30)
 MFA_TRUST_COOKIE_NAME = os.getenv("MFA_TRUST_COOKIE_NAME", "mfa_trusted_device")
 MFA_TRUST_COOKIE_SAMESITE = os.getenv("MFA_TRUST_COOKIE_SAMESITE", "Strict")
 
+# Q-S4 [F8]: the failed-attempt budget for the Django admin login form
+# (AdminLoginThrottle in accounts/admin.py). DRF's scoped throttle only
+# covers DRF views, so the API 'auth' rate never saw /admin/login/ — a
+# plain Django view. The form counts FAILED attempts per client ident in
+# the throttle cache; a successful login spends nothing. 'n/min' matches
+# the DRF rate shape; an empty value disables the bound (kill switch).
+ADMIN_LOGIN_THROTTLE_RATE = os.getenv("THROTTLE_ADMIN_LOGIN_RATE", "10/min")
+
+# Q-S3 [F3 ACCESS GATE]: application-level signed-challenge hook for the two
+# username-enumeration endpoints (register, username-available). Unset — the
+# zero-config default — the hook is DISABLED and both endpoints answer every
+# request exactly as before, so a deployment that has not wired an edge gate
+# keeps working and every existing test stays green. Set it to the shared
+# secret the owner-side edge gate (e.g. a Cloudflare Turnstile Worker) uses to
+# SIGN the `challenge` parameter; from then on those endpoints refuse any
+# request without a token that verifies under this secret. The exact minting
+# contract (TimestampSigner, salt and payload) is documented on
+# _enforce_access_challenge in accounts/views.py and in .env.example.
+ACCOUNT_CHALLENGE_SECRET = os.getenv("ACCOUNT_CHALLENGE_SECRET", "")
+# Freshness window for a signed challenge, in seconds. Values below 1 disable
+# the age check only — a valid signature is still required. Malformed values
+# fall back to the documented default via _env_int, never crashing startup.
+ACCOUNT_CHALLENGE_MAX_AGE = _env_int("ACCOUNT_CHALLENGE_MAX_AGE", 300)
+
 # SPEC-19-2 [R-19.20/R-19.21] admin alerts. Comma-separated staff/admin
 # mailboxes; empty disables admin alerts entirely (no guessed recipient).
 ALERT_RECIPIENTS = os.getenv("ALERT_RECIPIENTS", "")
@@ -1144,6 +1168,12 @@ REST_FRAMEWORK = {
         "coupon": os.getenv("THROTTLE_COUPON_RATE", "10/min"),
         "cart": os.getenv("THROTTLE_CART_RATE", "60/min"),
         "auth": os.getenv("THROTTLE_AUTH_RATE", "10/min"),
+        # Q-S3 [F3]: the two username-enumeration surfaces left the shared
+        # 'auth' budget for dedicated scopes, each default TIGHTER than that
+        # shared budget (a probe and a registration can no longer draw from
+        # the login budget either — separate counters, separate knobs).
+        "register": os.getenv("THROTTLE_REGISTER_RATE", "5/min"),
+        "username-probe": os.getenv("THROTTLE_USERNAME_PROBE_RATE", "5/min"),
         # Tighter than 'auth': the recovery views each send an email per
         # accepted request, so this budget is the outbound-mail-bomb bound.
         "recovery": os.getenv("THROTTLE_RECOVERY_RATE", "5/min"),
