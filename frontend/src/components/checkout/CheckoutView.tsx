@@ -123,11 +123,6 @@ export default function CheckoutView() {
         setOrder(created);
         setShipping(details);
         saveShipping(details); // PII save — the moment a working order exists.
-        try {
-          sessionStorage.removeItem("aurel.coupon");
-        } catch {
-          // ignore
-        }
         setStep("pay");
       })
       .catch((err: unknown) => {
