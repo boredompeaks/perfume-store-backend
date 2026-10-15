@@ -1185,6 +1185,12 @@ REST_FRAMEWORK = {
         # receive an outbound email, so the budget is the same shape as
         # the recovery bound (tighter than the generic auth budget).
         "restock": os.getenv("THROTTLE_RESTOCK_RATE", "5/min"),
+        # SPEC-Q-RS1 guest half of the same endpoint: the per-(IP + email)
+        # pair budget for anonymous opt-ins. Separate knob from 'restock'
+        # so a deployment can tighten the pair bound (the mail-bomb shape:
+        # one origin re-arming one address) without moving the per-IP
+        # volume budget the authed path also draws on.
+        "restock-guest": os.getenv("THROTTLE_RESTOCK_GUEST_RATE", "5/min"),
         # SPEC-1-06: webhook deliveries are server-to-server and arrive in
         # bursts (a retry storm, a payout sweep, a provider-side loop), so the
         # budget is a floor on honest traffic rather than an anti-brute-force
