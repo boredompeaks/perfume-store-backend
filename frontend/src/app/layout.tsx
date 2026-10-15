@@ -4,6 +4,7 @@ import "./globals.css";
 import Header from "@/components/Header";
 import Footer from "@/components/Footer";
 import { site } from "@/lib/site";
+import { DEFAULT_SEED, seedToCssVars } from "@/lib/theme";
 import { Providers } from "./providers";
 
 /**
@@ -94,7 +95,20 @@ export default function RootLayout({
   children: React.ReactNode;
 }) {
   return (
-    <html lang="en" className={`${playfair.variable} ${jakarta.variable}`}>
+    <html
+      lang="en"
+      className={`${playfair.variable} ${jakarta.variable}`}
+      // U-W1-T2: the white-label seed layer. DEFAULT_SEED re-states the
+      // canonical globals.css token values (#8c5338 / #885035 and the
+      // Playfair/Jakarta stacks), so this inline style is a zero visual
+      // delta — it only wires the mechanism a merchant theme overrides.
+      // The values ride on the root element, where the stylesheet's
+      // :root/@theme declarations would resolve, so specificity matches
+      // and a seed swap needs no other code. The cast: React's
+      // CSSProperties has no --custom-property index, though the runtime
+      // accepts it.
+      style={seedToCssVars(DEFAULT_SEED) as React.CSSProperties}
+    >
       <body className="flex min-h-dvh flex-col bg-paper font-sans text-ink antialiased">
         <Providers>
           <a
