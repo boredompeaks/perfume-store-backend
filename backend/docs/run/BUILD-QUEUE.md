@@ -10,6 +10,10 @@ decision record.
 Status legend: `PENDING` | `BUILDING` | `IN-AUDIT` | `SHIPPED` | `BLOCKED(owner)`.
 Queue execution APPROVED by owner 2026-10-15 (name not yet decided — run
 everything EXCEPT Phase N; frontend tasks are agent-owned per owner).
+**PAUSED by owner 2026-10-15T11:01** after Q-S1+Q-S3 audits returned SHIP —
+no further dispatch until owner says continue. On resume: Q-S2 (lane A) +
+Q-S4 (lane B). Cross-orchestrator coordination channel:
+`C:\Users\Admin\AppData\Local\Temp\opencode\orch-bridge.md` (+bridge-watch.ps1).
 
 ---
 
@@ -17,10 +21,10 @@ everything EXCEPT Phase N; frontend tasks are agent-owned per owner).
 
 | ID | Task | Lane | Notes |
 |---|---|---|---|
-| Q-S1 | F1: remove `session_id` from CartSerializer; repin `test_v09_cart_payload_excludes_session_id` against the REAL payload (it currently passes against a different payload = lying test); frontend `types.ts` field removal rides the frontend phase | A | Verified: `cart/serializers.py:30` includes the field. Regression test: unauthenticated GET /api/cart/ contains neither `session_id` nor the raw session key |
-| Q-S2 | F2: split /health/ — public keeps `{"status":"ok","checks":{...deploy-relevant}}` (FIRST verify release.sh's exact wait contract); pending_orders/carts/stock/razorpay_mode/smtp_configured move behind a staff-capability endpoint or die if nothing reads them | A | P2. Deploy pipeline must stay green through the change |
-| Q-S3 | F3: ACCESS GATE on `/api/accounts/username-available/` + `/api/accounts/register/` (Cloudflare Turnstile/challenge or equivalent edge gate + tightened throttle); drop numeric `user.id` from the register response. Owner chose gate-over-removal | B | Edge gate may be owner-configured (Turnstile keys); backend half = register response + any app-level challenge hook. Enumerate residual oracles and record them |
-| Q-S4 | F8-verify + hardening: prove MFAAdminSite enforces the MFA code field on the Django admin path (SPEC-17-05/20-13 built it; pentest saw only pre-enrollment login); verify storefront MFA enrollment requires an already-privileged session + throttle; add throttle/lockout on the Django admin login form if the API auth-scope does not cover it | B | Test-only unless a real gap is found (then P2 fix in-task) |
+| Q-S1 | F1: remove `session_id` from CartSerializer; repin `test_v09_cart_payload_excludes_session_id` against the REAL payload; frontend `types.ts` field removal rides the frontend phase | A | **SHIPPED 2026-10-15** — auditor SHIP cycle 1, pushed origin/lane/a @75b0210; non-vacuity mutation-proven; xf 3->2; mechanism = xfail-masked live leak (brief's different-payload claim wrong, corrected); types.ts drop flagged on orch-bridge BE-003 |
+| Q-S2 | F2: split /health/ — public keeps `{"status":"ok","checks":{...deploy-relevant}}` (FIRST verify release.sh's exact wait contract); pending_orders/carts/stock/razorpay_mode/smtp_configured move behind a staff-capability endpoint or die if nothing reads them | A | queued behind Q-S1 audit |
+| Q-S3 | F3: ACCESS GATE on `/api/accounts/username-available/` + `/api/accounts/register/` (Turnstile/challenge + tightened throttle); drop numeric `user.id` from the register response. Owner chose gate-over-removal | B | **SHIPPED 2026-10-15** — auditor SHIP cycle 1, pushed origin/lane/b @90520c0; dedicated scopes 5/min + env-gated signed-challenge (zero-config invariant verified, mutation 9 pins); tests 2093->2101 (+8); api-contract register row stale -> Q-D2; register `id` drop flagged orch-bridge BE-003; residual oracles run/Q-S3-evidence.md |
+| Q-S4 | F8-verify + hardening: prove MFAAdminSite enforces the MFA code field on the Django admin path (SPEC-17-05/20-13 built it; pentest saw only pre-enrollment login); verify storefront MFA enrollment requires an already-privileged session + throttle; add throttle/lockout on the Django admin login form if the API auth-scope does not cover it | B | queued behind Q-S3 audit |
 
 Owner-side parallel actions (dashboard, not agents):
 - F6: Cloudflare Always-HTTPS + HSTS header on test.boredompeaks.me.
@@ -133,6 +137,7 @@ T2 — Load / stress / resource against the REAL URL (after red team):
 | Q-D4 | (d) conventions rule ("comment the why and the invariant, never the what; history belongs in changes.md") + opportunistic trim; optional top-10 narrative-header pass | no mass scrub |
 | Q-D5 | (b) changes.md rotation -> `changes/changes-2026Q4.md` + pointer row | SCHEDULED AT THIS QUEUE'S FINAL PROMOTION BOUNDARY (byte-integrity baseline + scanner scope updated in the same gate) |
 | Q-D6 | README refresh (owner 2026-10-15): verify every command still true, freshen product one-liner, keep current repo-name branding — NO product-name rename until name is finalized | rides Phase D |
+| Q-D7 | test-infra: fix two pre-existing environmental reds hit independently by both Q-S1+Q-S3 builders — (a) celery cadence pin is deterministic-fail 02:17-03:17 UTC daily (wall-clock invariant needs a freeze/mock, not the real clock), (b) restore-drill TEMP-glob cross-process race when suites run concurrently | both builders root-caused; after-runs clean |
 
 ## Phase N — Naming (blocked on owner shortlist reply)
 
