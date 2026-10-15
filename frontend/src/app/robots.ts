@@ -1,5 +1,6 @@
 import type { MetadataRoute } from "next";
 import { site } from "@/lib/site";
+import { disallowedPaths } from "@/lib/pages";
 
 export default function robots(): MetadataRoute.Robots {
   return {
@@ -7,19 +8,9 @@ export default function robots(): MetadataRoute.Robots {
       {
         userAgent: "*",
         allow: "/",
-        disallow: [
-          "/admin",
-          "/cart",
-          "/checkout",
-          "/orders",
-          "/login",
-          "/register",
-          "/verify-email",
-          "/reset-password",
-          "/resend-verification",
-          "/forgot-username",
-          "/forgot-password",
-        ],
+        // Derived from the page registry: every non-indexable static route is
+        // disallowed, so robots can never drift from the sitemap's indexable set.
+        disallow: disallowedPaths(),
       },
     ],
     sitemap: `${site.url}/sitemap.xml`,
