@@ -8,6 +8,8 @@ are blocked until the owner answers the frontend-edit question in the
 decision record.
 
 Status legend: `PENDING` | `BUILDING` | `IN-AUDIT` | `SHIPPED` | `BLOCKED(owner)`.
+Queue execution starts after the product name is finalized (owner 2026-10-15);
+frontend tasks are agent-owned (owner will not touch frontend).
 
 ---
 
@@ -26,7 +28,7 @@ Owner-side parallel actions (dashboard, not agents):
   `test.boredompeaks.me/staff/*`).
 - Turnstile keys for Q-S3 once the backend hook shape is known.
 
-## Phase F — Frontend trio (FRONTEND-GATED on owner answer)
+## Phase F — Frontend trio (UNBLOCKED 2026-10-15: agents own frontend fixes per owner)
 
 | ID | Task | Notes |
 |---|---|---|

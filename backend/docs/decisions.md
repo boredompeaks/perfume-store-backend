@@ -123,10 +123,15 @@ implemented via retainer. Storefront brand in demos is "Maison Aurel"
 | F7 refresh in localStorage | FIX (pair): API sets HttpOnly+Secure+SameSite refresh cookie + Origin check; frontend dual-accept migration window then purge. Backend half lane A; frontend half gated on frontend-edit question |
 | F8 admin exposed | Handled by the Access-in-front decision above + admin-login throttle ride-along |
 
-OPEN QUESTION (owner did not answer in the 2026-10-15 reply): do **agents**
-get a frontend lane for F4/F5/F7-frontend, or does the owner fix those three
-personally? Until answered, frontend files are owner-only per the historical
-standing rule.
+FRONTEND-EDIT QUESTION — **RESOLVED 2026-10-15 (owner): agents handle ALL
+frontend fixes; the owner will not touch frontend code.** `frontend/**` is
+now in-pipeline scope for the queued security fixes (Q-F1/F2/F3 and the
+F7-frontend half). Historical "frontend is owner-only" standing rule is
+superseded for these tasks; the owner keeps any creative/product frontend
+work to themselves when they choose to do it.
+Also recorded: owner has GitHub **Pro** already (private-flip governance
+concern moot); mutation-weekly workflow tuned by owner (~6x4 + other tests,
+est. <2k units/mo); **not flipping the repo private at this time**.
 
 ## 2026-10-15 — Testing program policy (owner override of hybrid proposal)
 
