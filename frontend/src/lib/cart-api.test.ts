@@ -13,7 +13,6 @@ const err = (status: number, body: unknown) =>
 
 const cartBody = {
   id: 1,
-  session_id: "s",
   items: [],
   coupon_code: "SAVE10",
   created_at: "2026-01-01T00:00:00Z",
