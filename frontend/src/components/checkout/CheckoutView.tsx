@@ -8,6 +8,7 @@ import { useAuth } from "@/lib/auth";
 import { getCart } from "@/lib/cart-api";
 import { formatINR } from "@/lib/money";
 import { checkout } from "@/lib/orders-api";
+import { templateConfig } from "@/lib/template.config";
 import {
   loadShipping,
   saveShipping,
@@ -21,6 +22,10 @@ type Step = "details" | "review" | "pay";
 
 export default function CheckoutView() {
   const { status: authStatus } = useAuth();
+  // featureFlags.guestCheckout gates the whole guest path (default true):
+  // off = the sign-in wall below, exactly as it was; on = the wall is down
+  // and the backend's own answer decides what a guest may do.
+  const guestCheckoutEnabled = templateConfig.featureFlags.guestCheckout;
 
   const {
     data: cart,
@@ -38,6 +43,7 @@ export default function CheckoutView() {
     null,
   );
   const [creationError, setCreationError] = useState<string | null>(null);
+  const [refused, setRefused] = useState(false);
   const [creating, setCreating] = useState(false);
 
   if (authStatus === "loading" || cartLoading) {
@@ -48,7 +54,12 @@ export default function CheckoutView() {
     );
   }
 
-  if (authStatus === "anonymous") {
+  // The sign-in wall: exactly the old behavior whenever guest checkout is
+  // off. With guestCheckout on, an anonymous visitor gets the real flow, and
+  // the backend's verified contract (TIER1-GUEST-DEADEND: one uniform 403
+  // that mints nothing) is surfaced at submit as a sign-in hand-off below —
+  // never faked as success, never pre-judged here.
+  if (authStatus === "anonymous" && !guestCheckoutEnabled) {
     return (
       <div className="border border-hairline p-10 text-center">
         <p className="font-display text-2xl tracking-tight">
@@ -109,6 +120,7 @@ export default function CheckoutView() {
 
   const createOrder = (details: ShippingDetails) => {
     setCreationError(null);
+    setRefused(false);
     setCreating(true);
     checkout({
       full_name: details.full_name,
@@ -127,6 +139,10 @@ export default function CheckoutView() {
       })
       .catch((err: unknown) => {
         if (err instanceof ApiError) {
+          // The backend's uniform guest refusal (403, one body for every
+          // reason) becomes a sign-in hand-off rather than a retry loop; its
+          // own message is the copy — nothing is invented on top of it.
+          setRefused(authStatus === "anonymous" && err.status === 403);
           setCreationError(
             err.status === 404
               ? "Your cart session expired. Please add items again."
@@ -206,7 +222,19 @@ export default function CheckoutView() {
               created.
             </p>
 
-            {creationError && (
+            {creationError && refused && (
+              <div role="alert" className="mt-4 border border-hairline p-5">
+                <p className="text-sm">{creationError}</p>
+                <Link
+                  href="/login?next=/checkout"
+                  data-testid="checkout-signin"
+                  className="mt-4 inline-block bg-ink px-6 py-3 text-sm text-paper transition-colors hover:bg-bronze"
+                >
+                  Sign in
+                </Link>
+              </div>
+            )}
+            {creationError && !refused && (
               <p role="alert" className="mt-4 text-sm text-bronze">
                 {creationError}
               </p>
@@ -254,14 +282,37 @@ export default function CheckoutView() {
             </p>
 
             <div className="mt-6">
-              <PaymentLauncher
-                order={order}
-                contact={{
-                  name: shipping.full_name,
-                  email: shipping.email,
-                  phone: shipping.phone,
-                }}
-              />
+              {authStatus === "anonymous" ? (
+                /* Verified contract: create_payment and verify_payment are
+                   IsAuthenticated, so a guest is never routed into the Razorpay
+                   flow — no JWT is faked and no payment call is attempted.
+                   The order exists; signing in is where their path resumes. */
+                <div
+                  className="border border-hairline p-5"
+                  role="status"
+                  data-testid="guest-pay-handoff"
+                >
+                  <p className="text-sm text-ink-secondary">
+                    Your order is created and waiting for payment. Sign in to
+                    complete it.
+                  </p>
+                  <Link
+                    href="/login?next=/checkout"
+                    className="mt-4 inline-block bg-ink px-6 py-3 text-sm text-paper transition-colors hover:bg-bronze"
+                  >
+                    Sign in to pay
+                  </Link>
+                </div>
+              ) : (
+                <PaymentLauncher
+                  order={order}
+                  contact={{
+                    name: shipping.full_name,
+                    email: shipping.email,
+                    phone: shipping.phone,
+                  }}
+                />
+              )}
             </div>
           </section>
         )}
