@@ -10,9 +10,10 @@ decision record.
 Status legend: `PENDING` | `BUILDING` | `IN-AUDIT` | `SHIPPED` | `BLOCKED(owner)`.
 Queue execution APPROVED by owner 2026-10-15 (name not yet decided — run
 everything EXCEPT Phase N; frontend tasks are agent-owned per owner).
-**PAUSED by owner 2026-10-15T11:01** after Q-S1+Q-S3 audits returned SHIP —
-no further dispatch until owner says continue. On resume: Q-S2 (lane A) +
-Q-S4 (lane B). Cross-orchestrator coordination channel:
+**PAUSED by owner 2026-10-15T11:01** after Q-S1+Q-S3 audits returned SHIP;
+resumed 2026-10-15T~17:0x per owner continue. **PHASE S COMPLETE** — all four
+tasks SHIPPED (auditor SHIP cycle 1 each), lanes pushed; GATE_PHASE opened at
+the section boundary. Cross-orchestrator coordination channel:
 `C:\Users\Admin\AppData\Local\Temp\opencode\orch-bridge.md` (+bridge-watch.ps1).
 
 ---
@@ -22,9 +23,9 @@ Q-S4 (lane B). Cross-orchestrator coordination channel:
 | ID | Task | Lane | Notes |
 |---|---|---|---|
 | Q-S1 | F1: remove `session_id` from CartSerializer; repin `test_v09_cart_payload_excludes_session_id` against the REAL payload; frontend `types.ts` field removal rides the frontend phase | A | **SHIPPED 2026-10-15** — auditor SHIP cycle 1, pushed origin/lane/a @75b0210; non-vacuity mutation-proven; xf 3->2; mechanism = xfail-masked live leak (brief's different-payload claim wrong, corrected); types.ts drop flagged on orch-bridge BE-003 |
-| Q-S2 | F2: split /health/ — public keeps `{"status":"ok","checks":{...deploy-relevant}}` (FIRST verify release.sh's exact wait contract); pending_orders/carts/stock/razorpay_mode/smtp_configured move behind a staff-capability endpoint or die if nothing reads them | A | queued behind Q-S1 audit |
+| Q-S2 | F2: split /health/ — public keeps `{"status":"ok","checks":{...deploy-relevant}}` (FIRST verify release.sh's exact wait contract); pending_orders/carts/stock/razorpay_mode/smtp_configured move behind a staff-capability endpoint or die if nothing reads them | A | **SHIPPED 2026-10-15** — auditor SHIP cycle 1, pushed origin/lane/a @163851b; floor 2093→2096 both engines, cov 99.81%; waiters proven body-blind; P3 notes (brief figure wrong; fixture email) travel with next build; stale-docs findings routed Q-D2 |
 | Q-S3 | F3: ACCESS GATE on `/api/accounts/username-available/` + `/api/accounts/register/` (Turnstile/challenge + tightened throttle); drop numeric `user.id` from the register response. Owner chose gate-over-removal | B | **SHIPPED 2026-10-15** — auditor SHIP cycle 1, pushed origin/lane/b @90520c0; dedicated scopes 5/min + env-gated signed-challenge (zero-config invariant verified, mutation 9 pins); tests 2093->2101 (+8); api-contract register row stale -> Q-D2; register `id` drop flagged orch-bridge BE-003; residual oracles run/Q-S3-evidence.md |
-| Q-S4 | F8-verify + hardening: prove MFAAdminSite enforces the MFA code field on the Django admin path (SPEC-17-05/20-13 built it; pentest saw only pre-enrollment login); verify storefront MFA enrollment requires an already-privileged session + throttle; add throttle/lockout on the Django admin login form if the API auth-scope does not cover it | B | queued behind Q-S3 audit |
+| Q-S4 | F8-verify + hardening: prove MFAAdminSite enforces the MFA code field on the Django admin path (SPEC-17-05/20-13 built it; pentest saw only pre-enrollment login); verify storefront MFA enrollment requires an already-privileged session + throttle; add throttle/lockout on the Django admin login form if the API auth-scope does not cover it | B | **SHIPPED 2026-10-15** — auditor SHIP cycle 1, pushed origin/lane/b @6a6de0a; floor 2101→2111 both engines, cov 99.81%; AdminLoginThrottle mutation-proven (M1/M2, 3 pins each); matrix run/Q-S4-evidence.md; V-18 in vulnerabilities.md stale (auditor/human file) |
 
 Owner-side parallel actions (dashboard, not agents):
 - F6: Cloudflare Always-HTTPS + HSTS header on test.boredompeaks.me.
