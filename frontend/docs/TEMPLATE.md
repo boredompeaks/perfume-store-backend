@@ -54,8 +54,10 @@ Paths are relative to `frontend/`.
   `src/lib/server-settings.ts`; if the API is unreachable, the env fallbacks
   keep the footer rendering.
 - **`nav`** and **`footer`** (`shop` / `help` / `legal`) — link + label
-  manifests. They mirror the links the header and footer render today; the
-  components still keep their own local copies (see §7).
+  manifests, consumed by the components themselves: `Header.tsx` renders
+  `templateConfig.nav`, `Footer.tsx` renders the three footer groups, and
+  `MenuOverlay.tsx` derives the mobile menu from `footer.shop` minus `/login`
+  (see §7).
 - **`featureFlags`** — see §4.
 
 `src/lib/site.ts` re-derives the flat `site` export from this manifest;
@@ -121,10 +123,10 @@ All `NEXT_PUBLIC_*` values are inlined at build time — after editing
    (`/products/[slug]`, `/orders/[id]`) are deliberately absent from the
    registry; they are resolved at request time.
 3. **Surface it in navigation**: add the link to `nav` or the relevant
-   `footer` group in `src/lib/template.config.ts`. **Current reality:** the
-   header, mobile menu and footer still render their own local link arrays
-   (`Header.tsx`, `MenuOverlay.tsx`, `Footer.tsx`), so until that switch-over
-   lands you must also add the link there for it to appear (§7).
+   `footer` group in `src/lib/template.config.ts`. **Current reality:** this
+   is the only edit — `Header.tsx`, `MenuOverlay.tsx` and `Footer.tsx` all
+   render from the manifest (the mobile menu derives from `footer.shop` minus
+   `/login`), so a manifest link appears without touching a component (§7).
 
 ---
 
@@ -140,10 +142,20 @@ Declared in `templateConfig.featureFlags`:
 | `returnsRequests` | returns request flow | `true` |
 | `reviews` | product reviews (off until a tenant curates moderation) | `false` |
 
-**Honest state:** the flags are declared, typed and covered by unit tests for
-their defaults and shape, but **no component reads them yet** — consumer
-wiring lands in a later wave. Flipping a flag today changes no behaviour; the
-defaults above are the contract the wiring must honour.
+**Honest state:** the flags are declared, typed and unit-tested for their
+defaults and shape, and **two of the five have consumers**:
+
+- `guestCheckout` gates the whole guest path: off = the `/checkout` sign-in
+  wall as before (`CheckoutView.tsx`); on = an anonymous visitor gets the real
+  flow and the backend's own 403 refusal becomes a sign-in hand-off at submit.
+  It also picks the anonymous CTA copy in `CartView.tsx`.
+- `restockNotifications` switches the sold-out PDP's restock form
+  (`src/app/products/[slug]/page.tsx`, the flag is the kill switch).
+
+The other three — `orderTracking`, `returnsRequests`, `reviews` — are read by
+**no component**: flipping them changes nothing today. (`/track-order` exists
+as a route but does not read `orderTracking`.) The defaults in the table stay
+the contract the remaining wiring must honour.
 
 ---
 
@@ -204,19 +216,19 @@ truth):
 
 ## 7. Honest limits — what still requires code edits today
 
-- **Nav/footer manifest → components:** `template.config.ts` mirrors the
-  link lists, but `Header.tsx`, `MenuOverlay.tsx` and `Footer.tsx` render
-  their own local copies. Editing the manifest alone does not move the UI;
-  both places must change until the switch-over wave.
-- **Feature flags have no consumers** (§4) — flipping one is a no-op today.
+- **Nav/footer manifest → components:** wired — `Header.tsx` renders
+  `templateConfig.nav`, `Footer.tsx` renders the three `footer` groups, and
+  `MenuOverlay.tsx` derives its list from `footer.shop` (minus `/login`).
+  Editing the manifest alone now moves the UI; the one nuance is that the
+  mobile menu follows the footer's shop group, not `nav`.
+- **Three feature flags still have no consumers** (§4) — `orderTracking`,
+  `returnsRequests` and `reviews` flip nothing today; `guestCheckout` and
+  `restockNotifications` are wired.
 - **Theme seed has no env knob** (§2b) — rebranding the accent/fonts means
   editing `src/lib/theme.ts` and rebuilding; only four slots exist, and
   derived colours/fonts are intentionally not seedable.
 - **Currency/locale is fixed:** `money.ts` formats `en-IN` / `INR`. A
   different currency is a code change (then re-verify every money surface).
-- **One brand leak remains in a component:** the mailto subject line in
-  `ContactLinks.tsx` hardcodes the default brand name instead of reading
-  `site.name`.
 - **Policy copy is code:** legal/shipping/returns page prose (including
   region-specific wording such as India pincode and delivery-window text)
   lives in the page components; per-merchant localization is a content edit
