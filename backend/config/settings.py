@@ -13,7 +13,7 @@ https://docs.djangoproject.com/en/6.1/ref/settings/
 import logging
 import os
 import re
-from datetime import timedelta
+from datetime import date, timedelta
 from decimal import Decimal
 from pathlib import Path
 from urllib.parse import unquote, urlparse
@@ -1245,6 +1245,36 @@ SIMPLE_JWT = {
 JWT_REFRESH_COOKIE_NAME = os.getenv("JWT_REFRESH_COOKIE_NAME", "refresh_token")
 JWT_REFRESH_COOKIE_PATH = os.getenv("JWT_REFRESH_COOKIE_PATH", "/api/")
 JWT_REFRESH_COOKIE_SAMESITE = os.getenv("JWT_REFRESH_COOKIE_SAMESITE", "Lax")
+
+
+# SPEC-Q-P1 (F7 backend half): the dual-accept migration window for the
+# legacy body-borne refresh token. Q-F3's frontend half stops sending the
+# token in the JSON body; until that has shipped everywhere, the refresh
+# view still ACCEPTS the body carrier so an already-logged-in browser is
+# not bricked mid-cutover - and it never ISSUES one (the rotated token
+# left as the cookie only, both before and after this window closes). The
+# window is configuration, never a code path: ENABLED is the kill switch,
+# otherwise the window closes START + DAYS after the anchor. All three are
+# env-driven and documented in .env.example; the defaults are the generous
+# posture (open, 90 days past the 2026-10-15 cutover anchor). A malformed
+# START env falls back to the default anchor instead of raising - the same
+# fail-safe pattern as _env_bool/_env_int, because a typo must not take the
+# deployment down, and must not silently close the window early either.
+def _env_iso_date(name, default):
+    raw = (os.getenv(name) or "").strip()
+    if not raw:
+        return default
+    try:
+        return date.fromisoformat(raw)
+    except ValueError:
+        return default
+
+
+JWT_REFRESH_BODY_ACCEPT_ENABLED = _env_bool("JWT_REFRESH_BODY_ACCEPT_ENABLED", True)
+JWT_REFRESH_BODY_ACCEPT_START = _env_iso_date(
+    "JWT_REFRESH_BODY_ACCEPT_START", date(2026, 10, 15)
+)
+JWT_REFRESH_BODY_ACCEPT_DAYS = _env_int("JWT_REFRESH_BODY_ACCEPT_DAYS", 90)
 
 # SPEC-17-03 [R-17.18]: the session cookie carries the cart identity, so
 # its SameSite policy is explicit deployment config rather than an implicit

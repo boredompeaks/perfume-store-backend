@@ -1,3 +1,5 @@
+from datetime import timedelta
+
 from django.conf import settings
 from django.contrib.auth import authenticate
 from django.contrib.auth.models import User
@@ -17,6 +19,7 @@ from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
 from rest_framework.views import APIView
 from rest_framework_simplejwt.exceptions import TokenError
+from rest_framework_simplejwt.settings import api_settings as jwt_api_settings
 from rest_framework_simplejwt.token_blacklist.models import (
     BlacklistedToken,
     OutstandingToken,
@@ -148,29 +151,141 @@ def _clear_refresh_cookie(response):
     return response
 
 
+def _refresh_origin_is_trusted(request):
+    """Origin/CSRF gate for the refresh seam (SPEC-Q-P1).
+
+    The refresh credential rides a cookie, so a forged cross-origin POST is
+    the attack the gate exists for. SameSite=Lax already withholds the
+    cookie from cross-SITE requests, but SameSite is registered-domain
+    scoped: a hostile sibling subdomain (or a deployment that relaxes
+    SameSite through the env knob) is same-site, the browser attaches the
+    cookie, and only the Origin header still names the attacker. Django's
+    CSRF middleware cannot make this check - DRF APIViews are csrf_exempt
+    and this view authenticates no session - so it is made explicitly: an
+    Origin the deployment does not name is refused (403), the API's own
+    scheme://host plus the configured CSRF/CORS origin lists are allowed,
+    and an absent Origin is not a cross-site claim at all (non-browser API
+    clients send none and hold no ambient cookie jar to ride).
+    """
+    origin = request.META.get("HTTP_ORIGIN")
+    if origin is None:
+        return True
+    allowed = {entry.lower() for entry in settings.CSRF_TRUSTED_ORIGINS}
+    allowed.update(entry.lower() for entry in settings.CORS_ALLOWED_ORIGINS)
+    allowed.add(f"{request.scheme}://{request.get_host()}".lower())
+    return origin.lower() in allowed
+
+
+def _legacy_body_refresh_allowed():
+    """Is the legacy body carrier still inside its dual-accept window?
+
+    The window exists so Q-F3's frontend half can migrate at its own pace:
+    closing it early turns every browser still holding the token in
+    localStorage into a logged-out user (the bricking SPEC-Q-P1 forbids),
+    while leaving it open forever keeps an XSS-readable carrier alive.
+    ENABLED is the kill switch; otherwise the window closes START + DAYS,
+    all three env-driven (see settings). Settings are read per call, so a
+    deployment - or a test - can move the window without a restart.
+    """
+    if not settings.JWT_REFRESH_BODY_ACCEPT_ENABLED:
+        return False
+    deadline = settings.JWT_REFRESH_BODY_ACCEPT_START + timedelta(
+        days=settings.JWT_REFRESH_BODY_ACCEPT_DAYS
+    )
+    return timezone.now().date() < deadline
+
+
+def _resolve_refresh_carrier(request, body):
+    """Decide which carrier supplies the refresh token; return the raw token
+    the rotation will consume (None when neither carrier presented one).
+
+    Window OPEN: an explicit body token wins - byte for byte the legacy
+    behaviour, which is what "dual-accept" means - with the cookie filling
+    an empty body. Window CLOSED: the body carrier is retired, so a cookie
+    refill takes precedence over a stray body token (a transitional client
+    sending both keeps working), and a body-only presentation is refused by
+    name instead of the generic "field is required", which would tell a
+    legacy client nothing about why it stopped working. A non-dict body
+    (form-encoded, not the browser surface this seam is about) is never
+    merged with the cookie, exactly as before.
+    """
+    if body is None:
+        return None
+    cookie = request.COOKIES.get(settings.JWT_REFRESH_COOKIE_NAME)
+    presented = body.get("refresh")
+    if not presented:
+        if cookie and type(body) is dict:
+            body["refresh"] = cookie
+            return cookie
+        return None
+    if _legacy_body_refresh_allowed():
+        return presented
+    if cookie and type(body) is dict:
+        body["refresh"] = cookie
+        return cookie
+    raise DRFValidationError(
+        {"refresh": ["Legacy body refresh tokens are no longer accepted."]}
+    )
+
+
+def _lock_presented_refresh(raw):
+    """Serialize concurrent rotations of the SAME presented refresh token.
+
+    Rotation mutates two token-blacklist rows, and simplejwt's
+    check-then-blacklist is not atomic on its own: two simultaneous POSTs
+    carrying one token could both pass the blacklist check and both mint a
+    replacement - one token spent twice. The OutstandingToken row keyed by
+    the presented token's jti is the gate every rotation passes, so it is
+    locked FOR UPDATE inside the rotation's transaction; the loser blocks,
+    re-validates against the committed blacklist and dies 401 instead of
+    double-spending. Only a token that already verifies gets locked (a
+    forged jti would otherwise buy a lock on a stranger's row), and a token
+    that cannot verify mutates nothing, so its canonical rejection needs no
+    lock. SQLite serialises writes and no-ops FOR UPDATE, so the real
+    enforcement is the PostgreSQL leg of the floor pair.
+    """
+    if not raw:
+        return
+    try:
+        claims = RefreshToken(raw)
+    except TokenError:
+        return
+    jti = claims.get(jwt_api_settings.JTI_CLAIM)
+    if jti:
+        OutstandingToken.objects.select_for_update().filter(jti=jti).first()
+
+
 class RefreshView(TokenRefreshView):
     """JWT refresh behind the 'auth' throttle scope.
 
     Throttling here bounds refresh-token brute forcing (V-04 family). The
     refresh token is read from the HttpOnly cookie set at login [R-17.12];
-    an explicit body token still works for non-browser API clients. On
-    success the rotated token re-enters the cookie (never the body), and a
+    while the SPEC-Q-P1 dual-accept window is open an explicit body token
+    still works for legacy clients, and once it closes the cookie is the
+    only carrier (_resolve_refresh_carrier names the refusal). Every
+    response re-sets the rotated token into the cookie and never into the
+    body, a cross-origin POST is refused before any carrier is read
+    (_refresh_origin_is_trusted), the rotation runs in one transaction
+    under the presented token's row lock (_lock_presented_refresh), and a
     rejected refresh sweeps the cookie so a dead token cannot pin the
-    browser into retrying it."""
+    browser into retrying it - an origin refusal is not a verdict on the
+    token, so it never sweeps."""
 
     throttle_scope = "auth"
 
     def post(self, request, *args, **kwargs):
-        body = request.data if isinstance(request.data, dict) else None
-        if body is not None and not body.get("refresh"):
-            cookie = request.COOKIES.get(settings.JWT_REFRESH_COOKIE_NAME)
-            # JSON bodies parse to a plain mutable dict, so the cookie token
-            # merges in place — DRF 3.18 exposes no data setter. Form-encoded
-            # bodies (immutable QueryDict) are not a browser-client surface
-            # and stay untouched.
-            if cookie and type(body) is dict:
-                body["refresh"] = cookie
-        return _set_refresh_cookie(super().post(request, *args, **kwargs))
+        if not _refresh_origin_is_trusted(request):
+            # 403 before the body is even read: a cross-origin caller gets
+            # the same verdict whatever it presented, and a probe must never
+            # sweep (or mint from) the victim's cookie.
+            raise PermissionDenied("Cross-origin refresh requests are not allowed.")
+        raw = _resolve_refresh_carrier(
+            request, request.data if isinstance(request.data, dict) else None
+        )
+        with transaction.atomic():
+            _lock_presented_refresh(raw)
+            response = super().post(request, *args, **kwargs)
+        return _set_refresh_cookie(response)
 
     def handle_exception(self, exc):
         # super().post signals rejection by raising (InvalidToken -> 401
