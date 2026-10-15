@@ -1,20 +1,24 @@
 import type { Metadata } from "next";
 import { LegalSection, LegalShell } from "@/components/legal/LegalShell";
+import { getReturnWindow } from "@/lib/policies";
 import { site } from "@/lib/site";
 
 export const metadata: Metadata = {
   title: "Returns & Refunds",
 };
 
-export default function ReturnsPage() {
+export default async function ReturnsPage() {
+  // A-12.D.2: the window is stated only when the API publishes one; with no
+  // number the same sentence ships minus its claim, never a fallback value.
+  const { days } = await getReturnWindow();
   return (
     <LegalShell title="Returns & Refunds">
       <LegalSection title="The short version">
         <p>
           Unopened, unused perfume in its original packaging can be returned
-          within 7 days of delivery. Refunds go back to your original payment
-          method. Opened perfume boxes are non-returnable, for hygiene and
-          authenticity reasons.
+          {days ? ` within ${days} days of delivery` : ""}. Refunds go back to
+          your original payment method. Opened perfume boxes are
+          non-returnable, for hygiene and authenticity reasons.
         </p>
       </LegalSection>
 
