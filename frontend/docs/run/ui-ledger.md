@@ -151,6 +151,10 @@ user has not vetoed).
 | U-W3-T6 | brand-derived mailto+storage key; dead coupon cleanup | 3 | **SHIPPED** | 1 | `d485eea`; 0 "Maison Aurel" in ContactLinks; tokens.* untouched (BE Q-F3 owns aurel.session). |
 | U-W3-T7 | dispatch/delivery windows single-sourced in policies | 3 | **SHIPPED** | 1 | `07e0649`; en-dash codepoints verified (U+2013); mutation-proven page guard; BACKEND_REQUESTS P2 entry. |
 | AUDIT-W3 | Wave-3 full audit | — | **SHIP** | 1 | Floor: **107/14 vitest, build 0, 23 page routes, 34,308 B css**; guards mutation-proven 3 ways; PUSHED `origin/spec-ui=fc94fdc3387de27d7a543468b05983e5c0b3c689` (orch ls-verified). |
+| U-W4-F1 | guest checkout plumbing (sessionStorage + header) | 4 | **IN-AUDIT** | 1 | `30778db` PARTIAL: backend REFUSES anonymous checkout (uniform 403, mints nothing — TIER1-GUEST-DEADEND owner decision verified). Frontend: flag-gated wall, server copy verbatim, guest-token store ready for future mint. BACKEND_REQUESTS P1. |
+| U-W4-F3 | restock opt-in on sold-out PDP | 4 | **IN-AUDIT** | 1 | `8ac8fcd` RestockForm + flag consumer #2; BACKEND_REQUESTS P1 (endpoint IsAuthenticated, email ignored by trigger). |
+| U-W4-F4 | /track-order page | 4 | **IN-AUDIT** | 2 | `52d745d` (resume after builder hallucinated missing worktree); fixed silent `starting-style`→`starting` 0B no-op; indexable:false; 24 routes. |
+| AUDIT-W4 | Wave-4 full audit | — | pending | — | owner directive: invoke release-engineer immediately after this audit ships (RE train 10/9+, BUG-4 owner-waived for this gate). |
 
 RE train: **10/9 — GATE DUE.** BLOCKED on §14.3 precondition BUG-4 (e2e unproven "must run
 with backend up before §14 — do not waive"): NO frontend agent may run python (ui-builder +
