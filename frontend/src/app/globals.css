@@ -255,7 +255,7 @@
      A new z-index is a new token, or it is a bug. Note the scanner no longer
      reads this file's neighbours, so a raw `z-50` typed into a component is
      the only thing that could reintroduce one. */
-  --z-sticky: 30; /* sticky purchase / summary panels — no consumer yet */
+  --z-sticky: 30; /* sticky purchase / summary panels — CartView.tsx */
   --z-header: 40; /* <header> — Header.tsx */
   --z-overlay: 50; /* menu overlay, any modal — MenuOverlay.tsx */
   --z-toast: 60; /* above the overlay: a confirmation must not hide behind it — toast.tsx */
@@ -385,6 +385,25 @@
   animation: shimmer var(--motion-loading-dur) linear infinite;
 }
 
+/* §5.3 — the stepper value cross-fade on the cart quantity control. The
+   declaration sits inside the no-preference gate (§3's primary layer), so
+   under reduced motion there is no opacity step at all: the new value is
+   simply there, at full opacity, from its first frame. */
+@keyframes qty-crossfade-in {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
+
+@media (prefers-reduced-motion: no-preference) {
+  .qty-crossfade {
+    animation: qty-crossfade-in var(--motion-enter-dur) var(--motion-ease);
+  }
+}
+
 /* ——— UI polish layer ——— */
 
 /* Animated underline for footer/nav links. Compositor-only (`transform`,
@@ -435,6 +454,23 @@
   inset: 0;
   pointer-events: none;
   background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='160' height='160'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='2'/%3E%3CfeColorMatrix values='0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0.05 0'/%3E%3C/filter%3E%3Crect width='160' height='160' filter='url(%23n)'/%3E%3C/svg%3E");
+}
+
+/* ==========================================================================
+   §3 — VIEW TRANSITIONS (the cart line removal, §5.3).
+   The removal wrapper in CartLineItem names ONE element per visible row —
+   "one snapshot per visible line", capped at 20 rows by CartView — so the
+   browser re-lays-out and cross-fades the lines that closed up. The implicit
+   root snapshot is switched off here: the summary, heading and header are
+   state, not motion, and §5.3 gives /cart no accent moment of its own. A
+   browser without the API, and every customer under prefers-reduced-motion,
+   takes the wrapper's instant-reflow path instead — the UA's transition
+   animations read no --motion-* token, so the media query there is the layer
+   that can reach them.
+   ======================================================================== */
+::view-transition-old(root),
+::view-transition-new(root) {
+  animation: none;
 }
 
 /* ==========================================================================
