@@ -1,6 +1,6 @@
 """Cart unit tests - docs/test-gaps.md items 23-29."""
 
-import unittest
+import json
 from datetime import timedelta
 from decimal import Decimal
 from unittest import mock
@@ -197,13 +197,26 @@ class CartItemDeleteTests(ApiTestCase):
         res = self.client.delete("/api/cart/999999/")
         self.assertEqual(res.status_code, 404, res.data)
 
-    @unittest.expectedFailure
     def test_v09_cart_payload_excludes_session_id(self):
-        """V-09/F-15: the cart response leaks the raw session id (the client
-        already owns the cookie; the token adds nothing but risk). Flip when
-        `session_id` is dropped from CartSerializer."""
+        """V-09/F-15 (Q-S1): an unauthenticated cart payload must expose
+        neither a `session_id` field nor the raw session key anywhere in
+        the body — the client already owns the cookie, so echoing the
+        token back adds nothing but risk. Pinned against the REAL
+        GET /api/cart/ response, never a hand-built payload."""
         res = self.client.get("/api/cart/")
-        self.assertNotIn("session_id", res.data)
+
+        self.assertEqual(res.status_code, 200, res.data)
+        # The real cart-body key set is the canary: a field added later
+        # must land here deliberately, and session_id can never sneak back.
+        self.assertEqual(
+            set(res.data.keys()),
+            {"id", "items", "coupon_code", "created_at", "updated_at"},
+        )
+        # The raw session key must not appear ANYWHERE in the serialized
+        # body — not even smuggled inside another value.
+        session_key = self.client.session.session_key
+        self.assertTrue(session_key)  # the view minted this session
+        self.assertNotIn(session_key, json.dumps(res.data))
 
 
 @tag("cart")

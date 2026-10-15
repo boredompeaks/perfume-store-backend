@@ -7,7 +7,7 @@ from django.views.static import serve as serve_media
 
 from common.admin_search import global_search
 from common.saved_filters import delete_saved_filter, save_saved_filter
-from ops.views import api_settings, audit_log, dashboard, health
+from ops.views import api_settings, audit_log, dashboard, health, health_detail
 from orders.views import (
     admin_order_cancel,
     admin_order_detail,
@@ -61,6 +61,12 @@ v1_account_patterns = [
 v1_admin_patterns = [
     path("dashboard/", dashboard, name="dashboard"),
     path("audit-log/", audit_log, name="audit-log"),
+    # Q-S2/F2: the staff-capability twin of the public /health/ — the probe
+    # payload's business counters and configuration modes, gated by
+    # reports.read (ops.views.health_detail). Mounted under the versioned
+    # admin family only: no frontend or script consumed a legacy alias, and
+    # spec §9 is the path new endpoints ship on.
+    path("health/", health_detail, name="health"),
     # §9.4 Orders module JSON seam (SPEC-9-07): DRF views wired exactly like
     # the two chrome routes above — direct mounts in both families, no view
     # duplication. The ledger's requirement names /api/admin/orders/, so the
