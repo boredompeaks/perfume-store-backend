@@ -147,6 +147,9 @@ user has not vetoed).
 | U-W2-P1 | return-window binds to settings API | 2 | **SHIPPED** | 1 | `e01af15` 5 files; guard MUTATION-PROVEN (weakened copy -> test fails); zero literal "7 days" in the 3 pages. |
 | U-W2-F2 | persisted cart coupon (POST/DELETE /cart/coupon/) | 2 | **SHIPPED** | 1 | `093a7ea` 3 files; sessionStorage=0, preview->persist trace OK, types.ts untouched (BE owns drops). Residual: CheckoutView dead removeItem — next build. |
 | AUDIT-W2 | Wave-2 full audit (frontend lane) | — | **SHIP** | 1 | Floor: **98/13 vitest, build 0, 23 routes, 34,308 B css**; screenshots frontend/test-results/audit-wave2/; PUSHED `origin/spec-ui=add79e5ed99dcee0cc48506149f93ef2177230aa` (orch ls-verified). |
+| U-W3-T5 | nav/footer consume manifest; guestCheckout gates CTA copy | 3 | **IN-AUDIT** | 1 | `7f686d8` 5 files; MenuOverlay list derived (not 1:1 nav) — zero-delta visual must confirm; tests 98->101. |
+| U-W3-T6 | brand-derived mailto+storage key; dead coupon cleanup | 3 | **IN-AUDIT** | 1 | `d485eea` 4 files; aurel.session deferred to BE Q-F3; tests 98->101/14. |
+| U-W3-T7 | dispatch/delivery windows single-sourced in policies | 3 | **IN-AUDIT** | 1 | `07e0649` 4 src + vitest.config alias + BACKEND_REQUESTS P2 entry; copy byte-identical (en-dashes); mutation-proven; tests 98->101. |
 
 User configs landed 2026-10-15 ~11:00: ui-wt/.opencode/agents/{ui-builder,ui-auditor,ui-orchestrator}.md.
 Every future builder/auditor dispatch cites its file as primary contract. Wave 2 HELD
