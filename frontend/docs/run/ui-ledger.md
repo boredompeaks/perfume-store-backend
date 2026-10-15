@@ -140,12 +140,13 @@ user has not vetoed).
 |---|---|---|---|---|---|
 | U-W0 | Merge origin/feat/add-frontend into spec-ui | — | **SHIPPED** | 1 | `7d97460`; auditor verified diff-scope (backend/ diff EMPTY after revert). Pushed with wave. |
 | U-W1-T1 | template.config.ts manifest; site.ts reads it | 1 | **SHIPPED** | 1 | `e13a74c`; audit: env-precedence tests green; 4th file .env.local.example ACCEPTED. Pushed `fa40218`. |
-| U-W1-T2 | theme seed -> CSS custom properties | 1 | **SHIPPED** | 1 | `e14f71a`; audit: zero-delta CONFIRMED (--color-bronze #8c5338 / alt #885038 via computed style on /). changes.md row DROPPED at sync, revert held. Pushed `fa40218`. |
+| U-W1-T2 | theme seed -> CSS custom properties | 1 | **SHIPPED** | 1 | `e14f71a`; audit: zero-delta CONFIRMED (--color-bronze #8c5338 / alt #885035 via computed style on /). changes.md row DROPPED at sync, revert held. Pushed `fa40218`. |
 | U-W1-T3 | page registry; sitemap/robots consume it | 1 | **SHIPPED** | 1 | `7eb19eb`; audit: 21 unique paths, robots parity on all six disallows. Sitemap 2->9 ACCEPTED. Pushed `fa40218`. |
 | AUDIT-W1 | Wave-1 full audit (frontend lane) | — | **SHIP** | 2 | cycle1 died (hung script, stray :3000 killed by orch); cycle2: 85/85 vitest, build 0, visual PASS (screenshots frontend/test-results/audit-wave1/), push `origin/spec-ui=fa4021897fab812f7ed06347e70800e2ea0708aa` (push verified by orch via ls-remote). |
-| U-W2-T4 | TEMPLATE.md white-label contract | 2 | **IN-AUDIT** | 1 | `d302e51` (+232 ln, 1 file). Builder found 7 code-vs-doc gaps (nav/flags unwired, seed no-env, ContactLinks brand leak, wrangler ids) — wave-3 candidates. |
-| U-W2-P1 | return-window binds to settings API | 2 | **IN-AUDIT** | 1 | `e01af15` 5 files; vitest 85->92; numberless-absent behavior; services/returns/terms/home-strip all API-bound. |
-| U-W2-F2 | persisted cart coupon (POST/DELETE /cart/coupon/) | 2 | **IN-AUDIT** | 1 | `093a7ea` 3 files; vitest 85->91; sessionStorage mirror gone; preview+persist split verified vs cart/views.py. Known residual: CheckoutView dead removeItem (next build, not own cycle). |
+| U-W2-T4 | TEMPLATE.md white-label contract | 2 | **SHIPPED** | 1 | `d302e51` (+232 ln, 1 file). 7 code-vs-doc gaps DISCLOSED not promised (auditor spot-checked 3: real). |
+| U-W2-P1 | return-window binds to settings API | 2 | **SHIPPED** | 1 | `e01af15` 5 files; guard MUTATION-PROVEN (weakened copy -> test fails); zero literal "7 days" in the 3 pages. |
+| U-W2-F2 | persisted cart coupon (POST/DELETE /cart/coupon/) | 2 | **SHIPPED** | 1 | `093a7ea` 3 files; sessionStorage=0, preview->persist trace OK, types.ts untouched (BE owns drops). Residual: CheckoutView dead removeItem — next build. |
+| AUDIT-W2 | Wave-2 full audit (frontend lane) | — | **SHIP** | 1 | Floor: **98/13 vitest, build 0, 23 routes, 34,308 B css**; screenshots frontend/test-results/audit-wave2/; PUSHED `origin/spec-ui=add79e5ed99dcee0cc48506149f93ef2177230aa` (orch ls-verified). |
 
 User configs landed 2026-10-15 ~11:00: ui-wt/.opencode/agents/{ui-builder,ui-auditor,ui-orchestrator}.md.
 Every future builder/auditor dispatch cites its file as primary contract. Wave 2 HELD
@@ -161,9 +162,15 @@ Auditor findings come to the user; NO fix dispatch without approval. Check perio
 | BUG-10 | Tailwind @source pin | — | **CLOSED** | 1 | fixed `adbc7ea` (pre-WP0 tip); stylesheet bloat eliminated at source |
 | BUG-4 | e2e unproven (servers down) | — | **OPEN** | — | still must run with backend up; WP0 put a current backend in-tree — close during wave with e2e tasks |
 
-RE train: 4/9 tasks shipped since last promotion (U-W0 + W1-T1/T2/T3; push `fa40218`).
-Wave tracker: wave 1 SHIPPED+PUSHED 2026-10-15. Wave 2 (T4 TEMPLATE.md / P1 policy-bind
-to settings API / F2 persisted coupon) READY — HELD for user go.
+RE train: 7/9 tasks shipped (W0, W1-T1/T2/T3, W2-T4/P1/F2; last push `add79e5`). At 9: invoke
+release-engineer (GATE_PHASE) for spec-ui -> feat/add-frontend promotion per §14.
+Wave tracker: wave 1+2 SHIPPED+PUSHED. PERMANENT lanes (user, 2026-10-15): ui-wt-t1|t2|t3
+always on branches ui/t1|t2|t3 — orchestrator prep per wave = `git switch -C ui/tN spec-ui`
+in-place; NO new worktrees/branches ever. Dispatches call agents by name (ui-builder,
+ui-auditor) with task-only prompts — contract lives in ui-wt/.opencode/agents.
+Wave 3 candidates (queued, not dispatched): template wiring (nav/footer + feature-flag
+consumers — flags currently no-ops), ContactLinks brand leak, CheckoutView dead removeItem,
+shipping dispatch-copy single-source. BUG-4 e2e still OPEN (needs API up; auditors denied python).
 
 ---
 
