@@ -102,7 +102,7 @@ export default function ContactLinks({
     });
   }
   items.push({
-    href: `mailto:${settings.supportEmail}?subject=${encodeURIComponent("Maison Aurel — support")}`,
+    href: `mailto:${settings.supportEmail}?subject=${encodeURIComponent(`${site.name} — support`)}`,
     label: `Email ${settings.supportEmail}`,
     icon: <MailIcon />,
   });
