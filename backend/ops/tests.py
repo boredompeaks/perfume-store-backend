@@ -28,39 +28,39 @@ TEST_PASSWORD = "S3cure-Passphrase!"
 
 @tag("ops")
 class HealthEndpointTests(ApiTestCase):
-    def test_health_returns_ok_shape(self):
+    def test_health_public_body_holds_only_deploy_relevant_checks(self):
+        """Q-S2/F2: the anonymous probe is a liveness contract, not a
+        dashboard. release.sh's `up --wait`, the compose healthcheck and the
+        image HEALTHCHECK all gate on the HTTP status alone, so the body
+        carries only the checks that drive that status plus the pre-launch
+        shipping marker; every business counter and credential-shaped config
+        value moved behind the staff endpoint. Both key sets are pinned
+        EXACTLY, not by the absence of a few names — a future check must not
+        slip onto the public body by default (whitelist, not blacklist)."""
         res = self.client.get("/health/")
         self.assertEqual(res.status_code, 200)
         data = res.json()
+        self.assertEqual(set(data), {"status", "checks"})
         self.assertEqual(data["status"], "ok")
-        self.assertTrue(data["checks"]["database"])
-        self.assertIn("razorpay_mode", data["checks"])
-        self.assertIn("pending_orders", data)
-
-    def test_health_counts_pending_orders_and_carts(self):
-        from cart.models import Cart
-
-        Cart.objects.create(session_id="s1")
-        Cart.objects.create(session_id="s2")
-        buyer = self.make_user("buyer")
-        from decimal import Decimal
-
-        from orders.models import Order
-
-        Order.objects.create(
-            user=buyer,
-            full_name="a",
-            phone="1",
-            address="a",
-            city="c",
-            state="s",
-            pincode="1",
-            status="pending",
-            total_amount=Decimal("10.00"),
+        self.assertEqual(
+            set(data["checks"]),
+            {"database", "media_writable", "shipping_configured"},
         )
-        data = self.client.get("/health/").json()
-        self.assertEqual(data["pending_orders"], 1)
-        self.assertEqual(data["carts"], 2)
+        self.assertTrue(data["checks"]["database"])
+        self.assertTrue(data["checks"]["media_writable"])
+        for key in (
+            "pending_orders",
+            "carts",
+            "low_stock",
+            "out_of_stock",
+            "low_stock_threshold",
+            "stock_alert_checked",
+        ):
+            with self.subTest(top_level=key):
+                self.assertNotIn(key, data)
+        for key in ("razorpay_mode", "smtp_configured"):
+            with self.subTest(check=key):
+                self.assertNotIn(key, data["checks"])
 
     def test_health_degraded_when_media_root_unwritable(self):
         """If MEDIA_ROOT cannot be created/written the store can serve product
@@ -107,6 +107,108 @@ class HealthEndpointTests(ApiTestCase):
                 with override_settings(RAZORPAY_KEY_ID=key or None):
                     data = get_health()
                 self.assertEqual(data["checks"]["razorpay_mode"], expected)
+
+
+@tag("ops")
+class StaffHealthEndpointTests(ApiTestCase):
+    """Q-S2/F2: the staff-capability twin of the public probe.
+
+    get_health()'s counters and configuration modes were not deleted — they
+    moved behind `reports.read`, the same capability that already gates the
+    dashboard rendering every one of these numbers, so the split discloses
+    nothing new to anyone: a reader of this endpoint could already read the
+    same payload in the dashboard HTML."""
+
+    URL = "/api/v1/admin/health/"
+
+    @staticmethod
+    def _role_user(username, role):
+        from django.contrib.auth.models import Group
+
+        user = User.objects.create_user(
+            username=username,
+            email=f"{username}@example.com",
+            password=TEST_PASSWORD,
+            is_staff=True,
+        )
+        user.groups.add(Group.objects.get_or_create(name=role)[0])
+        return user
+
+    def test_anonymous_is_403_in_the_uniform_envelope(self):
+        res = self.client.get(self.URL)
+        self.assertEqual(res.status_code, 403)
+        self.assertEqual(res.data["code"], "permission_denied")
+        self.assertIn("error", res.data)
+        self.assertIn("details", res.data)
+
+    def test_non_grantee_staff_roles_get_403(self):
+        for role in (ROLE_SUPPORT, ROLE_CATALOGUE, ROLE_INVENTORY):
+            with self.subTest(role=role):
+                client = self.fresh_client()
+                client.force_authenticate(self._role_user(f"denied-{role}", role))
+                res = client.get(self.URL)
+                self.assertEqual(res.status_code, 403)
+                self.assertEqual(res.data["code"], "permission_denied")
+
+    def test_reports_read_roles_receive_the_full_payload(self):
+        for role in (ROLE_FINANCE, ROLE_MARKETING, ROLE_ADMIN):
+            with self.subTest(role=role):
+                client = self.fresh_client()
+                client.force_authenticate(self._role_user(f"reader-{role}", role))
+                res = client.get(self.URL)
+                self.assertEqual(res.status_code, 200, res.data)
+                data = res.data
+                self.assertEqual(data["status"], "ok")
+                self.assertEqual(
+                    set(data["checks"]),
+                    {
+                        "database",
+                        "media_writable",
+                        "shipping_configured",
+                        "smtp_configured",
+                        "razorpay_mode",
+                    },
+                )
+                for key in (
+                    "pending_orders",
+                    "carts",
+                    "low_stock",
+                    "out_of_stock",
+                    "low_stock_threshold",
+                    "stock_alert_checked",
+                ):
+                    with self.subTest(moved=key):
+                        self.assertIn(key, data)
+
+    def test_health_counts_pending_orders_and_carts(self):
+        """The counts the public body used to leak now live on the staff
+        endpoint: one pending order and two carts are reported there — and
+        only there."""
+        from cart.models import Cart
+
+        Cart.objects.create(session_id="s1")
+        Cart.objects.create(session_id="s2")
+        buyer = self.make_user("buyer")
+        from decimal import Decimal
+
+        from orders.models import Order
+
+        Order.objects.create(
+            user=buyer,
+            full_name="a",
+            phone="1",
+            address="a",
+            city="c",
+            state="s",
+            pincode="1",
+            status="pending",
+            total_amount=Decimal("10.00"),
+        )
+        self.client.force_authenticate(self._role_user("counter", ROLE_FINANCE))
+        data = self.client.get(self.URL).json()
+        self.assertEqual(data["pending_orders"], 1)
+        self.assertEqual(data["carts"], 2)
+        self.assertNotIn("pending_orders", self.client.get("/health/").json())
 
 
 @tag("ops")
