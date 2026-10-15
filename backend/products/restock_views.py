@@ -12,8 +12,10 @@ entirely. Uniformity is the security property of the guest half: every
 guest success is one 202 with one body — valid or invalid format, first
 or repeat, registered address or not — so the surface cannot be steered
 into a format, history or registration oracle. A guest POST without an
-email, and every guest DELETE, keep the exact 401 the endpoint answered
-when it was auth-only (opt-out stays ownership-scoped to request.user;
+email — or with a body too malformed to parse, which likewise carries no
+submitted email — and every guest DELETE, keep the exact 401 the endpoint
+answered when it was auth-only (opt-out stays ownership-scoped to
+request.user;
 a guest row has no caller identity to scope a DELETE by, and accepting
 an email on DELETE would let anyone disarm anyone's notification).
 
@@ -39,6 +41,7 @@ from rest_framework.decorators import (
     throttle_classes,
     throttle_scope,
 )
+from rest_framework.exceptions import ParseError
 from rest_framework.permissions import BasePermission
 from rest_framework.response import Response
 from rest_framework.throttling import ScopedRateThrottle, SimpleRateThrottle
@@ -94,13 +97,18 @@ def _uniform_not_found():
 
 class IsAuthenticatedOrSubmittedEmail(BasePermission):
     """POST is open to guests only when the body carries a submitted
-    email; DELETE and email-less POST keep the auth-only contract.
+    email; DELETE, email-less POST, and unparseable-body POST keep the
+    auth-only contract.
 
     Failing this permission for an anonymous caller raises DRF's
     NotAuthenticated through the standard permission_denied path — the
     same exception (and therefore the same uniform envelope bytes) the
     endpoint's former IsAuthenticated class produced, which is what the
-    prior-shape pins measure.
+    prior-shape pins measure. An unparseable body carries no submitted
+    email either, so it is denied the same way (a ParseError here would
+    surface as a 400 and make body parseability a probe on this surface).
+    Authenticated callers pass before any body parse matters — the pre-
+    task flow never read the body on this path and still does not.
     """
 
     def has_permission(self, request, view):
@@ -109,7 +117,14 @@ class IsAuthenticatedOrSubmittedEmail(BasePermission):
             return True
         if request.method != "POST":
             return False
-        data = request.data
+        try:
+            data = request.data
+        except ParseError:
+            # No submitted email can be recovered from an unparseable body:
+            # deny through the normal NotAuthenticated path so the guest
+            # gets the same uniform 401 as an email-less POST. Only
+            # ParseError is swallowed — every other failure stays visible.
+            return False
         raw = data.get("email") if hasattr(data, "get") else None
         # Same normalizer the view and the throttle key on, so a non-string
         # or blank value is "no email" at every layer — one definition, no

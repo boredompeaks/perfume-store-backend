@@ -694,6 +694,58 @@ class RestockGuestOptInTests(ApiTestCase):
             self.assertEqual(res.content, no_email.content)
         self.assertEqual(RestockNotification.objects.count(), 0)
 
+    def test_guest_malformed_json_body_keeps_the_prior_401_bytes(self):
+        """A guest POST whose JSON body cannot even be parsed carries no
+        submitted email, so it must answer the same uniform 401 as every
+        other email-less guest request — not a parse-error 400 that would
+        make body parseability a probe on this surface. Three-way byte
+        pin: malformed POST, empty POST, and malformed DELETE must be
+        identical on the wire, not merely same-status."""
+        malformed = self.client.post(
+            self._url(), b"{not json", content_type="application/json"
+        )
+        no_email = self._guest_post({})
+        malformed_delete = self.client.delete(
+            self._url(), b"{not json", content_type="application/json"
+        )
+        for res in (malformed, no_email, malformed_delete):
+            self.assertEqual(res.status_code, 401, res.data)
+            self.assertEqual(res.content, no_email.content)
+        self.assertEqual(malformed.data["code"], "not_authenticated")
+        self.assertEqual(RestockNotification.objects.count(), 0)
+        # And the uniform 202 half is undisturbed by whatever the 401 fix
+        # does: valid-format and invalid-format guest opt-ins still get the
+        # byte-identical success (no format oracle smuggled in).
+        valid = self._guest_post({"email": "valid@example.org"})
+        invalid = self._guest_post({"email": "not-an-email"})
+        self.assertEqual(valid.status_code, 202, valid.data)
+        self.assertEqual(invalid.status_code, 202, invalid.data)
+        self.assertEqual(valid.content, invalid.content)
+
+    def test_authed_malformed_json_body_is_ignored_like_any_other_body(self):
+        """The authenticated path never parses the request body — the
+        pre-task contract ignores any submitted email entirely — so a
+        malformed JSON body reaches the view exactly like an empty one:
+        201 with the same bytes, account row armed. (The cycle-1 report
+        claimed this case answered 400; measured on this tree it does
+        not: neither the permission's authed branch nor the view's authed
+        path ever touches request.data, so no ParseError is raised for an
+        authenticated caller. The guest fix must leave this flow alone.)"""
+        self.api_login(username=self.user.username)
+        malformed = self.client.post(
+            self._url(), b"{not json", content_type="application/json"
+        )
+        other = self.make_user("acct2")
+        other_client = self.fresh_client()
+        self.api_login(username=other.username, client=other_client)
+        empty = other_client.post(self._url())
+        self.assertEqual(malformed.status_code, 201, malformed.data)
+        self.assertEqual(empty.status_code, 201, empty.data)
+        self.assertEqual(malformed.content, empty.content)
+        self.assertEqual(
+            RestockNotification.objects.filter(user__isnull=False).count(), 2
+        )
+
     def test_guest_invalid_email_is_accepted_uniformly_and_arms_nothing(self):
         """Format is validated but never disclosed: a malformed address
         gets the byte-identical success a valid one gets, and no row is
