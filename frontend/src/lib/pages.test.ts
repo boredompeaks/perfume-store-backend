@@ -23,6 +23,7 @@ const STATIC_PAGE_PATHS = [
   "/staff/login",
   "/staff/mfa/enroll",
   "/terms",
+  "/track-order",
   "/verify-email",
 ];
 
@@ -40,6 +41,15 @@ const LEGACY_ROBOTS_DISALLOW = [
   "/resend-verification",
   "/forgot-username",
   "/forgot-password",
+];
+
+// Deliberate registry additions on top of the legacy baseline, each citing the
+// spec row that ordered it. Any OTHER divergence from the baseline is a drift
+// bug and fails the parity test below.
+const SPEC_DISALLOW_ADDITIONS = [
+  // §8 line 2019: /track-order is a per-customer-secret surface — noindex,
+  // robots-disallow, and excluded from the sitemap (§5.6, §8 line 2054).
+  "/track-order",
 ];
 
 describe("page registry", () => {
@@ -71,9 +81,11 @@ describe("page registry", () => {
 });
 
 describe("disallowedPaths", () => {
-  it("matches the legacy robots disallow list exactly", () => {
+  it("matches the legacy robots disallow list plus the pinned spec additions", () => {
     const sorted = [...disallowedPaths()].sort();
-    expect(sorted).toEqual([...LEGACY_ROBOTS_DISALLOW].sort());
+    expect(sorted).toEqual(
+      [...LEGACY_ROBOTS_DISALLOW, ...SPEC_DISALLOW_ADDITIONS].sort(),
+    );
   });
 
   it("always includes the required auth/checkout/orders set", () => {
