@@ -10,6 +10,10 @@ decision record.
 Status legend: `PENDING` | `BUILDING` | `IN-AUDIT` | `SHIPPED` | `BLOCKED(owner)`.
 Queue execution APPROVED by owner 2026-10-15 (name not yet decided — run
 everything EXCEPT Phase N; frontend tasks are agent-owned per owner).
+**PAUSED by owner 2026-10-15T11:01** after Q-S1+Q-S3 audits returned SHIP —
+no further dispatch until owner says continue. On resume: Q-S2 (lane A) +
+Q-S4 (lane B). Cross-orchestrator coordination channel:
+`C:\Users\Admin\AppData\Local\Temp\opencode\orch-bridge.md` (+bridge-watch.ps1).
 
 ---
 
@@ -17,9 +21,9 @@ everything EXCEPT Phase N; frontend tasks are agent-owned per owner).
 
 | ID | Task | Lane | Notes |
 |---|---|---|---|
-| Q-S1 | F1: remove `session_id` from CartSerializer; repin `test_v09_cart_payload_excludes_session_id` against the REAL payload (it currently passes against a different payload = lying test); frontend `types.ts` field removal rides the frontend phase | A | **IN-AUDIT 2026-10-15** — built @ 06f5ec9+75b0210 (lane/a); measured mechanism = xfail-masked live leak (not different-payload); xf 3->2; frontend drop flagged on orch-bridge BE-003 |
+| Q-S1 | F1: remove `session_id` from CartSerializer; repin `test_v09_cart_payload_excludes_session_id` against the REAL payload; frontend `types.ts` field removal rides the frontend phase | A | **SHIPPED 2026-10-15** — auditor SHIP cycle 1, pushed origin/lane/a @75b0210; non-vacuity mutation-proven; xf 3->2; mechanism = xfail-masked live leak (brief's different-payload claim wrong, corrected); types.ts drop flagged on orch-bridge BE-003 |
 | Q-S2 | F2: split /health/ — public keeps `{"status":"ok","checks":{...deploy-relevant}}` (FIRST verify release.sh's exact wait contract); pending_orders/carts/stock/razorpay_mode/smtp_configured move behind a staff-capability endpoint or die if nothing reads them | A | queued behind Q-S1 audit |
-| Q-S3 | F3: ACCESS GATE on `/api/accounts/username-available/` + `/api/accounts/register/` (Cloudflare Turnstile/challenge or equivalent edge gate + tightened throttle); drop numeric `user.id` from the register response. Owner chose gate-over-removal | B | **IN-AUDIT 2026-10-15** — built @ 90520c0 (lane/b); dedicated throttle scopes + env-gated signed-challenge hook (zero-config default); api-contract register row stale -> rides Q-D2; register `id` drop flagged on orch-bridge BE-003; residual oracles in run/Q-S3-evidence.md |
+| Q-S3 | F3: ACCESS GATE on `/api/accounts/username-available/` + `/api/accounts/register/` (Turnstile/challenge + tightened throttle); drop numeric `user.id` from the register response. Owner chose gate-over-removal | B | **SHIPPED 2026-10-15** — auditor SHIP cycle 1, pushed origin/lane/b @90520c0; dedicated scopes 5/min + env-gated signed-challenge (zero-config invariant verified, mutation 9 pins); tests 2093->2101 (+8); api-contract register row stale -> Q-D2; register `id` drop flagged orch-bridge BE-003; residual oracles run/Q-S3-evidence.md |
 | Q-S4 | F8-verify + hardening: prove MFAAdminSite enforces the MFA code field on the Django admin path (SPEC-17-05/20-13 built it; pentest saw only pre-enrollment login); verify storefront MFA enrollment requires an already-privileged session + throttle; add throttle/lockout on the Django admin login form if the API auth-scope does not cover it | B | queued behind Q-S3 audit |
 
 Owner-side parallel actions (dashboard, not agents):
