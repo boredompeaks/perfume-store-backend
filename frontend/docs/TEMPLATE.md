@@ -103,7 +103,7 @@ From `.env.local.example`, as read by `template.config.ts`, `site.ts` and
 | `NEXT_PUBLIC_WHATSAPP_NUMBER` | → `site.whatsappNumber` | `wa.me` deep link; empty = hidden | empty (hidden) |
 | `NEXT_PUBLIC_WHATSAPP_MESSAGE` | → `site.whatsappMessage` | pre-filled WhatsApp text | default question string |
 | `NEXT_PUBLIC_INSTAGRAM_URL` | → `site.instagramUrl` | profile link; empty = hidden | empty (hidden) |
-| `ADMIN_URL` | `src/app/admin/page.tsx` | redirect target for `/admin` (Django admin lives on the API origin) | `http://127.0.0.1:8000/admin/` |
+| `NEXT_PUBLIC_ADMIN_ORIGIN` | `src/app/admin/page.tsx` | absolute origin of the Django admin; `/admin` 307-redirects to `<origin>/admin/` | `https://api.boredompeaks.me` — **no default**; the build fails if unset |
 
 All `NEXT_PUBLIC_*` values are inlined at build time — after editing
 `.env.local`, run `next build` again.
@@ -152,7 +152,8 @@ defaults above are the contract the wiring must honour.
 **Environment** (see §2c table and `.env.local.example`): at minimum
 `NEXT_PUBLIC_API_BASE_URL` (same-site with the frontend origin — a
 `127.0.0.1`/`localhost` split breaks the session cart cookie),
-`NEXT_PUBLIC_SITE_URL`, the brand/contact overrides, and `ADMIN_URL`.
+`NEXT_PUBLIC_SITE_URL`, the brand/contact overrides, and
+`NEXT_PUBLIC_ADMIN_ORIGIN` (required — the build fails if it is unset).
 
 **Scripts** (`package.json`):
 
@@ -228,5 +229,7 @@ truth):
   edits that file.
 - **Default fallbacks are the template's own values:** unset brand/contact
   env vars fall back to the template brand strings and the template's default
-  support inbox, and `ADMIN_URL` falls back to a localhost Django admin —
-  override all of them per merchant.
+  support inbox — override all of them per merchant.
+- **`NEXT_PUBLIC_ADMIN_ORIGIN` is the exception:** it has **no** default (no
+  localhost fallback), and a missing value fails `next build`; seed it in
+  `.env.local` from `.env.local.example`.
