@@ -8,8 +8,8 @@ are blocked until the owner answers the frontend-edit question in the
 decision record.
 
 Status legend: `PENDING` | `BUILDING` | `IN-AUDIT` | `SHIPPED` | `BLOCKED(owner)`.
-Queue execution starts after the product name is finalized (owner 2026-10-15);
-frontend tasks are agent-owned (owner will not touch frontend).
+Queue execution APPROVED by owner 2026-10-15 (name not yet decided — run
+everything EXCEPT Phase N; frontend tasks are agent-owned per owner).
 
 ---
 
@@ -132,6 +132,7 @@ T2 — Load / stress / resource against the REAL URL (after red team):
 | Q-D3 | SECURITY.md (reporting channel, scope, test-mode note) + CONTRIBUTING.md (lane/spec-comp/PR flow, conventions pointer, test commands) | license-independent |
 | Q-D4 | (d) conventions rule ("comment the why and the invariant, never the what; history belongs in changes.md") + opportunistic trim; optional top-10 narrative-header pass | no mass scrub |
 | Q-D5 | (b) changes.md rotation -> `changes/changes-2026Q4.md` + pointer row | SCHEDULED AT THIS QUEUE'S FINAL PROMOTION BOUNDARY (byte-integrity baseline + scanner scope updated in the same gate) |
+| Q-D6 | README refresh (owner 2026-10-15): verify every command still true, freshen product one-liner, keep current repo-name branding — NO product-name rename until name is finalized | rides Phase D |
 
 ## Phase N — Naming (blocked on owner shortlist reply)
 
