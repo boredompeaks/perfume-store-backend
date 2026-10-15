@@ -7,12 +7,8 @@ import { useQuery } from "@tanstack/react-query";
 import { useAuth } from "@/lib/auth";
 import { cartCount, getCart } from "@/lib/cart-api";
 import { site } from "@/lib/site";
+import { templateConfig } from "@/lib/template.config";
 import MenuOverlay from "./MenuOverlay";
-
-const navLinks = [
-  { href: "/products", label: "Shop" },
-  { href: "/products?ordering=-created_at", label: "New arrivals" },
-];
 
 function CartIcon() {
   return (
@@ -91,7 +87,7 @@ export default function Header() {
               aria-label="Primary"
               className="hidden items-center gap-7 md:flex"
             >
-              {navLinks.map((link) => (
+              {templateConfig.nav.map((link) => (
                 <Link
                   key={link.label}
                   href={link.href}

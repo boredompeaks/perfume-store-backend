@@ -5,6 +5,7 @@ import { useQuery } from "@tanstack/react-query";
 import { useAuth } from "@/lib/auth";
 import { getCart } from "@/lib/cart-api";
 import { formatINR } from "@/lib/money";
+import { templateConfig } from "@/lib/template.config";
 import CartLineItem from "./CartLineItem";
 import CouponForm from "./CouponForm";
 
@@ -118,7 +119,14 @@ export default function CartView() {
                 href="/login?next=/checkout"
                 className="block bg-ink px-6 py-3 text-center text-sm text-paper transition-colors hover:bg-bronze"
               >
-                Sign in to checkout
+                {/* guestCheckout flips COPY only (U-W3-T5): the guest wall
+                    (redirect to /login?next=/checkout) stays the real behavior
+                    until F1 ships guest checkout server-side. Pointing the href
+                    at /checkout now would promise a flow the backend does not
+                    have, so the flag cannot move the target yet. */}
+                {templateConfig.featureFlags.guestCheckout
+                  ? "Sign in to checkout"
+                  : "Proceed to checkout"}
               </Link>
               <p className="mt-3 text-center text-xs text-ink-secondary">
                 Your cart is saved on this device.

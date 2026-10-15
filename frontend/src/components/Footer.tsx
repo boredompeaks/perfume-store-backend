@@ -2,25 +2,7 @@ import Link from "next/link";
 import ContactLinks from "./ContactLinks";
 import { getContactSettings } from "@/lib/server-settings";
 import { site } from "@/lib/site";
-
-const shopLinks = [
-  { href: "/products", label: "Shop all" },
-  { href: "/products?ordering=-created_at", label: "New arrivals" },
-  { href: "/cart", label: "Cart" },
-  { href: "/orders", label: "Orders" },
-  { href: "/login", label: "Sign in" },
-];
-
-const helpLinks = [
-  { href: "/contact", label: "Contact" },
-  { href: "/shipping", label: "Shipping" },
-  { href: "/returns", label: "Returns & Refunds" },
-];
-
-const legalLinks = [
-  { href: "/privacy", label: "Privacy Policy" },
-  { href: "/terms", label: "Terms & Conditions" },
-];
+import { templateConfig } from "@/lib/template.config";
 
 export default async function Footer() {
   const contact = await getContactSettings();
@@ -44,7 +26,7 @@ export default async function Footer() {
 
         <nav aria-label="Shop" className="flex flex-col items-start gap-2 text-sm">
           <p className="text-xs uppercase tracking-[0.15em] text-ink-secondary">Shop</p>
-          {shopLinks.map((link) => (
+          {templateConfig.footer.shop.map((link) => (
             <Link
               key={link.label}
               href={link.href}
@@ -57,7 +39,7 @@ export default async function Footer() {
 
         <nav aria-label="Help" className="flex flex-col items-start gap-2 text-sm">
           <p className="text-xs uppercase tracking-[0.15em] text-ink-secondary">Help</p>
-          {helpLinks.map((link) => (
+          {templateConfig.footer.help.map((link) => (
             <Link
               key={link.label}
               href={link.href}
@@ -76,7 +58,7 @@ export default async function Footer() {
 
         <nav aria-label="Legal" className="flex flex-col items-start gap-2 text-sm">
           <p className="text-xs uppercase tracking-[0.15em] text-ink-secondary">Legal</p>
-          {legalLinks.map((link) => (
+          {templateConfig.footer.legal.map((link) => (
             <Link
               key={link.label}
               href={link.href}

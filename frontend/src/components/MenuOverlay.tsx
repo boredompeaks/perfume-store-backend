@@ -4,13 +4,15 @@ import Link from "next/link";
 import { useEffect, useRef } from "react";
 import { useAuth } from "@/lib/auth";
 import { site } from "@/lib/site";
+import { templateConfig } from "@/lib/template.config";
 
+// Mobile menu = Home + the manifest's shop footer group, minus the sign-in
+// link: the overlay renders auth in its own footer block below (and Home is
+// already the logo's hardcoded root link in Header). Kept as a derived list
+// so a manifest edit moves this menu with the footer (U-W3-T5).
 const links = [
   { href: "/", label: "Home" },
-  { href: "/products", label: "Shop all" },
-  { href: "/products?ordering=-created_at", label: "New arrivals" },
-  { href: "/cart", label: "Cart" },
-  { href: "/orders", label: "Orders" },
+  ...templateConfig.footer.shop.filter((link) => link.href !== "/login"),
 ];
 
 export default function MenuOverlay({

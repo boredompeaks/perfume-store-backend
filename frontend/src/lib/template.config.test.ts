@@ -105,6 +105,52 @@ describe("templateConfig defaults (Maison Aurel)", () => {
   });
 });
 
+/**
+ * Manifest → component contract (U-W3-T5): Header, MenuOverlay and Footer
+ * render these lists, so a shape regression (empty group, missing label or
+ * href) breaks rendered navigation, not just a type. The mobile menu derives
+ * from `footer.shop`, so it is covered by the same assertions.
+ */
+describe("nav/footer lists drive component rendering", () => {
+  const groups = (config: {
+    nav: readonly { href: string; label: string }[];
+    footer: Record<
+      "shop" | "help" | "legal",
+      readonly { href: string; label: string }[]
+    >;
+  }) => [
+    ["nav", config.nav],
+    ["footer.shop", config.footer.shop],
+    ["footer.help", config.footer.help],
+    ["footer.legal", config.footer.legal],
+  ] as const;
+
+  it("every nav/footer group is non-empty", async () => {
+    const { templateConfig } = await import("./template.config");
+
+    for (const [name, entries] of groups(templateConfig)) {
+      expect(entries.length, `${name} must not be empty`).toBeGreaterThan(0);
+    }
+  });
+
+  it("every nav/footer entry has a non-empty label and href", async () => {
+    const { templateConfig } = await import("./template.config");
+
+    for (const [name, entries] of groups(templateConfig)) {
+      for (const entry of entries) {
+        expect(entry.label.trim(), `${name} entry label`).not.toBe("");
+        expect(entry.href.trim(), `${name} entry href`).not.toBe("");
+      }
+    }
+  });
+
+  it("guestCheckout defaults to true (today's guest CTA copy)", async () => {
+    const { templateConfig } = await import("./template.config");
+
+    expect(templateConfig.featureFlags.guestCheckout).toBe(true);
+  });
+});
+
 describe("NEXT_PUBLIC_* overrides", () => {
   it("brand env overrides win over defaults", async () => {
     vi.stubEnv("NEXT_PUBLIC_SITE_NAME", "Atelier Noir");
