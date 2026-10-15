@@ -1,4 +1,5 @@
 from django import forms
+from django.conf import settings
 from django.contrib import admin
 from django.contrib.admin.forms import AdminAuthenticationForm
 from django.contrib.admin.widgets import FilteredSelectMultiple
@@ -7,6 +8,7 @@ from django.contrib.auth.forms import UserChangeForm
 from django.contrib.auth.models import Group, User
 from django.core.exceptions import PermissionDenied
 from django.urls import reverse
+from rest_framework.throttling import SimpleRateThrottle
 
 from common import totp
 from common.admin import CONFIRM_FIELD, CONFIRMATION_YES, RoleAwareModelAdmin
@@ -37,6 +39,70 @@ ROLE_CHANGE_WARNING = (
     "adds or removes staff authority on this account. Confirm to continue."
 )
 
+# Q-S4 [F8]: the refusal a spent admin-login budget gets. Generic on purpose:
+# it names no account, no ident rule and no remaining time, so it is the same
+# page a caller sees regardless of who they were trying to be.
+ADMIN_LOGIN_THROTTLE_MESSAGE = (
+    "Too many failed authentication attempts. Try again shortly."
+)
+
+
+class AdminLoginThrottle(SimpleRateThrottle):
+    """Failed-attempt budget for the Django admin login form (Q-S4 [F8]).
+
+    DRF's ScopedRateThrottle only ever sees DRF views, and AdminSite.login
+    hands this form to a plain Django LoginView — so the API 'auth' budget
+    provably never covered this door (pinned by the non-coverage proof in
+    tests/test_mfa.py). This is the same cache-window primitive DRF uses,
+    keyed per client ident exactly the way DRF keys anonymous budgets
+    (NUM_PROXIES-aware X-Forwarded-For, else REMOTE_ADDR), counting FAILED
+    attempts only: a successful login spends nothing, so honest traffic can
+    never lock an operator out. The rate comes from the env-driven
+    ADMIN_LOGIN_THROTTLE_RATE settings knob ('n/min', same shape as the DRF
+    rates; an empty value disables the bound — the documented kill switch),
+    not from the DRF rate table, because this throttle answers to the Django
+    settings module that already owns the admin/MFA configuration.
+    """
+
+    scope = "admin-login"
+
+    def get_rate(self):
+        return getattr(settings, "ADMIN_LOGIN_THROTTLE_RATE", None) or None
+
+    def get_cache_key(self, request, view):
+        # request is the plain HttpRequest the LoginView handed the form;
+        # get_ident reads only headers/META, which it carries. The view is
+        # unused (only ScopedRateThrottle ever reads one) but kept in the
+        # signature to match the base-class contract.
+        return self.cache_format % {
+            "scope": self.scope,
+            "ident": self.get_ident(request),
+        }
+
+    def _window(self, request):
+        """(key, now, history) for this ident, history pruned to the window."""
+        key = self.get_cache_key(request, None)
+        now = self.timer()
+        history = self.cache.get(key, [])
+        while history and history[-1] <= now - self.duration:
+            history.pop()
+        return key, now, history
+
+    def blocked(self, request):
+        """True when this ident has spent its failed-attempt budget."""
+        if self.rate is None:
+            return False
+        _, _, history = self._window(request)
+        return len(history) >= self.num_requests
+
+    def record_failure(self, request):
+        """Spend one unit of the budget (one failed admin login)."""
+        if self.rate is None:
+            return
+        key, now, history = self._window(request)
+        history.insert(0, now)
+        self.cache.set(key, history, self.duration)
+
 
 class MFAAdminAuthenticationForm(AdminAuthenticationForm):
     """Admin login + mandatory TOTP for privileged roles (SPEC-17-05).
@@ -59,6 +125,10 @@ class MFAAdminAuthenticationForm(AdminAuthenticationForm):
     hands the request to ``LoginView``, which passes it to the form, so
     ``self.request.COOKIES`` is where the signed marker lives. Everything
     below the skip is the unchanged pre-SPEC-20-8 challenge.
+
+    Q-S4 [F8]: the whole exchange is wrapped in
+    :class:`AdminLoginThrottle` — the API 'auth' scope never covered this
+    plain-Django door, and the form is where that gap is closed.
     """
 
     totp = forms.CharField(
@@ -73,6 +143,28 @@ class MFAAdminAuthenticationForm(AdminAuthenticationForm):
     )
 
     def clean(self):
+        """Password + MFA, wrapped in the Q-S4 failed-attempt budget.
+
+        The budget is checked BEFORE the first factor is evaluated (a
+        refused attempt must not even get the password check) and spent on
+        every ValidationError the MFA leg raises — wrong password,
+        missing/invalid code, enrollment required — so the bound is on
+        failures, never on honest traffic. Without a request on the form
+        (direct construction, as the form-level tests do) the throttle
+        steps aside entirely.
+        """
+        request = getattr(self, "request", None)
+        throttle = AdminLoginThrottle()
+        if request is not None and throttle.blocked(request):
+            raise forms.ValidationError(ADMIN_LOGIN_THROTTLE_MESSAGE)
+        try:
+            return self._clean_with_mfa()
+        except forms.ValidationError:
+            if request is not None:
+                throttle.record_failure(request)
+            raise
+
+    def _clean_with_mfa(self):
         cleaned_data = super().clean()
         user = getattr(self, "user_cache", None)
         if user is None or not is_privileged(user):

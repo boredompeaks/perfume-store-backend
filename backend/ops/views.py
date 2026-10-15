@@ -4,8 +4,10 @@ from django.contrib.admin.models import LogEntry
 from django.core.paginator import Paginator
 from django.http import JsonResponse
 from django.shortcuts import render
+from rest_framework.decorators import api_view, permission_classes
+from rest_framework.response import Response
 
-from common.permissions import capability_required
+from common.permissions import HasReportsRead, capability_required
 
 from . import alerts
 from .alerts import check_payment_failure_spike
@@ -21,9 +23,54 @@ from .services import (
 # has no magic numbers.
 AUDIT_PAGE_SIZE = 50
 
+# Q-S2 (decisions.md F2): what the ANONYMOUS probe may carry. Every
+# release-time waiter — release.sh's `up --wait`, the compose healthcheck
+# and the image HEALTHCHECK — gates on the HTTP status alone (urlopen exits
+# non-zero on the 503), so the body only needs the checks that DRIVE that
+# status plus the pre-launch shipping marker a merchant reads before going
+# live. It is a whitelist, not a blacklist: a new check stays staff-only
+# until it is deliberately added here.
+PUBLIC_HEALTH_CHECKS = ("database", "media_writable", "shipping_configured")
+
+# The top-level keys that left the public body with the F2 split — order
+# and cart counts, the stock counters and the marker the stock alert never
+# fires from inside the probe. get_health() still computes all of them
+# (the dashboard renders them, health_detail serves them); this list only
+# names what /health/ strips.
+STAFF_ONLY_HEALTH_KEYS = frozenset(
+    {
+        "pending_orders",
+        "carts",
+        "low_stock",
+        "out_of_stock",
+        "low_stock_threshold",
+        "stock_alert_checked",
+    }
+)
+
+
+def _public_health(health):
+    """Project get_health()'s full payload onto the public Q-S2 contract.
+
+    Subtract-by-name rather than pick-whole-dict on purpose: the
+    error-envelope seam substitutes arbitrary 503 bodies (tests patch
+    get_health with a bare ``{"status": ...}`` or one carrying an
+    ``"error"`` key), and this projection must pass those through with only
+    the moved keys stripped — dropping unknown keys would swallow the
+    envelope the middleware is about to wrap.
+    """
+    body = {k: v for k, v in health.items() if k not in STAFF_ONLY_HEALTH_KEYS}
+    checks = body.get("checks")
+    if checks is not None:
+        body["checks"] = {k: v for k, v in checks.items() if k in PUBLIC_HEALTH_CHECKS}
+    return body
+
 
 def health(request):
-    """Public health endpoint — cheap checks, no network calls."""
+    """Public health endpoint — deploy-relevant checks only, no network
+    calls. Business counters and configuration modes moved to
+    health_detail (Q-S2/F2); the status contract (200 ok / 503 degraded)
+    is unchanged, which is what every release-time waiter polls."""
     health = get_health()
     # [SPEC-19-2] Integration-outage alert ([R-19.20] alerting half) beside
     # the existing detection: a degraded probe notifies the staff mailbox
@@ -35,12 +82,30 @@ def health(request):
         # error-envelope seam may substitute arbitrary 503 bodies), so the
         # alert renders whatever keys are present instead of assuming
         # `checks` — an alert must never 500 the probe that tripped it.
+        # Deliberately the FULL payload: the mailbox is the staff surface,
+        # so the alert keeps the checks the public body no longer carries.
         checks = health.get("checks") or {}
         checks_text = " ".join(f"{key}={value}" for key, value in checks.items())
         alerts.notify_integration_outage(
             f"status={health.get('status')} {checks_text}".rstrip()
         )
-    return JsonResponse(health, status=200 if health["status"] == "ok" else 503)
+    return JsonResponse(
+        _public_health(health), status=200 if health["status"] == "ok" else 503
+    )
+
+
+@api_view(["GET"])
+@permission_classes([HasReportsRead])
+def health_detail(request):
+    """GET /api/v1/admin/health/ — the full probe payload, staff eyes only.
+
+    Q-S2/F2 moved the business counters and configuration modes off the
+    anonymous /health/ body without deleting them: they live here behind
+    ``reports.read``, the same capability that gates the dashboard already
+    rendering every one of these numbers (finance, marketing, admin per
+    CAPABILITY_ROLES) — so the split removes a public disclosure without
+    granting any reader anything new."""
+    return Response(get_health())
 
 
 def api_settings(request):

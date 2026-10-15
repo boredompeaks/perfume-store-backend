@@ -25,9 +25,11 @@ class CartSerializer(serializers.ModelSerializer):
 
     class Meta:
         model = Cart
+        # V-09/F-15 (Q-S1): no `session_id` here. The client already owns
+        # the session cookie; echoing the raw key back only widens who can
+        # capture it (logs, proxies, XSS exfil) with zero benefit.
         fields = [
             "id",
-            "session_id",
             "items",
             "coupon_code",
             "created_at",

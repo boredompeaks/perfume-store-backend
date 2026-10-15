@@ -26,6 +26,10 @@ Pins the whole feature end to end:
 - SPEC-20-8b the same opt-in at the Django admin door, decided by the SAME
   shared function, with every fail-safe (other browser, lapsed grant, forged
   or other-user marker, the TTL kill switch) still challenged there;
+- Q-S4 [F8]: the admin login form's own FAILED-attempt budget (the API
+  'auth' scope provably never covered the plain-Django login view), the
+  'auth' budget engaging on the enrollment surfaces themselves, and the
+  post-enrollment first-factor cells the pentest never exercised;
 - secret exposure: shown exactly once at setup, never returned again.
 """
 
@@ -38,10 +42,14 @@ import segno
 from django.conf import settings
 from django.contrib.auth.models import Group, User
 from django.core import signing
+from django.core.cache import cache
 from django.test import RequestFactory, SimpleTestCase, override_settings
 from django.utils import timezone
+from rest_framework.settings import api_settings
+from rest_framework.throttling import ScopedRateThrottle
 
 from accounts import mfa_trust
+from accounts.admin import ADMIN_LOGIN_THROTTLE_MESSAGE, AdminLoginThrottle
 from accounts.models import TOTPDevice
 from accounts.serializers import StorefrontTokenObtainPairSerializer
 from common import qr, totp
@@ -455,6 +463,10 @@ class MFAEnrollmentTests(ApiTestCase):
         self.assertEqual(res.status_code, 400)
 
 
+# Q-S4: the classes below post many refused admin logins back to back; the
+# budget override keeps those refusals the EXACT MFA refusals they assert,
+# never the throttle's generic one (AdminLoginThrottleTests owns that proof).
+@override_settings(ADMIN_LOGIN_THROTTLE_RATE="1000/min")
 class MFAEnrollmentReachTests(ApiTestCase):
     """SPEC-20-13: a blocked privileged account can actually reach enrollment.
 
@@ -1246,6 +1258,7 @@ class StorefrontLoginSplitTests(ApiTestCase):
         self.assertEqual(res.status_code, 400)
 
 
+@override_settings(ADMIN_LOGIN_THROTTLE_RATE="1000/min")
 class AdminMFAEnforcementTests(ApiTestCase):
     """The second R-17.9 enforcement surface: the Django admin login form."""
 
@@ -1314,6 +1327,7 @@ class AdminMFAEnforcementTests(ApiTestCase):
         self.assertTrue(self.is_logged_in())
 
 
+@override_settings(ADMIN_LOGIN_THROTTLE_RATE="1000/min")
 class AdminMfaTrustDeviceTests(ApiTestCase):
     """SPEC-20-8b: "trust this device" reaches the Django admin door too.
 
@@ -1542,3 +1556,247 @@ class AdminSiteWiringTests(SimpleTestCase):
 
         self.assertIsInstance(admin.site, MFAAdminSite)
         self.assertIs(admin.site.login_form, MFAAdminAuthenticationForm)
+
+
+# --- Q-S4 [F8]: the admin login throttle + the gaps it filled ---------------
+
+
+@override_settings(ADMIN_LOGIN_THROTTLE_RATE="1000/min")
+class AdminMfaPathMatrixCells(ApiTestCase):
+    """Q-S4: the two post-enrollment admin-path cells the pentest never hit.
+
+    The rest of the path x enrollment matrix is pinned elsewhere in this
+    module — AdminMFAEnforcementTests drives no-code / valid-code /
+    invalid-code / unenrolled / replay through the real /admin/login/ URL,
+    and AdminLoginThrottleTests owns the budget below. These two cells close
+    the first-factor edges: a code never promotes a wrong password or an
+    unknown user, and neither failure leaks an MFA-shaped hint (the page's
+    own "Authentication code" field label is not a leak — only the refusal
+    strings are, which is what these pins watch for).
+    """
+
+    def setUp(self):
+        self.boss = make_privileged("boss")
+        enroll_via_model(self.boss)
+
+    def test_wrong_password_with_a_valid_code_is_still_refused(self):
+        code = totp.hotp(TEST_TOTP_SECRET, totp.now() // totp.STEP)
+        res = self.client.post(
+            "/admin/login/",
+            {"username": "boss", "password": "Wr0ng-Passphrase!", "totp": code},
+        )
+        self.assertEqual(res.status_code, 200)
+        self.assertNotIn("_auth_user_id", self.client.session)
+        self.assertContains(res, "Please enter the correct username and password")
+        self.assertNotContains(res, "Enter your authentication code.")
+        self.assertNotContains(res, "Invalid or expired authentication code.")
+        self.assertNotContains(res, "Multi-factor authentication is mandatory")
+
+    def test_unknown_user_with_a_code_is_not_promoted(self):
+        code = totp.hotp(TEST_TOTP_SECRET, totp.now() // totp.STEP)
+        res = self.client.post(
+            "/admin/login/",
+            {"username": "ghost", "password": PASSWORD, "totp": code},
+        )
+        self.assertNotIn("_auth_user_id", self.client.session)
+        self.assertContains(res, "Please enter the correct username and password")
+        self.assertNotContains(res, "Enter your authentication code.")
+        self.assertNotContains(res, "Invalid or expired authentication code.")
+
+
+class AdminLoginThrottleTests(ApiTestCase):
+    """Q-S4 [F8]: the Django admin login form's own failed-attempt budget.
+
+    AdminLoginThrottleNonCoverageTests proves the API 'auth' scope never
+    covered this door; these pins hold the bound that replaced that gap:
+    FAILED attempts per client ident are refused with one generic message
+    for the window, successes spend nothing, the budget is per ident, the
+    rate is the env-driven settings knob, and an empty knob is the kill
+    switch. The class-level override keeps this class's own counting
+    deterministic against the deployed default (pinned separately by
+    AdminLoginThrottleSettingsTests).
+    """
+
+    RATE = "2/min"
+
+    def setUp(self):
+        self.boss = make_privileged("boss")
+        self.device = enroll_via_model(self.boss)
+        cache.clear()
+        override = override_settings(ADMIN_LOGIN_THROTTLE_RATE=self.RATE)
+        override.enable()
+        self.addCleanup(override.disable)
+        # Never leak budget state into (or pick up residue from) the rest of
+        # the suite — the throttle cache is process-wide LocMemCache.
+        self.addCleanup(cache.clear)
+
+    def valid_code(self):
+        return totp.hotp(TEST_TOTP_SECRET, totp.now() // totp.STEP)
+
+    def post_login(self, username, password=PASSWORD, client=None, meta=None, **extra):
+        # Form fields ride the payload (totp=... is a field); meta rides the
+        # WSGI environ (REMOTE_ADDR=... is the ident the throttle keys on).
+        payload = {"username": username, "password": password}
+        payload.update(extra)
+        return (client or self.client).post("/admin/login/", payload, **(meta or {}))
+
+    def is_logged_in(self, client=None):
+        return "_auth_user_id" in (client or self.client).session
+
+    def test_spent_budget_refuses_further_attempts_with_one_generic_message(self):
+        # Two failures spend the 2/min budget...
+        first = self.post_login("boss", "Wr0ng-Passphrase!")
+        self.assertEqual(first.status_code, 200)
+        self.assertContains(first, "Please enter the correct username and password")
+        second = self.post_login("boss", "Wr0ng-Passphrase!")
+        self.assertContains(second, "Please enter the correct username and password")
+        # ...and the next attempt is refused BEFORE the first factor is
+        # evaluated — even with credentials and a code that would work.
+        third = self.post_login("boss", PASSWORD, totp=self.valid_code())
+        self.assertEqual(third.status_code, 200)
+        self.assertContains(third, ADMIN_LOGIN_THROTTLE_MESSAGE)
+        self.assertFalse(self.is_logged_in())
+
+    def test_successes_spend_nothing(self):
+        # Budget is 2/min: two successful logins must both go through, and a
+        # failure after them is still inside the budget (a count-everything
+        # throttle of the same size would have refused one of these).
+        self.post_login("boss", PASSWORD, totp=self.valid_code())
+        self.assertTrue(self.is_logged_in())
+        self.client.logout()
+        # The first login spent this step's code; the replay watermark moves
+        # to the next acceptable step rather than sleeping or patching clocks
+        # (same accommodation AdminMfaTrustDeviceTests documents).
+        self.post_login("boss", PASSWORD, totp=code_after(self.device))
+        self.assertTrue(self.is_logged_in())
+        self.client.logout()
+        fail = self.post_login("boss", "Wr0ng-Passphrase!")
+        self.assertNotContains(fail, ADMIN_LOGIN_THROTTLE_MESSAGE)
+        self.assertContains(fail, "Please enter the correct username and password")
+
+    def test_the_budget_is_per_client_ident(self):
+        self.post_login("boss", "Wr0ng-Passphrase!")
+        self.post_login("boss", "Wr0ng-Passphrase!")
+        blocked = self.post_login("boss", "Wr0ng-Passphrase!")
+        self.assertContains(blocked, ADMIN_LOGIN_THROTTLE_MESSAGE)
+        # A different REMOTE_ADDR is a different ident with a full budget —
+        # one abusive client cannot exhaust the office behind the NAT.
+        other = self.post_login(
+            "boss", "Wr0ng-Passphrase!", meta={"REMOTE_ADDR": "10.9.8.7"}
+        )
+        self.assertNotContains(other, ADMIN_LOGIN_THROTTLE_MESSAGE)
+        self.assertContains(other, "Please enter the correct username and password")
+
+    def test_the_budget_restores_when_the_window_lapses(self):
+        # The window is a sliding TTL, not a lockout: once it lapses the
+        # stale attempts are pruned and the ident gets a fresh budget. The
+        # clock is the throttle's own timer hook, so this is hermetic — no
+        # sleeps, and the cache TTL itself is real (and irrelevant here).
+        clock = {"now": 1_000_000.0}
+        frozen = staticmethod(lambda: clock["now"])
+        with mock.patch.object(AdminLoginThrottle, "timer", frozen):
+            self.post_login("boss", "Wr0ng-Passphrase!")
+            self.post_login("boss", "Wr0ng-Passphrase!")
+            blocked = self.post_login("boss", "Wr0ng-Passphrase!")
+            self.assertContains(blocked, ADMIN_LOGIN_THROTTLE_MESSAGE)
+            clock["now"] += 61  # past the 60s window of the 2/min rate
+            recovered = self.post_login("boss", "Wr0ng-Passphrase!")
+            self.assertNotContains(recovered, ADMIN_LOGIN_THROTTLE_MESSAGE)
+            self.assertContains(
+                recovered, "Please enter the correct username and password"
+            )
+
+    def test_empty_rate_is_the_documented_kill_switch(self):
+        with override_settings(ADMIN_LOGIN_THROTTLE_RATE=""):
+            for _ in range(5):
+                res = self.post_login("boss", "Wr0ng-Passphrase!")
+                self.assertNotContains(res, ADMIN_LOGIN_THROTTLE_MESSAGE)
+                self.assertContains(
+                    res, "Please enter the correct username and password"
+                )
+
+
+class AdminLoginThrottleSettingsTests(SimpleTestCase):
+    """Q-S4: the rate is configuration, not a constant in the form."""
+
+    def test_unset_env_yields_the_documented_default(self):
+        # In the test process THROTTLE_ADMIN_LOGIN_RATE is unset, so this is
+        # the literal settings.py boots with; the knob's env contract is
+        # documented in .env.example beside the other throttle rates.
+        self.assertEqual(settings.ADMIN_LOGIN_THROTTLE_RATE, "10/min")
+
+
+class AdminLoginThrottleNonCoverageTests(ApiTestCase):
+    """Q-S4: the gap proof — the API 'auth' scope never bounded this door.
+
+    Exhaust the 'auth' budget against the API login door (the third attempt
+    is 429), then drive the SAME ident at /admin/login/ with working
+    credentials: the form still evaluates and admits the attempt, because a
+    plain Django view is invisible to DRF's ScopedRateThrottle. Before Q-S4
+    that meant unlimited admin password/TOTP guessing from one client;
+    AdminLoginThrottleTests pins the bound that now applies.
+    """
+
+    def test_the_api_auth_budget_does_not_bound_the_admin_form(self):
+        boss = make_privileged("boss")
+        enroll_via_model(boss)
+        rates = dict(api_settings.DEFAULT_THROTTLE_RATES)
+        rates["auth"] = "1/min"
+        cache.clear()
+        with mock.patch.object(ScopedRateThrottle, "THROTTLE_RATES", rates):
+            bad = self.client.post(
+                "/api/accounts/login/",
+                {"username": "boss", "password": "Wr0ng-Passphrase!"},
+                format="json",
+            )
+            self.assertEqual(bad.status_code, 401, bad.data)
+            limited = self.client.post(
+                "/api/accounts/login/",
+                {"username": "boss", "password": "Wr0ng-Passphrase!"},
+                format="json",
+            )
+            self.assertEqual(limited.status_code, 429, limited.data)
+            # The API budget is spent — yet the admin form still evaluates
+            # this ident's next attempt, and with the right code admits it
+            # (a successful admin login answers with the standard redirect).
+            code = totp.hotp(TEST_TOTP_SECRET, totp.now() // totp.STEP)
+            res = self.client.post(
+                "/admin/login/",
+                {
+                    "username": "boss",
+                    "password": PASSWORD,
+                    "totp": code,
+                    "next": "/admin/",
+                },
+                follow=True,
+            )
+            self.assertEqual(res.status_code, 200)
+            self.assertIn("_auth_user_id", self.client.session)
+
+
+class MfaEnrollmentThrottleTests(ApiTestCase):
+    """Q-S4: the 'auth' budget actually engages on the enrollment surfaces.
+
+    The URLConf wiring guard in accounts/tests.py pins that every accounts
+    route DECLARES a scope; these pins prove the budget bites on the two
+    bootstrap enrollment paths themselves (they carry permission_classes=[]
+    and gate inside the view, so the throttle is their outer bound), sitting
+    beside the permission pins this module already holds: anonymous ->
+    uniform 401, non-privileged session -> 403, privileged JWT or the
+    credential bootstrap while no device is active -> served.
+    """
+
+    def test_the_auth_budget_engages_on_setup_and_confirm(self):
+        rates = dict(api_settings.DEFAULT_THROTTLE_RATES)
+        rates["auth"] = "2/min"
+        cache.clear()
+        with mock.patch.object(ScopedRateThrottle, "THROTTLE_RATES", rates):
+            for _ in range(2):
+                res = self.client.post("/api/accounts/mfa/setup/", {}, format="json")
+                self.assertEqual(res.status_code, 401, res.data)
+            limited = self.client.post("/api/accounts/mfa/setup/", {}, format="json")
+            self.assertEqual(limited.status_code, 429, limited.data)
+            # One shared 'auth' budget: probing setup cannot spare confirm —
+            # the second enrollment surface is refused on the same counter.
+            confirm = self.client.post("/api/accounts/mfa/confirm/", {}, format="json")
+            self.assertEqual(confirm.status_code, 429, confirm.data)

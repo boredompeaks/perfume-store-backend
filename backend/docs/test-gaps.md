@@ -86,9 +86,11 @@ expectedFailure is the untruncated-slug pin
 26. Quantity > stock → 400 (new *and* accumulate paths) — DELIVERED.
 27. PATCH quantity: 0 / negative / non-numeric → 400; > stock → 400 — DELIVERED.
 28. Delete item: removed; response excludes `session_id` — DELIVERED for the
-    removal. The `session_id` half is **still open (V-09/F-15)** and is the
-    cart app's one expectedFailure
-    (`test_v09_cart_payload_excludes_session_id`).
+    removal, and the `session_id` half is closed too (V-09/F-15, Q-S1):
+    `CartSerializer` no longer carries the field, and
+    `test_v09_cart_payload_excludes_session_id` pins the real unauthenticated
+    `GET /api/cart/` body — no `session_id` key, and no raw session key
+    anywhere in the payload.
 29. Cross-session isolation: another session's item → 404 — DELIVERED.
 
 Coupon-as-cart-state (R-9.3.5/R-9.3.6, `POST`/`DELETE /api/cart/coupon/`) was
