@@ -125,6 +125,37 @@ executable from words alone.
 
 ---
 
+## Frontend-ops phase (2026-10-15, user-directed)
+
+User decisions (verbatim intent, 2026-10-15): merge feat/add-frontend now; template
+architecture first, then features/policies, then per-page redesign; a11y = keep shipped
+tokens, no new gates; 3 parallel builders (isolated worktrees, local commits, no pushes)
+-> sync -> 1 auditor on ui-wt -> auditor pushes origin spec-ui; RE train every 9 shipped
+tasks; auditor must visually inspect via Playwright when work is visual (dev server
+background-only); bridge file `Temp\opencode\orch-bridge.md` with backend orchestrator
+(do not commit); guest-token = sessionStorage (standing recommendation, reversible —
+user has not vetoed).
+
+| # | Task | Wave | Status | Attempts | Evidence |
+|---|---|---|---|---|---|
+| U-W0 | Merge origin/feat/add-frontend into spec-ui | — | **IN-AUDIT** | 1 | `7d97460` conflict-free; brings OpenNext/wrangler, Razorpay CSP (G8), today's backend (settings return_window_days, returns API, guest header contract). Audit rides wave-1 auditor. |
+| U-W1-T1 | template.config.ts manifest; site.ts reads it | 1 | **IN-AUDIT** | 1 | `e13a74c` on ui/t1; merged ff into spec-ui. 11 tests; .env.local.example 4th file ACCEPTED (config-doc convention). |
+| U-W1-T2 | theme seed -> CSS custom properties | 1 | **IN-AUDIT** | 1 | `e14f71a` on ui/t2; merged `144f851`. 5 tests; DEFAULT_SEED zero-delta claim. Out-of-scope backend/docs/changes.md row DROPPED at sync (checkout 7d97460 -- that file). |
+| U-W1-T3 | page registry; sitemap/robots consume it | 1 | **IN-AUDIT** | 1 | `7eb19eb` on ui/t3; merged `18985b2`. 8 tests; sitemap static set 2->9 ACCEPTED; staff pages indexable to preserve robots parity (call noted). |
+
+Standing rules (user, 2026-10-15): wave 2 NOT dispatched until user's frontend-tailored
+agent configs land in ui-wt/.opencode/agents — check that dir before every dispatch.
+Auditor findings come to the user; NO fix dispatch without approval. Check periodically:
+(1) ui-wt/.opencode/agents for new configs, (2) orch-bridge.md for backend messages,
+(3) git fetch origin.
+| BUG-10 | Tailwind @source pin | — | **CLOSED** | 1 | fixed `adbc7ea` (pre-WP0 tip); stylesheet bloat eliminated at source |
+| BUG-4 | e2e unproven (servers down) | — | **OPEN** | — | still must run with backend up; WP0 put a current backend in-tree — close during wave with e2e tasks |
+
+RE train: 0/9 tasks shipped since last promotion (none yet on this branch).
+Wave tracker: wave 1 dispatched 2026-10-15; auditor on ui-wt after sync.
+
+---
+
 ## Next actions on quota reset
 
 1. Re-fire **R4** unchanged — the brief is complete and covers the binding table,
