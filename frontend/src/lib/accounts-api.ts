@@ -1,6 +1,6 @@
 import { apiFetch } from "./api";
 
-export type RegisterResult = { message: string; user: { id: number; username: string; email: string } };
+export type RegisterResult = { message: string; user: { username: string; email: string } };
 
 export function register(username: string, email: string, password: string) {
   return apiFetch<RegisterResult>("/api/accounts/register/", {
