@@ -894,6 +894,14 @@ MFA_TRUST_DAYS = _env_int("MFA_TRUST_DAYS", 30)
 MFA_TRUST_COOKIE_NAME = os.getenv("MFA_TRUST_COOKIE_NAME", "mfa_trusted_device")
 MFA_TRUST_COOKIE_SAMESITE = os.getenv("MFA_TRUST_COOKIE_SAMESITE", "Strict")
 
+# Q-S4 [F8]: the failed-attempt budget for the Django admin login form
+# (AdminLoginThrottle in accounts/admin.py). DRF's scoped throttle only
+# covers DRF views, so the API 'auth' rate never saw /admin/login/ — a
+# plain Django view. The form counts FAILED attempts per client ident in
+# the throttle cache; a successful login spends nothing. 'n/min' matches
+# the DRF rate shape; an empty value disables the bound (kill switch).
+ADMIN_LOGIN_THROTTLE_RATE = os.getenv("THROTTLE_ADMIN_LOGIN_RATE", "10/min")
+
 # Q-S3 [F3 ACCESS GATE]: application-level signed-challenge hook for the two
 # username-enumeration endpoints (register, username-available). Unset — the
 # zero-config default — the hook is DISABLED and both endpoints answer every
