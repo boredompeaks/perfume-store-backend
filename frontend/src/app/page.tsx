@@ -4,6 +4,7 @@ import GridSkeleton from "@/components/GridSkeleton";
 import ProductCard from "@/components/ProductCard";
 import { fetchProductsPage } from "@/lib/products-api";
 import { toJsonLdScriptContent } from "@/lib/json-ld";
+import { getReturnWindow } from "@/lib/policies";
 import { site } from "@/lib/site";
 
 // Rendered on demand with the underlying fetch cached for 60s
@@ -45,7 +46,10 @@ async function NewArrivals() {
   }
 }
 
-export default function HomePage() {
+export default async function HomePage() {
+  // A-12.D.2: the strip states the window only when the API publishes one;
+  // without it the item keeps its place in the strip as plain "Returns".
+  const { days } = await getReturnWindow();
   const organizationJsonLd = {
     "@context": "https://schema.org",
     "@type": "Organization",
@@ -102,7 +106,7 @@ export default function HomePage() {
             <span aria-hidden="true" className="text-hairline">·</span>
             <span>Secure Razorpay payments</span>
             <span aria-hidden="true" className="text-hairline">·</span>
-            <span>7-day returns</span>
+            <span>{days ? `${days}-day returns` : "Returns"}</span>
           </p>
         </div>
       </section>
