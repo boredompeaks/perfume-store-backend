@@ -1,3 +1,5 @@
+import { readFileSync } from "node:fs";
+import { fileURLToPath } from "node:url";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { API_BASE } from "./config";
 
@@ -103,5 +105,77 @@ describe("getReturnWindow", () => {
     });
 
     await expect((await getReturnWindow())()).resolves.toEqual({});
+  });
+});
+
+/**
+ * Dispatch/delivery windows (same A-12.D.2 single-source rule as the return
+ * window): the shipping page is imported beside `shippingPolicy`, so "the
+ * page renders the constants" is proven on both sides — the module's strings
+ * against the element tree the page actually returns, plus a source check
+ * that no window range is typed into the page again. A page that re-wrote
+ * the numbers itself would satisfy a rendered-text check by coincidence;
+ * only the source check fails it.
+ */
+function collectText(node: unknown): string {
+  if (node === null || node === undefined || typeof node === "boolean") {
+    return "";
+  }
+  if (typeof node === "string" || typeof node === "number") {
+    return String(node);
+  }
+  if (Array.isArray(node)) {
+    return node.map(collectText).join("");
+  }
+  if (typeof node === "object" && "props" in node) {
+    return collectText(
+      (node as { props?: { children?: unknown } }).props?.children,
+    );
+  }
+  return "";
+}
+
+describe("shippingPolicy", () => {
+  it("states both windows: non-empty, each carrying a number", async () => {
+    const { shippingPolicy } = await import("./policies");
+
+    expect(shippingPolicy.dispatchWindow.trim()).not.toBe("");
+    expect(shippingPolicy.deliveryWindow.trim()).not.toBe("");
+    expect(shippingPolicy.dispatchWindow).toMatch(/\d/);
+    expect(shippingPolicy.deliveryWindow).toMatch(/\d/);
+  });
+
+  it("the shipping page renders exactly these strings (import both sides)", async () => {
+    const [{ shippingPolicy }, { default: ShippingPage }] = await Promise.all([
+      import("./policies"),
+      import("@/app/shipping/page"),
+    ]);
+
+    const text = collectText(ShippingPage());
+    // The whole sentence, word for word — structure is the page's contract,
+    // the numbers come from the module, so nothing may drift between them.
+    const sentence =
+      `Orders are typically dispatched within ${shippingPolicy.dispatchWindow} ` +
+      `of payment confirmation, and delivery usually takes a further ` +
+      `${shippingPolicy.deliveryWindow} depending on your location. ` +
+      `Business days exclude Sundays and public holidays.`;
+    expect(text).toContain(sentence);
+    // The page states exactly two range windows on screen — the two the
+    // module owns. A third claim typed anywhere else fails here.
+    const claims = text.match(/\d+[–-]\d+ (?:business )?days/g) ?? [];
+    expect([...claims].sort()).toEqual(
+      [shippingPolicy.dispatchWindow, shippingPolicy.deliveryWindow].sort(),
+    );
+  });
+
+  it("no window range is typed into the page source — constants only", () => {
+    const source = readFileSync(
+      fileURLToPath(new URL("../app/shipping/page.tsx", import.meta.url)),
+      "utf8",
+    );
+
+    expect(source).toContain("shippingPolicy.dispatchWindow");
+    expect(source).toContain("shippingPolicy.deliveryWindow");
+    expect(source).not.toMatch(/\d+[–-]\d+/);
   });
 });

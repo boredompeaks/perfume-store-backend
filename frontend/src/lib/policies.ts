@@ -43,3 +43,26 @@ export async function getReturnWindow(): Promise<ReturnWindow> {
     return {};
   }
 }
+
+/**
+ * The dispatch and delivery windows `/shipping` may state — the ONLY place
+ * they are written (same single-source rule as the return window above: the
+ * refs published contradictory delivery claims, so no page may type its own
+ * number — the numbers below are the policy copy, verbatim).
+ *
+ * SINGLE EDIT POINT for this copy. `GET /api/settings/` answers today with
+ * contact channels plus `return_window_days` only — there is no dispatch
+ * field yet (spec A-12.G11). When the future `dispatch_window_days` /
+ * `delivery_window_days` fields land on that endpoint, replace this const
+ * with an async binding shaped like `getReturnWindow`: same endpoint, same
+ * 60s cache, and "state a number only when the API publishes a positive
+ * integer", with no fabricated fallback when the field is absent. Until then
+ * these are client-side policy constants; consumers import them from here
+ * and render them verbatim.
+ */
+export const shippingPolicy = {
+  /** Orders are "typically dispatched within … of payment confirmation". */
+  dispatchWindow: "2–4 business days",
+  /** Delivery "usually takes a further … depending on your location". */
+  deliveryWindow: "2–7 days",
+} as const;
