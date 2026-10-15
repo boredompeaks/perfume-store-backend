@@ -145,7 +145,8 @@ est. <2k units/mo); **not flipping the repo private at this time**.
   Razorpay test-API latency, not store capacity — the k6 profile caps intent
   creation and the resource report separates internal vs gateway time; Sentry
   noise during runs is expected; run windows still off-peak by preference.
-- Seed data first: promote `scripts/demo_seed.py` to a real management
+- Seed data first: promote the demo seed script (untracked until T0 lands it
+  in-tree) to a real management
   command (`seed_demo`, marked rows + cleanup) so runs start from known state.
 
 ## 2026-10-15 — Red-team scope (owner)

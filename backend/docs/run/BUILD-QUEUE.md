@@ -56,7 +56,8 @@ the live test URLs (api.boredompeaks.me / test.boredompeaks.me); OOM on the
 UAT box is ACCEPTED and informative (finding its limits is the point; not yet
 a client demo).
 
-T0 — Seed: promote `scripts/demo_seed.py` -> `manage.py seed_demo` (marked
+T0 — Seed: promote the demo seed script (untracked until T0 lands it in-tree)
+-> `manage.py seed_demo` (marked
 rows, cleanup flag). Both red team and load runs start from known state.
 
 T1 — Red-team attack catalog (each item = attempted attack + invariant that
