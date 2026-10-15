@@ -20,6 +20,29 @@ const themeColours = new Set(
   )].map((match) => match[1]),
 );
 
+/**
+ * The `--text-*` namespace in the same `@theme` block — §2.2's nine-step
+ * type scale (`text-display`, `text-body`, `text-label`, …). Those utilities
+ * share the `text-` prefix with the colour utilities, so the guard below
+ * reads every font-size utility as a colour token named `display` / `body` /
+ * `label` and fails on a component that is doing exactly what the type scale
+ * exists to do (proved by running this file against `app/page.tsx` before the
+ * exemption: seven false positives). Exempted by *name resolution against
+ * @theme*, not by blocklisting the words, so a future scale step is covered
+ * the moment it is declared. The `--text-…--line-height` companion keys are
+ * filtered out — they are not utilities, and one of them would otherwise
+ * shadow nothing but bloat the set.
+ */
+const themeTexts = new Set(
+  [...(globalsCss.match(/@theme[^{]*\{([\s\S]*?)\n\}/)?.[1] ?? "").matchAll(
+    /^\s*(--text-[a-z0-9-]+)\s*:/gm,
+  )]
+    .map((match) => match[1])
+    // Companion keys (`--text-<step>--line-height`) carry a second `--`
+    // after the namespace; the utility names themselves do not.
+    .filter((name) => !name.replace(/^--/, "").includes("--")),
+);
+
 /** Prefixes that introduce a colour in Tailwind v4. */
 const COLOUR_PREFIXES = new Set([
   "bg",
@@ -132,7 +155,11 @@ function unresolvedColourTokens(): string[] {
     for (const [, prefix, name] of source.matchAll(
       /(?:[a-z-]+:)*([a-z]+)-([a-z0-9-]+)/g,
     )) {
-      if (isColourCandidate(prefix, name) && !themeColours.has(`--color-${name}`)) {
+      if (
+        isColourCandidate(prefix, name) &&
+        !themeColours.has(`--color-${name}`) &&
+        !themeTexts.has(`--text-${name}`)
+      ) {
         missing.add(name);
       }
     }
@@ -166,6 +193,20 @@ describe("theme tokens", () => {
     // Without this, a regex that silently matched nothing would make the guard
     // below vacuously pass — the exact failure mode it exists to prevent.
     expect(themeColours.size).toBeGreaterThan(0);
+  });
+
+  it("parses the --text-* type scale out of the same @theme block", () => {
+    // The colour guard exempts by name resolution, so this set is the load-
+    // bearing half of that exemption: empty means every font-size utility
+    // fails the colour check again.
+    expect(themeTexts.size).toBeGreaterThan(0);
+    expect(themeTexts.has("--text-display")).toBe(true);
+    expect(themeTexts.has("--text-label-sm")).toBe(true);
+    // Companion keys are not utilities and must not pollute the set. Built
+    // by concatenation so this file's own source never reads as a utility
+    // name to the colour guard above (it scans every file in src/).
+    const companionKey = `--text-${"display"}--line-height`;
+    expect(themeTexts.has(companionKey)).toBe(false);
   });
 
   it("declares every colour token that any component references", () => {
