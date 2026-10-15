@@ -147,9 +147,17 @@ user has not vetoed).
 | U-W2-P1 | return-window binds to settings API | 2 | **SHIPPED** | 1 | `e01af15` 5 files; guard MUTATION-PROVEN (weakened copy -> test fails); zero literal "7 days" in the 3 pages. |
 | U-W2-F2 | persisted cart coupon (POST/DELETE /cart/coupon/) | 2 | **SHIPPED** | 1 | `093a7ea` 3 files; sessionStorage=0, preview->persist trace OK, types.ts untouched (BE owns drops). Residual: CheckoutView dead removeItem — next build. |
 | AUDIT-W2 | Wave-2 full audit (frontend lane) | — | **SHIP** | 1 | Floor: **98/13 vitest, build 0, 23 routes, 34,308 B css**; screenshots frontend/test-results/audit-wave2/; PUSHED `origin/spec-ui=add79e5ed99dcee0cc48506149f93ef2177230aa` (orch ls-verified). |
-| U-W3-T5 | nav/footer consume manifest; guestCheckout gates CTA copy | 3 | **IN-AUDIT** | 1 | `7f686d8` 5 files; MenuOverlay list derived (not 1:1 nav) — zero-delta visual must confirm; tests 98->101. |
-| U-W3-T6 | brand-derived mailto+storage key; dead coupon cleanup | 3 | **IN-AUDIT** | 1 | `d485eea` 4 files; aurel.session deferred to BE Q-F3; tests 98->101/14. |
-| U-W3-T7 | dispatch/delivery windows single-sourced in policies | 3 | **IN-AUDIT** | 1 | `07e0649` 4 src + vitest.config alias + BACKEND_REQUESTS P2 entry; copy byte-identical (en-dashes); mutation-proven; tests 98->101. |
+| U-W3-T5 | nav/footer consume manifest; guestCheckout gates CTA copy | 3 | **SHIPPED** | 1 | `7f686d8`; audit zero-delta PASS on href|label tuple diff (nav2/footer10/menu5); tests 107. |
+| U-W3-T6 | brand-derived mailto+storage key; dead coupon cleanup | 3 | **SHIPPED** | 1 | `d485eea`; 0 "Maison Aurel" in ContactLinks; tokens.* untouched (BE Q-F3 owns aurel.session). |
+| U-W3-T7 | dispatch/delivery windows single-sourced in policies | 3 | **SHIPPED** | 1 | `07e0649`; en-dash codepoints verified (U+2013); mutation-proven page guard; BACKEND_REQUESTS P2 entry. |
+| AUDIT-W3 | Wave-3 full audit | — | **SHIP** | 1 | Floor: **107/14 vitest, build 0, 23 page routes, 34,308 B css**; guards mutation-proven 3 ways; PUSHED `origin/spec-ui=fc94fdc3387de27d7a543468b05983e5c0b3c689` (orch ls-verified). |
+
+RE train: **10/9 — GATE DUE.** BLOCKED on §14.3 precondition BUG-4 (e2e unproven "must run
+with backend up before §14 — do not waive"): NO frontend agent may run python (ui-builder +
+ui-auditor configs deny it), so closing BUG-4 needs the owner to either run the e2e suite
+once with the backend up or explicitly waive BUG-4 for promotion. Not invoking
+release-engineer until one of those lands (a GATE_PHASE wake would halt on preconditions
+and burn a cycle). Waves continue in the meantime (user: continuous mode).
 
 User configs landed 2026-10-15 ~11:00: ui-wt/.opencode/agents/{ui-builder,ui-auditor,ui-orchestrator}.md.
 Every future builder/auditor dispatch cites its file as primary contract. Wave 2 HELD
