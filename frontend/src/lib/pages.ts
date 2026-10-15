@@ -67,6 +67,19 @@ export const pages: readonly PageEntry[] = [
     indexable: false,
     navGroup: "account",
   },
+  // Spec §5.6 / §8: public shipment tracking keyed on a customer credential.
+  // `indexable: false` is deliberate — §8 line 2010 requires `noindex, follow`,
+  // line 2019 puts it in the robots disallow list and line 2054 keeps it out
+  // of the sitemap. A credential-gate surface has no business being indexed,
+  // and the safer default is the one that cannot leak: the page currently has
+  // no nav link at all (unlinked + disallowed = no crawl path by construction).
+  {
+    path: "/track-order",
+    title: "Track your order",
+    description: "Look up where your parcel is using your order number.",
+    indexable: false,
+    navGroup: "static",
+  },
   {
     path: "/login",
     title: "Sign in",
