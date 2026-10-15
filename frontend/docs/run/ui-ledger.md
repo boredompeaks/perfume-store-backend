@@ -138,10 +138,17 @@ user has not vetoed).
 
 | # | Task | Wave | Status | Attempts | Evidence |
 |---|---|---|---|---|---|
-| U-W0 | Merge origin/feat/add-frontend into spec-ui | — | **IN-AUDIT** | 1 | `7d97460` conflict-free; brings OpenNext/wrangler, Razorpay CSP (G8), today's backend (settings return_window_days, returns API, guest header contract). Audit rides wave-1 auditor. |
-| U-W1-T1 | template.config.ts manifest; site.ts reads it | 1 | **IN-AUDIT** | 1 | `e13a74c` on ui/t1; merged ff into spec-ui. 11 tests; .env.local.example 4th file ACCEPTED (config-doc convention). |
-| U-W1-T2 | theme seed -> CSS custom properties | 1 | **IN-AUDIT** | 1 | `e14f71a` on ui/t2; merged `144f851`. 5 tests; DEFAULT_SEED zero-delta claim. Out-of-scope backend/docs/changes.md row DROPPED at sync (checkout 7d97460 -- that file). |
-| U-W1-T3 | page registry; sitemap/robots consume it | 1 | **IN-AUDIT** | 1 | `7eb19eb` on ui/t3; merged `18985b2`. 8 tests; sitemap static set 2->9 ACCEPTED; staff pages indexable to preserve robots parity (call noted). |
+| U-W0 | Merge origin/feat/add-frontend into spec-ui | — | **SHIPPED** | 1 | `7d97460`; auditor verified diff-scope (backend/ diff EMPTY after revert). Pushed with wave. |
+| U-W1-T1 | template.config.ts manifest; site.ts reads it | 1 | **SHIPPED** | 1 | `e13a74c`; audit: env-precedence tests green; 4th file .env.local.example ACCEPTED. Pushed `fa40218`. |
+| U-W1-T2 | theme seed -> CSS custom properties | 1 | **SHIPPED** | 1 | `e14f71a`; audit: zero-delta CONFIRMED (--color-bronze #8c5338 / alt #885038 via computed style on /). changes.md row DROPPED at sync, revert held. Pushed `fa40218`. |
+| U-W1-T3 | page registry; sitemap/robots consume it | 1 | **SHIPPED** | 1 | `7eb19eb`; audit: 21 unique paths, robots parity on all six disallows. Sitemap 2->9 ACCEPTED. Pushed `fa40218`. |
+| AUDIT-W1 | Wave-1 full audit (frontend lane) | — | **SHIP** | 2 | cycle1 died (hung script, stray :3000 killed by orch); cycle2: 85/85 vitest, build 0, visual PASS (screenshots frontend/test-results/audit-wave1/), push `origin/spec-ui=fa4021897fab812f7ed06347e70800e2ea0708aa` (push verified by orch via ls-remote). |
+
+User configs landed 2026-10-15 ~11:00: ui-wt/.opencode/agents/{ui-builder,ui-auditor,ui-orchestrator}.md.
+Every future builder/auditor dispatch cites its file as primary contract. Wave 2 HELD
+until user says go (directive stands even though configs exist). Standing audit lessons:
+dev-server via cmd-with-redirect (Start-Process npm failed 3x); MCP Chromium for
+screenshots (CLI browsers absent); NEVER run wrangler/opennext in audit.
 
 Standing rules (user, 2026-10-15): wave 2 NOT dispatched until user's frontend-tailored
 agent configs land in ui-wt/.opencode/agents — check that dir before every dispatch.
@@ -151,8 +158,9 @@ Auditor findings come to the user; NO fix dispatch without approval. Check perio
 | BUG-10 | Tailwind @source pin | — | **CLOSED** | 1 | fixed `adbc7ea` (pre-WP0 tip); stylesheet bloat eliminated at source |
 | BUG-4 | e2e unproven (servers down) | — | **OPEN** | — | still must run with backend up; WP0 put a current backend in-tree — close during wave with e2e tasks |
 
-RE train: 0/9 tasks shipped since last promotion (none yet on this branch).
-Wave tracker: wave 1 dispatched 2026-10-15; auditor on ui-wt after sync.
+RE train: 4/9 tasks shipped since last promotion (U-W0 + W1-T1/T2/T3; push `fa40218`).
+Wave tracker: wave 1 SHIPPED+PUSHED 2026-10-15. Wave 2 (T4 TEMPLATE.md / P1 policy-bind
+to settings API / F2 persisted coupon) READY — HELD for user go.
 
 ---
 
