@@ -178,7 +178,11 @@ export default function TrackOrderPage() {
         name="description"
         content="Look up where your parcel is using your order number."
       />
-      <main className="mx-auto w-full max-w-[calc(var(--measure)_+_4rem)] px-4 py-16 sm:px-6">
+      {/* Plain container, not <main>: the layout already renders the page's
+          single <main id="main"> (layout.tsx) and every other page nests
+          inside it — a page-level <main> made this the only page with
+          landmark-within-landmark nesting. Same classes → same rendering. */}
+      <div className="mx-auto w-full max-w-[calc(var(--measure)_+_4rem)] px-4 py-16 sm:px-6">
         <h1 className="font-display text-4xl tracking-tight">Track your order</h1>
         <p className="mt-4 max-w-[var(--measure)] text-sm text-ink-secondary">
           See where your parcel is. You need your order number and the order
@@ -267,7 +271,7 @@ export default function TrackOrderPage() {
             </div>
           )}
         </div>
-      </main>
+      </div>
     </>
   );
 }

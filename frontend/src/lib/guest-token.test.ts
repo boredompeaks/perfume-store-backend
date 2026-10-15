@@ -16,6 +16,12 @@ import {
  * URL surface) as source guards that bite when the module grows one.
  */
 
+/**
+ * Deliberately fake AND deliberately low-entropy: a random-looking
+ * credential literal here trips the generic high-entropy secret detector
+ * even as a test fixture (GitGuardian incident 38246359), while the
+ * assertions only need a stable non-blank value to round-trip.
+ */
 const TOKEN = "test-guest-token-fixture";
 
 function installFakeSessionStorage() {
