@@ -143,6 +143,9 @@ user has not vetoed).
 | U-W1-T2 | theme seed -> CSS custom properties | 1 | **SHIPPED** | 1 | `e14f71a`; audit: zero-delta CONFIRMED (--color-bronze #8c5338 / alt #885038 via computed style on /). changes.md row DROPPED at sync, revert held. Pushed `fa40218`. |
 | U-W1-T3 | page registry; sitemap/robots consume it | 1 | **SHIPPED** | 1 | `7eb19eb`; audit: 21 unique paths, robots parity on all six disallows. Sitemap 2->9 ACCEPTED. Pushed `fa40218`. |
 | AUDIT-W1 | Wave-1 full audit (frontend lane) | — | **SHIP** | 2 | cycle1 died (hung script, stray :3000 killed by orch); cycle2: 85/85 vitest, build 0, visual PASS (screenshots frontend/test-results/audit-wave1/), push `origin/spec-ui=fa4021897fab812f7ed06347e70800e2ea0708aa` (push verified by orch via ls-remote). |
+| U-W2-T4 | TEMPLATE.md white-label contract | 2 | **IN-AUDIT** | 1 | `d302e51` (+232 ln, 1 file). Builder found 7 code-vs-doc gaps (nav/flags unwired, seed no-env, ContactLinks brand leak, wrangler ids) — wave-3 candidates. |
+| U-W2-P1 | return-window binds to settings API | 2 | **IN-AUDIT** | 1 | `e01af15` 5 files; vitest 85->92; numberless-absent behavior; services/returns/terms/home-strip all API-bound. |
+| U-W2-F2 | persisted cart coupon (POST/DELETE /cart/coupon/) | 2 | **IN-AUDIT** | 1 | `093a7ea` 3 files; vitest 85->91; sessionStorage mirror gone; preview+persist split verified vs cart/views.py. Known residual: CheckoutView dead removeItem (next build, not own cycle). |
 
 User configs landed 2026-10-15 ~11:00: ui-wt/.opencode/agents/{ui-builder,ui-auditor,ui-orchestrator}.md.
 Every future builder/auditor dispatch cites its file as primary contract. Wave 2 HELD
