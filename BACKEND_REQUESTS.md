@@ -123,3 +123,10 @@ Format per entry: priority, where needed, what's missing, why, suggested contrac
 - **Why:** avoids leaking stock levels and prevents the UI from implying inventory precision the backend doesn't manage (no reservations).
 - **Suggested contract:** `in_stock: bool` in `ProductSerializer`.
 - **Current workaround:** derives `stock > 0` and never displays numeric stock.
+
+## [P2] Dispatch / delivery window fields on settings
+- **Where it's needed:** `/shipping` dispatch-and-delivery copy (`src/lib/policies.ts`, `shippingPolicy`)
+- **What's missing:** `dispatch_window_days` / `delivery_window_days` on `GET /api/settings/` (the endpoint answers with contact channels plus `return_window_days` only — spec A-12.G11).
+- **Why:** shipping windows are owner-editable policy claims; today editing one is a code deploy, while the return window is already API-owned through the same endpoint.
+- **Suggested contract:** add both as positive integers to the existing public settings reader — same admin singleton and 60s revalidate semantics as `return_window_days`.
+- **Current workaround:** client-side constants `shippingPolicy` in `src/lib/policies.ts` (single source, labeled, comment names the future fields); consumers import them and `/shipping` renders them verbatim.

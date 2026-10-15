@@ -1,5 +1,6 @@
 import type { Metadata } from "next";
 import { LegalSection, LegalShell } from "@/components/legal/LegalShell";
+import { shippingPolicy } from "@/lib/policies";
 
 export const metadata: Metadata = {
   title: "Shipping",
@@ -18,10 +19,10 @@ export default function ShippingPage() {
 
       <LegalSection title="Dispatch and delivery">
         <p>
-          Orders are typically dispatched within 2–4 business days of payment
-          confirmation, and delivery usually takes a further 2–7 days
-          depending on your location. Business days exclude Sundays and
-          public holidays.
+          Orders are typically dispatched within {shippingPolicy.dispatchWindow} of
+          payment confirmation, and delivery usually takes a further{" "}
+          {shippingPolicy.deliveryWindow} depending on your location. Business days
+          exclude Sundays and public holidays.
         </p>
       </LegalSection>
 
