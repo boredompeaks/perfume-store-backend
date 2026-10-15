@@ -62,8 +62,8 @@ Ran 1 test in 0.005s — FAILED (failures=1)   WINDOW-REPRO exit-failures: 1
 
 **(b) Shared-temp churn during the drill module** — a second process created
 `restore-drill-hammer-*` directories in %TEMP%, held each 150 ms (long enough
-to straddle snapshot→assert), deleted it, for the whole run of
-`manage.py test tests.test_restore_drill`:
+to straddle snapshot→assert), deleted it, for the whole run of the drill test
+module (path `backend/tests/test_restore_drill.py`):
 
 ```
 Ran 26 tests in 46.087s — FAILED (failures=5)
@@ -114,8 +114,8 @@ The module no longer reads the real clock at all (its `_utcnow` seam is
 gone); additionally the purge pin evaluates at a probe instant inside the
 window by construction.
 
-**Concurrency proof** — two suite processes ran
-`manage.py test tests.test_restore_drill` SIMULTANEOUSLY while the hammer
+**Concurrency proof** — two suite processes ran the drill test module
+(path `backend/tests/test_restore_drill.py`) SIMULTANEOUSLY while the hammer
 process churned shared-temp `restore-drill-hammer-*` directories:
 
 ```
@@ -168,7 +168,13 @@ unchanged at 99.81% with 0 missed lines, both engines exit 0.
   changes detected`, exit 0 (no models touched).
 - `venv\Scripts\python ..\scripts\doc_claims.py --base 3b5cf88` and
   `venv\Scripts\python ..\scripts\changelog_figures.py check --base
-  3b5cf88` → run after the changelog row; results recorded at commit time.
+  3b5cf88`: the figures gate exited 0 on every run so far (row backed by
+  `scripts/figures/SPEC-Q-D7.json`); the claims gate's first post-commit run
+  exited 1 on TWO claims inside this file — the drill test module cited by
+  its `manage.py` label reads as a test-name claim with no `def` behind it —
+  and the two citations were rewritten as path claims in the fix-forward
+  commit. This file quotes only gate runs it has already seen; the green run
+  against the final commit is quoted in the builder's report.
 
 ## Findings / proposals (reported, not fixed — outside this scope)
 
