@@ -31,17 +31,17 @@ that capability — and nothing else beyond it.
 import importlib
 from decimal import Decimal
 
+from django.apps import apps
 from django.contrib import admin
 from django.contrib.admin.models import LogEntry
 from django.contrib.auth.models import AnonymousUser, Group, User
 from django.core.exceptions import PermissionDenied
-from django.apps import apps
 from django.test import RequestFactory, TestCase, tag
 from rest_framework.exceptions import PermissionDenied as DRFPermissionDenied
 from rest_framework.request import Request
 from rest_framework.test import APIRequestFactory
 
-from common.admin import CONFIRMATION_YES, CONFIRM_FIELD, RoleAwareModelAdmin
+from common.admin import CONFIRM_FIELD, CONFIRMATION_YES, RoleAwareModelAdmin
 from common.permissions import (
     CapabilityPermission,
     HasPlatformConfigure,
@@ -57,8 +57,8 @@ from common.roles import (
     ROLE_GRANT_CAPABILITY,
     ROLE_INVENTORY,
     ROLE_MARKETING,
-    ROLE_SUPPORT,
     ROLE_SUPERADMIN,
+    ROLE_SUPPORT,
     STAFF_ROLES,
     sync_role_groups,
 )

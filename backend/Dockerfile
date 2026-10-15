@@ -1,5 +1,12 @@
 # SPEC-2-10a: production image for the Django backend.
 #
+# MULTI-STAGE (owner choice for the GHCR publish path, 2026-10): the pip
+# install happens in a discarded builder stage, so the runtime image carries
+# only the installed packages -- no upgraded pip, no build residue -- on the
+# same python:3.14-slim base. Both stages are wheels-only (psycopg[binary] and
+# Pillow ship prebuilt libpq/imaging wheels), so neither stage needs a
+# compiler and the slim base stays enough.
+#
 # Build with backend/ as the build context (the sibling .dockerignore is
 # honoured exactly when the context is backend/):
 #   docker build -t perfume-backend backend
@@ -7,23 +14,43 @@
 #   docker run -p 8000:8000 -e DJANGO_SECRET_KEY=... -e DATABASE_URL=... \
 #     -e DJANGO_ALLOWED_HOSTS=... perfume-backend
 #
-# Orchestration (compose/Procfile/deploy workflow) is SPEC-2-10b.
+# Orchestration (compose/Procfile/deploy workflow) is SPEC-2-10b. The
+# publish automation that pushes this image to GHCR is
+# .github/workflows/ghcr-publish.yml; deploy.yml (ssh + scripts/release.sh)
+# remains the documented backup release path.
+
+FROM python:3.14-slim AS builder
+
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1
+
+WORKDIR /build
+
+# Dependencies first: this layer is cached until requirements change, so
+# ordinary source edits do not re-run pip. Installed with --prefix into a
+# private tree that the runtime stage copies over /usr/local, which is where
+# this base image's interpreter lives -- so console-script shebangs and
+# site-packages paths stay valid in the copy.
+#
+# requirements.txt is a POINTER (`-r requirements.lock`), and pip resolves
+# that include relative to the file, so the lock has to be in the image too.
+# Copying only the pointer produces a build error rather than an unpinned
+# install, which is the intended failure: it cannot be quiet.
+COPY requirements.txt requirements.lock ./
+RUN pip install --no-cache-dir --upgrade pip \
+    && pip install --no-cache-dir --prefix=/install -r requirements.txt
 
 FROM python:3.14-slim
 
-# Unbuffered output so the platform's log collector sees logs line by line,
-# and no .pyc files written into the app's read-mostly layers.
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1
 
 WORKDIR /app
 
-# Dependencies first: this layer is cached until requirements.txt changes,
-# so ordinary source edits do not re-run pip. No compiler in this image, so
-# psycopg[binary]'s prebuilt libpq wheel and Pillow's wheel are the ones used.
-COPY requirements.txt ./
-RUN pip install --no-cache-dir --upgrade pip \
-    && pip install --no-cache-dir -r requirements.txt
+# The dependency tree from the builder, dropped onto the same interpreter
+# location it was installed for. Nothing else crosses the stage boundary:
+# pip's own upgrade and any build tooling stay behind in the builder.
+COPY --from=builder /install /usr/local
 
 COPY . ./
 
@@ -51,8 +78,9 @@ COPY . ./
 #   DJANGO_ALLOWED_HOSTS /    the localhost values the guard would otherwise
 #   CSRF_TRUSTED_ORIGINS      refuse outright; no request is ever served
 #                             while the image is being built
-# backend/tests/test_deployment_contract.py pins this layer by booting the app
-# with exactly this env, and by refusing again when any one key is dropped.
+# backend/tests/test_deployment_contract.py pins this layer by parsing it out
+# of this file and booting the app with exactly this env, and by refusing
+# again when any one key is dropped.
 RUN DJANGO_DEBUG=false \
     DJANGO_ENV=ci \
     DJANGO_SECRET_KEY=collectstatic-build-only-not-a-real-secret \

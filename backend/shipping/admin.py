@@ -25,11 +25,12 @@ from django.contrib import admin
 from django.db import transaction
 
 from common.admin import RoleAwareModelAdmin
+
 from .models import (
-    ShippingMethod,
-    ShippingRate,
     Shipment,
     ShipmentEvent,
+    ShippingMethod,
+    ShippingRate,
 )
 
 SHIPPING_MANAGE = "shipping.manage"

@@ -1,7 +1,9 @@
-{# SPEC-20-6 [R-20.11]: the per-user saved-view bar on a changelist.
-   Rendered by SavedFilterMixin.changelist_view through the per-model
-   change_list.html overrides; every link/form here is scoped to the
-   signed-in user's own saved views (the endpoints enforce it too). #}
+{% comment %}
+SPEC-20-6 [R-20.11]: the per-user saved-view bar on a changelist.
+Rendered by SavedFilterMixin.changelist_view through the per-model
+change_list.html overrides; every link/form here is scoped to the
+signed-in user's own saved views (the endpoints enforce it too).
+{% endcomment %}
 <div class="module" id="saved-filters">
   <h2>Saved views</h2>
   {% if active_saved_filter %}

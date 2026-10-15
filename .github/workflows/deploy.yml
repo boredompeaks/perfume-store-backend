@@ -213,4 +213,4 @@ jobs:
             -o "UserKnownHostsFile=$known_hosts" \
             -o BatchMode=yes \
             "$DEPLOY_USER@$DEPLOY_HOST" \
-            "cd '$DEPLOY_DIR' && git fetch --quiet --prune origin && git -c advice.detachedHead=false checkout --quiet --detach '$RELEASED_SHA' && exec ./scripts/release.sh"
+            "cd '$DEPLOY_DIR' && git fetch --quiet --prune origin && git -c advice.detachedHead=false checkout --quiet --detach '$RELEASED_SHA' && if [ -x ./scripts/release-uat.sh ]; then exec ./scripts/release-uat.sh; else exec ./scripts/release.sh; fi"

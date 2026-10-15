@@ -17,13 +17,13 @@ from django.contrib.admin.models import LogEntry
 from django.contrib.auth.models import Group, User
 from django.test import RequestFactory, tag
 
+from accounts.admin import StoreUserAdmin
+from cart.admin import CartAdmin
+from cart.models import Cart
 from common.admin import CONFIRMATION_NOTE_MAX_LENGTH, RoleAwareModelAdmin
 from common.permissions import user_has_capability
 from common.roles import CAPABILITY_ROLES, ROLE_ADMIN, STAFF_ROLES
 from common.testing import ApiTestCase
-from accounts.admin import StoreUserAdmin
-from cart.admin import CartAdmin
-from cart.models import Cart
 from ops.admin import SiteSettingsAdmin
 from ops.models import SiteSettings
 from orders.admin import CouponAdmin, OrderAdmin
@@ -252,11 +252,19 @@ class RoleAwareAdminActionGatingTests(ApiTestCase):
         )
         self.assertEqual(set(inventory), {"adjust_stock", "export_csv"})
         # Catalogue holds products.publish, so the admin-wide bulk delete is
-        # available to it on top of the export.
+        # available to it on top of the export. MERCHANT-DELIST: the same
+        # capability also gates delist/relist (the unpublish power the
+        # capability exists for), so the catalogue set grew by exactly those
+        # two actions -- a deliberate extension of this pin, not a drift:
+        # inventory (no products.publish) still cannot take anything off
+        # sale.
         catalogue = product_admin.get_actions(
             request_for(make_role_user("catalogue", "act-cat"))
         )
-        self.assertEqual(set(catalogue), {"export_csv", "delete_selected"})
+        self.assertEqual(
+            set(catalogue),
+            {"export_csv", "delete_selected", "delist_products", "relist_products"},
+        )
 
     def test_admin_role_sees_every_gated_action(self):
         actions = admin.site._registry[Order].get_actions(

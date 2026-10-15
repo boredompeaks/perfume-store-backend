@@ -1,0 +1,19 @@
+{
+  "task": "TIER-2-PROXIES",
+  "title": "The mutation figure recorded for NUM_PROXIES: an anonymous throttle budget keyed on an address the caller chooses",
+  "note": "One mutation, and it is the delete rather than the usual edit: NUM_PROXIES is a declaration, so the only way to lose the behaviour is to stop declaring it, which is also the only way an operator's deployment silently loses it. `find` is hand-written from the committed blob and occurs exactly once; replay refuses otherwise. `claimed_count` is the figure measured on this tree by deleting the line and running the module, and the replay below re-derives it rather than restating it. Only the five settings subTests move, not the six behavioural ones: the keying table supplies its own NUM_PROXIES through override_settings, because what it pins is DRF's keying under a configured hop count, which is independent of what this repo declares - so the two halves fail separately, and a mutation that only rewired the throttle would be caught by the other half alone.",
+  "mutations": [
+    {
+      "id": "M1",
+      "description": "REST_FRAMEWORK declares no NUM_PROXIES, so DRF falls back to keying an anonymous throttle budget on the entire X-Forwarded-For header - a value the caller itself wrote - and behind a proxy every caller also shares the proxy's REMOTE_ADDR",
+      "path": "backend/config/settings.py",
+      "find": "    \"NUM_PROXIES\": max(0, _env_int(\"NUM_PROXIES\", 0)),\n}",
+      "replace": "}",
+      "expected_failing_tests": [
+        "test_num_proxies_decides_whose_address_a_throttle_budget_is_keyed_on"
+      ],
+      "claimed_count": 5,
+      "test_scope": ["tests.test_settings_security"]
+    }
+  ]
+}

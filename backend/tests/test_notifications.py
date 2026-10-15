@@ -7,19 +7,27 @@
   ``AuditEvent.record`` hooks inside the caller's atomic block. A send
   failure is logged and swallowed (never breaks the business transaction);
   unregistered events are no-ops.
+- ASYNC-2b1 adds ``dispatch_on_commit()``: the post-commit send primitive,
+  still tested here as the primitive it is. The verify_payment hook site
+  no longer uses it — TIER1-ASYNC-CONVERT moved that site to
+  ``enqueue`` (see the proof-event tests below).
 - Proof event: ``order.paid`` -> order-confirmation email (order number,
-  total, frontend URL) on ``verify_payment`` success, with a failing send
-  leaving the captured payment confirmed. locmem backend only — no network.
+  total, frontend URL) on ``verify_payment`` success: queued as an
+  outbox row inside the money transaction, delivered by the drain
+  worker, with a failing enqueue leaving the captured payment confirmed.
+  locmem backend only — no network.
 """
+
 from decimal import Decimal
 from unittest import mock
 
 from django.conf import settings
 from django.core import mail
+from django.db import transaction
 from django.test import tag
 
 from common import notifications
-from common.models import AuditEvent
+from common.models import AuditEvent, NotificationOutbox
 from common.testing import ApiTestCase, extract_link_params
 from orders.models import Order
 
@@ -123,13 +131,55 @@ class SendEmailPathTests(ApiTestCase):
 class DispatchTests(ApiTestCase):
     """dispatch(): registry-driven, never raises, log-and-continue."""
 
-    def test_unknown_event_is_a_no_op(self):
-        # A future spec-19.1 event with no notification wired yet: nothing
-        # is sent, and the no-op is findable in logs (DEBUG) not silent.
+    def test_vocabulary_member_with_no_handler_is_a_debug_no_op(self):
+        # A vocabulary member whose content has not landed: nothing is sent,
+        # and the no-op is findable in logs (DEBUG) not silent. order.shipped
+        # used to be this test's "unknown" name while actually being a name
+        # OUTSIDE the vocabulary — the case the next test pins separately.
         with self.assertLogs("common.notifications", level="DEBUG") as logs:
-            notifications.dispatch("order.shipped", {})
+            notifications.dispatch(AuditEvent.EventType.ORDER_SHIPPED, {})
         self.assertEqual(len(mail.outbox), 0)
-        self.assertIn("no notification registered", "\n".join(logs.output))
+        output = "\n".join(logs.output)
+        self.assertIn("no notification registered", output)
+        # DEBUG is asserted by the absence of the warning wording, not by the
+        # level alone: assertLogs(DEBUG) admits WARNING lines too, so a pin
+        # that only read the capture could not tell the two cases apart.
+        self.assertNotIn("not an AuditEvent.EventType member", output)
+
+    def test_ordered_member_tuple_is_the_whole_vocabulary_in_declaration_order(self):
+        # The registry is keyed on the enum but the module keeps its own
+        # ordered enumeration of it (mypy does not model the metaclass
+        # __iter__ Django supplies, so the class object cannot be iterated in
+        # typed code). This pins that enumeration against the enum itself:
+        # every member, the same objects, the enum's own order, and the same
+        # set the DEBUG-vs-WARNING lookup uses — so the two cannot drift apart
+        # and make a member-without-handler read as an unknown name.
+        members = notifications._EVENT_TYPE_MEMBERS
+        self.assertEqual(len(members), len(set(members)))
+        self.assertEqual(set(members), set(AuditEvent.EventType))
+        self.assertEqual(set(members), set(notifications._EVENT_TYPE_VALUES))
+        self.assertEqual(
+            [member.value for member in members],
+            [member.value for member in AuditEvent.EventType],
+        )
+        for member in members:
+            self.assertIsInstance(member, AuditEvent.EventType)
+
+    def test_name_outside_the_vocabulary_is_a_warning_not_a_gentle_no_op(self):
+        # ASYNC-2e. A name the registry can never match is a programming
+        # error, not a content gap, and the two are no longer indistinguishable
+        # — this is the defect class that let three lifecycle notifications go
+        # missing with nothing to report. It must not be absorbed at DEBUG.
+        with self.assertLogs("common.notifications", level="WARNING") as logs:
+            notifications.dispatch("order.teleported", {})
+        self.assertEqual(len(mail.outbox), 0)
+        self.assertIn("not an AuditEvent.EventType member", "\n".join(logs.output))
+
+    def test_dead_name_dispatch_still_never_raises(self):
+        # The escalation must not become a failure: a notification can never
+        # roll back the transaction it follows, dead name or not.
+        notifications.dispatch("order.teleported", {})
+        self.assertEqual(len(mail.outbox), 0)
 
     def test_order_paid_dispatches_confirmation_email(self):
         order = _make_order(self.make_user("notifybuyer"))
@@ -163,8 +213,9 @@ class DispatchTests(ApiTestCase):
 
 @tag("notifications")
 class OrderPaidProofEventTests(ApiTestCase):
-    """End-to-end: verify_payment success dispatches the confirmation
-    email; a send failure never breaks the captured payment."""
+    """End-to-end: verify_payment success QUEUES the confirmation (outbox
+    row, no send on the request thread); the drain worker delivers it; an
+    enqueue failure never breaks the captured payment."""
 
     def setUp(self):
         self.user = self.make_user("proofbuyer")
@@ -181,6 +232,10 @@ class OrderPaidProofEventTests(ApiTestCase):
             "/api/orders/payment/", {"order_id": order_id}, format="json"
         )
         self.assertEqual(res.status_code, 200, res.data)
+        # TIER1-ASYNC-CONVERT: verify_payment enqueues the order.paid
+        # notification INSIDE its money transaction. No on-commit callback
+        # is involved any more — the row is written with the payment and
+        # nothing is sent until a drain worker claims it.
         return self.client.post(
             "/api/orders/payment/verify/",
             {
@@ -192,11 +247,17 @@ class OrderPaidProofEventTests(ApiTestCase):
             format="json",
         )
 
-    def test_verify_success_sends_confirmation_email(self):
+    def test_verify_success_queues_and_the_drain_delivers(self):
         res = self._pay()
         self.assertEqual(res.status_code, 200, res.data)
         order = Order.objects.get(pk=res.data["order_id"])
         self.assertEqual(order.status, "confirmed")
+        # Nothing sent on the request thread; the intent is queued.
+        self.assertEqual(len(mail.outbox), 0)
+        row = NotificationOutbox.objects.get(event_type=AuditEvent.EventType.ORDER_PAID)
+        self.assertEqual(row.status, NotificationOutbox.Status.PENDING)
+        # The scheduled worker is the only send path.
+        notifications.drain_notifications()
         self.assertEqual(len(mail.outbox), 1)
         message = mail.outbox[0]
         self.assertEqual(message.to, [self.user.email])
@@ -204,13 +265,16 @@ class OrderPaidProofEventTests(ApiTestCase):
         self.assertIn(f"Order number: #{order.id}", message.body)
         self.assertIn("499.99", message.body)
 
-    def test_send_failure_does_not_break_the_payment(self):
-        # SMTP-503 mirror of the accounts flows: the payment outcome is
-        # untouched, the audit trail still commits, only the send fails.
+    def test_enqueue_failure_does_not_break_the_payment(self):
+        # The request-path mirror of the SMTP-503 accounts behavior: an
+        # outbox write that raises leaves the payment confirmed, the audit
+        # trail committed, and the failure on the log — never a 500 over
+        # a notification the gateway has already paid for.
         with mock.patch(
-            "common.notifications.send_email", side_effect=Exception("smtp down")
+            "orders.views.notifications.enqueue",
+            side_effect=RuntimeError("outbox unavailable"),
         ):
-            with self.assertLogs("common.notifications", level="ERROR"):
+            with self.assertLogs("orders.views.payment", level="ERROR"):
                 res = self._pay()
         self.assertEqual(res.status_code, 200, res.data)
         order = Order.objects.get(pk=res.data["order_id"])
@@ -220,4 +284,73 @@ class OrderPaidProofEventTests(ApiTestCase):
                 event_type=AuditEvent.EventType.ORDER_PAID, order=order
             ).exists()
         )
+        self.assertEqual(NotificationOutbox.objects.count(), 0)
         self.assertEqual(len(mail.outbox), 0)
+
+
+@tag("notifications")
+class PostCommitDispatchTests(ApiTestCase):
+    """ASYNC-2b1: ``dispatch_on_commit`` defers the send past the commit so
+    a money-path ``transaction.atomic()`` block is not holding its
+    ``select_for_update`` rows across an SMTP round trip."""
+
+    def test_send_is_deferred_until_the_transaction_commits(self):
+        order = _make_order(self.make_user("deferred"))
+        with self.captureOnCommitCallbacks(execute=True):
+            with transaction.atomic():
+                notifications.dispatch_on_commit(
+                    AuditEvent.EventType.ORDER_PAID, {"order": order}
+                )
+                # Inside the block, while the row locks are held: nothing
+                # sent, so no socket is open under them.
+                self.assertEqual(len(mail.outbox), 0)
+            # Leaving a savepoint is not the commit either - only the real
+            # outermost commit runs the callback.
+            self.assertEqual(len(mail.outbox), 0)
+        self.assertEqual(len(mail.outbox), 1)
+        self.assertEqual(mail.outbox[0].to, [order.user.email])
+
+    def test_rollback_discards_the_registered_send(self):
+        # The inline send this replaced could not be recalled: a later
+        # rollback in the same block still emailed a confirmed-looking
+        # order. A registered callback dies with its transaction.
+        order = _make_order(self.make_user("rolledback"))
+        with self.captureOnCommitCallbacks(execute=True):
+            with self.assertRaises(RuntimeError):
+                with transaction.atomic():
+                    notifications.dispatch_on_commit(
+                        AuditEvent.EventType.ORDER_PAID, {"order": order}
+                    )
+                    raise RuntimeError("later in the money block failed")
+        self.assertEqual(len(mail.outbox), 0)
+
+    def test_post_commit_send_failure_is_logged_and_swallowed(self):
+        # A callback runs where a raise could not roll anything back, so
+        # the broad catch in dispatch() is what keeps it out of an
+        # already-decided response - proven here through the real path.
+        order = _make_order(self.make_user("postcommitfail"))
+        with mock.patch(
+            "common.notifications.send_email", side_effect=Exception("smtp down")
+        ):
+            with self.assertLogs("common.notifications", level="ERROR") as logs:
+                with self.captureOnCommitCallbacks(execute=True):
+                    notifications.dispatch_on_commit(
+                        AuditEvent.EventType.ORDER_PAID, {"order": order}
+                    )
+        # ERROR with traceback, not a DEBUG line and not a silent pass.
+        self.assertTrue(any(r.levelname == "ERROR" for r in logs.records), logs.records)
+        self.assertIn("smtp down", "\n".join(logs.output))
+
+    def test_plain_dispatch_still_sends_synchronously(self):
+        # dispatch_on_commit is opt-in, and dispatch itself is unchanged:
+        # the registry was NOT made to defer or to enqueue, so a caller
+        # can still ask for an in-process synchronous send. (The business
+        # sites converted to enqueue in TIER1-ASYNC-CONVERT; this test
+        # pins the primitive they converted AWAY from, which stays
+        # available.) Back-in-stock is not a registry site at all -
+        # products/models.py calls send_email directly - so no change
+        # here could have moved it.
+        order = _make_order(self.make_user("syncreg"))
+        with self.captureOnCommitCallbacks(execute=True):
+            notifications.dispatch(AuditEvent.EventType.ORDER_PAID, {"order": order})
+            self.assertEqual(len(mail.outbox), 1)

@@ -13,6 +13,7 @@ TOTP parameters are code constants, not env config: a drift in the step,
 digit count or window between server and enrollment URI would silently
 break every staff login, so they are deliberately not deployment-tunable.
 """
+
 import base64
 import hashlib
 import hmac
@@ -56,9 +57,9 @@ def hotp(secret, counter, digits=DIGITS):
     message = int(counter).to_bytes(8, "big")
     digest = hmac.new(_b32decode(secret), message, hashlib.sha1).digest()
     offset = digest[-1] & 0x0F
-    code = (
-        int.from_bytes(digest[offset : offset + 4], "big") & 0x7FFFFFFF
-    ) % (10**digits)
+    code = (int.from_bytes(digest[offset : offset + 4], "big") & 0x7FFFFFFF) % (
+        10**digits
+    )
     return str(code).zfill(digits)
 
 

@@ -414,11 +414,11 @@ class Command(BaseCommand):
         raw = (options.get("output_dir") or os.getenv("BACKUP_DIR") or "").strip()
         if not raw:
             raise CommandError(
-                f"backup_db refuses to run without a backup directory: set "
-                f"BACKUP_DIR (see backend/.env.example) or pass "
-                f"--output-dir. A dump written to a container's writable "
-                f"layer is lost when the container is replaced, which is the "
-                f"failure this command exists to prevent."
+                "backup_db refuses to run without a backup directory: set "
+                "BACKUP_DIR (see backend/.env.example) or pass "
+                "--output-dir. A dump written to a container's writable "
+                "layer is lost when the container is replaced, which is the "
+                "failure this command exists to prevent."
             )
         directory = Path(raw).expanduser()
         if directory.exists() and not directory.is_dir():

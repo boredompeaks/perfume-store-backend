@@ -1,4 +1,5 @@
 """E2E auth/recovery tests - docs/test-gaps.md e2e items 2 and 3."""
+
 from django.core import mail
 from django.test import tag
 
@@ -11,7 +12,11 @@ class VerificationGateTests(ApiTestCase):
     def test_login_stays_blocked_until_resend_and_verify_complete(self):
         res = self.client.post(
             "/api/accounts/register/",
-            {"username": "delayed", "email": "delayed@example.com", "password": "S3cure-Passphrase!"},
+            {
+                "username": "delayed",
+                "email": "delayed@example.com",
+                "password": "S3cure-Passphrase!",
+            },
             format="json",
         )
         self.assertEqual(res.status_code, 201, res.data)
@@ -21,12 +26,18 @@ class VerificationGateTests(ApiTestCase):
         self.assertEqual(res.status_code, 401, res.data)
 
         # resend flow issues a fresh, working link (register already sent one)
-        res = self.client.post("/api/accounts/resend-verification/", {"email": "delayed@example.com"}, format="json")
+        res = self.client.post(
+            "/api/accounts/resend-verification/",
+            {"email": "delayed@example.com"},
+            format="json",
+        )
         self.assertEqual(res.status_code, 200, res.data)
         self.assertEqual(len(mail.outbox), 2)
         uid, token = extract_link_params(mail.outbox[-1].body, "verify-email")
 
-        res = self.client.post("/api/accounts/verify-email/", {"uid": uid, "token": token}, format="json")
+        res = self.client.post(
+            "/api/accounts/verify-email/", {"uid": uid, "token": token}, format="json"
+        )
         self.assertEqual(res.status_code, 200, res.data)
 
         # only now does the gate open
@@ -46,7 +57,11 @@ class PasswordResetFlowTests(ApiTestCase):
         self.register_and_verify(username="resetflow", email="resetflow@example.com")
 
         # request a reset link
-        res = self.client.post("/api/accounts/password-reset/", {"email": "resetflow@example.com"}, format="json")
+        res = self.client.post(
+            "/api/accounts/password-reset/",
+            {"email": "resetflow@example.com"},
+            format="json",
+        )
         self.assertEqual(res.status_code, 200, res.data)
         reset_mail = mail.outbox[-1]
         uid, token = extract_link_params(reset_mail.body, "reset-password")
@@ -94,7 +109,9 @@ class PasswordResetFlowTests(ApiTestCase):
         user = self.make_user("deactivated")
         uid = urlsafe_base64_encode(force_bytes(user.pk))
         token = default_token_generator.make_token(user)
-        User.objects.filter(pk=user.pk).update(is_active=False)  # staff disabled the account
+        User.objects.filter(pk=user.pk).update(
+            is_active=False
+        )  # staff disabled the account
 
         res = self.client.post(
             "/api/accounts/password-reset/confirm/",
@@ -103,7 +120,9 @@ class PasswordResetFlowTests(ApiTestCase):
         )
 
         user.refresh_from_db()
-        self.assertTrue(user.check_password("Ev1l-Passphrase-9"))  # password did change...
-        self.assertFalse(user.is_active)                            # ...but the gate stays shut
+        self.assertTrue(
+            user.check_password("Ev1l-Passphrase-9")
+        )  # password did change...
+        self.assertFalse(user.is_active)  # ...but the gate stays shut
         res, _ = self.api_login("deactivated", password="Ev1l-Passphrase-9")
         self.assertEqual(res.status_code, 401, res.data)

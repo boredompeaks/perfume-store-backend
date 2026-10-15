@@ -1,0 +1,57 @@
+{
+  "kind": "floor",
+  "task": "GATE-MYPY-1",
+  "tool": "scripts/changelog_figures.py",
+  "measured_at": "2026-10-09T02:52:38+05:30",
+  "pair_complete": true,
+  "engines": [
+    {
+      "engine": "sqlite",
+      "database_url": "sqlite:///db.sqlite3",
+      "commands": [
+        "C:\\Users\\Admin\\AppData\\Local\\Temp\\opencode\\freshv\\Scripts\\python.exe -m coverage run manage.py test --verbosity 0",
+        "C:\\Users\\Admin\\AppData\\Local\\Temp\\opencode\\freshv\\Scripts\\python.exe -m coverage report"
+      ],
+      "run": {
+        "verdict": "OK",
+        "tests": 1937,
+        "failures": null,
+        "errors": null,
+        "expected_failures": 3
+      },
+      "coverage": {
+        "statements": 9358,
+        "missed": 0,
+        "coverage_percent": "99.79",
+        "branches": 1358,
+        "partial_branches": 22
+      },
+      "test_exit": 0,
+      "coverage_exit": 0
+    },
+    {
+      "engine": "postgresql",
+      "database_url": "postgres://perfume:***@localhost:55433/perfume_store",
+      "commands": [
+        "C:\\Users\\Admin\\AppData\\Local\\Temp\\opencode\\freshv\\Scripts\\python.exe -m coverage run manage.py test --verbosity 0",
+        "C:\\Users\\Admin\\AppData\\Local\\Temp\\opencode\\freshv\\Scripts\\python.exe -m coverage report"
+      ],
+      "run": {
+        "verdict": "OK",
+        "tests": 1937,
+        "failures": null,
+        "errors": null,
+        "expected_failures": 3
+      },
+      "coverage": {
+        "statements": 9358,
+        "missed": 0,
+        "coverage_percent": "99.79",
+        "branches": 1358,
+        "partial_branches": 22
+      },
+      "test_exit": 0,
+      "coverage_exit": 0
+    }
+  ]
+}

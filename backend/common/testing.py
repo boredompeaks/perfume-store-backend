@@ -11,20 +11,21 @@ Security rules enforced here (per docs/conventions.md and docs/test-gaps.md):
 - Password hashing uses the fast MD5 hasher (test-only speed-up; production
   settings are untouched).
 """
+
 from datetime import timedelta
 from decimal import Decimal
 from pathlib import Path
 from tempfile import mkdtemp
 from unittest.mock import patch
 
+import razorpay
 from django.contrib.auth.models import User
 from django.core import mail
-from django.core.cache import cache
+from django.core.cache import cache, caches
+from django.db import connection
 from django.test import TestCase, override_settings
 from django.utils import timezone
 from rest_framework.test import APIClient
-
-import razorpay
 
 from accounts.models import TOTPDevice
 from common import totp
@@ -62,14 +63,22 @@ class ApiTestCase(TestCase):
         # Scoped throttles keep their request history in the default cache,
         # which lives for the whole test run; reset it per test so a rate
         # limit engaged in one test can never 429 another (deterministic
-        # suite, independent of throttle rates in settings).
+        # suite, independent of throttle rates in settings). The alerts
+        # alias carries the cooldown window, so it is reset too.
         cache.clear()
+        caches["alerts"].clear()
 
     # ------------------------------------------------------------------
     # Factories
     # ------------------------------------------------------------------
 
-    def make_user(self, username="buyer", password="S3cure-Passphrase!", email=None, is_active=True):
+    def make_user(
+        self,
+        username="buyer",
+        password="S3cure-Passphrase!",
+        email=None,
+        is_active=True,
+    ):
         return User.objects.create_user(
             username=username,
             email=email or f"{username}@example.com",
@@ -94,7 +103,14 @@ class ApiTestCase(TestCase):
         user.groups.add(Group.objects.get_or_create(name=ROLE_ADMIN)[0])
         return user
 
-    def make_product(self, name="Rose Aurum", price="499.99", stock=10, category="Floral", **overrides):
+    def make_product(
+        self,
+        name="Rose Aurum",
+        price="499.99",
+        stock=10,
+        category="Floral",
+        **overrides,
+    ):
         from products.models import products
 
         fields = dict(
@@ -108,9 +124,18 @@ class ApiTestCase(TestCase):
         fields.update(overrides)
         return products.objects.create(**fields)
 
-    def make_coupon(self, code="SAVE10", discount_type="percentage", discount_value="10",
-                    minimum_order_amount="0", maximum_discount=None, active=True,
-                    usage_limit=None, used_count=0, **overrides):
+    def make_coupon(
+        self,
+        code="SAVE10",
+        discount_type="percentage",
+        discount_value="10",
+        minimum_order_amount="0",
+        maximum_discount=None,
+        active=True,
+        usage_limit=None,
+        used_count=0,
+        **overrides,
+    ):
         from orders.models import Coupon
 
         fields = dict(
@@ -118,7 +143,9 @@ class ApiTestCase(TestCase):
             discount_type=discount_type,
             discount_value=Decimal(discount_value),
             minimum_order_amount=Decimal(minimum_order_amount),
-            maximum_discount=Decimal(maximum_discount) if maximum_discount is not None else None,
+            maximum_discount=Decimal(maximum_discount)
+            if maximum_discount is not None
+            else None,
             active=active,
             valid_from=timezone.now() - timedelta(days=1),
             valid_until=timezone.now() + timedelta(days=1),
@@ -181,7 +208,9 @@ class ApiTestCase(TestCase):
             target.credentials(HTTP_AUTHORIZATION=f"Bearer {token}")
         return res, token
 
-    def register_and_verify(self, username="buyer", password="S3cure-Passphrase!", email=None):
+    def register_and_verify(
+        self, username="buyer", password="S3cure-Passphrase!", email=None
+    ):
         """Full registration through the API: register -> verify email link."""
         email = email or f"{username}@example.com"
         res = self.client.post(
@@ -236,7 +265,9 @@ class ApiTestCase(TestCase):
 
     def checkout(self, client=None, **overrides):
         client = client or self.client
-        return client.post("/api/orders/checkout/", self.checkout_payload(**overrides), format="json")
+        return client.post(
+            "/api/orders/checkout/", self.checkout_payload(**overrides), format="json"
+        )
 
     # ------------------------------------------------------------------
     # Razorpay fakes (never touch the network)
@@ -260,6 +291,48 @@ class ApiTestCase(TestCase):
         client_mock.utility.verify_payment_signature.side_effect = (
             razorpay.errors.SignatureVerificationError("invalid signature")
         )
+
+
+def covering_indexes(model, column):
+    """Every index/constraint the database reports on exactly ``column``.
+
+    Keyed by the name the database gives it, so a caller can tell one index
+    from another without relying on dict order.
+    """
+    with connection.cursor() as cursor:
+        constraints = connection.introspection.get_constraints(
+            cursor, model._meta.db_table
+        )
+    return {
+        name: info for name, info in constraints.items() if info["columns"] == [column]
+    }
+
+
+def redundant_covering_indexes(model, column):
+    """Covering indexes that are neither unique nor the engine's own LIKE index.
+
+    Django gives every indexed ``varchar``/``text`` column a SECOND,
+    deliberately non-unique index with the ``varchar_pattern_ops`` operator
+    class, so that ``icontains`` can use an index under a non-C collation.
+    PostgreSQL creates it; SQLite does not, and its introspection never
+    surfaces one. So "every covering index is unique" is not a portable
+    invariant, and asserting it makes a correct schema look redundant on one
+    engine only.
+
+    What IS portable is the intent behind the assertion - no *duplicate*
+    index stacked on top of a column's UNIQUE constraint - so the engine's
+    own LIKE index is named by asking the backend to generate the name it
+    would have generated, rather than by hardcoding a digest. Anything left
+    over is an index a human added, which is what the pin is for.
+    """
+    like_name = connection.schema_editor()._create_index_name(
+        model._meta.db_table, [column], suffix="_like"
+    )
+    return {
+        name: info
+        for name, info in covering_indexes(model, column).items()
+        if not info["unique"] and name != like_name
+    }
 
 
 def extract_link_params(body, hint):

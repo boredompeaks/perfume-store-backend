@@ -22,7 +22,6 @@ customers…". These tests pin the properties that make it safe and useful:
 
 from decimal import Decimal
 
-from django.contrib import admin
 from django.contrib.auth.models import Group, User
 from django.db import connection
 from django.test import tag

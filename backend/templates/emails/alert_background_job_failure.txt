@@ -1,0 +1,14 @@
+A queued notification was dead-lettered and will not be retried
+automatically:
+
+{{ detail }}
+
+Every attempt the deployment allows has now failed, or the notification can
+never be sent, so nothing further is owed to the customer automatically. Read
+the failure with:
+
+  manage.py drain_notification_outbox --status-only
+
+Re-open it for one more attempt with --retry-dead (a row past its retention
+window is refused there, because its payload is deliberately not scrubbed of
+one-time token material and the expiry is the control that bounds it).

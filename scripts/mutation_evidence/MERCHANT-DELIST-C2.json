@@ -1,0 +1,41 @@
+{
+  "task": "MERCHANT-DELIST-C2",
+  "title": "The delist-aware restock surface: the opt-in miss, the suppression, and the relist release",
+  "note": "Authored from the committed blob at the fix commit, before any replay ran, with claimed_count deliberately absent: this is the FIRST recording, so the replay that follows is the figures' origin, not a re-check. The fix has three load-bearing halves and each is broken here the way a regression would actually break it: M1 removes the opt-in gate so a delisted slug answers the same 201 an active one does - the existence leak the 404-on-detail behaviour one endpoint over exists to refuse; M2 removes the fan-out's is_active re-check so a restock that lands while the product is off sale mails 'Back in stock' with a link to a 404 detail page; M3 drops the relist registration so the deferral decision (suppress while inactive, release on relist) loses its symmetric half and a customer who opted in before a delist is silenced for good.",
+  "mutations": [
+    {
+      "id": "M1",
+      "description": "the opt-in surface stops refusing delisted products: the is_active gate is dead, so a delisted slug answers the same 201 an active one does, leaking that the product exists (and its product_id) against a 404 for an unknown slug",
+      "path": "backend/products/restock_views.py",
+      "find": "    if request.method == \"POST\":\n        if not product.is_active:",
+      "replace": "    if request.method == \"POST\":\n        if False:",
+      "expected_failing_tests": [
+        "test_opt_in_to_delisted_product_is_uniform_with_unknown_slug"
+      ],
+      "test_scope": ["products.test_restock"]
+    },
+    {
+      "id": "M2",
+      "description": "the fan-out loses its is_active re-check, so a restock that lands while the product is delisted mails 'Back in stock' linking a detail page that 404s - the exact customer-facing defect the fix exists to close",
+      "path": "backend/products/models.py",
+      "find": "        if not products.objects.filter(pk=product.pk, is_active=True).exists():\n            return\n\n        armed = RestockNotification.objects.filter(",
+      "replace": "        armed = RestockNotification.objects.filter(",
+      "expected_failing_tests": [
+        "test_a_restock_while_delisted_sends_no_mail_and_leaves_optins_waiting",
+        "test_relist_releases_the_waiting_optins"
+      ],
+      "test_scope": ["products.test_restock"]
+    },
+    {
+      "id": "M3",
+      "description": "the relist action stops registering the release, so the suppression's symmetric half is gone: waiting opt-ins from before a delist are never told the product came back, which is deliberate silence rather than deferral",
+      "path": "backend/products/admin.py",
+      "find": "                    products.register_back_in_stock_release(target)",
+      "replace": "                    pass",
+      "expected_failing_tests": [
+        "test_relist_releases_the_waiting_optins"
+      ],
+      "test_scope": ["products.test_restock"]
+    }
+  ]
+}

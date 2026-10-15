@@ -17,6 +17,7 @@ Django's documented CSRF test recipe:
 The JWT interplay (refresh cookie flow from SPEC-17-02, checkout) is
 pinned here too: cookie+JWT endpoints keep working under the gate.
 """
+
 from django.conf import settings
 from django.contrib.auth.models import User
 from django.test import tag
@@ -247,17 +248,19 @@ class JWTAndAuthFlowInterplayTests(ApiTestCase):
         self.assertNotIn("refresh", res.data)  # R-17.12: cookie, not body
 
         res = self.client.post(
-            "/api/accounts/token/refresh/", {}, format="json",
+            "/api/accounts/token/refresh/",
+            {},
+            format="json",
             HTTP_X_CSRFTOKEN=token,
         )
         self.assertEqual(res.status_code, 200, res.data)
         self.assertIn("access", res.data)
 
-        self.client.credentials(
-            HTTP_AUTHORIZATION=f"Bearer {res.data['access']}"
-        )
+        self.client.credentials(HTTP_AUTHORIZATION=f"Bearer {res.data['access']}")
         res = self.client.post(
-            "/api/accounts/logout/", {}, format="json",
+            "/api/accounts/logout/",
+            {},
+            format="json",
             HTTP_X_CSRFTOKEN=token,
         )
         self.assertEqual(res.status_code, 200, res.data)

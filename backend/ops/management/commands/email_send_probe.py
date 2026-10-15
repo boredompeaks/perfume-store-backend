@@ -87,8 +87,7 @@ class Command(BaseCommand):
         parser.add_argument(
             "--recipient",
             help=(
-                "One ALERT_RECIPIENTS entry to probe. Default: every "
-                "allowlisted entry."
+                "One ALERT_RECIPIENTS entry to probe. Default: every allowlisted entry."
             ),
         )
 
@@ -146,8 +145,7 @@ class Command(BaseCommand):
                 # credential in it - so it is safe to surface. Exit non-zero: a
                 # rejected probe IS a delivery failure, not a warning.
                 raise CommandError(
-                    f"probe delivery to {address} failed: "
-                    f"{type(exc).__name__}: {exc}"
+                    f"probe delivery to {address} failed: {type(exc).__name__}: {exc}"
                 )
         self.stdout.write(
             f"probe accepted by the server for {len(recipients)} recipient(s). "

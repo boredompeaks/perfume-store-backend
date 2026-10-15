@@ -4,14 +4,13 @@ from django.db import migrations, models
 
 
 class Migration(migrations.Migration):
-
     dependencies = [
-        ('products', '0007_productvariant'),
+        ("products", "0007_productvariant"),
     ]
 
     operations = [
         migrations.AddIndex(
-            model_name='products',
-            index=models.Index(fields=['category'], name='products_category_idx'),
+            model_name="products",
+            index=models.Index(fields=["category"], name="products_category_idx"),
         ),
     ]

@@ -5,20 +5,25 @@ from django.db import migrations, models
 
 
 class Migration(migrations.Migration):
-
     dependencies = [
-        ('orders', '0003_coupon'),
+        ("orders", "0003_coupon"),
     ]
 
     operations = [
         migrations.AddField(
-            model_name='order',
-            name='coupon',
-            field=models.ForeignKey(blank=True, null=True, on_delete=django.db.models.deletion.SET_NULL, related_name='orders', to='orders.coupon'),
+            model_name="order",
+            name="coupon",
+            field=models.ForeignKey(
+                blank=True,
+                null=True,
+                on_delete=django.db.models.deletion.SET_NULL,
+                related_name="orders",
+                to="orders.coupon",
+            ),
         ),
         migrations.AddField(
-            model_name='order',
-            name='discount_amount',
+            model_name="order",
+            name="discount_amount",
             field=models.DecimalField(decimal_places=2, default=0, max_digits=10),
         ),
     ]

@@ -279,6 +279,15 @@ HasShippingManage = capability_permission("shipping.manage")
 # staff shipment endpoint could not be wired at all.
 HasShipmentsRead = capability_permission("shipments.read")
 HasShipmentsWrite = capability_permission("shipments.write")
+# [R-1.16] SPEC-1-B07a: the return-request surface's gates. The customer-facing
+# half of a return is NOT gated by them - a customer requests against their own
+# order by account and reads only their own requests - so as with the shipment
+# pair these exist for the staff review queue (spec 6.8 line 1957) and for the
+# one-named-class-per-capability invariant this module documents, which
+# tests/test_rbac_foundation.py pins: without them the capabilities could not
+# exist in the map at all.
+HasReturnsRead = capability_permission("returns.read")
+HasReturnsWrite = capability_permission("returns.write")
 HasCustomersRead = capability_permission("customers.read")
 HasDiscountsWrite = capability_permission("discounts.write")
 HasReportsRead = capability_permission("reports.read")

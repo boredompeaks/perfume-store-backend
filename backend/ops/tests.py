@@ -1,4 +1,5 @@
 """Ops tests: /health/, /api/settings/, admin dashboard, services."""
+
 import tempfile
 from datetime import timedelta
 from decimal import Decimal
@@ -6,12 +7,11 @@ from pathlib import Path
 
 from django.conf import settings
 from django.contrib.auth.models import User
-from django.template import Context, RequestContext, Template
+from django.template import RequestContext, Template
 from django.test import override_settings, tag
 from django.test.client import RequestFactory
 from django.utils import timezone
 
-from common.testing import ApiTestCase
 from common.roles import (
     ROLE_ADMIN,
     ROLE_CATALOGUE,
@@ -20,6 +20,7 @@ from common.roles import (
     ROLE_MARKETING,
     ROLE_SUPPORT,
 )
+from common.testing import ApiTestCase
 from ops.services import REVENUE_STATUSES, get_health, get_sales_series, get_stats
 
 TEST_PASSWORD = "S3cure-Passphrase!"
@@ -47,8 +48,15 @@ class HealthEndpointTests(ApiTestCase):
         from orders.models import Order
 
         Order.objects.create(
-            user=buyer, full_name="a", phone="1", address="a", city="c", state="s",
-            pincode="1", status="pending", total_amount=Decimal("10.00"),
+            user=buyer,
+            full_name="a",
+            phone="1",
+            address="a",
+            city="c",
+            state="s",
+            pincode="1",
+            status="pending",
+            total_amount=Decimal("10.00"),
         )
         data = self.client.get("/health/").json()
         self.assertEqual(data["pending_orders"], 1)
@@ -75,7 +83,9 @@ class HealthEndpointTests(ApiTestCase):
         leaking a traceback."""
         from unittest.mock import patch
 
-        with patch("orders.models.Order.objects.filter", side_effect=Exception("db gone")):
+        with patch(
+            "orders.models.Order.objects.filter", side_effect=Exception("db gone")
+        ):
             data = get_health()
 
         self.assertEqual(data["status"], "degraded")
@@ -102,7 +112,6 @@ class HealthEndpointTests(ApiTestCase):
 @tag("ops")
 class SettingsEndpointTests(ApiTestCase):
     def test_settings_returns_singleton_values(self):
-        from ops.models import SiteSettings
 
         res = self.client.get("/api/settings/")
         self.assertEqual(res.status_code, 200)
@@ -162,8 +171,15 @@ class OpsServicesTests(ApiTestCase):
         }
         for status, amount in amounts.items():
             Order.objects.create(
-                user=buyer, full_name="a", phone="1", address="a", city="c", state="s",
-                pincode="1", status=status, total_amount=Decimal(amount),
+                user=buyer,
+                full_name="a",
+                phone="1",
+                address="a",
+                city="c",
+                state="s",
+                pincode="1",
+                status=status,
+                total_amount=Decimal(amount),
             )
         self.make_product()
 
@@ -176,7 +192,14 @@ class OpsServicesTests(ApiTestCase):
         self.assertEqual(stats["orders_total"], 5)
         self.assertEqual(stats["orders_by_status"]["pending"], 1)
         # revenue only counts money actually captured
-        expected = sum(Decimal(v) for s, v in [("confirmed", "250.00"), ("shipped", "10.50"), ("delivered", "5.25")])
+        expected = sum(
+            Decimal(v)
+            for s, v in [
+                ("confirmed", "250.00"),
+                ("shipped", "10.50"),
+                ("delivered", "5.25"),
+            ]
+        )
         self.assertEqual(REVENUE_STATUSES, ("confirmed", "shipped", "delivered"))
         self.assertEqual(stats["revenue"], str(expected))
         self.assertEqual(len(stats["recent_orders"]), 5)
@@ -211,8 +234,14 @@ class OpsServicesTests(ApiTestCase):
                 if subcase == "only unpaid orders":
                     buyer = self.make_user("windowshopper")
                     Order.objects.create(
-                        user=buyer, full_name="a", phone="1", address="a",
-                        city="c", state="s", pincode="1", status="pending",
+                        user=buyer,
+                        full_name="a",
+                        phone="1",
+                        address="a",
+                        city="c",
+                        state="s",
+                        pincode="1",
+                        status="pending",
                         total_amount=Decimal("99.00"),
                     )
                 stats = get_stats()
@@ -241,7 +270,11 @@ class OpsServicesTests(ApiTestCase):
 
         self.make_product(name="Barely There", stock=2)
         Product.objects.create(
-            name="Getting There", description="d", price=1, size=1, stock=3,
+            name="Getting There",
+            description="d",
+            price=1,
+            size=1,
+            stock=3,
             category="X",
         )
 
@@ -280,8 +313,15 @@ class SalesSeriesTests(ApiTestCase):
 
         buyer = self.make_user(username)
         return Order.objects.create(
-            user=buyer, full_name="a", phone="1", address="a", city="c", state="s",
-            pincode="1", status=status, total_amount=Decimal(amount),
+            user=buyer,
+            full_name="a",
+            phone="1",
+            address="a",
+            city="c",
+            state="s",
+            pincode="1",
+            status=status,
+            total_amount=Decimal(amount),
         )
 
     @staticmethod
@@ -330,7 +370,9 @@ class SalesSeriesTests(ApiTestCase):
         self.assertIsInstance(by_date[today]["revenue"], Decimal)
         self.assertEqual(str(by_date[today]["revenue"]), "125.00")
         self.assertEqual(by_date[today]["orders"], 2)
-        self.assertEqual(by_date[today - timedelta(days=1)]["revenue"], Decimal("10.50"))
+        self.assertEqual(
+            by_date[today - timedelta(days=1)]["revenue"], Decimal("10.50")
+        )
         self.assertEqual(by_date[today - timedelta(days=1)]["orders"], 1)
         # unpaid, cancelled and out-of-window money appears on no day
         self.assertNotIn(Decimal("999.00"), revenues)
@@ -418,8 +460,15 @@ class DashboardAccessTests(ApiTestCase):
         self.client.login(username="boss", password="boss-pass-123")
         buyer = self.make_user("dashbuyer")
         Order.objects.create(
-            user=buyer, full_name="a", phone="1", address="a", city="c", state="s",
-            pincode="1", status="confirmed", total_amount=Decimal("42.00"),
+            user=buyer,
+            full_name="a",
+            phone="1",
+            address="a",
+            city="c",
+            state="s",
+            pincode="1",
+            status="confirmed",
+            total_amount=Decimal("42.00"),
         )
         res = self.client.get("/admin/dashboard/")
         self.assertEqual(res.status_code, 200)
@@ -439,8 +488,15 @@ class DashboardAccessTests(ApiTestCase):
         kpis = (("confirmed", "100.00"), ("shipped", "25.00"), ("pending", "50.00"))
         for status, amount in kpis:
             Order.objects.create(
-                user=buyer, full_name="a", phone="1", address="a", city="c", state="s",
-                pincode="1", status=status, total_amount=Decimal(amount),
+                user=buyer,
+                full_name="a",
+                phone="1",
+                address="a",
+                city="c",
+                state="s",
+                pincode="1",
+                status=status,
+                total_amount=Decimal(amount),
             )
 
         res = self.client.get("/admin/dashboard/")
@@ -470,8 +526,15 @@ class DashboardAccessTests(ApiTestCase):
         self.client.login(username="boss", password="boss-pass-123")
         buyer = self.make_user("goner")
         Order.objects.create(
-            user=buyer, full_name="a", phone="1", address="a", city="c", state="s",
-            pincode="1", status="pending", total_amount=Decimal("42.00"),
+            user=buyer,
+            full_name="a",
+            phone="1",
+            address="a",
+            city="c",
+            state="s",
+            pincode="1",
+            status="pending",
+            total_amount=Decimal("42.00"),
         )
         # make ONLY the buyer's lookup fail (session auth also uses .get)
         real_get = User.objects.get
@@ -493,7 +556,9 @@ class DashboardAccessTests(ApiTestCase):
         User.objects.create_superuser("boss", "boss@example.com", "boss-pass-123")
         self.client.login(username="boss", password="boss-pass-123")
         low = self.make_product(name="Low Stock One", stock=2)
-        Product.objects.create(name="Empty Bottle", description="d", price=1, size=1, stock=0, category="X")
+        Product.objects.create(
+            name="Empty Bottle", description="d", price=1, size=1, stock=0, category="X"
+        )
         healthy = self.make_product(name="Healthy Stock", stock=50)
 
         res = self.client.get("/admin/dashboard/")
@@ -510,8 +575,12 @@ class DashboardAccessTests(ApiTestCase):
         self.client.login(username="boss", password="boss-pass-123")
         self.make_product(name="Threshold Edge Two", stock=2)
         Product.objects.create(
-            name="Threshold Edge Three", description="d", price=1, size=1,
-            stock=3, category="X",
+            name="Threshold Edge Three",
+            description="d",
+            price=1,
+            size=1,
+            stock=3,
+            category="X",
         )
 
         with override_settings(LOW_STOCK_THRESHOLD=5):
@@ -539,8 +608,15 @@ class DashboardAccessTests(ApiTestCase):
         self.client.login(username="boss", password="boss-pass-123")
         buyer = self.make_user("ctxbuyer")
         Order.objects.create(
-            user=buyer, full_name="a", phone="1", address="a", city="c", state="s",
-            pincode="1", status="confirmed", total_amount=Decimal("42.00"),
+            user=buyer,
+            full_name="a",
+            phone="1",
+            address="a",
+            city="c",
+            state="s",
+            pincode="1",
+            status="confirmed",
+            total_amount=Decimal("42.00"),
         )
 
         res = self.client.get("/admin/dashboard/")
@@ -568,8 +644,14 @@ class DashboardAccessTests(ApiTestCase):
         for i in range(3):
             buyer = self.make_user(f"batch{i}")
             Order.objects.create(
-                user=buyer, full_name="a", phone="1", address="a", city="c",
-                state="s", pincode="1", status="confirmed",
+                user=buyer,
+                full_name="a",
+                phone="1",
+                address="a",
+                city="c",
+                state="s",
+                pincode="1",
+                status="confirmed",
                 total_amount=Decimal("10.00"),
             )
 
@@ -595,8 +677,15 @@ class DashboardAccessTests(ApiTestCase):
         self.client.login(username="boss", password="boss-pass-123")
         buyer = self.make_user("vanisher")
         Order.objects.create(
-            user=buyer, full_name="a", phone="1", address="a", city="c", state="s",
-            pincode="1", status="pending", total_amount=Decimal("42.00"),
+            user=buyer,
+            full_name="a",
+            phone="1",
+            address="a",
+            city="c",
+            state="s",
+            pincode="1",
+            status="pending",
+            total_amount=Decimal("42.00"),
         )
 
         with patch.object(User.objects, "in_bulk", return_value={}):
@@ -620,8 +709,15 @@ class DashboardSalesChartTests(ApiTestCase):
 
         buyer = self.make_user(username)
         order = Order.objects.create(
-            user=buyer, full_name="a", phone="1", address="a", city="c", state="s",
-            pincode="1", status=status, total_amount=Decimal(amount),
+            user=buyer,
+            full_name="a",
+            phone="1",
+            address="a",
+            city="c",
+            state="s",
+            pincode="1",
+            status=status,
+            total_amount=Decimal(amount),
         )
         if days_ago:
             Order.objects.filter(pk=order.pk).update(
@@ -667,8 +763,7 @@ class DashboardSalesChartTests(ApiTestCase):
         res = self.client.get("/admin/dashboard/")
 
         expected = (
-            "Sales over time for the last 30 days: "
-            "2 paid orders, total revenue ₹72.00"
+            "Sales over time for the last 30 days: 2 paid orders, total revenue ₹72.00"
         )
         self.assertContains(res, f'aria-label="{expected}"')
 
@@ -700,7 +795,7 @@ class SiteSettingsAdminTests(ApiTestCase):
         SiteSettings.load()  # ensure the singleton row exists
         res = self.client.get("/admin/ops/sitesettings/")
         self.assertEqual(res.status_code, 302)
-        self.assertIn(f"/admin/ops/sitesettings/1/change/", res.headers["Location"])
+        self.assertIn("/admin/ops/sitesettings/1/change/", res.headers["Location"])
 
     def test_changelist_creates_nothing_when_row_missing(self):
         """With no singleton row yet the changelist still renders (the row is
@@ -753,12 +848,14 @@ class SiteSettingsAdminTests(ApiTestCase):
 @tag("ops")
 class DashboardTemplateTagTests(ApiTestCase):
     def test_ops_dashboard_cards_tag_renders(self):
-        from ops.templatetags.ops_dashboard import register as _register  # noqa: F401  (loads the tag library)
+        from ops.templatetags.ops_dashboard import (
+            register as _register,  # noqa: F401  (loads the tag library)
+        )
 
         request = RequestFactory().get("/")
-        html = Template(
-            "{% load ops_dashboard %}{% ops_dashboard_cards %}"
-        ).render(RequestContext(request))
+        html = Template("{% load ops_dashboard %}{% ops_dashboard_cards %}").render(
+            RequestContext(request)
+        )
         self.assertIn("ok", html)
 
 
@@ -808,7 +905,9 @@ class DashboardCapabilityGateTests(ApiTestCase):
         self.assertEqual(res.status_code, 403)
 
     def test_superuser_bypass_renders_the_dashboard(self):
-        User.objects.create_superuser("dash-root", "dash-root@example.com", TEST_PASSWORD)
+        User.objects.create_superuser(
+            "dash-root", "dash-root@example.com", TEST_PASSWORD
+        )
         self.client.force_login(User.objects.get(username="dash-root"))
         res = self._dashboard_get()
         self.assertEqual(res.status_code, 200)

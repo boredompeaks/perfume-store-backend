@@ -17,6 +17,20 @@ explicit dimensions below (spec 10.2) are additive and kept in sync by the
 writers. No consumer is forced onto the new fields in this batch.
 """
 
+# Typing imports (TIER-2). `Callable` is a RUNTIME import, not a typing-only
+# one, because it appears in the module-level annotation on
+# TRANSITION_PRECONDITIONS below and Python evaluates that annotation when the
+# module is loaded. `TYPE_CHECKING` gates the model reference, and that one IS
+# typing-only: this module promises to stay dependency-free (the 0012 data
+# migration imports from here), so a real import of orders.models would risk an
+# import cycle at migration time. A string annotation around the name means
+# nothing is resolved when this module is loaded.
+from collections.abc import Callable
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from orders.models import Order
+
 # ——— legacy single status (compat surface) ———————————————————————————
 
 STATUS_CHOICES = [
@@ -78,7 +92,14 @@ FULFILMENT_QUEUE_STATUSES = tuple(ADMIN_FULFILMENT_NEXT)
 # themselves at import (models is imported by every writer surface, so
 # the registry is populated before any writer runs). precondition_failures
 # is the ONLY evaluation point — writers must never special-case a check.
-TRANSITION_PRECONDITIONS = {}
+# Annotated rather than left bare (TIER-2): the registry is a mapping from a
+# status to the list of callables registered against it, and an empty `{}` is
+# precisely the case mypy cannot infer -- it has no value to read the type
+# from. `Callable[[Order], list[str]]` is the contract the docstring above
+# already states (callables receiving the Order, returning failure reasons),
+# and the `Order` reference is a string because this module stays
+# dependency-free (see the module docstring) and must not import the model.
+TRANSITION_PRECONDITIONS: dict[str, list[Callable[["Order"], list[str]]]] = {}
 
 
 def register_transition_preconditions(status, *checks):
@@ -97,6 +118,7 @@ def precondition_failures(order, new_status):
     for check in TRANSITION_PRECONDITIONS.get(new_status, ()):
         failures.extend(check(order) or [])
     return failures
+
 
 # ——— [R-10.1] explicit lifecycle dimensions (spec 10.2) —————————————————
 # The legacy single status conflates "did they pay" with "did we ship"; the
@@ -163,6 +185,7 @@ def payment_transition_allowed(old_payment: str, new_payment: str) -> bool:
         old_payment, set()
     )
 
+
 # Total legacy→dimensions mapping: EVERY legacy status value maps to BOTH
 # dimensions — this is what the 0012 data migration backfills from, so a
 # key missing here would leave a live row with un-backfilled dimensions.
@@ -196,6 +219,72 @@ def fulfilment_for_status(status: str) -> str:
 # ask this module whether the row may reach it, so neither restates it.
 PAYMENT_CAPTURED = "captured"
 
+
+def _reachable_payment_values(root: str) -> set:
+    """Every payment value reachable from ``root`` along declared edges.
+
+    Follows ``PAYMENT_ALLOWED_TRANSITIONS`` breadth-first, so the answer is
+    whatever the machine says rather than whatever a caller listed. Used by
+    :data:`CAPTURED_MONEY_PAYMENT_STATUSES`, which is why it is private.
+    """
+    seen, frontier = {root}, [root]
+    while frontier:
+        for target in PAYMENT_ALLOWED_TRANSITIONS.get(frontier.pop(), set()):
+            if target not in seen:
+                seen.add(target)
+                frontier.append(target)
+    return seen
+
+
+# [R-1.14] SPEC-1-05: the payment values that mean THE CUSTOMER HAS PAID and
+# the store still holds some of that money - the capture point itself plus
+# everything the machine places downstream of it that it can still move a
+# refund out of.
+#
+# DERIVED, NEVER LISTED, and the derivation is the whole point. It is the
+# closure of ``PAYMENT_ALLOWED_TRANSITIONS`` from ``PAYMENT_CAPTURED``, less the
+# values with no declared outgoing edge. Each half is the machine's own
+# evidence rather than a judgment:
+#
+# * the closure is what admits ``partially_refunded``. The table places it
+#   STRICTLY AFTER ``captured``, orders/models.py's shipped-edge precondition
+#   admits it ALONGSIDE ``captured`` as "real money too - a capture minus a
+#   recorded refund", and the SPEC-1-05 refund seam is the writer that puts an
+#   order there. A customer who has had part of their money back still has
+#   money in the transaction, so they still have something to be RETURNING.
+# * the no-outgoing-edge filter is what excludes ``refunded``: a value the
+#   machine declares no edge out of is a value whose money has all gone back,
+#   and an order in that state has nothing left to send anything against.
+#
+# Restating either half as a literal here is what let the cycle-3 audit find
+# the returns gate tracking only ``captured`` while the machine tracked two
+# values; a reader that walks the table instead cannot fall behind it.
+CAPTURED_MONEY_PAYMENT_STATUSES = frozenset(
+    value
+    for value in _reachable_payment_values(PAYMENT_CAPTURED)
+    if PAYMENT_ALLOWED_TRANSITIONS.get(value)
+)
+
+# The payment values that prove a CAPTURE already happened for this order -
+# the capture point plus everything the machine places downstream of it,
+# INCLUDING the values with no outgoing edge.
+#
+# This is the same closure as :data:`CAPTURED_MONEY_PAYMENT_STATUSES` WITHOUT
+# the sink filter, and the difference is the whole point: the two answer
+# different questions and a writer that inherits the wrong one's answer writes
+# a real defect.
+#
+# * ``CAPTURED_MONEY_PAYMENT_STATUSES`` asks "can this store still move a
+#   REFUND out of this order" (the returns seam), so it drops the dead ends -
+#   an order in that state has nothing left to send a refund against.
+# * This set asks "did a capture already commit this order's SALE"
+#   (``orders.inventory``'s idempotency guard), and ``refunded`` answers YES:
+#   the only route to ``refunded`` runs through ``captured``, so the sale was
+#   committed and then unwound. Dropping it would let that guard treat a
+#   refunded order as never sold and commit its stock a second time - a double
+#   decrement against stock the refund already returned.
+CAPTURED_SALE_PAYMENT_STATUSES = frozenset(_reachable_payment_values(PAYMENT_CAPTURED))
+
 # The lifecycle order the dimension mapping above is read in. status_for_payment
 # needs a progression, not a set: one payment value spans several statuses
 # (captured covers confirmed/shipped/delivered) and the answer to "which status
@@ -203,7 +292,7 @@ PAYMENT_CAPTURED = "captured"
 LIFECYCLE_SEQUENCE = ("pending", "confirmed", "shipped", "delivered", "cancelled")
 
 
-def status_for_payment(payment_status: str) -> str:
+def status_for_payment(payment_status: str) -> str | None:
     """The earliest lifecycle status whose payment dimension is ``payment_status``.
 
     The inverse of :func:`payment_for_status`, and the reason a writer never
@@ -212,6 +301,15 @@ def status_for_payment(payment_status: str) -> str:
     refund-dimension values, states the legacy single status cannot express
     (the documented [R-10.1] divergence), so a caller must handle it rather
     than assume a mapping exists.
+
+    The return annotation is ``str | None`` and it was ``str`` until mypy was
+    pointed at this module (TIER-2). The annotation was the defect, not the
+    body: ``None`` is a real, intended and TESTED return here — the pins in
+    ``orders.tests_webhooks`` assert ``assertIsNone`` for both refund-dimension
+    and unmapped values — and ``orders.webhooks`` branches on it. A ``-> str``
+    signature on a function that returns ``None`` tells every future caller,
+    and every type checker reading this module, that the None branch cannot
+    happen. ``str | None`` says what the function actually does.
     """
     for status in LIFECYCLE_SEQUENCE:
         if LEGACY_STATUS_DIMENSIONS.get(status, ("", ""))[0] == payment_status:

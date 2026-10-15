@@ -10,17 +10,17 @@ Documented population source: no variant-selection input exists at checkout
 ``products`` carries no product-level SKU, so ``sku`` snapshots empty and
 ``variant_name`` mirrors the product name until a variant can be chosen.
 """
+
 import importlib
+from decimal import Decimal
 
 from django.apps import apps as global_apps
 from django.test import tag
-from decimal import Decimal
 
 from common.testing import ApiTestCase
 from orders.admin import OrderItemInline
 from orders.models import Order, OrderItem
 from orders.serializers import OrderItemSerializer
-from products.models import products as Product
 
 
 def make_order(user):

@@ -22,7 +22,6 @@ therefore the only one that has to answer for a credential.
 """
 
 from django.conf import settings
-
 from rest_framework import status
 from rest_framework.permissions import AllowAny
 from rest_framework.response import Response

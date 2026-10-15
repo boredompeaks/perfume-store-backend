@@ -215,8 +215,8 @@ class ProductVariantStockBoundaryTests(ApiTestCase):
 
         product.refresh_from_db()
         variant.refresh_from_db()
-        self.assertEqual(product.stock, 9)   # product stock is the authority
-        self.assertEqual(variant.stock, 0)   # variant stock untouched
+        self.assertEqual(product.stock, 9)  # product stock is the authority
+        self.assertEqual(variant.stock, 0)  # variant stock untouched
 
 
 @tag("products")

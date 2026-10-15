@@ -5,20 +5,21 @@ from django.db import migrations, models
 
 
 class Migration(migrations.Migration):
-
     dependencies = [
-        ('orders', '0010_order_orders_user_created_idx_and_more'),
+        ("orders", "0010_order_orders_user_created_idx_and_more"),
         migrations.swappable_dependency(settings.AUTH_USER_MODEL),
     ]
 
     operations = [
         migrations.AddField(
-            model_name='order',
-            name='idempotency_key',
+            model_name="order",
+            name="idempotency_key",
             field=models.CharField(blank=True, max_length=128, null=True),
         ),
         migrations.AddConstraint(
-            model_name='order',
-            constraint=models.UniqueConstraint(fields=('user', 'idempotency_key'), name='orders_user_idem_key_uidx'),
+            model_name="order",
+            constraint=models.UniqueConstraint(
+                fields=("user", "idempotency_key"), name="orders_user_idem_key_uidx"
+            ),
         ),
     ]

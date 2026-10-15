@@ -4,27 +4,55 @@ from django.db import migrations, models
 
 
 class Migration(migrations.Migration):
-
     initial = True
 
-    dependencies = [
-    ]
+    dependencies = []
 
     operations = [
         migrations.CreateModel(
-            name='SiteSettings',
+            name="SiteSettings",
             fields=[
-                ('id', models.BigAutoField(auto_created=True, primary_key=True, serialize=False, verbose_name='ID')),
-                ('support_email', models.EmailField(blank=True, default='', max_length=254)),
-                ('support_phone', models.CharField(blank=True, default='', max_length=32)),
-                ('whatsapp_number', models.CharField(blank=True, default='', help_text="International digits only, no '+'. Leave blank to hide WhatsApp.", max_length=32)),
-                ('whatsapp_message', models.CharField(blank=True, default='Hi! I have a question about a fragrance.', help_text='Pre-filled message for the WhatsApp deep link.', max_length=200)),
-                ('instagram_url', models.URLField(blank=True, default='')),
-                ('updated_at', models.DateTimeField(auto_now=True)),
+                (
+                    "id",
+                    models.BigAutoField(
+                        auto_created=True,
+                        primary_key=True,
+                        serialize=False,
+                        verbose_name="ID",
+                    ),
+                ),
+                (
+                    "support_email",
+                    models.EmailField(blank=True, default="", max_length=254),
+                ),
+                (
+                    "support_phone",
+                    models.CharField(blank=True, default="", max_length=32),
+                ),
+                (
+                    "whatsapp_number",
+                    models.CharField(
+                        blank=True,
+                        default="",
+                        help_text="International digits only, no '+'. Leave blank to hide WhatsApp.",
+                        max_length=32,
+                    ),
+                ),
+                (
+                    "whatsapp_message",
+                    models.CharField(
+                        blank=True,
+                        default="Hi! I have a question about a fragrance.",
+                        help_text="Pre-filled message for the WhatsApp deep link.",
+                        max_length=200,
+                    ),
+                ),
+                ("instagram_url", models.URLField(blank=True, default="")),
+                ("updated_at", models.DateTimeField(auto_now=True)),
             ],
             options={
-                'verbose_name': 'Site settings',
-                'verbose_name_plural': 'Site settings',
+                "verbose_name": "Site settings",
+                "verbose_name_plural": "Site settings",
             },
         ),
     ]

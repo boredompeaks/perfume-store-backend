@@ -1,6 +1,7 @@
 import csv
 from decimal import Decimal
 
+from django import forms
 from django.contrib import admin, messages
 from django.db import transaction
 from django.http import HttpResponse
@@ -10,15 +11,31 @@ from common.admin import RoleAwareModelAdmin
 from common.audit import log_mutation, model_field_changes
 from common.models import AuditEvent
 from common.saved_filters import SavedFilterMixin
-# [R-10.1] The order machine lives in orders.state (single source); this
-# module only consumes it.
-from .models import Coupon, Order, OrderItem, OrderStatusEvent, Refund
-# [R-10.16] SPEC-10-05: the per-transition side-effect contract (one
-# dispatch point, shared with the JSON seam).
-from .events import notify_transition
+
 # [R-12.8] SPEC-12-02: the admin cancel writers release the checkout's
 # stock holds with the same vocabulary the API twin uses.
 from products.models import StockReservation
+
+# [R-10.16] SPEC-10-05: the per-transition side-effect contract (one
+# dispatch point, shared with the JSON seam).
+from .events import notify_transition
+
+# [R-10.1] The order machine lives in orders.state (single source); this
+# module only consumes it.
+# [R-1.16] SPEC-1-B07a: the return-request row and its own machine. Kept on
+# its own import line so every hunk above stays insertion-only, and kept out
+# of orders.state on purpose (that module is capability-scoped and audited).
+from .models import (
+    Coupon,
+    Order,
+    OrderItem,
+    OrderStatusEvent,
+    Refund,
+    ReturnRequest,
+    _allowed_from,
+    return_transition_allowed,
+)
+
 # [R-10.1] SPEC-10-01b: the fulfilment-dimension mapping for the writers.
 # [R-10.12] SPEC-10-02: the trigger vocabulary for the audit writers.
 from .state import (
@@ -242,7 +259,13 @@ class OrderAdmin(SavedFilterMixin, RoleAwareModelAdmin):
     ordering = ("-created_at",)
     list_per_page = 25
     inlines = (OrderItemInline,)
-    actions = ("mark_confirmed", "mark_shipped", "mark_delivered", "cancel_pending", "export_csv")
+    actions = (
+        "mark_confirmed",
+        "mark_shipped",
+        "mark_delivered",
+        "cancel_pending",
+        "export_csv",
+    )
     readonly_fields = (
         "created_at",
         "updated_at",
@@ -441,8 +464,44 @@ class OrderAdmin(SavedFilterMixin, RoleAwareModelAdmin):
 
     # ——— bulk actions (respect the same guards) ———
 
+    @staticmethod
+    def _locked_orders(queryset, pks):
+        """The bulk writers' locked read of the snapshot pks.
+
+        Both bulk writers hand their snapshot to this so the locked
+        statement is built in one place: the writes below touch Order rows
+        and nothing else, so the Order row is the only row that needs
+        locking, and the locked query carries no join.
+
+        The joins are stripped with ``select_related(None)`` because the
+        queryset arrives from the changelist, where Django 6.1's
+        ``ChangeList.get_select_related_fields`` adds a join for every
+        ForeignKey named in ``list_display`` - and ``user`` and ``coupon``
+        are both nullable here, so those joins are LEFT OUTER JOINs.
+        FOR UPDATE over the nullable side of an outer join is rejected by
+        PostgreSQL ("FOR UPDATE cannot be applied to the nullable side of
+        an outer join") and silently dropped by SQLite, so without this
+        every bulk action raised on Postgres and none of them could fail
+        on SQLite.
+
+        Stripping the join costs no extra query: the loop reads Order
+        columns, ``order.items`` (a reverse FK, never covered by
+        ``select_related``) and the transition preconditions, which are
+        ``payment_method`` / ``payment_status`` scalars - the lifecycle
+        notifications these writers fire have no registered handler, so
+        nothing here dereferences ``order.user`` or ``order.coupon``.
+        """
+        return (
+            queryset.filter(pk__in=pks)
+            .select_related(None)
+            .select_for_update()
+            .order_by("pk")
+        )
+
     def _bulk_set_status(self, request, queryset, new_status):
-        allowed_from = [s for s, targets in ALLOWED_TRANSITIONS.items() if new_status in targets]
+        allowed_from = [
+            s for s, targets in ALLOWED_TRANSITIONS.items() if new_status in targets
+        ]
         matched_pks = list(
             queryset.filter(status__in=allowed_from).values_list("pk", flat=True)
         )
@@ -467,11 +526,7 @@ class OrderAdmin(SavedFilterMixin, RoleAwareModelAdmin):
                 # skipped. Per-row saves (unlike .update()) also fire
                 # auto_now, fixing the stale updated_at the bulk path
                 # shipped with.
-                for order in (
-                    queryset.filter(pk__in=matched_pks)
-                    .select_for_update()
-                    .order_by("pk")
-                ):
+                for order in self._locked_orders(queryset, matched_pks):
                     if order.status not in allowed_from:
                         continue  # flipped between snapshot and save: skip
                     # [R-10.19]/[R-10.14] SPEC-10-03: the per-row
@@ -635,11 +690,7 @@ class OrderAdmin(SavedFilterMixin, RoleAwareModelAdmin):
                 # orders is impossible by design, so it is skipped, never
                 # swept. Per-row saves also fire auto_now (no stale
                 # updated_at) and carry the audit event per row.
-                for order in (
-                    queryset.filter(pk__in=unpaid_pks)
-                    .select_for_update()
-                    .order_by("pk")
-                ):
+                for order in self._locked_orders(queryset, unpaid_pks):
                     if order.status != "pending":
                         continue  # flipped between snapshot and save: skip
                     _append_status_event(
@@ -691,7 +742,9 @@ class OrderAdmin(SavedFilterMixin, RoleAwareModelAdmin):
                 self.get_queryset(request).filter(pk__in=unpaid_pks),
                 self._cancel_change_message(request),
             )
-            self.message_user(request, f"{count} unpaid order(s) cancelled.", messages.SUCCESS)
+            self.message_user(
+                request, f"{count} unpaid order(s) cancelled.", messages.SUCCESS
+            )
         if skipped:
             self.message_user(
                 request,
@@ -818,10 +871,7 @@ class CouponAdmin(RoleAwareModelAdmin):
         if not change:
             return
         stored = (
-            type(obj)
-            .objects.filter(pk=obj.pk)
-            .values_list(*self.list_editable)
-            .first()
+            type(obj).objects.filter(pk=obj.pk).values_list(*self.list_editable).first()
         )
         before = dict(zip(self.list_editable, stored or ()))
         super().save_model(request, obj, form, change)
@@ -912,3 +962,126 @@ class RefundAdmin(RoleAwareModelAdmin):
 
     def has_delete_permission(self, request, obj=None):
         return False  # money that moved is never deleted
+
+
+# [R-1.16] SPEC-1-B07a: the return-request surface (spec 6.8 line 1949's
+# `/admin/returns`). Read is ``returns.read`` and every write is
+# ``returns.write``, so a role can be given the queue without the decision.
+RETURNS_READ = "returns.read"
+RETURNS_WRITE = "returns.write"
+
+RETURN_CAPABILITY_MAP = {
+    "view": RETURNS_READ,
+    # A return request is the CUSTOMER's ask (spec 4 line 1083), filed through
+    # the API seam; a hand-written row here would be a return nobody asked for.
+    "add": None,
+    "change": RETURNS_WRITE,
+    # Deleting one erases the review trail spec 6.8 line 1983 requires, so no
+    # staff role gets it - not even the superuser bypass reaches the form.
+    "delete": None,
+}
+
+
+class ReturnRequestAdminForm(forms.ModelForm):
+    """The change form's machine check, and the operator's answer when it fails.
+
+    Validation is the right layer for "this value is not a legal value FOR THIS
+    ROW", and putting it here rather than in ``save_model`` is deliberate: an
+    aborted ``save_model`` still gets logged by Django's own ``log_change``
+    (it runs after ``save_model`` returns, unconditionally), so a refusal that
+    way would leave a "Changed status" entry on a row whose status never moved.
+    A field error is refused before ``save_model`` is reached at all, so the
+    refusal leaves the row untouched AND writes no misleading audit entry.
+
+    ``old`` is read under ``select_for_update()`` inside an explicit atomic
+    block - and Django already wraps the whole change-form view in a
+    transaction, so the lock is held for the check AND the subsequent write: two
+    operators editing the same request cannot both pass against a status the
+    database has already left. (SQLite emits no FOR UPDATE, so the lock is inert
+    there; ``ReturnRequest.save`` re-checks the edge against the stored status
+    regardless, which is what makes the guarantee engine-independent.)
+    """
+
+    class Meta:
+        model = ReturnRequest
+        # ``status`` is the only editable field on this surface. The admin
+        # overrides this with its own field list (built from ``readonly_fields``
+        # below), so the declaration here is what lets the form be built and
+        # unit-tested on its own.
+        fields = ("status",)
+
+    def clean_status(self):
+        status = self.cleaned_data["status"]
+        if not self.instance.pk:
+            # The add form cannot be reached (has_add_permission is False below),
+            # so a row with no pk never gets here; the guard keeps the lookup
+            # honest if that ever changes rather than raising DoesNotExist.
+            return status
+        with transaction.atomic():
+            old = (
+                ReturnRequest.objects.select_for_update()
+                .get(pk=self.instance.pk)
+                .status
+            )
+        if not return_transition_allowed(old, status):
+            raise forms.ValidationError(
+                f"A return request cannot move from '{old}' to '{status}'. "
+                f"Allowed from '{old}': {_allowed_from(old)}."
+            )
+        return status
+
+
+@admin.register(ReturnRequest)
+class ReturnRequestAdmin(RoleAwareModelAdmin):
+    """[R-1.16] The staff half of a return: review it, then walk it.
+
+    This is the whole of spec 6.8 line 1957's "Return request review" for this
+    task: the queue is the changelist, and the decision is the ``status`` field
+    on the change form, checked against the return machine by
+    ``ReturnRequestAdminForm.clean_status`` and again by ``ReturnRequest.save``
+    behind it. ``order``, ``reason_code`` and ``reason_note`` are the customer's
+    own input and render read-only, so an operator acts on a request by walking
+    its status and can never rewrite what was asked for.
+
+    That leaves this surface with no place for an operator's own words - the
+    spec's "Manual exception workflow" and the decision note have nowhere to
+    live yet. It is a named gap, not an oversight: SPEC-1-B07b owns the
+    returns serializer and the return/refund audit trail (spec 6.8 line 1983),
+    and a staff note belongs with that work rather than as a second column
+    invented here.
+
+    NO ``scoped_view_capability``: this surface has one door. The narrow second
+    door SPEC-1-B03 built for the packing operator has no business here, and
+    declaring one would also be the way to widen a role's capability set that
+    ``tests/test_superadmin_tier.py`` pins exactly.
+
+    ONE write path. There is no ``list_editable`` cell and no bulk action on
+    this surface, so the change form is the only admin path that can move a
+    status - which is what makes ``ReturnRequestQuerySet`` refusing
+    ``update(status=...)`` a statement about the whole surface rather than
+    about one of two doors. ``ReturnRequestAdminForm`` is what that one path
+    asks before it writes.
+    """
+
+    form = ReturnRequestAdminForm
+    capability_map = RETURN_CAPABILITY_MAP
+    list_display = ("id", "order", "status", "reason_code", "created_at", "updated_at")
+    list_filter = ("status", "reason_code", "created_at")
+    # The order reference is how staff find the request (spec 6.8 pairs every
+    # returns surface with its order); the pk is here for the same reason
+    # RefundAdmin carries it.
+    search_fields = ("id", "order__id", "order__order_number", "reason_code")
+    readonly_fields = (
+        "order",
+        "reason_code",
+        "reason_note",
+        "created_at",
+        "updated_at",
+    )
+    date_hierarchy = "created_at"
+
+    def has_add_permission(self, request):
+        return False  # asked for by the customer, never hand-written
+
+    def has_delete_permission(self, request, obj=None):
+        return False  # the review trail is never erased

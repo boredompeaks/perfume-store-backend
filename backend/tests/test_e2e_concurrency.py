@@ -5,13 +5,15 @@ The verify endpoint serializes concurrent payments via
 the race is exercised by resolving the two verifications against the same
 rows in sequence - exactly the interleaving the row locks permit.
 """
+
+from django.conf import settings
 from django.test import tag
 from django.utils import timezone
 
-from cart.models import Cart, CartItem
 from common.testing import ApiTestCase
 from orders.models import Order
-from products.models import StockReservation, products as Product
+from products.models import StockReservation
+from products.models import products as Product
 
 
 @tag("e2e")
@@ -34,16 +36,23 @@ class OversellRaceTests(ApiTestCase):
         # same-user collapse is pinned in orders/tests.py CheckoutDedupTests.
         order_ids = {}
         for name, client in clients.items():
-            res = client.post("/api/orders/checkout/", self.checkout_payload(), format="json")
+            res = client.post(
+                "/api/orders/checkout/", self.checkout_payload(), format="json"
+            )
             self.assertEqual(res.status_code, 201, res.data)
             order_ids[name] = res.data["id"]
         self.assertEqual(Order.objects.count(), 2)
 
         # both payments get a razorpay order (mocked; ids are unique per order)
         client_mock = self.razorpay_mock()
-        client_mock.order.create.side_effect = [{"id": "order_RACE1"}, {"id": "order_RACE2"}]
+        client_mock.order.create.side_effect = [
+            {"id": "order_RACE1"},
+            {"id": "order_RACE2"},
+        ]
         for name, client in clients.items():
-            res = client.post("/api/orders/payment/", {"order_id": order_ids[name]}, format="json")
+            res = client.post(
+                "/api/orders/payment/", {"order_id": order_ids[name]}, format="json"
+            )
             self.assertEqual(res.status_code, 200, res.data)
 
         # first verify wins: stock 1 -> 0
@@ -71,10 +80,15 @@ class OversellRaceTests(ApiTestCase):
             format="json",
         )
         self.assertEqual(second.status_code, 409, second.data)
-        self.assertEqual(second.data["error"], "An item is no longer available in the requested quantity")
+        self.assertEqual(
+            second.data["error"],
+            "An item is no longer available in the requested quantity",
+        )
 
         # exactly one confirmed, stock sold out once, loser stays pending
-        statuses = {row["id"]: row["status"] for row in Order.objects.values("id", "status")}
+        statuses = {
+            row["id"]: row["status"] for row in Order.objects.values("id", "status")
+        }
         self.assertEqual(statuses[order_ids["alice"]], "confirmed")
         self.assertEqual(statuses[order_ids["bob"]], "pending")
         product.refresh_from_db()
@@ -116,16 +130,23 @@ class CouponRaceTests(ApiTestCase):
         order_ids = {}
         for name, client in clients.items():
             res = client.post(
-                "/api/orders/checkout/", self.checkout_payload(coupon_code="ONCE"), format="json"
+                "/api/orders/checkout/",
+                self.checkout_payload(coupon_code="ONCE"),
+                format="json",
             )
             self.assertEqual(res.status_code, 201, res.data)
             self.assertEqual(res.data["total_amount"], "100.00")
             order_ids[name] = res.data["id"]
 
         client_mock = self.razorpay_mock()
-        client_mock.order.create.side_effect = [{"id": "order_CPN1"}, {"id": "order_CPN2"}]
+        client_mock.order.create.side_effect = [
+            {"id": "order_CPN1"},
+            {"id": "order_CPN2"},
+        ]
         for name, client in clients.items():
-            res = client.post("/api/orders/payment/", {"order_id": order_ids[name]}, format="json")
+            res = client.post(
+                "/api/orders/payment/", {"order_id": order_ids[name]}, format="json"
+            )
             self.assertEqual(res.status_code, 200, res.data)
 
         first = clients["alice"].post(
@@ -156,7 +177,9 @@ class CouponRaceTests(ApiTestCase):
         # exactly one increment, exactly one confirmed order
         coupon.refresh_from_db()
         self.assertEqual(coupon.used_count, 1)
-        statuses = {row["id"]: row["status"] for row in Order.objects.values("id", "status")}
+        statuses = {
+            row["id"]: row["status"] for row in Order.objects.values("id", "status")
+        }
         self.assertEqual(statuses[order_ids["alice"]], "confirmed")
         self.assertEqual(statuses[order_ids["bob"]], "pending")
         product.refresh_from_db()
@@ -167,24 +190,45 @@ class CouponRaceTests(ApiTestCase):
 class PaginationStabilityTests(ApiTestCase):
     # e2e 9. pagination is stable across pages even with equal created_at (F-12 context)
     def test_pages_partition_the_catalog_stably_across_repeated_requests(self):
-        names = [f"Perfume {i}" for i in range(1, 6)]
+        # Enough rows to force MORE THAN ONE page: a catalogue that fits in a
+        # single page is returned whole by every engine and cannot demonstrate
+        # that the partition is stable, so the count is derived from the
+        # configured page size rather than typed - a literal here would quietly
+        # stop crossing the boundary the moment the page size changed.
+        page_size = settings.PRODUCTS_PAGE_SIZE
+        names = [f"Perfume {i}" for i in range(1, 2 * page_size + 1)]
         for name in names:
             self.make_product(name=name)
         # identical timestamps: ordering must not depend on timestamp jitter
-        Product.objects.update(created_at=timezone.make_aware(timezone.datetime(2026, 1, 1, 12, 0, 0)))
+        Product.objects.update(
+            created_at=timezone.make_aware(timezone.datetime(2026, 1, 1, 12, 0, 0))
+        )
 
         all_ids = []
         page = 1
+        pages_walked = 0
         while True:
             res = self.client.get("/api/products/", {"page": page})
             self.assertEqual(res.status_code, 200, res.data)
+            self.assertTrue(res.data["results"], f"page {page} came back empty")
             all_ids.extend(row["id"] for row in res.data["results"])
+            pages_walked += 1
             if not res.data["next_page"]:
                 break
             page += 1
 
-        # every product appears exactly once across pages (no skips/repeats)
-        self.assertEqual(sorted(all_ids), sorted(range(1, 6)))
+        # The walk really did cross a page boundary, or the rest of this test
+        # is asserting that one page is returned intact.
+        self.assertGreater(pages_walked, 1, "the catalogue fit on a single page")
+
+        # every product appears exactly once across pages (no skips/repeats),
+        # measured against the rows this test created rather than against a
+        # literal id range: a sequence is not transactional, so on PostgreSQL
+        # these rows do not get pks 1..N in a fresh test database.
+        self.assertEqual(
+            sorted(all_ids),
+            sorted(Product.objects.values_list("id", flat=True)),
+        )
 
         # a repeat walk yields the identical partition (stable across requests)
         repeat = []

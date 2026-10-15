@@ -29,6 +29,7 @@ from django.db.utils import ConnectionDoesNotExist, load_backend
 from django.test import SimpleTestCase, override_settings, tag
 
 from common.testing import ApiTestCase
+from ops.management.commands import restore_drill as drill
 from ops.management.commands.restore_drill import (
     RESTORE_ALIAS,
     Command,
@@ -63,6 +64,22 @@ def _sqlite_settings(alias, name):
             "TEST": {},
         }
     }
+
+
+@contextmanager
+def without_temp_containment():
+    """Run the block with the temp-directory shape switched off.
+
+    The runner rewrites a PostgreSQL name to a BARE database name, the
+    containment check resolves a bare name against the working directory, and a
+    checkout that lives under the system temp directory -- which this one does --
+    therefore has that shape wave the bare name through whatever the rule under
+    test says. Switching it off leaves the remaining shapes as the only ones in
+    play, which is what the pins below are about. The shape itself is pinned
+    separately, against a real temp path.
+    """
+    with patch.object(drill, "_within", return_value=False):
+        yield
 
 
 class DrillHygieneAssertionsMixin:
@@ -199,13 +216,54 @@ class RestoreDrillSafetyTests(DrillHygieneAssertionsMixin, SimpleTestCase):
         self.assert_scratch_unregistered()
         self.assert_no_drill_workdirs_left()
 
+    def test_the_derived_test_database_is_accepted(self):
+        """The wiring, not the rule: a connection whose name the test runner
+        rewrote to the database it derives from this deployment's name is the
+        drill's own test database, and the command runs against it instead of
+        refusing it."""
+        alias = "restore_drill_derived"
+        captured = {alias: {"NAME": PRODUCTION_DB, "TEST_NAME": ""}}
+        out = io.StringIO()
+
+        with (
+            patch.dict(drill.CONFIGURED_AT_IMPORT, captured, clear=False),
+            without_temp_containment(),
+            self.alias_configured_as(alias, f"test_{PRODUCTION_DB}"),
+        ):
+            call_command("restore_drill", database=alias, dry_run=True, stdout=out)
+
+        self.assertIn("DRY RUN", out.getvalue())
+        self.assert_scratch_unregistered()
+        self.assert_no_drill_workdirs_left()
+
+    def test_an_uncaptured_alias_is_still_refused(self):
+        """Fail closed at the command level too: the same rewritten name with
+        nothing captured for that alias leaves no derivation to check, so the
+        drill stops rather than assume one it never had."""
+        alias = "restore_drill_uncaptured"
+
+        with (
+            without_temp_containment(),
+            self.alias_configured_as(alias, f"test_{PRODUCTION_DB}"),
+        ):
+            with self.assertRaises(CommandError) as caught:
+                call_command("restore_drill", database=alias, dry_run=True)
+
+        self.assertIn("refuses to run", str(caught.exception))
+        self.assert_scratch_unregistered()
+        self.assert_no_drill_workdirs_left()
+
 
 @tag("ops")
 class RestoreDrillSafetyRuleTests(SimpleTestCase):
     """The decision behind those refusals, pinned directly so the rule cannot
-    be widened without a test noticing. The names below are absolute, so the
-    assertions do not depend on where the repository happens to be checked
-    out."""
+    be widened without a test noticing. Every name below is absolute, so the
+    assertions do not depend on where the repository happens to be checked out
+    -- which matters more than it looks here: the runner rewrites a PostgreSQL
+    name to a BARE database name, the containment check resolves a bare name
+    against the working directory, so on a checkout that lives under the system
+    temp directory that shape decides these assertions by accident and the rule
+    under test is never consulted."""
 
     def test_in_memory_is_safe(self):
         self.assertTrue(is_rehearsal_safe(":memory:", PRODUCTION_DB))
@@ -230,6 +288,46 @@ class RestoreDrillSafetyRuleTests(SimpleTestCase):
         """A connection pointing at a database this deployment does not use
         is the test database; reading it cannot harm production."""
         self.assertTrue(is_rehearsal_safe(PRODUCTION_DB + "-test", PRODUCTION_DB))
+
+    def test_the_test_database_the_runner_derived_is_safe(self):
+        """The case the rule above cannot decide: once the test runner has
+        rewritten the connection's name, the name it points at IS the configured
+        one, so only the derivation from what this process started with tells the
+        drill's own test database apart from a deployment's database."""
+        with without_temp_containment():
+            self.assertTrue(
+                is_rehearsal_safe(
+                    f"test_{PRODUCTION_DB}", f"test_{PRODUCTION_DB}", PRODUCTION_DB
+                )
+            )
+
+    def test_the_configured_test_database_name_is_safe(self):
+        """A deployment that names its test database explicitly has that name
+        used verbatim, so it is accepted on the same grounds."""
+        named = f"{PRODUCTION_DB}-drill"
+        with without_temp_containment():
+            self.assertTrue(is_rehearsal_safe(named, named, PRODUCTION_DB, named))
+
+    def test_the_configured_database_is_not_safe_even_with_a_capture(self):
+        """The capture must not become an allow-anything switch: a real database
+        is refused even by a process that knows what it started with."""
+        self.assertFalse(is_rehearsal_safe(PRODUCTION_DB, PRODUCTION_DB, PRODUCTION_DB))
+
+    def test_no_capture_fails_closed(self):
+        """An alias this process never saw -- or a command module imported after
+        the rewrite -- offers no derivation to check, so equal names are refused
+        instead of guessed at."""
+        with without_temp_containment():
+            self.assertFalse(
+                is_rehearsal_safe(f"test_{PRODUCTION_DB}", f"test_{PRODUCTION_DB}")
+            )
+
+    def test_the_derived_shape_is_a_whole_name_not_a_prefix(self):
+        """A name that merely begins with the runner's prefixed start name is a
+        different database, and nothing in the configuration says who made it."""
+        longer = f"test_{PRODUCTION_DB}-backup"
+        with without_temp_containment():
+            self.assertFalse(is_rehearsal_safe(longer, longer, PRODUCTION_DB))
 
     def test_the_configured_database_is_not_safe(self):
         self.assertFalse(is_rehearsal_safe(PRODUCTION_DB, PRODUCTION_DB))

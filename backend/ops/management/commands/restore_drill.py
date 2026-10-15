@@ -9,7 +9,8 @@ Safety is structural, not advisory:
 
 * the drill REFUSES to run unless the connection it would read from is a
   throwaway database (in-memory, or a file under the system temp directory),
-  or is not the database this deployment is configured to use. Anything else
+  or is not the database this deployment is configured to use, or is the test
+  database the test runner derives from that configuration. Anything else
   raises CommandError before a single query is issued, so the drill can never
   drop, migrate or overwrite a real database;
 * every write lands in a temp directory that the drill creates and then
@@ -34,11 +35,28 @@ from django.apps import apps
 from django.conf import settings
 from django.core.management import BaseCommand, CommandError, call_command
 from django.db import connections
+from django.db.backends.base.creation import TEST_DATABASE_PREFIX
 from django.db.utils import ConnectionDoesNotExist, DatabaseError, load_backend
 
 # The scratch connection the restore lands in. Deliberately not a name an
 # operator would configure: the drill owns it and removes it again.
 RESTORE_ALIAS = "restore_drill_scratch"
+
+# The names this process STARTED with, read at import -- before anything can
+# rewrite them. Django's test runner rewrites BOTH settings.DATABASES[alias]
+# ["NAME"] and connection.settings_dict["NAME"] to the database it creates, so
+# by the time a command runs the connection's name and the deployment's
+# configured name are the same string. That makes "a database other than the
+# configured one" carry no information, and the drill refused the very test
+# database it had been pointed at. Captured before the rewrite is what the
+# fourth shape below is decided from.
+CONFIGURED_AT_IMPORT = {
+    alias: {
+        "NAME": str((config or {}).get("NAME") or ""),
+        "TEST_NAME": str(((config or {}).get("TEST") or {}).get("NAME") or ""),
+    }
+    for alias, config in settings.DATABASES.items()
+}
 
 
 def _within(path, root):
@@ -52,18 +70,28 @@ def _within(path, root):
     return path == root or path.startswith(root + os.sep)
 
 
-def is_rehearsal_safe(name, configured):
+def is_rehearsal_safe(name, configured, start_name="", start_test_name=""):
     """Whether the drill may read from a database called ``name``.
 
-    ``configured`` is the name this deployment is configured with: a
-    connection pointing somewhere else is the test database the test runner
-    created, which is safe to read.
+    ``configured`` is the name this deployment is configured with as this
+    process sees it NOW. ``start_name`` and ``start_test_name`` are that same
+    connection's name and ``TEST["NAME"]`` as they were when this module was
+    imported, which is before the test runner rewrites the live one. Both are
+    needed because after the rewrite ``configured`` names the test database too,
+    and the two being equal is exactly the case that must not be read as "the
+    configured production database".
 
-    Only three shapes pass:
+    Four shapes pass:
       * an in-memory database (the test runner's default),
       * a file inside the system temp directory (a throwaway an operator or
         CI created on purpose),
-      * any name that is not the configured production database.
+      * any name that is not the configured production database,
+      * the test database the test runner derives from what this process started
+        with: ``TEST["NAME"]`` where one is configured, otherwise the start name
+        under the runner's own prefix. The shape is matched exactly, and with
+        nothing captured -- an alias this process never saw, or a command module
+        imported after the rewrite -- it cannot be satisfied at all, so the drill
+        refuses instead of assuming a capture it never had.
     """
     if not name:
         return False
@@ -71,7 +99,11 @@ def is_rehearsal_safe(name, configured):
         return True
     if _within(name, tempfile.gettempdir()):
         return True
-    return name != configured
+    if name != configured:
+        return True
+    if start_name and name == f"{TEST_DATABASE_PREFIX}{start_name}":
+        return True
+    return bool(start_test_name) and name == start_test_name
 
 
 def _row_counts(alias):
@@ -116,18 +148,22 @@ class Command(BaseCommand):
     def handle(self, *args, **options):
         alias = options["database"]
         configured = str((settings.DATABASES.get(alias) or {}).get("NAME") or "")
+        origin = CONFIGURED_AT_IMPORT.get(alias) or {}
         # Resolving the connection builds its wrapper; it opens nothing, so the
         # safety decision costs no query and applies to every mode below --
         # including --dry-run, which is a report, not an exemption.
         name = str(connections[alias].settings_dict.get("NAME") or "")
 
-        if not is_rehearsal_safe(name, configured):
+        if not is_rehearsal_safe(
+            name, configured, origin.get("NAME", ""), origin.get("TEST_NAME", "")
+        ):
             raise CommandError(
                 f"restore_drill refuses to run: connection '{alias}' points at "
                 f"'{name}', which is neither an in-memory database, a file "
                 f"under the system temp directory, nor a database other than "
-                f"the configured '{configured}'. The drill never reads a real "
-                f"database; point --database at a test database."
+                f"the configured '{configured}', nor the test database derived "
+                f"from it. The drill never reads a real database; point "
+                f"--database at a test database."
             )
 
         if options["dry_run"]:
@@ -233,7 +269,7 @@ class Command(BaseCommand):
         # counts is a truthful pass -- so that case is reported plainly
         # instead of being dressed up as a failure.
         self.stdout.write(
-            f"Simulated failure: removed one {removed} row from the restored " f"copy"
+            f"Simulated failure: removed one {removed} row from the restored copy"
             if removed
             else (
                 "Simulated failure: the restored copy holds no rows, so there "

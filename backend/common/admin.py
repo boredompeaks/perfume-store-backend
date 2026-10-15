@@ -46,8 +46,10 @@ one confirmation contract, one template and one commit gate. SPEC-20-5
 reason/note, declared per action (``confirmation_reason_actions``) and read
 back off the same POST by the action body.
 """
+
 from dataclasses import replace
 from functools import wraps
+from typing import Any
 
 from django import forms
 from django.contrib import admin
@@ -148,11 +150,20 @@ class RoleAwareModelAdmin(admin.ModelAdmin):
       but the one that declares it) means there is no second door at all.
     """
 
-    capability_map = {}
-    action_capabilities = {}
-    confirmation_required_actions = frozenset()
-    confirmation_reason_actions = frozenset()
-    scoped_view_capability = None
+    # Annotated (TIER-2) because these are class attributes a subclass
+    # OVERRIDES, which is what makes them the surface they are: mypy cannot
+    # infer a type for a bare `{}`/`frozenset()` default, and an unannotated
+    # override in a subclass is then checked against nothing at all -- the one
+    # place a type is most worth having. The annotations state the contract the
+    # docstring above already describes, and `dict[str, frozenset[str]]` for the
+    # two maps is the narrower claim that also holds for the subclasses that
+    # declare them (a role -> capability-id set), so a future wrong-shaped
+    # override fails here rather than at a request.
+    capability_map: dict[str, frozenset[str]] = {}
+    action_capabilities: dict[str, frozenset[str]] = {}
+    confirmation_required_actions: frozenset[str] = frozenset()
+    confirmation_reason_actions: frozenset[str] = frozenset()
+    scoped_view_capability: str | None = None
 
     # ——— capability plumbing ———
 
@@ -221,12 +232,20 @@ class RoleAwareModelAdmin(admin.ModelAdmin):
 
     # Field names this surface lets a scoped viewer edit. Every other field its
     # fieldsets expose renders read-only (see ``get_readonly_fields``).
-    scoped_writable_fields = frozenset()
+    scoped_writable_fields: frozenset[str] = frozenset()
     # ``field name -> {value: capability required to write that value}``. A
     # value named here belongs to another capability's authority, so it is
     # offered and accepted only for a caller holding that capability; an
     # unmapped value carries no extra requirement beyond the field's own.
-    scoped_value_capabilities = {}
+    #
+    # The inner value is `Any`, not `str`, and that is deliberate: `str()` is
+    # applied to the comparison in ``scoped_value_permitted`` below precisely
+    # because a ModelForm hands back a string for a char/choice field while a
+    # dict key is written literally -- so the keys this map is indexed with are
+    # not guaranteed to be `str` at the call site. Narrowing it to `str` would
+    # be a claim the runtime does not make, and this gate must not invent types
+    # the code does not have.
+    scoped_value_capabilities: dict[str, dict[Any, str]] = {}
 
     def scoped_value_permitted(self, request, field_name, value):
         """Whether ``value`` may be written into ``field_name`` by this caller.

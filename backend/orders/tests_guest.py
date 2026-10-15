@@ -1,33 +1,30 @@
-"""SPEC-1-B04 (Section 1, [R-1.13]): guest checkout.
+"""TIER1-GUEST-DEADEND: anonymous checkout is REFUSED, uniformly.
 
-Spec line 74 gives the guest exactly one job -- "browse products and
-optionally check out without an account" -- and spec 9.3 requires the checkout
-to be bound "to the correct customer or guest session" while spec 21.2's first
-acceptance row is that a guest can "complete an eligible purchase". Before
-this, ``POST /api/orders/checkout/`` answered 401 to anyone without a JWT, so
-that row could not hold: a guest could build a cart and then had nowhere to go.
+Owner decision 2026-10-09 (recorded in ``backend/docs/run/TIER1-launch.md``):
+full guest checkout is deferred (SPEC-3-02 off the Tier-1 list). What the
+store did in the meantime was the dead end this file used to pin the happy
+path of -- an anonymous ``POST /api/orders/checkout/`` minted an order that
+could never be paid (the payment endpoints are account-scoped) while it held
+a stock reservation and carried the coupon FK: saleable inventory parked on
+a purchase nobody could complete. The server now refuses every anonymous
+submission with ONE uniform answer, creating NOTHING.
 
 What is pinned here, in the order the requirement reads:
 
-* a guest order is created by the SAME endpoint an account order is, with no
-  session user, a validated guest email, and a credential minted from
-  ``secrets``;
-* the guest reads their own order back by possessing that credential -- and
-  every miss (no token, wrong token, unknown number, another guest's number
-  with a valid token) answers with one byte-identical 404, so the endpoint
-  confirms nothing about which orders exist;
-* the authenticated path is untouched, including that a body-supplied
-  guest_email on an account submission is ignored rather than stored;
-* stock behaviour is identical: the checkout gate and the reservation hold are
-  minted for a guest order exactly as for an account one, and no money
-  arithmetic moved (all of it Decimal, all of it server-side);
-* guest orders are visible to the SAME staff surfaces that see customer
-  orders -- the admin grid (searchable by the guest email), the admin CSV
-  export, the admin JSON seam, and the packing queue;
-* nothing that dereferences ``order.user`` raises on a guest row: the order
-  confirmation mail, the refund seam, the payment webhook, and the customer
-  payment endpoints (which stay account-scoped, so a guest order is simply
-  not theirs to find).
+* an anonymous POST to checkout (either mount) answers the one uniform
+  refusal -- same status, same bytes -- for EVERY guest reason, so the
+  answer is not an oracle for which inputs any guest path would accept;
+* the refusal creates NOTHING: no order row, no stock reservation, no
+  creation audit trail, no coupon attachment, no stock movement, and the
+  product's stock and the coupon's ``used_count`` are unchanged;
+* the authenticated path is untouched, END TO END: checkout 201, payment
+  intent, verify, stock decrement, coupon spend, hold conversion;
+* guest order ROWS that predate the refusal are still data, so every read
+  path that serves them stays pinned against ORM-built rows of the exact
+  pre-refusal shape: the token lookup (one byte-identical 404 for every
+  miss), the staff surfaces, the payment webhook, the refund and cancel
+  seams, and the account-scoped reads that must never see a guest row;
+* the two-owner rule and the column widths stay database facts.
 
 Razorpay is always mocked (``self.razorpay_mock``); the webhook tests sign
 their own deliveries with the fixture secret and never touch the network.
@@ -48,24 +45,33 @@ from django.utils import timezone
 from rest_framework.settings import api_settings
 from rest_framework.throttling import ScopedRateThrottle
 
+from cart.models import Cart, CartItem
+from common import notifications
 from common.models import AuditEvent
 from common.roles import ROLE_FINANCE, ROLE_INVENTORY, ROLE_SUPPORT
 from common.testing import ApiTestCase
-from orders.models import Order, OrderStatusEvent, PaymentEvent, Refund
+from orders.models import Order, OrderItem, OrderStatusEvent, PaymentEvent, Refund
 from orders.serializers import OrderSerializer
 from orders.state import TRIGGER_ORDER_CREATE
 from orders.views import GUEST_TOKEN_HEADER, create_order
-from products.models import StockReservation
+from products.models import StockMovement, StockReservation
 
 GUEST_EMAIL = "guest@example.com"
 TOKEN_HEADER = "HTTP_" + GUEST_TOKEN_HEADER.upper().replace("-", "_")
+
+# Hand-written literal, deliberately NOT imported from the view: a pin whose
+# expected value is read off the constant under test agrees with a wrong
+# constant from both sides (conventions.md, evidence claims).
+REFUSAL_MESSAGE = (
+    "Guest checkout is not available. Sign in or create an account to place an order."
+)
 
 # The webhook fixture secret (recognizably not a real credential, V-01).
 WEBHOOK_SECRET = "TESTINGONLY-WEBHOOK-SECRET-DO-NOT-USE"
 WEBHOOK_URL = "/api/v1/webhooks/razorpay/"
 
 
-class GuestCheckoutTestBase(ApiTestCase):
+class GuestRefusalTestBase(ApiTestCase):
     """A guest browser: seeded session cart, no account, its own cookie jar."""
 
     def setUp(self):
@@ -75,26 +81,18 @@ class GuestCheckoutTestBase(ApiTestCase):
         self.guest = self.fresh_client()
         self.seed_session_cart([(self.product, 2)], client=self.guest)  # 1000.00
 
-    def guest_checkout(self, client=None, idempotency_key=None, **overrides):
-        payload = self.checkout_payload(
-            **overrides,
-        )
-        payload.setdefault("guest_email", GUEST_EMAIL)
+    def guest_post(
+        self,
+        client=None,
+        path="/api/orders/checkout/",
+        idempotency_key=None,
+        **overrides,
+    ):
+        payload = self.checkout_payload(**overrides)
         headers = {}
         if idempotency_key is not None:
             headers["HTTP_IDEMPOTENCY_KEY"] = idempotency_key
-        return (client or self.guest).post(
-            "/api/orders/checkout/", payload, format="json", **headers
-        )
-
-    def place_guest_order(self, client=None, **overrides):
-        """Checkout, asserting 201, and return (order, response)."""
-        res = self.guest_checkout(client=client, **overrides)
-        self.assertEqual(res.status_code, 201, res.data)
-        return Order.objects.get(id=res.data["id"]), res
-
-    def guest_token_header(self, token):
-        return {TOKEN_HEADER: token}
+        return (client or self.guest).post(path, payload, format="json", **headers)
 
     @staticmethod
     def user_with_role(username, role):
@@ -108,243 +106,272 @@ class GuestCheckoutTestBase(ApiTestCase):
 
 
 @tag("orders")
-class GuestCheckoutCreationTests(GuestCheckoutTestBase):
-    """[R-1.13] The guest submission itself."""
+class GuestCheckoutRefusalTests(GuestRefusalTestBase):
+    """(a)-(e) The refusal itself, and the nothing it leaves behind."""
 
-    def test_a_guest_places_an_order_with_no_account_and_no_login(self):
-        order, res = self.place_guest_order()
+    def test_anonymous_checkout_is_refused_with_one_clear_error(self):
+        res = self.guest_post()
 
-        self.assertIsNone(order.user)
-        self.assertEqual(order.guest_email, GUEST_EMAIL)
-        self.assertEqual(order.order_number, res.data["order_number"])
-        self.assertEqual(order.status, "pending")
-        # Money is untouched by this task: still Decimal, still server-side,
-        # still the same total a customer checkout of this cart produces.
-        self.assertIsInstance(order.total_amount, Decimal)
-        self.assertEqual(order.total_amount, Decimal("1000.00"))
-        self.assertEqual(res.data["total_amount"], "1000.00")
-        self.assertIsNone(res.data["user"])
-        self.assertEqual(res.data["guest_email"], GUEST_EMAIL)
-        self.assertEqual(order.items.get().quantity, 2)
+        self.assertEqual(res.status_code, 403, res.data)
+        # The SPEC-9-03 uniform envelope: the middleware wraps the view's
+        # {"error": ...} into the store-wide shape, and the status family
+        # label for a 403 is "permission_denied" on every reason alike.
+        self.assertEqual(res.data["error"], REFUSAL_MESSAGE)
+        self.assertEqual(res.data["code"], "permission_denied")
+        self.assertEqual(res.data["details"], {})
 
-    def test_the_response_carries_the_token_that_can_read_the_order_back(self):
-        order, res = self.place_guest_order()
+    def test_the_refusal_creates_no_order_row_reservation_or_trail(self):
+        """(b) Nothing is minted: no order, no hold, no creation trail."""
+        coupon = self.make_coupon(code="SAVE10", discount_value="10")
 
-        self.assertEqual(res.data["guest_token"], order.guest_token)
-        self.assertTrue(order.guest_token)
+        res = self.guest_post(coupon_code=coupon.code)
 
-    def test_the_token_is_minted_by_the_secrets_module(self):
-        """conventions.md/the requirement: `secrets`, never `random`. Proved by
-        pinning the call itself -- a counter or a PRNG would not be routed
-        through ``secrets.token_urlsafe`` at all."""
-        with mock.patch(
-            "orders.views.secrets.token_urlsafe", return_value="SENTINEL-TOKEN"
-        ) as mint:
-            order, res = self.place_guest_order()
-
-        mint.assert_called_once_with(32)
-        self.assertEqual(order.guest_token, "SENTINEL-TOKEN")
-        self.assertEqual(res.data["guest_token"], "SENTINEL-TOKEN")
-
-    def test_the_token_is_long_and_never_reused(self):
-        first, _ = self.place_guest_order()
-        # A second browser, same guest email, its own cart: an independent
-        # submission must mint an independent credential.
-        other = self.fresh_client()
-        self.seed_session_cart([(self.product, 1)], client=other)
-        second, _ = self.place_guest_order(client=other)
-
-        self.assertNotEqual(first.guest_token, second.guest_token)
-        # 32 CSPRNG bytes render as 43 URL-safe characters - wide enough that
-        # the token space cannot be walked, narrow enough for the column.
-        self.assertEqual(len(first.guest_token), 43)
-        self.assertEqual(len(second.guest_token), 43)
-
-    def test_an_account_submission_ignores_a_body_supplied_guest_email(self):
-        self.make_user("buyer")
-        self.api_login("buyer")
-        self.seed_session_cart([(self.product, 1)])
-
-        res = self.client.post(
-            "/api/orders/checkout/",
-            self.checkout_payload(guest_email="impostor@example.com"),
-            format="json",
-        )
-
-        self.assertEqual(res.status_code, 201, res.data)
-        order = Order.objects.get(id=res.data["id"])
-        self.assertEqual(order.user.username, "buyer")
-        self.assertEqual(order.guest_email, "")
-        self.assertIsNone(order.guest_token)
-        # And no credential is handed to an authenticated caller: possession
-        # of a guest token is the only guest authorization there is, so an
-        # account order must not carry one.
-        self.assertNotIn("guest_token", res.data)
-
-    def test_an_invalid_guest_email_is_refused_and_writes_nothing(self):
-        for bad in ("not-an-email", "guest@", "@example.com", "a b@example.com"):
-            with self.subTest(guest_email=bad):
-                res = self.guest_checkout(guest_email=bad)
-
-                self.assertEqual(res.status_code, 400, res.data)
-                self.assertEqual(
-                    res.data["error"], "guest_email must be a valid email address"
-                )
-                self.assertEqual(Order.objects.count(), 0)
-
-    def test_an_over_length_guest_email_is_refused_before_the_row_exists(self):
-        """[R-1.13] The Postgres max_length trap. `validate_email` accepts any
-        length and SQLite ignores `varchar(254)`, so the pre-fix endpoint
-        answered 201 and stored the address verbatim -- a DataError 500 on the
-        production database. The pin is the BEHAVIOUR (a 400, nothing
-        written), not the field declaration."""
-        limit = Order._meta.get_field("guest_email").max_length
-
-        # A syntactically valid address one character too wide.
-        too_long = "a" * (limit - len("@corp.example")) + "@corp.example"
-        self.assertEqual(len(too_long), limit)
-        too_long += "x"
-
-        res = self.guest_checkout(guest_email=too_long)
-
-        self.assertEqual(res.status_code, 400, res.data)
+        self.assertEqual(res.status_code, 403, res.data)
+        self.assertEqual(Order.objects.count(), 0)
+        self.assertEqual(OrderItem.objects.count(), 0)
+        self.assertEqual(OrderStatusEvent.objects.count(), 0)
+        self.assertFalse(StockReservation.objects.exists())
+        self.assertFalse(StockMovement.objects.exists())
         self.assertEqual(
-            res.data["error"], "guest_email must be at most 254 characters"
-        )
-        self.assertEqual(Order.objects.count(), 0)
-
-        # The width boundary itself is still accepted, so the gate is the
-        # column's width and not a rounder number.
-        at_limit = too_long[:-1]
-        self.assertEqual(len(at_limit), limit)
-        accepted = self.guest_checkout(guest_email=at_limit)
-
-        self.assertEqual(accepted.status_code, 201, accepted.data)
-        self.assertEqual(Order.objects.count(), 1)
-
-    def test_an_over_length_shipping_field_is_refused_before_the_row_exists(self):
-        """[R-1.13] The same trap on the rest of the payload: `full_name`'s 150
-        and `phone`'s 15 are varchar widths SQLite does not enforce and
-        Postgres rejects. Refused before the atomic block opens.
-
-        BOTH paths are pinned by the gate's MESSAGE, not by the status alone.
-        The status is not evidence: an ANONYMOUS submission of this payload
-        answers 400 too, on the `guest_email is required` gate, so a half of
-        this test that never authenticated would stay green with the width
-        loop scoped back to the guest branch and the DataError 500 back on a
-        public endpoint. So the account request below is authenticated (and
-        holds a cart of its own, or the cart gate would answer 404 instead),
-        and each half names the error it expects -- only the width gate can
-        produce that string.
-        """
-        self.make_user("buyer")
-        _, token = self.api_login("buyer")
-        self.auth(token)
-        self.seed_session_cart([(self.product, 1)])
-        for field, limit in (("full_name", 150), ("phone", 15)):
-            with self.subTest(field=field):
-                too_long = "x" * (limit + 1)
-                res = self.guest_checkout(**{field: too_long})
-
-                self.assertEqual(res.status_code, 400, res.data)
-                self.assertEqual(
-                    res.data["error"],
-                    f"{field} must be at most {limit} characters",
-                )
-                self.assertEqual(Order.objects.count(), 0)
-                # The account path shares the gate: this is the shipping
-                # payload, not a guest-only field.
-                account = self.checkout(**{field: too_long})
-
-                self.assertEqual(account.status_code, 400, account.data)
-                self.assertEqual(
-                    account.data["error"],
-                    f"{field} must be at most {limit} characters",
-                )
-                self.assertEqual(Order.objects.count(), 0)
-        self.auth(None)
-
-    def test_the_guest_email_is_stored_in_one_canonical_form(self):
-        """[R-1.13] BUG-3: RFC 5321 local-parts are case-insensitive in
-        practice, so `Victim@Corp.Example` and `victim@corp.example` are one
-        buyer. Canonicalised at the boundary, or the owner filter addresses
-        them as two rows and one customer gets two orders."""
-        order, res = self.place_guest_order(guest_email="  Victim@Corp.Example  ")
-
-        self.assertEqual(order.guest_email, "victim@corp.example")
-        self.assertEqual(res.data["guest_email"], "victim@corp.example")
-
-    def test_a_case_variant_of_the_guest_email_is_one_owner_not_two(self):
-        """[R-1.13] BUG-3, the consequence: the keyed collapse is scoped by the
-        stored address, so a spelling variant must resolve to the SAME owner
-        and collapse -- pre-fix it minted a second, separately addressable
-        order for the same person."""
-        key = "case-variant-001"
-        first, _ = self.place_guest_order(
-            guest_email="victim@corp.example", idempotency_key=key
+            AuditEvent.objects.filter(
+                event_type=AuditEvent.EventType.ORDER_CREATED
+            ).count(),
+            0,
         )
 
-        upper = self.fresh_client()
-        self.seed_session_cart([(self.product, 2)], client=upper)
-        replay = self.guest_checkout(
-            client=upper, guest_email="VICTIM@CORP.EXAMPLE", idempotency_key=key
-        )
+    def test_stock_is_unchanged_by_a_refused_submission(self):
+        """(c) The dead-end's whole harm was holding stock; the refusal
+        holds none. Captured before/after around the POST, not typed."""
+        stock_before = type(self.product).objects.get(pk=self.product.pk).stock
 
-        self.assertEqual(replay.status_code, 200, replay.data)
-        self.assertEqual(replay.data["id"], first.id)
-        self.assertEqual(Order.objects.count(), 1)
+        res = self.guest_post()
 
-    def test_a_guest_checkout_has_no_cart_too(self):
-        """The cart gate is not a login gate: it answers 404 the same way for
-        a guest, so a sessionless caller still cannot invent an order."""
-        cartless = self.fresh_client()
+        self.assertEqual(res.status_code, 403, res.data)
+        stock_after = type(self.product).objects.get(pk=self.product.pk).stock
+        self.assertEqual(stock_after, stock_before)
+        self.assertEqual(stock_after, 10)  # the setUp fixture, untouched
 
-        res = self.guest_checkout(client=cartless)
+    def test_coupon_usage_is_unchanged_by_a_refused_submission(self):
+        """(d) The dead-end order used to carry the coupon FK from
+        checkout; the refusal attaches nothing and spends nothing."""
+        coupon = self.make_coupon(code="SAVE10", discount_value="10", usage_limit=5)
+        self.assertEqual(coupon.used_count, 0)
 
-        self.assertEqual(res.status_code, 404, res.data)
-        self.assertEqual(res.data["error"], "Cart not found")
-        self.assertEqual(Order.objects.count(), 0)
+        res = self.guest_post(coupon_code=coupon.code)
 
-    def test_the_stock_gate_still_refuses_a_guest_oversell(self):
-        self.product.__class__.objects.filter(pk=self.product.pk).update(stock=1)
+        self.assertEqual(res.status_code, 403, res.data)
+        coupon.refresh_from_db()
+        self.assertEqual(coupon.used_count, 0)
+        self.assertFalse(Order.objects.filter(coupon=coupon).exists())
 
-        res = self.guest_checkout()
+    def test_every_guest_reason_gets_the_byte_identical_refusal(self):
+        """(e) The no-oracle property, as bytes: missing, invalid,
+        over-length and casefold-variant guest_email; over-length shipping
+        fields; known, unknown and over-long Idempotency-Keys; a valid and
+        an invalid coupon -- one answer for all of them. A caller cannot
+        probe which inputs any guest path would have accepted."""
+        coupon = self.make_coupon(code="SAVE10", discount_value="10")
+        too_long_email = "a" * 255
+        reasons = {
+            "no guest_email": {},
+            "valid guest_email": {"guest_email": GUEST_EMAIL},
+            "invalid guest_email": {"guest_email": "not-an-email"},
+            "over-length guest_email": {"guest_email": too_long_email},
+            "whitespace casefold guest_email": {
+                "guest_email": "  Victim@Corp.Example  "
+            },
+            "over-length full_name": {"full_name": "x" * 151},
+            "over-length phone": {"phone": "1" * 16},
+            "unknown coupon": {"coupon_code": "NOSUCHCODE"},
+            "valid coupon": {"coupon_code": coupon.code},
+            "named shipping_method": {"shipping_method": "express"},
+            "keyed": {"__idempotency_key__": "uniform-key-001"},
+            "over-long key": {"__idempotency_key__": "k" * 129},
+        }
 
-        self.assertEqual(res.status_code, 400, res.data)
-        self.assertIn("Rose Aurum", res.data["error"])
+        bodies = {}
+        for label, kwargs in reasons.items():
+            kwargs = dict(kwargs)
+            key = kwargs.pop("__idempotency_key__", None)
+            with self.subTest(reason=label):
+                res = self.guest_post(idempotency_key=key, **kwargs)
+                self.assertEqual(res.status_code, 403, res.data)
+                self.assertEqual(res.data["error"], REFUSAL_MESSAGE)
+                bodies[label] = res.content
+
+        # Byte-identical across every reason, and still zero rows after all
+        # of them (the loop's own writes would show here if any leaked).
+        self.assertEqual(len(set(bodies.values())), 1, bodies)
         self.assertEqual(Order.objects.count(), 0)
         self.assertFalse(StockReservation.objects.exists())
 
-    def test_a_guest_order_reserves_its_units_with_no_account_attached(self):
-        """[R-12.6] The hold is the oversell guarantee, and a guest checkout
-        takes the same hold an account one does -- with a NULL owner, which is
-        why StockReservation.owner is nullable."""
-        order, _ = self.place_guest_order()
+    def test_an_oversell_attempt_gets_the_same_refusal_not_a_stock_error(self):
+        """The stock gate is an ACCOUNT gate now: an anonymous submission
+        never reaches it, so it cannot be used to distinguish this refusal
+        from the differentiated 400s further down the authenticated path."""
+        type(self.product).objects.filter(pk=self.product.pk).update(stock=1)
+        baseline = self.guest_post()
+        oversell = self.guest_post()  # cart asks 2, stock holds 1
 
-        hold = StockReservation.objects.get(order=order)
-        self.assertIsNone(hold.owner_id)
-        self.assertEqual(hold.product_id, self.product.id)
-        self.assertEqual(hold.quantity, 2)
-        self.assertEqual(hold.status, StockReservation.Status.ACTIVE)
-        self.assertGreater(hold.expires_at, timezone.now())
+        self.assertEqual(oversell.status_code, 403, oversell.data)
+        self.assertEqual(oversell.content, baseline.content)
+        self.assertEqual(Order.objects.count(), 0)
 
-    def test_the_trail_records_the_guest_order_without_an_actor(self):
-        order, _ = self.place_guest_order()
+    def test_a_sessionless_caller_gets_the_same_refusal(self):
+        """No cart, no session cookie: the same answer as every other
+        reason -- not the "Cart not found" 404 the authenticated path
+        (still) answers, which would split the anonymous surface."""
+        res = self.guest_post(client=self.fresh_client())
 
-        event = OrderStatusEvent.objects.get(order=order)
-        self.assertIsNone(event.actor_id)
-        self.assertEqual(event.trigger, TRIGGER_ORDER_CREATE)
-        self.assertEqual(event.to_status, "pending")
-        audit = AuditEvent.objects.get(
-            event_type=AuditEvent.EventType.ORDER_CREATED, order=order
+        self.assertEqual(res.status_code, 403, res.data)
+        self.assertEqual(res.data["error"], REFUSAL_MESSAGE)
+
+    def test_an_empty_cart_does_not_change_the_answer(self):
+        CartItem.objects.filter(
+            cart__session_id=self.guest.session.session_key
+        ).delete()
+
+        res = self.guest_post()
+
+        self.assertEqual(res.status_code, 403, res.data)
+        self.assertEqual(res.data["error"], REFUSAL_MESSAGE)
+
+    def test_the_refusal_answers_the_v1_mirror_byte_identically(self):
+        """Both mounts are the same view; a caller learns nothing from
+        switching the path either, and neither mount writes anything."""
+        main = self.guest_post()
+        mirrored = self.guest_post(path="/api/v1/store/orders/checkout/")
+
+        self.assertEqual(mirrored.status_code, 403, mirrored.data)
+        self.assertEqual(mirrored.content, main.content)
+        self.assertEqual(Order.objects.count(), 0)
+
+    def test_an_invalid_guest_email_is_refused_and_writes_nothing(self):
+        """The invalid-email reason, pinned on its own as well as inside the
+        byte-identical set: the old differentiated 400 ("must be a valid
+        email address") is gone, and with it any per-reason write risk."""
+        for bad in ("not-an-email", "guest@", "@example.com", "a b@example.com"):
+            with self.subTest(guest_email=bad):
+                res = self.guest_post(guest_email=bad)
+
+                self.assertEqual(res.status_code, 403, res.data)
+                self.assertEqual(res.data["error"], REFUSAL_MESSAGE)
+                self.assertEqual(Order.objects.count(), 0)
+
+    def test_an_empty_payload_gets_the_same_refusal(self):
+        """Field-validation errors are not reachable anonymously either:
+        a payload missing every required field still gets the one answer,
+        so no 400-listing-a-field shape can be probed from outside."""
+        res = self.guest.post("/api/orders/checkout/", {}, format="json")
+
+        self.assertEqual(res.status_code, 403, res.data)
+        self.assertEqual(res.data["error"], REFUSAL_MESSAGE)
+
+    def test_the_refusal_response_carries_no_order_fields(self):
+        """The body is the refusal and nothing else -- no id, no order
+        number, no totals, no items, no credential."""
+        res = self.guest_post()
+
+        self.assertEqual(res.status_code, 403, res.data)
+        for field in ("id", "order_number", "total_amount", "guest_token", "items"):
+            self.assertNotIn(field, res.data)
+
+    def test_the_refusal_leaves_the_callers_cart_intact(self):
+        """Checkout-only: the refusal neither clears the cart nor its
+        lines -- removal stays the caller's call, exactly as on the delist
+        refusal, and a logged-in retry can still buy the same cart."""
+        res = self.guest_post()
+
+        self.assertEqual(res.status_code, 403, res.data)
+        lines = list(
+            CartItem.objects.filter(
+                cart__session_id=self.guest.session.session_key
+            ).values_list("product_id", "quantity")
         )
-        self.assertIsNone(audit.actor_id)
-        self.assertEqual(audit.detail["order_id"], order.id)
+        self.assertEqual(lines, [(self.product.id, 2)])
 
-    def test_checkout_is_throttled_as_a_public_mutating_endpoint(self):
-        """conventions.md:24. Checkout draws on the cart budget on purpose
-        (it is the terminal mutation of the session-cart flow), so the pin is
-        on that scope rather than on a new rate."""
+    def test_the_cart_coupon_state_is_untouched_by_a_refused_checkout(self):
+        """The cart-side guest path feeds checkout (spec route rule 2 keeps
+        the cart guest-open); the refusal must not consume, clear or alter
+        the coupon the cart holds."""
+        coupon = self.make_coupon(code="SAVE10", discount_value="10")
+        applied = self.guest.post(
+            "/api/cart/coupon/", {"code": coupon.code}, format="json"
+        )
+        self.assertEqual(applied.status_code, 200, applied.data)
+
+        res = self.guest_post()
+
+        self.assertEqual(res.status_code, 403, res.data)
+        cart = Cart.objects.get(session_id=self.guest.session.session_key)
+        self.assertEqual(cart.coupon_id, coupon.pk)
+        coupon.refresh_from_db()
+        self.assertEqual(coupon.used_count, 0)
+
+    def test_an_anonymous_caller_can_still_cart_and_apply_a_coupon(self):
+        """The spec boundary, positively: route rule 2 keeps the CART open
+        to guests and rule 3's checkout is what refuses, so the refusal
+        stopped at the checkout door and did not leak into the cart flow."""
+        self.make_coupon(code="SAVE10", discount_value="10")
+
+        add = self.guest.post(
+            "/api/cart/", {"product_id": self.product.id, "quantity": 1}, format="json"
+        )
+        applied = self.guest.post(
+            "/api/cart/coupon/", {"code": "SAVE10"}, format="json"
+        )
+
+        self.assertEqual(add.status_code, 201, add.data)
+        self.assertEqual(applied.status_code, 200, applied.data)
+        self.assertEqual(applied.data["coupon_code"], "SAVE10")
+
+    def test_an_invalid_bearer_token_gets_the_auth_stack_answer_not_the_refusal(
+        self,
+    ):
+        """The refusal is for ANONYMOUS callers. Broken credentials are the
+        auth stack's axis -- answered with its 401 on every endpoint alike
+        -- so this pin keeps the two axes tellable apart: a 401 here is a
+        bad token, never a guest reason."""
+        res = self.guest.post(
+            "/api/orders/checkout/",
+            self.checkout_payload(),
+            format="json",
+            HTTP_AUTHORIZATION="Bearer not-a-real-token",
+        )
+
+        self.assertEqual(res.status_code, 401, res.data)
+        self.assertEqual(res.data["code"], "not_authenticated")
+
+    def test_an_anonymous_keyed_replay_never_reaches_an_account_order(self):
+        """The leak the old keyed-collapse path had to be defended against
+        is now refused at the door: an anonymous caller presenting a live
+        account Idempotency-Key gets the uniform refusal, not the order,
+        not the key's existence, nothing."""
+        self.make_user("buyer")
+        self.api_login("buyer")
+        self.seed_session_cart([(self.product, 1)])
+        key = "account-key-live-001"
+        first = self.client.post(
+            "/api/orders/checkout/",
+            self.checkout_payload(),
+            format="json",
+            HTTP_IDEMPOTENCY_KEY=key,
+        )
+        self.assertEqual(first.status_code, 201, first.data)
+        self.assertEqual(Order.objects.count(), 1)
+        self.auth(None)
+
+        stolen = self.guest_post(idempotency_key=key)
+
+        self.assertEqual(stolen.status_code, 403, stolen.data)
+        self.assertEqual(stolen.data["error"], REFUSAL_MESSAGE)
+        self.assertNotIn("id", stolen.data)
+        self.assertEqual(Order.objects.count(), 1)
+
+    def test_checkout_is_still_throttled_for_anonymous_callers(self):
+        """conventions.md:24, unchanged: the throttle runs before the view
+        body, so the anonymous funnel still draws on the cart budget and
+        the refusal is never a bypass of it."""
         self.assertEqual(create_order.view_class.throttle_scope, "cart")
         self.assertIn("cart", api_settings.DEFAULT_THROTTLE_RATES)
 
@@ -370,210 +397,161 @@ class GuestCheckoutCreationTests(GuestCheckoutTestBase):
                 ).status_code,
                 201,
             )
-            throttled = self.guest_checkout()
+            throttled = self.guest_post()
         self.assertEqual(throttled.status_code, 429)
         self.assertEqual(Order.objects.count(), 0)
 
-    def test_the_guest_order_carries_no_coupon_or_money_arithmetic_of_its_own(self):
-        coupon = self.make_coupon(code="SAVE10", discount_value="10")
-
-        order, res = self.place_guest_order(coupon_code=coupon.code)
-
-        self.assertEqual(order.discount_amount, Decimal("100.00"))
-        self.assertEqual(order.total_amount, Decimal("900.00"))
-        self.assertEqual(res.data["coupon"], "SAVE10")
-        coupon.refresh_from_db()
-        self.assertEqual(coupon.used_count, 0)  # spent at payment, not at checkout
-
 
 @tag("orders")
-class GuestCheckoutReplayTests(GuestCheckoutTestBase):
-    """[R-1.13] The two dedup guards, re-pointed at a guest owner.
+class AuthenticatedCheckoutRegressionTests(GuestRefusalTestBase):
+    """(f) The refusal is scoped to anonymous callers only: the account
+    path still works END TO END, and the guest_email body field is still
+    ignored outright on it."""
 
-    Both collapse onto the caller's OWN prior submission and neither can be
-    used to reach another guest's order -- which is why the owner filter is
-    (user IS NULL AND guest_email = ...) and never a bare user=None.
-    """
+    def test_authenticated_checkout_still_works_end_to_end(self):
+        """Checkout -> intent -> verify -> captured, with the stock
+        decrement, the coupon spend and the hold conversion the payment
+        commit is responsible for. Razorpay is mocked throughout."""
+        coupon = self.make_coupon(code="SAVE10", discount_value="10", usage_limit=5)
+        self.make_user("buyer")
+        self.api_login("buyer")
+        self.seed_session_cart([(self.product, 2)])  # 1000.00
+        self.razorpay_mock(order_id="order_ACCTOK")
 
-    def test_an_identical_resubmission_collapses_onto_the_first_order(self):
-        first, _ = self.place_guest_order()
-
-        replay = self.guest_checkout()
-
-        self.assertEqual(replay.status_code, 200, replay.data)
-        self.assertEqual(replay.data["id"], first.id)
-        self.assertEqual(Order.objects.count(), 1)
-
-    def test_a_collapse_never_hands_back_the_credential(self):
-        """[R-1.13] INVARIANT: `guest_token` is disclosed by the 201 that
-        mints it and by nothing else -- not the keyless dedup collapse, not
-        the keyed replay. A permanent read credential must not be replayable
-        by whoever reaches a collapse, so the disclosure does not depend on
-        any collapse guard being right."""
-        first, minted = self.place_guest_order()
-        self.assertIn("guest_token", minted.data)
-
-        unkeyed = self.guest_checkout()
-        self.assertEqual(unkeyed.status_code, 200, unkeyed.data)
-        self.assertNotIn("guest_token", unkeyed.data)
-
-        other = self.fresh_client()
-        self.seed_session_cart([(self.product, 2)], client=other)
-        keyed = self.guest_checkout(client=other, idempotency_key="collapse-token-001")
-        self.assertEqual(keyed.status_code, 200, keyed.data)
-        self.assertEqual(keyed.data["id"], first.id)
-        self.assertNotIn("guest_token", keyed.data)
-
-    def test_a_different_guest_email_never_collapses_onto_another_order(self):
-        """The write-side counterpart of the read-side isolation probe: an
-        identical payload under a different guest identity is a DIFFERENT
-        purchase, not a replay of somebody else's."""
-        first, _ = self.place_guest_order()
-
-        other = self.fresh_client()
-        self.seed_session_cart([(self.product, 2)], client=other)
-        res = self.guest_checkout(client=other, guest_email="other@example.com")
+        res = self.client.post(
+            "/api/orders/checkout/",
+            self.checkout_payload(coupon_code=coupon.code),
+            format="json",
+        )
 
         self.assertEqual(res.status_code, 201, res.data)
-        self.assertNotEqual(res.data["id"], first.id)
-        self.assertEqual(Order.objects.count(), 2)
+        order = Order.objects.get(id=res.data["id"])
+        self.assertEqual(order.user.username, "buyer")
+        self.assertEqual(order.guest_email, "")
+        self.assertIsNone(order.guest_token)
+        self.assertEqual(order.discount_amount, Decimal("100.00"))
+        self.assertEqual(order.total_amount, Decimal("900.00"))
 
-    def test_a_keyed_guest_resubmission_collapses_onto_the_first_order(self):
-        """The keyed collapse still works for a genuine retry: same guest,
-        same cart, same payload, same key."""
-        key = "guest-retry-001"
+        intent = self.client.post(
+            "/api/orders/payment/", {"order_id": order.id}, format="json"
+        )
+        self.assertEqual(intent.status_code, 200, intent.data)
+        order.refresh_from_db()
 
-        first = self.guest.post(
-            "/api/orders/checkout/",
-            self.checkout_payload(guest_email=GUEST_EMAIL),
+        verify = self.client.post(
+            "/api/orders/payment/verify/",
+            {
+                "order_id": order.id,
+                "razorpay_order_id": order.razorpay_order_id,
+                "razorpay_payment_id": "pay_ACCTOK",
+                "razorpay_signature": "sig",
+            },
             format="json",
-            HTTP_IDEMPOTENCY_KEY=key,
         )
-        self.assertEqual(first.status_code, 201, first.data)
 
-        replay = self.guest.post(
+        self.assertEqual(verify.status_code, 200, verify.data)
+        self.assertEqual(verify.data["status"], "confirmed")
+        order.refresh_from_db()
+        self.assertEqual(order.status, "confirmed")
+        self.assertEqual(order.payment_status, "captured")
+        self.product.refresh_from_db()
+        self.assertEqual(self.product.stock, 8)  # 10 - 2
+        coupon.refresh_from_db()
+        self.assertEqual(coupon.used_count, 1)
+        self.assertEqual(
+            order.stock_reservations.get().status,
+            StockReservation.Status.CONVERTED,
+        )
+
+    def test_the_same_client_can_log_in_and_check_out_the_same_cart(self):
+        """The refusal blocks the GUEST, not the purchase: the same browser,
+        once authenticated, completes the checkout with the same cart it
+        was refused with."""
+        refused = self.guest_post()
+        self.assertEqual(refused.status_code, 403, refused.data)
+
+        self.make_user("buyer")
+        res, token = self.api_login("buyer", client=self.guest)
+        self.assertEqual(res.status_code, 200, res.data)
+        self.guest.credentials(HTTP_AUTHORIZATION=f"Bearer {token}")
+
+        ok = self.guest.post(
+            "/api/orders/checkout/", self.checkout_payload(), format="json"
+        )
+
+        self.assertEqual(ok.status_code, 201, ok.data)
+        order = Order.objects.get(id=ok.data["id"])
+        self.assertEqual(order.user.username, "buyer")
+        self.assertEqual(order.guest_email, "")
+
+    def test_the_refusal_does_not_burn_an_order_number(self):
+        """A rolled-back checkout never burns a number (R-8.4); a refused
+        one never even asks. The first account checkout after any number of
+        refusals still opens the year's sequence at 000001."""
+        for _ in range(3):
+            self.assertEqual(self.guest_post().status_code, 403)
+
+        self.make_user("buyer")
+        self.api_login("buyer")
+        self.seed_session_cart([(self.product, 1)])
+        res = self.client.post(
+            "/api/orders/checkout/", self.checkout_payload(), format="json"
+        )
+
+        self.assertEqual(res.status_code, 201, res.data)
+        self.assertEqual(res.data["order_number"], f"ORD-{timezone.now().year}-000001")
+
+    def test_an_account_submission_ignores_a_body_supplied_guest_email(self):
+        self.make_user("buyer")
+        self.api_login("buyer")
+        self.seed_session_cart([(self.product, 1)])
+
+        res = self.client.post(
             "/api/orders/checkout/",
-            self.checkout_payload(guest_email=GUEST_EMAIL),
+            self.checkout_payload(guest_email="impostor@example.com"),
             format="json",
-            HTTP_IDEMPOTENCY_KEY=key,
         )
 
-        self.assertEqual(replay.status_code, 200, replay.data)
-        self.assertEqual(replay.data["id"], first.data["id"])
-        self.assertNotIn("guest_token", replay.data)
-        self.assertEqual(Order.objects.count(), 1)
+        self.assertEqual(res.status_code, 201, res.data)
+        order = Order.objects.get(id=res.data["id"])
+        self.assertEqual(order.user.username, "buyer")
+        self.assertEqual(order.guest_email, "")
+        self.assertIsNone(order.guest_token)
+        # And no credential is handed to an authenticated caller: possession
+        # of a guest token is the only guest authorization there is, so an
+        # account order must not carry one.
+        self.assertNotIn("guest_token", res.data)
 
-    def test_a_keyed_replay_with_a_drifted_payload_is_refused(self):
-        """[R-1.13] P1 FIX: the keyed guest path requires the WHOLE purchase
-        to agree, so payload drift is a conflict, not a collapse onto
-        somebody's order. Spec 9.3.14's drift-tolerance stands for an
-        authenticated caller only."""
-        key = "guest-retry-drift"
+    def test_an_over_length_shipping_field_is_still_refused_for_an_account(self):
+        """The varchar-width gate is an ACCOUNT gate now (the anonymous
+        side of it died with the refusal, pinned as uniform in the class
+        above). BOTH the gate's status and its message are pinned: the
+        status alone is not evidence, since a half of this test that never
+        authenticated would stay green with the width loop deleted."""
+        self.make_user("buyer")
+        _, token = self.api_login("buyer")
+        self.auth(token)
+        self.seed_session_cart([(self.product, 1)])
+        for field, limit in (("full_name", 150), ("phone", 15)):
+            with self.subTest(field=field):
+                too_long = "x" * (limit + 1)
+                res = self.checkout(**{field: too_long})
 
-        first = self.guest.post(
-            "/api/orders/checkout/",
-            self.checkout_payload(guest_email=GUEST_EMAIL),
-            format="json",
-            HTTP_IDEMPOTENCY_KEY=key,
-        )
-        self.assertEqual(first.status_code, 201, first.data)
-
-        replay = self.guest.post(
-            "/api/orders/checkout/",
-            self.checkout_payload(guest_email=GUEST_EMAIL, city="Pune"),
-            format="json",
-            HTTP_IDEMPOTENCY_KEY=key,
-        )
-
-        self.assertEqual(replay.status_code, 409, replay.data)
-        self.assertNotIn("id", replay.data)
-        self.assertNotIn("guest_token", replay.data)
-        self.assertEqual(Order.objects.count(), 1)
-
-    def test_a_stolen_email_and_key_buy_the_attacker_nothing(self):
-        """[R-1.13] P1 FIX, the exact repro: the victim checks out; an
-        attacker from a FRESH session, with a DIFFERENT cart and their own
-        address, replays the victim's email and Idempotency-Key. Before the
-        fix this answered 200 with the victim's id, the victim's address and
-        the victim's `guest_token`."""
-        key = "abc-123"
-        victim, victim_res = self.place_guest_order(
-            guest_email="victim@corp.example", idempotency_key=key
-        )
-
-        attacker = self.fresh_client()
-        self.seed_session_cart([(self.product, 1)], client=attacker)  # 500.00
-        stolen = attacker.post(
-            "/api/orders/checkout/",
-            self.checkout_payload(
-                guest_email="victim@corp.example",
-                full_name="Attacker",
-                phone="9999999999",
-                address="1 Attacker Way",
-                city="Delhi",
-                state="Delhi",
-                pincode="110001",
-            ),
-            format="json",
-            HTTP_IDEMPOTENCY_KEY=key,
-        )
-
-        self.assertEqual(stolen.status_code, 409, stolen.data)
-        # Nothing of the victim's leaks: the body is the uniform error
-        # envelope (SPEC-9-03) and carries no order detail at all.
-        self.assertEqual(stolen.data["code"], "conflict")
-        self.assertEqual(stolen.data["details"], {})
-        self.assertNotIn("id", stolen.data)
-        self.assertNotIn("guest_token", stolen.data)
-        self.assertNotIn(str(victim.id), str(stolen.data))
-        self.assertEqual(Order.objects.count(), 1)
-        victim.refresh_from_db()
-        self.assertEqual(victim.address, "12 Rose Lane")
-
-        # ...and the credential the victim was given still reads only their
-        # own order, so the attack neither leaked nor invalidated it.
-        read = attacker.get(
-            "/api/orders/guest/",
-            **self.guest_token_header(victim_res.data["guest_token"]),
-        )
-        self.assertEqual(read.status_code, 200, read.data)
-        self.assertEqual(read.data["id"], victim.id)
-
-    def test_the_trailing_space_variant_of_a_stolen_email_buys_nothing(self):
-        """[R-1.13] P1 + P2 FIX: the same replay dressed as
-        `victim@corp.example ` (one trailing space). The address is
-        canonicalised at the boundary, so it resolves to the same owner AND
-        still has to agree on the purchase."""
-        key = "abc-123"
-        victim, _ = self.place_guest_order(
-            guest_email="victim@corp.example", idempotency_key=key
-        )
-
-        attacker = self.fresh_client()
-        self.seed_session_cart([(self.product, 1)], client=attacker)
-        stolen = attacker.post(
-            "/api/orders/checkout/",
-            self.checkout_payload(
-                guest_email="victim@corp.example   ",
-                address="1 Attacker Way",
-            ),
-            format="json",
-            HTTP_IDEMPOTENCY_KEY=key,
-        )
-
-        self.assertEqual(stolen.status_code, 409, stolen.data)
-        self.assertEqual(Order.objects.count(), 1)
-        victim.refresh_from_db()
-        self.assertEqual(victim.guest_email, "victim@corp.example")
+                self.assertEqual(res.status_code, 400, res.data)
+                self.assertEqual(
+                    res.data["error"],
+                    f"{field} must be at most {limit} characters",
+                )
+                self.assertEqual(Order.objects.count(), 0)
+        self.auth(None)
 
     def test_an_account_keyed_replay_still_tolerates_payload_drift(self):
-        """[R-1.13] The fix is scoped to the guest branch on purpose: an
-        authenticated caller proved who they are at login, so SPEC-9.3.14's
-        "a keyed replay collapses regardless of payload drift" is unchanged
-        for them (orders.test_idempotency pins the same contract)."""
-        buyer = self.make_user("drift-buyer")
-        _, token = self.api_login("drift-buyer")
-        self.auth(token)
+        """SPEC-9.3.14 stands for an authenticated caller: the keyed
+        guest-agreement branch died with the refusal, and the account
+        contract ("collapse regardless of payload drift") must not have
+        moved with it (orders.test_idempotency pins the same contract)."""
+        self.make_user("drift-buyer")
+        self.api_login("drift-buyer")
         self.seed_session_cart([(self.product, 2)])
         key = {"HTTP_IDEMPOTENCY_KEY": "account-drift-001"}
 
@@ -592,44 +570,78 @@ class GuestCheckoutReplayTests(GuestCheckoutTestBase):
         self.assertEqual(replay.status_code, 200, replay.data)
         self.assertEqual(replay.data["id"], first.data["id"])
         self.assertEqual(Order.objects.count(), 1)
-        self.assertEqual(buyer.orders.count(), 1)
 
-    def test_the_guest_key_constraint_is_the_database_authority(self):
-        """conventions.md:17. The (user, key) constraint cannot see a guest row
-        -- its user is NULL and NULLs stay distinct -- so the conditional
-        (guest_email, key) constraint is what makes a keyed guest replay
-        impossible at the database level, not just at the probe."""
-        order, _ = self.place_guest_order()
-        order.idempotency_key = "guest-retry-001"
-        order.save(update_fields=["idempotency_key"])
 
-        # Savepoint: the refused insert rolls back to here, leaving the test
-        # transaction usable for the count below (the products app's own
-        # unique-constraint pin uses the same shape).
-        with self.assertRaises(IntegrityError):
-            with transaction.atomic():
-                Order.objects.create(
-                    user=None,
-                    guest_email=GUEST_EMAIL,
-                    guest_token="another-token",
-                    full_name="G",
-                    phone="1",
-                    address="a",
-                    city="c",
-                    state="s",
-                    pincode="1",
-                    total_amount=Decimal("10.00"),
-                    idempotency_key="guest-retry-001",
-                )
-        self.assertEqual(Order.objects.count(), 1)
+class GuestOrderRowTestBase(GuestRefusalTestBase):
+    """A guest order ROW the way the pre-refusal checkout minted one.
+
+    The API no longer creates these (the refusal above); rows from before it
+    are still data every staff and payment path must keep handling, so the
+    classes below build the exact pre-refusal shape through the ORM: user
+    NULL, guest_email + guest_token set, one OrderItem, an ACTIVE hold with
+    a NULL owner, and the creation status event.
+    """
+
+    def setUp(self):
+        super().setUp()
+        self._row_seq = 0
+
+    def make_guest_order(self, quantity=2, email=GUEST_EMAIL, **overrides):
+        self._row_seq += 1
+        fields = dict(
+            user=None,
+            guest_email=email,
+            guest_token=f"legacy-guest-token-{self._row_seq:04d}",
+            order_number=f"ORD-2026-8{self._row_seq:05d}",
+            full_name="Guest Buyer",
+            phone="9876543210",
+            address="12 Rose Lane",
+            city="Mumbai",
+            state="Maharashtra",
+            pincode="400001",
+            total_amount=Decimal("1000.00"),
+            discount_amount=Decimal("0.00"),
+            shipping_amount=Decimal("0.00"),
+            status="pending",
+        )
+        fields.update(overrides)
+        order = Order.objects.create(**fields)
+        OrderItem.objects.create(
+            order=order,
+            product=self.product,
+            product_name=self.product.name,
+            sku="",
+            variant_name=self.product.name,
+            price=self.product.price,
+            quantity=quantity,
+            subtotal=self.product.price * quantity,
+        )
+        StockReservation.objects.create(
+            product=self.product,
+            order=order,
+            owner=None,
+            quantity=quantity,
+            expires_at=StockReservation.expiry_from_now(),
+        )
+        OrderStatusEvent.objects.create(
+            order=order,
+            from_status=None,
+            to_status=order.status,
+            actor=None,
+            trigger=TRIGGER_ORDER_CREATE,
+        )
+        return order
+
+    def guest_token_header(self, token):
+        return {TOKEN_HEADER: token}
 
 
 @tag("orders")
-class GuestOrderLookupTests(GuestCheckoutTestBase):
-    """[R-1.13] Possession of the token is the whole authorization."""
+class GuestOrderLookupTests(GuestOrderRowTestBase):
+    """Possession of the token is the whole authorization (legacy rows)."""
 
     def test_the_token_alone_returns_the_guests_own_order(self):
-        order, _ = self.place_guest_order()
+        order = self.make_guest_order()
 
         res = self.guest.get(
             "/api/orders/guest/", **self.guest_token_header(order.guest_token)
@@ -642,7 +654,7 @@ class GuestOrderLookupTests(GuestCheckoutTestBase):
         self.assertEqual(res.data["items"][0]["product_name"], "Rose Aurum")
 
     def test_the_order_number_is_an_optional_cross_check_not_the_credential(self):
-        order, _ = self.place_guest_order()
+        order = self.make_guest_order()
 
         res = self.guest.get(
             f"/api/orders/guest/{order.order_number}/",
@@ -653,7 +665,7 @@ class GuestOrderLookupTests(GuestCheckoutTestBase):
         self.assertEqual(res.data["id"], order.id)
 
     def test_the_lookup_is_served_on_the_v1_mirror(self):
-        order, _ = self.place_guest_order()
+        order = self.make_guest_order()
 
         res = self.guest.get(
             f"/api/v1/store/orders/guest/{order.order_number}/",
@@ -664,7 +676,7 @@ class GuestOrderLookupTests(GuestCheckoutTestBase):
         self.assertEqual(res.data["id"], order.id)
 
     def test_no_token_is_refused(self):
-        order, _ = self.place_guest_order()
+        self.make_guest_order()
 
         res = self.guest.get("/api/orders/guest/")
 
@@ -672,7 +684,7 @@ class GuestOrderLookupTests(GuestCheckoutTestBase):
         self.assertEqual(res.data["error"], "Order not found")
 
     def test_a_wrong_token_is_refused(self):
-        order, _ = self.place_guest_order()
+        self.make_guest_order()
 
         res = self.guest.get(
             "/api/orders/guest/", **self.guest_token_header("not-the-token")
@@ -686,14 +698,10 @@ class GuestOrderLookupTests(GuestCheckoutTestBase):
         order -- and points it at guest A's order number. A lookup scoped to
         the token alone or to (number, token) both fail, and both fail
         identically to a lookup with no token at all."""
-        theirs, _ = self.place_guest_order()
-        mine_client = self.fresh_client()
-        self.seed_session_cart([(self.product, 1)], client=mine_client)
-        mine, _ = self.place_guest_order(
-            client=mine_client, guest_email="mine@example.com"
-        )
+        theirs = self.make_guest_order(email="theirs@example.com")
+        mine = self.make_guest_order(email="mine@example.com")
 
-        stolen = mine_client.get(
+        stolen = self.guest.get(
             f"/api/orders/guest/{theirs.order_number}/",
             **self.guest_token_header(mine.guest_token),
         )
@@ -706,7 +714,7 @@ class GuestOrderLookupTests(GuestCheckoutTestBase):
         # whether theirs.order_number exists.
         self.assertEqual(stolen.data, anonymous.data)
         # ...and the token that DOES work still works for its own order.
-        own = mine_client.get(
+        own = self.guest.get(
             f"/api/orders/guest/{mine.order_number}/",
             **self.guest_token_header(mine.guest_token),
         )
@@ -714,12 +722,8 @@ class GuestOrderLookupTests(GuestCheckoutTestBase):
         self.assertEqual(own.data["id"], mine.id)
 
     def test_a_token_cannot_be_paired_with_another_orders_number(self):
-        order, _ = self.place_guest_order()
-        other_client = self.fresh_client()
-        self.seed_session_cart([(self.product, 1)], client=other_client)
-        other, _ = self.place_guest_order(
-            client=other_client, guest_email="other@example.com"
-        )
+        order = self.make_guest_order(email="first@example.com")
+        other = self.make_guest_order(email="other@example.com")
 
         res = self.guest.get(
             f"/api/orders/guest/{other.order_number}/",
@@ -729,7 +733,7 @@ class GuestOrderLookupTests(GuestCheckoutTestBase):
         self.assertEqual(res.status_code, 404, res.data)
 
     def test_an_unknown_order_number_with_a_valid_token_is_refused(self):
-        order, _ = self.place_guest_order()
+        order = self.make_guest_order()
 
         res = self.guest.get(
             "/api/orders/guest/ORD-1999-999999/",
@@ -767,9 +771,10 @@ class GuestOrderLookupTests(GuestCheckoutTestBase):
         self.assertEqual(res.status_code, 404, res.data)
 
     def test_the_lookup_never_returns_the_credential(self):
-        """The token is disclosed by the checkout response that minted it and
-        by nothing else -- not here, and not on any staff read."""
-        order, _ = self.place_guest_order()
+        """No response anywhere carries ``guest_token``: the serializer
+        never includes it, so a leaked order read cannot be replayed as a
+        guest lookup."""
+        order = self.make_guest_order()
 
         res = self.guest.get(
             "/api/orders/guest/", **self.guest_token_header(order.guest_token)
@@ -780,15 +785,15 @@ class GuestOrderLookupTests(GuestCheckoutTestBase):
 
 
 @tag("orders")
-class GuestOrderStaffSurfaceTests(GuestCheckoutTestBase):
-    """[R-1.13] Requirement 5: a guest order is a first-class order for staff.
+class GuestOrderStaffSurfaceTests(GuestOrderRowTestBase):
+    """Requirement 5: a guest order is a first-class order for staff.
 
-    Every surface a customer order appears on must carry a guest order too,
-    or the fulfilment queue silently drops the store's sales.
+    Every surface a customer order appears on must carry a legacy guest row
+    too, or the fulfilment queue silently drops the store's sales.
     """
 
     def test_the_admin_json_seam_serves_guest_orders(self):
-        order, _ = self.place_guest_order()
+        order = self.make_guest_order()
         self.client.force_authenticate(self.user_with_role("finmgr", ROLE_FINANCE))
 
         listing = self.client.get("/api/admin/orders/")
@@ -803,7 +808,7 @@ class GuestOrderStaffSurfaceTests(GuestCheckoutTestBase):
         self.assertNotIn("guest_token", detail.data)
 
     def test_the_admin_grid_shows_and_searches_the_guest_order(self):
-        order, _ = self.place_guest_order()
+        order = self.make_guest_order()
         admin = self.make_staff("root")
         self.client.force_login(admin)
 
@@ -816,7 +821,7 @@ class GuestOrderStaffSurfaceTests(GuestCheckoutTestBase):
         self.assertContains(found, order.order_number)
 
     def test_the_admin_change_form_renders_the_guest_order(self):
-        order, _ = self.place_guest_order()
+        order = self.make_guest_order()
         admin = self.make_staff("root")
         self.client.force_login(admin)
 
@@ -829,7 +834,7 @@ class GuestOrderStaffSurfaceTests(GuestCheckoutTestBase):
         """export_csv walks the selected queryset reading ``customer``. A
         guest row has no user, so the label resolves to the guest email
         instead of raising AttributeError mid-export."""
-        order, _ = self.place_guest_order()
+        order = self.make_guest_order()
         admin = self.make_staff("root")
         self.client.force_login(admin)
 
@@ -846,9 +851,9 @@ class GuestOrderStaffSurfaceTests(GuestCheckoutTestBase):
     def test_the_packing_queue_lists_the_guest_order(self):
         """[R-1-B03] The inventory/fulfilment operator's queue is unscoped by
         owner, so a guest order has to appear in it -- otherwise the store
-        cannot ship the sales this task lets it take. The money and the
+        cannot ship the sales this row shape carries. The money and the
         shipping record stay withheld exactly as B03 narrowed them."""
-        order, _ = self.place_guest_order()
+        order = self.make_guest_order()
         operator = self.user_with_role("packer", ROLE_INVENTORY)
         self.client.force_login(operator)
 
@@ -867,7 +872,7 @@ class GuestOrderStaffSurfaceTests(GuestCheckoutTestBase):
         self.assertNotContains(found, order.order_number)
 
     def test_the_dashboard_labels_a_guest_order(self):
-        order, _ = self.place_guest_order()
+        order = self.make_guest_order()
 
         self.assertEqual(str(order), f"Order #{order.id} - {GUEST_EMAIL}")
         self.assertEqual(order.customer_name, GUEST_EMAIL)
@@ -889,9 +894,9 @@ class GuestOrderStaffSurfaceTests(GuestCheckoutTestBase):
 
 
 @override_settings(RAZORPAY_WEBHOOK_SECRET=WEBHOOK_SECRET)
-class GuestOrderNullUserPathTests(GuestCheckoutTestBase):
-    """[R-1.13] Requirement 6: nothing that reads ``order.user`` may raise on
-    a guest row. Each case below is a path the guest order really reaches."""
+class GuestOrderNullUserPathTests(GuestOrderRowTestBase):
+    """Requirement 6: nothing that reads ``order.user`` may raise on a
+    guest row. Each case below is a path a pre-refusal row really reaches."""
 
     def deliver(self, body, event_id="evt_GUEST1"):
         payload = json.dumps(body).encode("utf-8")
@@ -926,13 +931,15 @@ class GuestOrderNullUserPathTests(GuestCheckoutTestBase):
         }
 
     def pay_the_guest_order(self, order):
-        """Stand in for create_payment, which stays account-scoped: the store
-        hands the gateway reference to a guest order out of band."""
+        """Stand in for create_payment, which stays account-scoped: the
+        store hands the gateway reference to a pre-refusal row out of band
+        (a live deployment's only source of such a reference is the old
+        checkout path; the webhook below is what confirms it)."""
         order.razorpay_order_id = "order_GUEST1"
         order.save(update_fields=["razorpay_order_id"])
 
     def test_the_payment_webhook_confirms_a_guest_order(self):
-        order, _ = self.place_guest_order()
+        order = self.make_guest_order()
         self.pay_the_guest_order(order)
 
         res = self.deliver(self.capture_event(order))
@@ -945,11 +952,19 @@ class GuestOrderNullUserPathTests(GuestCheckoutTestBase):
         self.assertEqual(
             PaymentEvent.objects.get(event_id="evt_GUEST1").outcome, "applied"
         )
-        # Inventory is deliberately the callback writer's job (webhooks.py's
-        # own contract), so the webhook's guest-leg work is the transition,
-        # the trail and the hold conversion - all of which happened.
+        # Inventory rides the same shared commit the customer callback uses
+        # (orders.inventory.commit_order_sale), so a guest order confirmed by
+        # the DELIVERY has its stock decremented and its ledger row written
+        # exactly as one confirmed by the callback would. The quantity is read
+        # off the order rather than typed, so the pin tracks the fixture
+        # instead of a number that can drift from it.
+        line = order.items.get()
         self.product.refresh_from_db()
-        self.assertEqual(self.product.stock, 10)
+        self.assertEqual(self.product.stock, 10 - line.quantity)
+        movement = StockMovement.objects.get()
+        self.assertEqual(movement.reason, StockMovement.Reason.SALE)
+        self.assertEqual(movement.delta, -line.quantity)
+        self.assertEqual(movement.note, f"Order #{order.id}")
         self.assertEqual(
             order.stock_reservations.get().status,
             StockReservation.Status.CONVERTED,
@@ -957,19 +972,24 @@ class GuestOrderNullUserPathTests(GuestCheckoutTestBase):
         self.assertIsNone(order.status_events.latest("id").actor_id)
 
     def test_the_order_confirmation_email_reaches_the_guest(self):
-        """The notification reads the order's recipient, so the guest gets
-        the mail instead of an AttributeError swallowed into the log."""
-        order, _ = self.place_guest_order()
+        """The notification reads the order's recipient, so a legacy guest
+        row gets the mail instead of an AttributeError swallowed into the
+        log. Since TIER1-ASYNC-CONVERT the webhook queues the confirmation;
+        the drain worker delivers it to the guest address."""
+        order = self.make_guest_order()
         self.pay_the_guest_order(order)
 
         self.deliver(self.capture_event(order))
 
+        # Nothing sent on the delivery thread -- the intent is queued.
+        self.assertEqual(len(mail.outbox), 0)
+        self.assertEqual(order.recipient, GUEST_EMAIL)
+        notifications.drain_notifications()
         self.assertEqual(len(mail.outbox), 1)
         self.assertEqual(mail.outbox[0].to, [GUEST_EMAIL])
-        self.assertEqual(order.recipient, GUEST_EMAIL)
 
     def test_the_refund_seam_refunds_a_captured_guest_order(self):
-        order, _ = self.place_guest_order()
+        order = self.make_guest_order()
         order.status = "confirmed"
         order.payment_status = "captured"
         order.paid_at = timezone.now()
@@ -999,7 +1019,7 @@ class GuestOrderNullUserPathTests(GuestCheckoutTestBase):
 
     def test_cancelling_a_guest_order_releases_its_hold(self):
         """The stock-release path a cancelled checkout takes, on a guest row."""
-        order, _ = self.place_guest_order()
+        order = self.make_guest_order()
         self.client.force_authenticate(self.user_with_role("supp", ROLE_SUPPORT))
 
         res = self.client.post(f"/api/admin/orders/{order.id}/cancel/")
@@ -1015,9 +1035,11 @@ class GuestOrderNullUserPathTests(GuestCheckoutTestBase):
 
     def test_the_customer_payment_seams_never_reach_a_guest_order(self):
         """create_payment/verify_payment stay account-scoped, and a guest
-        order is outside every account's scope -- so the answer is the same
-        uniform 404 an unknown id gets, not a 500 on the NULL user."""
-        order, _ = self.place_guest_order()
+        row is outside every account's scope -- so the answer is the same
+        uniform 404 an unknown id gets, not a 500 on the NULL user. This is
+        exactly WHY the anonymous checkout path had to die: a guest order is
+        unpayable by construction."""
+        order = self.make_guest_order()
         self.make_user("buyer")
         self.api_login("buyer")
         self.razorpay_mock()
@@ -1045,8 +1067,8 @@ class GuestOrderNullUserPathTests(GuestCheckoutTestBase):
 
     def test_the_customer_order_reads_never_include_a_guest_order(self):
         """An account's history and detail are scoped to that account, so a
-        guest sale is not disclosed by any authenticated read."""
-        order, _ = self.place_guest_order()
+        guest row is not disclosed by any authenticated read."""
+        order = self.make_guest_order()
         self.make_user("buyer")
         self.api_login("buyer")
 
@@ -1059,8 +1081,10 @@ class GuestOrderNullUserPathTests(GuestCheckoutTestBase):
 
 
 @tag("orders")
-class GuestOrderModelInvariantTests(ApiTestCase):
-    """[R-1.13] The two-owner rule, as a database fact rather than a habit."""
+class GuestOrderModelInvariantTests(GuestOrderRowTestBase):
+    """The two-owner rule and the guest-key constraint, as database facts
+    rather than habits -- they outlive the refusal, because the rows it
+    guards can still exist."""
 
     def test_an_order_with_no_owner_at_all_is_refused(self):
         with self.assertRaises(IntegrityError):
@@ -1089,6 +1113,36 @@ class GuestOrderModelInvariantTests(ApiTestCase):
                 pincode="1",
                 total_amount=Decimal("10.00"),
             )
+
+    def test_the_guest_key_constraint_is_the_database_authority(self):
+        """conventions.md:17. The (user, key) constraint cannot see a guest
+        row -- its user is NULL and NULLs stay distinct -- so the conditional
+        (guest_email, key) constraint is what makes a keyed guest row
+        duplicate impossible at the database level. The constraint outlives
+        the refusal: rows minted before it still carry keys."""
+        order = self.make_guest_order()
+        order.idempotency_key = "guest-retry-001"
+        order.save(update_fields=["idempotency_key"])
+
+        # Savepoint: the refused insert rolls back to here, leaving the test
+        # transaction usable for the count below (the products app's own
+        # unique-constraint pin uses the same shape).
+        with self.assertRaises(IntegrityError):
+            with transaction.atomic():
+                Order.objects.create(
+                    user=None,
+                    guest_email=GUEST_EMAIL,
+                    guest_token="another-token",
+                    full_name="G",
+                    phone="1",
+                    address="a",
+                    city="c",
+                    state="s",
+                    pincode="1",
+                    total_amount=Decimal("10.00"),
+                    idempotency_key="guest-retry-001",
+                )
+        self.assertEqual(Order.objects.count(), 1)
 
     def test_the_guest_columns_are_wide_enough_on_every_engine(self):
         """The widths are declared for BOTH engines: SQLite ignores

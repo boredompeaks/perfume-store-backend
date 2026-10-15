@@ -1,9 +1,9 @@
 from decimal import Decimal
 
 from django.conf import settings
+from django.contrib.auth.models import User
 from django.db import models
 from django.db.models import Q, Sum
-from django.contrib.auth.models import User
 
 from common.money import quantize_money
 from products.models import products
@@ -38,60 +38,36 @@ def default_currency():
 
 
 class Coupon(models.Model):
-
     DISCOUNT_TYPES = [
-        ('percentage', 'Percentage'),
-        ('fixed', 'Fixed Amount'),
+        ("percentage", "Percentage"),
+        ("fixed", "Fixed Amount"),
     ]
 
-    code = models.CharField(
-        max_length=50,
-        unique=True
-    )
+    code = models.CharField(max_length=50, unique=True)
 
-    discount_type = models.CharField(
-        max_length=20,
-        choices=DISCOUNT_TYPES
-    )
+    discount_type = models.CharField(max_length=20, choices=DISCOUNT_TYPES)
 
-    discount_value = models.DecimalField(
-        max_digits=10,
-        decimal_places=2
-    )
+    discount_value = models.DecimalField(max_digits=10, decimal_places=2)
 
     minimum_order_amount = models.DecimalField(
-        max_digits=10,
-        decimal_places=2,
-        default=0
+        max_digits=10, decimal_places=2, default=0
     )
 
     maximum_discount = models.DecimalField(
-        max_digits=10,
-        decimal_places=2,
-        null=True,
-        blank=True
+        max_digits=10, decimal_places=2, null=True, blank=True
     )
 
-    active = models.BooleanField(
-        default=True
-    )
+    active = models.BooleanField(default=True)
 
     valid_from = models.DateTimeField()
 
     valid_until = models.DateTimeField()
 
-    usage_limit = models.PositiveIntegerField(
-        null=True,
-        blank=True
-    )
+    usage_limit = models.PositiveIntegerField(null=True, blank=True)
 
-    used_count = models.PositiveIntegerField(
-        default=0
-    )
+    used_count = models.PositiveIntegerField(default=0)
 
-    created_at = models.DateTimeField(
-        auto_now_add=True
-    )
+    created_at = models.DateTimeField(auto_now_add=True)
 
     def __str__(self):
         return self.code
@@ -181,33 +157,19 @@ class Order(models.Model):
         unique=True,
     )
 
-    full_name = models.CharField(
-        max_length=150
-    )
+    full_name = models.CharField(max_length=150)
 
-    phone = models.CharField(
-        max_length=15
-    )
+    phone = models.CharField(max_length=15)
 
     address = models.TextField()
 
-    city = models.CharField(
-        max_length=100
-    )
+    city = models.CharField(max_length=100)
 
-    state = models.CharField(
-        max_length=100
-    )
+    state = models.CharField(max_length=100)
 
-    pincode = models.CharField(
-        max_length=10
-    )
+    pincode = models.CharField(max_length=10)
 
-    status = models.CharField(
-        max_length=20,
-        choices=STATUS_CHOICES,
-        default='pending'
-    )
+    status = models.CharField(max_length=20, choices=STATUS_CHOICES, default="pending")
 
     # [R-10.1] SPEC-10-01a: the lifecycle split into explicit dimensions
     # (spec 10.2). Additive by design: ``status`` above remains the compat
@@ -221,13 +183,13 @@ class Order(models.Model):
     payment_status = models.CharField(
         max_length=20,
         choices=PAYMENT_STATUS_CHOICES,
-        default='pending',
+        default="pending",
         help_text="Payment dimension of the lifecycle (spec 10.2).",
     )
     fulfilment_status = models.CharField(
         max_length=20,
         choices=FULFILMENT_STATUS_CHOICES,
-        default='unfulfilled',
+        default="unfulfilled",
         help_text="Fulfilment dimension of the lifecycle (spec 10.2).",
     )
 
@@ -247,23 +209,12 @@ class Order(models.Model):
     )
 
     coupon = models.ForeignKey(
-        Coupon,
-        on_delete=models.SET_NULL,
-        null=True,
-        blank=True,
-        related_name='orders'
+        Coupon, on_delete=models.SET_NULL, null=True, blank=True, related_name="orders"
     )
 
-    discount_amount = models.DecimalField(
-        max_digits=10,
-        decimal_places=2,
-        default=0
-    )
+    discount_amount = models.DecimalField(max_digits=10, decimal_places=2, default=0)
 
-    total_amount = models.DecimalField(
-        max_digits=10,
-        decimal_places=2
-    )
+    total_amount = models.DecimalField(max_digits=10, decimal_places=2)
 
     # [R-1.07] SPEC-1-B05: what the order was actually charged to deliver it.
     # Two columns because the amount is the money record and the method is a
@@ -276,11 +227,11 @@ class Order(models.Model):
     # amount does not already say. PROTECT would also make the admin's delete
     # view raise on referenced rows, i.e. a 500 on a legitimate action.
     shipping_method = models.ForeignKey(
-        'shipping.ShippingMethod',
+        "shipping.ShippingMethod",
         on_delete=models.SET_NULL,
         null=True,
         blank=True,
-        related_name='orders',
+        related_name="orders",
     )
 
     # [R-8.13] The frozen delivery-option label (spec 8.3 "Historical
@@ -329,8 +280,12 @@ class Order(models.Model):
         default=default_currency,
     )
 
-    razorpay_order_id = models.CharField(max_length=100, blank=True, null=True, unique=True)
-    razorpay_payment_id = models.CharField(max_length=100, blank=True, null=True, unique=True)
+    razorpay_order_id = models.CharField(
+        max_length=100, blank=True, null=True, unique=True
+    )
+    razorpay_payment_id = models.CharField(
+        max_length=100, blank=True, null=True, unique=True
+    )
 
     # [R-9.3.14] SPEC-9-01: header-keyed checkout idempotency. Set once by
     # create_order when the client sent an Idempotency-Key header; NULL for
@@ -367,13 +322,9 @@ class Order(models.Model):
     cancelled_at = models.DateTimeField(null=True, blank=True)
     refunded_at = models.DateTimeField(null=True, blank=True)
 
-    created_at = models.DateTimeField(
-        auto_now_add=True
-    )
+    created_at = models.DateTimeField(auto_now_add=True)
 
-    updated_at = models.DateTimeField(
-        auto_now=True
-    )
+    updated_at = models.DateTimeField(auto_now=True)
 
     class Meta:
         # [R-8.17] SPEC-8-05: spec 8.3 "Indexes" starting set (2557
@@ -389,12 +340,12 @@ class Order(models.Model):
         # auto-index for user-only joins.
         indexes = [
             models.Index(
-                fields=['user', '-created_at'],
-                name='orders_user_created_idx',
+                fields=["user", "-created_at"],
+                name="orders_user_created_idx",
             ),
             models.Index(
-                fields=['status', 'created_at'],
-                name='orders_status_created_idx',
+                fields=["status", "created_at"],
+                name="orders_status_created_idx",
             ),
         ]
         constraints = [
@@ -404,8 +355,8 @@ class Order(models.Model):
             # that one user can never hold two orders for one key. The
             # backing index also serves the replay probe lookup.
             models.UniqueConstraint(
-                fields=['user', 'idempotency_key'],
-                name='orders_user_idem_key_uidx',
+                fields=["user", "idempotency_key"],
+                name="orders_user_idem_key_uidx",
             ),
             # [R-1.13] The guest twin of the constraint above. A guest row's
             # `user` is NULL, and NULLs stay distinct in the constraint
@@ -479,23 +430,11 @@ class Order(models.Model):
 
 
 class OrderItem(models.Model):
+    order = models.ForeignKey(Order, on_delete=models.CASCADE, related_name="items")
 
-    order = models.ForeignKey(
-        Order,
-        on_delete=models.CASCADE,
-        related_name='items'
-    )
+    product = models.ForeignKey(products, on_delete=models.SET_NULL, null=True)
 
-    product = models.ForeignKey(
-        products,
-        on_delete=models.SET_NULL,
-        null=True
-    )
-
-    product_name = models.CharField(
-        max_length=200,
-        default=''
-    )
+    product_name = models.CharField(max_length=200, default="")
 
     # [R-8.13] Frozen identity snapshots (spec 8.3 "Historical snapshots"):
     # set once at checkout from the catalogue state the customer bought and
@@ -508,26 +447,19 @@ class OrderItem(models.Model):
     # variant's SKU/name replaces both once selection input exists.
     sku = models.CharField(
         max_length=64,  # ProductVariant.sku width, so a later variant-matched
-        default=''      # population source fits without another migration
+        default="",  # population source fits without another migration
     )
 
     variant_name = models.CharField(
         max_length=200,  # product_name width: it mirrors the product name
-        default=''
+        default="",
     )
 
-    price = models.DecimalField(
-        max_digits=10,
-        decimal_places=2
-    )
+    price = models.DecimalField(max_digits=10, decimal_places=2)
 
     quantity = models.PositiveIntegerField()
 
-    subtotal = models.DecimalField(
-        max_digits=10,
-        decimal_places=2,
-        default=0
-    )
+    subtotal = models.DecimalField(max_digits=10, decimal_places=2, default=0)
 
     # [R-8.11] Denomination of the price/subtotal money columns: set once
     # beside the amounts it labels, same store-config default as the parent
@@ -548,6 +480,7 @@ class OrderItem(models.Model):
 # register into the state's extension hook at import. Every callable
 # returns a list of human-readable failure reasons (empty = met); the
 # writers evaluate them through state.precondition_failures only.
+
 
 def _require_captured_payment(order):
     """Ship only after the money is real: a shipped order whose payment
@@ -613,9 +546,7 @@ class OrderStatusEvent(models.Model):
     """
 
     order = models.ForeignKey(
-        Order,
-        on_delete=models.CASCADE,
-        related_name='status_events'
+        Order, on_delete=models.CASCADE, related_name="status_events"
     )
 
     from_status = models.CharField(
@@ -635,7 +566,7 @@ class OrderStatusEvent(models.Model):
         on_delete=models.SET_NULL,
         null=True,
         blank=True,
-        related_name='order_status_events',
+        related_name="order_status_events",
     )
 
     trigger = models.CharField(
@@ -643,9 +574,7 @@ class OrderStatusEvent(models.Model):
         choices=STATUS_EVENT_TRIGGERS,
     )
 
-    created_at = models.DateTimeField(
-        auto_now_add=True
-    )
+    created_at = models.DateTimeField(auto_now_add=True)
 
     class Meta:
         # Newest first: the admin surface (and any future consumer) reads
@@ -699,23 +628,13 @@ class Refund(models.Model):
         FULL = "full", "Full"
         PARTIAL = "partial", "Partial"
 
-    order = models.ForeignKey(
-        Order,
-        on_delete=models.CASCADE,
-        related_name='refunds'
-    )
+    order = models.ForeignKey(Order, on_delete=models.CASCADE, related_name="refunds")
 
-    amount = models.DecimalField(
-        max_digits=10,
-        decimal_places=2
-    )
+    amount = models.DecimalField(max_digits=10, decimal_places=2)
 
     reason = models.TextField()
 
-    kind = models.CharField(
-        max_length=10,
-        choices=Kind.choices
-    )
+    kind = models.CharField(max_length=10, choices=Kind.choices)
 
     status = models.CharField(
         max_length=20,
@@ -740,7 +659,7 @@ class Refund(models.Model):
         on_delete=models.SET_NULL,
         null=True,
         blank=True,
-        related_name='order_refunds',
+        related_name="order_refunds",
     )
 
     # [R-9.3.14]-shaped replay identity, scoped to the order: a client that
@@ -753,13 +672,9 @@ class Refund(models.Model):
         blank=True,
     )
 
-    created_at = models.DateTimeField(
-        auto_now_add=True
-    )
+    created_at = models.DateTimeField(auto_now_add=True)
 
-    updated_at = models.DateTimeField(
-        auto_now=True
-    )
+    updated_at = models.DateTimeField(auto_now=True)
 
     class Meta:
         ordering = ("-created_at", "-id")
@@ -772,8 +687,8 @@ class Refund(models.Model):
             # can never hold two refunds for one key. Its backing index also
             # serves the replay probe.
             models.UniqueConstraint(
-                fields=['order', 'idempotency_key'],
-                name='orders_refund_order_idem_uidx',
+                fields=["order", "idempotency_key"],
+                name="orders_refund_order_idem_uidx",
             ),
         ]
 
@@ -793,6 +708,370 @@ class Refund(models.Model):
 
     def __str__(self):
         return f"Refund #{self.pk} {self.amount} ({self.kind})"
+
+
+# ==================================
+# [R-1.16] SPEC-1-B07a: the return-request lifecycle
+# ==================================
+#
+# Spec 10.2 line 3470-3474 gives the return its OWN lifecycle dimension, listed
+# beside order, payment, fulfilment, shipment and refund: "Requested, approved,
+# rejected, received, inspected, closed". Those six words are the vocabulary of
+# ``ReturnRequest.status`` verbatim, and none of the ambiguous words spec line
+# 3487 warns about ("success", "done") is among them.
+#
+# It is deliberately NOT wired into ``orders.state``: that module is
+# capability-scoped and audited (SPEC-1-B03) and holds the ORDER status and
+# PAYMENT dimensions only, so the return table and its edges live here beside
+# the model they describe. Spec 10.1 line 3409 is the reason they must stay
+# separate: "Payment, fulfilment, cancellation, returns and refunds are related,
+# but they are not the same thing."
+
+
+class ReturnStatus(models.TextChoices):
+    """The return dimension's vocabulary, as a choices enum.
+
+    Declared at module level rather than inside ``ReturnRequest`` because the
+    machine table and the partial unique index below are built from these values
+    BEFORE the model class exists, and the model then aliases it
+    (``ReturnRequest.Status``) so this and ``Shipment.Status`` /
+    ``Refund.Status`` are reached the same way from a caller. One definition,
+    two names - never two vocabularies.
+    """
+
+    REQUESTED = "requested", "Requested"
+    APPROVED = "approved", "Approved"
+    REJECTED = "rejected", "Rejected"
+    RECEIVED = "received", "Received"
+    INSPECTED = "inspected", "Inspected"
+    CLOSED = "closed", "Closed"
+
+
+RETURN_STATUS_CHOICES = ReturnStatus.choices
+
+# The legal edges, in the spec's own order. ``requested`` is the only branching
+# point - it is the decision spec 19.1 line 4692 calls "Return approved/
+# rejected" - and the approved branch then walks the physical work the spec
+# splits into three facts: the parcel came back (received), the warehouse
+# looked at it (inspected), and the case is done (closed). Both leaves are
+# terminal, and "rejected" is a decision rather than a stage: a rejected
+# request never becomes a return that arrived.
+RETURN_ALLOWED_TRANSITIONS = {
+    ReturnStatus.REQUESTED: {ReturnStatus.APPROVED, ReturnStatus.REJECTED},
+    ReturnStatus.APPROVED: {ReturnStatus.RECEIVED},
+    ReturnStatus.RECEIVED: {ReturnStatus.INSPECTED},
+    ReturnStatus.INSPECTED: {ReturnStatus.CLOSED},
+    ReturnStatus.REJECTED: set(),
+    ReturnStatus.CLOSED: set(),
+}
+
+
+def return_transition_allowed(old_status, new_status):
+    """Whether a return request may move from ``old_status`` to ``new_status``.
+
+    Mirrors ``orders.state.transition_allowed``, including its self-transition
+    rule (a replay of the current status is legal, an edit that leaves the
+    status alone is not a move at all). Kept as a separate function rather than
+    a second table argument because ``ALLOWED_TRANSITIONS`` is the audited
+    order machine and must not acquire a return's vocabulary.
+    """
+    return new_status == old_status or new_status in RETURN_ALLOWED_TRANSITIONS.get(
+        old_status, set()
+    )
+
+
+# The statuses in which a request is still being worked. A customer may hold
+# only ONE of these per order, which is what the partial unique constraint on
+# ``order`` below enforces at the database: "request, request again" cannot fan
+# out into parallel claims over the same goods. A closed or rejected request is
+# terminal, so the index releases the order and a later request is allowed
+# against it.
+RETURN_OPEN_STATUSES = (
+    ReturnStatus.REQUESTED,
+    ReturnStatus.APPROVED,
+    ReturnStatus.RECEIVED,
+    ReturnStatus.INSPECTED,
+)
+
+
+def _allowed_from(status):
+    """The statuses ``status`` may move to, as one human-readable clause.
+
+    One formatter for both refusal messages (this model's ``save`` guard and
+    the admin form's validation error), so the operator is never told two
+    different things about the same machine. ``"nothing"`` rather than an empty
+    string for a terminal status, which is what a reviewer actually needs to
+    read.
+    """
+    allowed = ", ".join(sorted(RETURN_ALLOWED_TRANSITIONS.get(status, set())))
+    return allowed or "nothing"
+
+
+def _reject_oversized_value(model, field_name, value):
+    """Raise when ``value`` is a string wider than the column it is written to.
+
+    A per-app copy of ``shipping.models._reject_oversized``, for the same
+    reason that helper is per-app in the first place: SQLite does not enforce a
+    ``varchar(n)`` width while Postgres raises ``DataError``, so a suite that
+    saves an over-length value cleanly reports a write that 500s in production.
+    The bound is read off the field, so the refusal and the schema cannot drift
+    apart, and a field with no width is never checked.
+
+    Deliberately NOT imported from the shipping app: that name is private to
+    it, and reaching into another app's private helper (or refactoring it into
+    ``common``, which is outside this task's scope) would couple the two model
+    layers for one function. Only ``str`` is measured - Django routes
+    ``bulk_update`` values through the same ``QuerySet.update`` as a ``Case``
+    expression rather than as the string that produced it, and an expression's
+    width is the database's business.
+    """
+    max_length = getattr(model._meta.get_field(field_name), "max_length", None)
+    if max_length is None or not isinstance(value, str):
+        return
+    if len(value) > max_length:
+        raise ValueError(
+            f"{model.__name__}.{field_name} must be at most {max_length} characters"
+        )
+
+
+def _reject_oversized_return_values(instance):
+    """Apply :func:`_reject_oversized_value` to every bounded column of ``instance``.
+
+    Called from ``ReturnRequest.save``, the write boundary the admin form
+    funnels into: the form validates its own choices, so a width that reaches
+    the database can only have come from a direct ORM write. The queryset paths
+    that bypass ``save`` are covered by the same helper in
+    ``ReturnRequestQuerySet``.
+    """
+    for field in type(instance)._meta.concrete_fields:
+        if not isinstance(field, models.CharField):
+            continue
+        _reject_oversized_value(
+            type(instance), field.name, getattr(instance, field.attname)
+        )
+
+
+class ReturnRequestQuerySet(models.QuerySet):
+    """A ``ReturnRequest`` queryset that will not move a status behind the machine.
+
+    ``ReturnRequestAdmin.save_model`` is the sanctioned writer of a status move:
+    it checks the edge against ``RETURN_ALLOWED_TRANSITIONS`` and refuses an
+    illegal one rather than applying it silently. The bulk paths that never
+    reach that method - ``update()`` and ``bulk_update()`` - are refused here
+    instead of being left as a way to move a return request with no machine
+    check at all. The other columns stay updatable, because none of them
+    is a transition.
+
+    EXACTLY those two paths are gated, and naming them is the point: the width
+    gate below rides ``update()``/``bulk_update()`` but NOT ``bulk_create()``,
+    which writes its rows through the compiler rather than through either
+    method. A ``bulk_create`` of over-width values is therefore a clean write
+    on SQLite and a DataError on the production database. That path is
+    reachable from the ORM and the admin shell only, never from HTTP (the
+    change form saves one row through ``save()``), which is why it is a
+    documented gap rather than a gate here - narrowing this sentence is what
+    stops the claim from outrunning the code.
+    """
+
+    def update(self, **kwargs):
+        if "status" in kwargs:
+            raise ValueError(
+                "ReturnRequest.status is moved only through the admin change "
+                "form, which checks the return machine first; a bulk update "
+                "cannot."
+            )
+        # The width gate rides here too: a bulk update writes straight to the
+        # column, so without this an over-length value is a clean write on
+        # SQLite and a DataError on the production database.
+        for field_name, value in kwargs.items():
+            _reject_oversized_value(ReturnRequest, field_name, value)
+        return super().update(**kwargs)
+
+    def bulk_update(self, objs, fields, batch_size=None):
+        """Refuse a status move here too, and width-gate the rest.
+
+        ``bulk_update`` is already caught by the ``update`` guard above, because
+        Django compiles the values into a CASE expression and issues it through
+        ``queryset.filter(...).update(...)``. It is refused HERE as well for the
+        two reasons ``ShipmentQuerySet`` records: the internal route is a Django
+        implementation detail rather than a documented contract, and Django
+        wraps the whole operation in ``transaction.atomic(savepoint=False)``, so
+        a refusal raised from inside it poisons the caller's transaction.
+        Raising before the block opens makes the refusal recoverable.
+        """
+        fields = list(fields)
+        if "status" in fields:
+            raise ValueError(
+                "ReturnRequest.status is moved only through the admin change "
+                "form, which checks the return machine first; a bulk update "
+                "cannot."
+            )
+        for obj in objs:
+            for field_name in fields:
+                _reject_oversized_value(
+                    ReturnRequest, field_name, getattr(obj, field_name)
+                )
+        return super().bulk_update(objs, fields, batch_size=batch_size)
+
+
+class ReturnRequest(models.Model):
+    """[R-1.16] SPEC-1-B07a: one customer's request to send an order back.
+
+    Spec 4 line 1083 makes it a customer self-service feature ("Return/refund
+    request where eligible", under the account's Orders page, line 1045's
+    ``/account/returns``) and spec 6.8 line 1957 makes it a staff feature ("Return
+    request review"). One row is the customer's ask; the staff half is the
+    status walk below, not a separate table.
+
+    THE ASK MOVES NO MONEY. This row creates no ``Refund``, changes no
+    ``payment_status`` and touches no ``total_amount``: spec 6.8 line 1985 is the
+    rule ("Never equate 'refund requested' with 'refund completed'"), and the
+    refund seam (SPEC-1-05, ``refunds.create``) is the only writer of the
+    payment dimension. Requesting and approving are also two separate acts:
+    approval is a staff decision, so nothing here auto-approves.
+
+    Ownership is read off the ORDER rather than stored a second time. The row's
+    owner is whoever owns ``self.order`` - the account holder, or the guest the
+    B04 token was minted for - so a request can never disagree with the order it
+    hangs from, and the "only your own returns" filter is the same
+    ``order__user`` filter the tracking endpoint already uses.
+
+    Guest requests are NOT offered, by decision rather than omission: the spec
+    routes returns under the ACCOUNT section (line 1045) and gives the guest
+    (line 74) browsing and checkout only, so an anonymous caller naming a guest
+    order gets the same uniform miss as any other miss.
+    """
+
+    class ReasonCode(models.TextChoices):
+        # Spec 6.8 line 1959 lists "Reason codes" as a returns feature, so the
+        # reason is a code from a bounded vocabulary and not free text: a code
+        # is what staff filter and report on, and the note below carries the
+        # customer's own words. No value here is invented money or policy -
+        # they are the reasons a buyer can state about a delivered parcel.
+        DAMAGED = "damaged", "Damaged in transit"
+        DEFECTIVE = "defective", "Defective product"
+        WRONG_ITEM = "wrong_item", "Wrong item received"
+        NOT_AS_DESCRIBED = "not_as_described", "Not as described"
+        CHANGED_MIND = "changed_mind", "Changed mind"
+
+    # The spec's lifecycle vocabulary, aliased so a caller reaches it the same
+    # way it reaches ``Shipment.Status`` and ``Refund.Status``. It is the
+    # module-level ``ReturnStatus``, not a second declaration - see that class.
+    Status = ReturnStatus
+
+    order = models.ForeignKey(
+        Order,
+        # CASCADE for the same reason Shipment.order is: a return request is a
+        # record OF one order, with no referent once that order is gone, and
+        # three surfaces in this codebase (the admin grid's order column, the
+        # search by order number, the staff detail view) join to it.
+        on_delete=models.CASCADE,
+        related_name="return_requests",
+    )
+
+    status = models.CharField(
+        # 20 wide for the longest vocabulary value ("not_as_described" is a
+        # reason code, not a status; "inspected" is the longest status at 9),
+        # and the width is enforced at every write boundary below because
+        # SQLite would not.
+        max_length=20,
+        choices=RETURN_STATUS_CHOICES,
+        default="requested",
+    )
+
+    reason_code = models.CharField(
+        max_length=30,
+        choices=ReasonCode.choices,
+    )
+
+    # A TextField, not a CharField: the customer's own words have no length the
+    # store can honestly bound, so there is no width to enforce (the same reason
+    # ``Order.address`` is unbounded).
+    reason_note = models.TextField(
+        blank=True,
+        default="",
+    )
+
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ("-created_at", "-id")
+        verbose_name = "return request"
+        verbose_name_plural = "return requests"
+        constraints = [
+            # The concurrency authority for "one live request per order": the
+            # writer holds the Order row lock while it probes, and this
+            # partial unique index is the last-resort guarantee that two
+            # concurrent requests can never both create an open one - the
+            # second INSERT raises IntegrityError rather than fanning out into
+            # parallel claims over the same goods. Scoped by the condition to
+            # the open statuses (RETURN_OPEN_STATUSES), so a closed or rejected
+            # request releases the order and a later request may be filed.
+            models.UniqueConstraint(
+                fields=["order"],
+                condition=Q(status__in=RETURN_OPEN_STATUSES),
+                name="orders_returnrequest_open_uidx",
+            ),
+        ]
+
+    objects = ReturnRequestQuerySet.as_manager()
+
+    def save(self, *args, **kwargs):
+        """Refuse a width violation and an illegal status edge, then write.
+
+        Two guards on the one write boundary every sanctioned writer funnels
+        into (the admin change form, and any direct ORM write).
+
+        The WIDTH guard exists because the admin form validates its own fields,
+        so a width violation can only reach this line from a direct ORM write -
+        and SQLite would accept it where the production Postgres raises
+        ``DataError``.
+
+        The EDGE guard is what makes "no illegal transition is applied" a
+        property of the model rather than of one admin form: ``requested ->
+        inspected`` raises here, so a caller that reaches the row by any other
+        route cannot skip a stage. A CREATION is not a move, so a row with no
+        pk yet is written whatever status it was given (the customer seam always
+        files ``requested``, the opening state of spec 10.2's vocabulary).
+
+        What this guard is NOT: a lock. The stored status is read, not locked,
+        so two concurrent saves could both pass it. The admin change form holds
+        the row with ``select_for_update()`` inside its own transaction, so on
+        the surface that exists today the check and the write are one critical
+        section; this layer is the backstop behind that, not a substitute for
+        it. The bulk paths that never reach ``save`` at all are refused in
+        ``ReturnRequestQuerySet``.
+        """
+        _reject_oversized_return_values(self)
+        if self.pk is not None:
+            stored = (
+                type(self)
+                ._default_manager.filter(pk=self.pk)
+                .values_list("status", flat=True)
+                .first()
+            )
+            if stored is not None and not return_transition_allowed(
+                stored, self.status
+            ):
+                raise ValueError(
+                    f"ReturnRequest #{self.pk} cannot move from '{stored}' to "
+                    f"'{self.status}'. Allowed from '{stored}': "
+                    f"{_allowed_from(stored)}."
+                )
+        return super().save(*args, **kwargs)
+
+    @property
+    def is_open(self):
+        """Whether this request is still being worked (see RETURN_OPEN_STATUSES)."""
+        return self.status in RETURN_OPEN_STATUSES
+
+    def __str__(self):
+        # No `order` traversal: this label is what the admin grid, the CSV
+        # export and LogEntry render per row, and an order can be a guest row
+        # whose own __str__ is already null-safe (SPEC-1-B04).
+        return f"Return request #{self.pk} ({self.status})"
 
 
 class PaymentEvent(models.Model):
@@ -862,7 +1141,7 @@ class PaymentEvent(models.Model):
         on_delete=models.SET_NULL,
         null=True,
         blank=True,
-        related_name='payment_events',
+        related_name="payment_events",
     )
 
     # The gateway payment the event is about (a refund event carries the
@@ -872,7 +1151,7 @@ class PaymentEvent(models.Model):
     gateway_payment_id = models.CharField(
         max_length=100,
         blank=True,
-        default='',
+        default="",
     )
 
     amount = models.DecimalField(
@@ -890,9 +1169,7 @@ class PaymentEvent(models.Model):
         default=Outcome.RECORDED,
     )
 
-    created_at = models.DateTimeField(
-        auto_now_add=True
-    )
+    created_at = models.DateTimeField(auto_now_add=True)
 
     class Meta:
         # Newest first for the same reason OrderStatusEvent is: the trail is
@@ -903,4 +1180,3 @@ class PaymentEvent(models.Model):
 
     def __str__(self):
         return f"{self.event_type} {self.event_id} ({self.outcome})"
-

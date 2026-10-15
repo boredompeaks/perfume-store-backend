@@ -643,7 +643,14 @@ class ClientSuppliedAmountTests(ApiTestCase):
 
 
 class CheckoutPricingParityTests(ApiTestCase):
-    """Guest and account checkouts price the same cart identically."""
+    """Two ACCOUNT checkouts of the same cart price identically.
+
+    The guest half of this parity died with TIER1-GUEST-DEADEND (guests are
+    refused at the door, so no guest order exists to compare against). What
+    stays pinned is the property the guest half was really protecting: the
+    price is a function of the cart, the destination and the server's rates
+    -- never of WHICH caller submits it.
+    """
 
     def setUp(self):
         self.product = self.make_product(price="499.50")
@@ -652,92 +659,58 @@ class CheckoutPricingParityTests(ApiTestCase):
         self.express = method("express", name="Express")
         rate(self.express, "249.00", region="Maharashtra")
 
+    def checkout_as(self, username, quantity=2, **payload_overrides):
+        """A named buyer's checkout of the seeded cart; returns the order."""
+        self.make_user(username)
+        _, token = self.api_login(username)
+        client = self.fresh_client()
+        client.credentials(HTTP_AUTHORIZATION=f"Bearer {token}")
+        self.seed_session_cart([(self.product, quantity)], client=client)
+        res = client.post(
+            "/api/orders/checkout/",
+            self.checkout_payload(**payload_overrides),
+            format="json",
+        )
+        self.assertEqual(res.status_code, 201, res.data)
+        return Order.objects.get(id=res.data["id"])
+
     def test_the_same_cart_and_destination_price_the_same_for_both_callers(self):
-        guest = self.fresh_client()
-        self.seed_session_cart([(self.product, 2)], client=guest)
-        guest_response = guest.post(
-            "/api/orders/checkout/",
-            self.checkout_payload(guest_email="roamer@example.com"),
-            format="json",
-        )
-        self.assertEqual(guest_response.status_code, 201, guest_response.data)
-        guest_order = Order.objects.get(guest_email="roamer@example.com")
-        self.assertIsNone(guest_order.user)
+        first = self.checkout_as("alice")
+        second = self.checkout_as("bob")
 
-        self.make_user("buyer")
-        _, token = self.api_login("buyer")
-        account_client = self.fresh_client()
-        account_client.credentials(HTTP_AUTHORIZATION=f"Bearer {token}")
-        self.seed_session_cart([(self.product, 2)], client=account_client)
-        account_response = account_client.post(
-            "/api/orders/checkout/",
-            self.checkout_payload(),
-            format="json",
-        )
-        self.assertEqual(account_response.status_code, 201, account_response.data)
-        account_order = Order.objects.get(user__username="buyer")
-
-        self.assertEqual(guest_order.shipping_amount, account_order.shipping_amount)
-        self.assertEqual(guest_order.shipping_method, account_order.shipping_method)
-        self.assertEqual(guest_order.total_amount, account_order.total_amount)
+        self.assertEqual(first.shipping_amount, second.shipping_amount)
+        self.assertEqual(first.shipping_method, second.shipping_method)
+        self.assertEqual(first.total_amount, second.total_amount)
         # 499.50 x 2 = 999.00, plus the 49.00 national standard: express's
         # 249.00 rate is region-specific but no preference was expressed, and
         # price - not specificity - decides across methods.
-        self.assertEqual(guest_order.shipping_amount, Decimal("49.00"))
-        self.assertEqual(guest_order.total_amount, Decimal("1048.00"))
+        self.assertEqual(first.shipping_amount, Decimal("49.00"))
+        self.assertEqual(first.total_amount, Decimal("1048.00"))
 
     def test_a_named_method_prices_the_same_for_both_callers(self):
-        guest = self.fresh_client()
-        self.seed_session_cart([(self.product, 1)], client=guest)
-        guest.post(
-            "/api/orders/checkout/",
-            self.checkout_payload(
-                guest_email="roamer@example.com",
-                shipping_method="express",
-            ),
-            format="json",
-        )
-        self.make_user("buyer")
-        _, token = self.api_login("buyer")
-        account_client = self.fresh_client()
-        account_client.credentials(HTTP_AUTHORIZATION=f"Bearer {token}")
-        self.seed_session_cart([(self.product, 1)], client=account_client)
-        account_client.post(
-            "/api/orders/checkout/",
-            self.checkout_payload(shipping_method="express"),
-            format="json",
-        )
-        guest_order = Order.objects.get(guest_email="roamer@example.com")
-        account_order = Order.objects.get(user__username="buyer")
-        self.assertEqual(guest_order.shipping_amount, Decimal("249.00"))
-        self.assertEqual(
-            guest_order.total_amount,
-            account_order.total_amount,
-        )
+        first = self.checkout_as("alice", quantity=1, shipping_method="express")
+        second = self.checkout_as("bob", quantity=1, shipping_method="express")
+
+        self.assertEqual(first.shipping_amount, Decimal("249.00"))
+        self.assertEqual(first.total_amount, second.total_amount)
 
     def test_an_unavailable_destination_is_refused_for_both_callers(self):
         ShippingRate.objects.update(region="Karnataka")
-        guest = self.fresh_client()
-        self.seed_session_cart([(self.product, 1)], client=guest)
-        guest_res = guest.post(
-            "/api/orders/checkout/",
-            self.checkout_payload(guest_email="roamer@example.com"),
-            format="json",
-        )
-        self.assertEqual(guest_res.status_code, 400, guest_res.data)
+        bodies = []
+        for username in ("alice", "bob"):
+            self.make_user(username)
+            _, token = self.api_login(username)
+            client = self.fresh_client()
+            client.credentials(HTTP_AUTHORIZATION=f"Bearer {token}")
+            self.seed_session_cart([(self.product, 1)], client=client)
+            res = client.post(
+                "/api/orders/checkout/", self.checkout_payload(), format="json"
+            )
+            self.assertEqual(res.status_code, 400, res.data)
+            bodies.append(res.data["error"])
 
-        self.make_user("buyer")
-        _, token = self.api_login("buyer")
-        account_client = self.fresh_client()
-        account_client.credentials(HTTP_AUTHORIZATION=f"Bearer {token}")
-        self.seed_session_cart([(self.product, 1)], client=account_client)
-        account_res = account_client.post(
-            "/api/orders/checkout/",
-            self.checkout_payload(),
-            format="json",
-        )
-        self.assertEqual(account_res.status_code, 400, account_res.data)
-        self.assertEqual(account_res.data["error"], guest_res.data["error"])
+        # Same destination, same rates, same refusal for either caller.
+        self.assertEqual(bodies[0], bodies[1])
         self.assertEqual(Order.objects.count(), 0)
 
 
@@ -793,17 +766,22 @@ class ShippingCostAtomicityTests(ApiTestCase):
 
     def test_the_price_is_resolved_inside_the_atomic_block(self):
         observed = {}
-        import orders.views as orders_views
+        # The spy has to replace the binding `create_order` actually resolves,
+        # and that callee reads it from the checkout module's own globals. The
+        # split moved the callee out of the single `orders.views` module, so
+        # rebinding the name on the package facade would leave the view reading
+        # its own untouched binding and the spy would never be called.
+        from orders.views import checkout as checkout_views
 
-        real_quote = orders_views.quote_shipping
+        real_quote = checkout_views.quote_shipping
 
         def spy(**kwargs):
             observed["in_atomic_block"] = connection.in_atomic_block
             observed["lock_requested"] = kwargs.get("lock")
             return real_quote(**kwargs)
 
-        orders_views.quote_shipping = spy
-        self.addCleanup(setattr, orders_views, "quote_shipping", real_quote)
+        checkout_views.quote_shipping = spy
+        self.addCleanup(setattr, checkout_views, "quote_shipping", real_quote)
 
         self.seed_session_cart([(self.product, 1)])
         self.checkout()
@@ -819,7 +797,6 @@ class ShippingCostAtomicityTests(ApiTestCase):
 
         from django.db.models.query import QuerySet
 
-        standard = self.standard
         observed = []
         original = QuerySet.order_by
 
@@ -892,7 +869,15 @@ def _explode(*args, **kwargs):
 
 
 class ReplayAgreementTests(ApiTestCase):
-    """A replay must not reach another order's price, and vice versa."""
+    """A replay must not reach another order's price, and vice versa.
+
+    The anonymous ``guest_post`` this class used died with
+    TIER1-GUEST-DEADEND; the agreement property it exercised is retargeted
+    at the ACCOUNT path, where the keyless dedup guard still requires
+    whole-purchase agreement and SPEC-9-01's keyed collapse still returns
+    the ORIGINAL order -- and its persisted price -- whatever the replay
+    posts.
+    """
 
     def setUp(self):
         self.product = self.make_product(price="999.99")
@@ -900,47 +885,58 @@ class ReplayAgreementTests(ApiTestCase):
         rate(self.standard, "49.00")
         self.express = method("express", name="Express")
         rate(self.express, "249.00")
+        self.make_user("buyer")
+        _, token = self.api_login("buyer")
+        self.auth(token)
         self.seed_session_cart([(self.product, 1)])
 
-    def guest_post(self, key="idem-key-1", **extra):
+    def buyer_post(self, key="idem-key-1", **extra):
         return self.client.post(
             "/api/orders/checkout/",
-            self.checkout_payload(
-                guest_email="roamer@example.com",
-                **extra,
-            ),
+            self.checkout_payload(**extra),
             format="json",
             HTTP_IDEMPOTENCY_KEY=key,
         )
 
-    def test_a_replay_naming_a_different_method_is_a_conflict(self):
-        first = self.guest_post(shipping_method="standard")
+    def test_a_keyed_replay_naming_a_different_method_cannot_reprice(self):
+        """SPEC-9-01 for an account caller: the keyed replay collapses
+        REGARDLESS of payload drift, so the different-method submission
+        gets the ORIGINAL order and its original price back -- never a
+        reprice, never a second order."""
+        first = self.buyer_post(shipping_method="standard")
         self.assertEqual(first.status_code, 201, first.data)
-        replay = self.guest_post(shipping_method="express")
-        self.assertEqual(replay.status_code, 409, replay.data)
+        replay = self.buyer_post(shipping_method="express")
+        self.assertEqual(replay.status_code, 200, replay.data)
+        self.assertEqual(replay.data["id"], first.data["id"])
         self.assertEqual(Order.objects.count(), 1)
-        self.assertEqual(Order.objects.get().shipping_amount, Decimal("49.00"))
+        order = Order.objects.get()
+        self.assertEqual(order.shipping_amount, Decimal("49.00"))
+        self.assertEqual(order.total_amount, Decimal("1048.99"))
+        self.assertEqual(
+            order.shipping_method.code if order.shipping_method_id else None,
+            "standard",
+        )
 
-    def test_a_replay_naming_the_same_method_collapses_onto_the_original(self):
-        first = self.guest_post(shipping_method="express")
+    def test_a_keyed_replay_naming_the_same_method_collapses_onto_the_original(self):
+        first = self.buyer_post(shipping_method="express")
         self.assertEqual(first.status_code, 201, first.data)
-        replay = self.guest_post(shipping_method="express")
+        replay = self.buyer_post(shipping_method="express")
         self.assertEqual(replay.status_code, 200, replay.data)
         self.assertEqual(replay.data["id"], first.data["id"])
         self.assertEqual(replay.data["total_amount"], first.data["total_amount"])
         self.assertEqual(Order.objects.count(), 1)
 
-    def test_a_replay_naming_no_method_collapses_onto_the_original(self):
-        first = self.guest_post()
-        replay = self.guest_post()
+    def test_a_keyed_replay_naming_no_method_collapses_onto_the_original(self):
+        first = self.buyer_post()
+        replay = self.buyer_post()
         self.assertEqual(replay.status_code, 200, replay.data)
         self.assertEqual(replay.data["id"], first.data["id"])
         self.assertEqual(replay.data["total_amount"], first.data["total_amount"])
         self.assertEqual(Order.objects.count(), 1)
 
     def test_a_forged_amount_on_a_replay_cannot_change_the_total(self):
-        first = self.guest_post(shipping_method="standard")
-        replay = self.guest_post(
+        first = self.buyer_post(shipping_method="standard")
+        replay = self.buyer_post(
             shipping_method="standard",
             shipping_amount="0.00",
             total_amount="1.00",
@@ -953,31 +949,25 @@ class ReplayAgreementTests(ApiTestCase):
         )
 
     def test_a_blank_method_string_is_treated_as_no_choice(self):
-        first = self.guest_post()
-        replay = self.guest_post(shipping_method="   ")
+        first = self.buyer_post()
+        replay = self.buyer_post(shipping_method="   ")
         self.assertEqual(replay.status_code, 200, replay.data)
         self.assertEqual(replay.data["id"], first.data["id"])
 
     def test_the_keyless_double_click_still_collapses_with_shipping(self):
-        # The accidental-duplicate window must survive the new agreement: two
-        # identical submissions are still one order, not two payable ones.
-        self.seed_session_cart([(self.product, 1)])
+        # The accidental-duplicate window must survive: two identical
+        # submissions are still one order, not two payable ones.
         first = self.client.post(
             "/api/orders/checkout/",
-            self.checkout_payload(
-                guest_email="roamer@example.com",
-                shipping_method="standard",
-            ),
+            self.checkout_payload(shipping_method="standard"),
             format="json",
         )
         second = self.client.post(
             "/api/orders/checkout/",
-            self.checkout_payload(
-                guest_email="roamer@example.com",
-                shipping_method="standard",
-            ),
+            self.checkout_payload(shipping_method="standard"),
             format="json",
         )
+        self.assertEqual(first.status_code, 201, first.data)
         self.assertEqual(second.status_code, 200, second.data)
         self.assertEqual(second.data["id"], first.data["id"])
         self.assertEqual(Order.objects.count(), 1)
@@ -985,10 +975,10 @@ class ReplayAgreementTests(ApiTestCase):
     def test_the_keyed_replay_of_an_unserviceable_destination_still_collapses(self):
         # Pricing runs after the collapse guards, so a rate retired between the
         # two submissions cannot turn a retry into a refusal.
-        first = self.guest_post(shipping_method="standard")
+        first = self.buyer_post(shipping_method="standard")
         self.assertEqual(first.status_code, 201, first.data)
         ShippingRate.objects.update(is_active=False)
-        replay = self.guest_post(shipping_method="standard")
+        replay = self.buyer_post(shipping_method="standard")
         self.assertEqual(replay.status_code, 200, replay.data)
         self.assertEqual(replay.data["id"], first.data["id"])
 

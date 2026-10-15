@@ -9,6 +9,7 @@ decrement is verify_payment's conversion; a hold only gated
 available-to-sell), so the row records reserved units returning to the
 pool with stock_after gated on the locked on-hand.
 """
+
 from datetime import timedelta
 from io import StringIO
 from unittest.mock import patch
@@ -101,16 +102,12 @@ class ExpireReservationsCommandTests(SweepHarness):
 
         call_command("expire_reservations", verbosity=0)
 
-        statuses = dict(
-            StockReservation.objects.values_list("order_id", "status")
-        )
+        statuses = dict(StockReservation.objects.values_list("order_id", "status"))
         self.assertEqual(statuses[live_order.pk], StockReservation.Status.ACTIVE)
         self.assertEqual(
             statuses[converted_order.pk], StockReservation.Status.CONVERTED
         )
-        self.assertEqual(
-            statuses[released_order.pk], StockReservation.Status.RELEASED
-        )
+        self.assertEqual(statuses[released_order.pk], StockReservation.Status.RELEASED)
         self.assertEqual(StockMovement.objects.count(), 0)
 
     def test_rerun_is_idempotent(self):

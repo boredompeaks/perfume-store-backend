@@ -3,6 +3,10 @@
 # The gate: coverage report fails (exit != 0) below fail_under.
 [run]
 source = .
+# Branch coverage on: a line executed with only one of its branches taken is
+# still a missing path (an untaken `else`, a guard that never trips). Line-only
+# coverage reported 100% while partial-branch decisions went unexercised.
+branch = True
 omit =
     venv/*
     manage.py
@@ -20,8 +24,11 @@ exclude_lines =
     pragma: no cover
     if TYPE_CHECKING:
     # the DEBUG/SECRET_KEY guard below is exercised in a subprocess
-    # (tests/test_settings_security.py); in-process coverage cannot see it
-    if not DEBUG and not os.getenv\('DJANGO_SECRET_KEY'\)
+    # (tests/test_settings_security.py); in-process coverage cannot see it.
+    # Quote-agnostic: ruff format normalizes string literals to double quotes,
+    # so a single-quoted pattern silently stops matching after a reformat and
+    # the unexercisable raise starts counting as a coverage miss.
+    if not DEBUG and not os.getenv\(["']DJANGO_SECRET_KEY["']\)
 
 [html]
 directory = htmlcov

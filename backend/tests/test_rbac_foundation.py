@@ -40,8 +40,8 @@ from common.roles import (
     CAPABILITY_ROLES,
     ROLE_ADMIN,
     ROLE_CATALOGUE,
-    ROLE_SUPPORT,
     ROLE_SUPERADMIN,
+    ROLE_SUPPORT,
     STAFF_ROLES,
     sync_role_groups,
 )

@@ -11,17 +11,20 @@ tested without a network.
 
 Credentials are read from settings, which resolve ``RAZORPAY_KEY_ID`` /
 ``RAZORPAY_KEY_SECRET`` from the environment - no credential is written here.
+``RAZORPAY_TIMEOUT`` bounds the gateway socket for the same reason
+``EMAIL_TIMEOUT`` bounds the mail socket: this call is made while the caller's
+transaction still holds the order lock, so an unbounded wait is a
+checkout-blocking outage rather than a slow request.
 The amount is quantized with the shared ``common.money`` helper before it is
 scaled to the provider's minor units, the same rounding rule the capture
 amount uses in ``create_payment``, so paying and refunding cannot disagree
 about one amount.
 """
 
+import razorpay
 from django.conf import settings
 
 from common.money import quantize_money
-
-import razorpay
 
 
 class RefundGatewayError(Exception):
@@ -53,14 +56,30 @@ def refund_payment(*, payment_id, amount):
     if not payment_id:
         raise RefundGatewayError("no captured payment reference to refund")
 
+    # Keyword form, never positional. The SDK's signature is
+    # ``__init__(self, session=None, auth=None, **options)``, so passing the
+    # credential pair positionally binds the KEY ID to ``session`` and the
+    # SECRET to ``auth``; the client then calls ``.post`` on a string and every
+    # refund dies as an AttributeError. ``orders.views.payment`` has always
+    # used the keyword form - this seam must match it.
     client = razorpay.Client(
-        settings.RAZORPAY_KEY_ID,
-        settings.RAZORPAY_KEY_SECRET,
+        auth=(settings.RAZORPAY_KEY_ID, settings.RAZORPAY_KEY_SECRET),
     )
 
     try:
+        # The timeout is the SDK's per-request kwarg, which it forwards
+        # untouched to ``requests``. It is NOT a Client option: ``__init__``
+        # consumes only base_url and the retry knobs, so a ``timeout=`` passed
+        # to the constructor would be silently discarded. Without it the
+        # refund socket waits forever, and this call runs inside the caller's
+        # ``transaction.atomic()`` holding the order's row lock - a stalled
+        # gateway would park every refund for that order behind it. A tripped
+        # timeout raises ``requests.Timeout``, which the handler below already
+        # turns into a typed RefundGatewayError, so the attempt rolls back
+        # whole instead of hanging.
         response = client.refund.create(
-            {"payment_id": payment_id, "amount": _minor_units(amount)}
+            {"payment_id": payment_id, "amount": _minor_units(amount)},
+            timeout=settings.RAZORPAY_TIMEOUT,
         )
     except Exception as exc:
         # razorpay's four error classes (BadRequestError, GatewayError,

@@ -1,0 +1,21 @@
+{
+  "task": "REFUND-SEAM",
+  "title": "The credentials must reach the SDK's auth, not its session",
+  "note": "The refund seam built razorpay.Client POSITIONALLY while the SDK's signature is __init__(self, session=None, auth=None, **options), so the key id bound to session and the client called .post on a string. Every real refund raised AttributeError, which the seam's own handler converted into a RefundGatewayError and reported to the operator as 'the gateway declined'. The whole refund test class mocks razorpay.Client wholesale, so Client.__init__ never ran and a mock - which accepts any call shape - could not see the defect at all; the credential test actively pinned the positional form. M1 records the mutation that proves the replacement pin bites: with the keyword form reverted to positional, the un-mocked pin runs the REAL Client.__init__ and dies on the production symptom itself. Recorded because a pin that only ever runs against a mocked constructor cannot fail when the constructor is wrong.",
+  "mutations": [
+    {
+      "id": "M1",
+      "description": "the refund seam passes the credential pair to razorpay.Client positionally again, binding the key id to the SDK's `session` parameter instead of its `auth`",
+      "path": "backend/orders/refunds.py",
+      "find": "    client = razorpay.Client(\n        auth=(settings.RAZORPAY_KEY_ID, settings.RAZORPAY_KEY_SECRET),\n    )",
+      "replace": "    client = razorpay.Client(\n        settings.RAZORPAY_KEY_ID,\n        settings.RAZORPAY_KEY_SECRET,\n    )",
+      "expected_failing_tests": [
+        "test_the_real_sdk_client_receives_the_credentials_as_its_auth"
+      ],
+      "claimed_count": 1,
+      "test_scope": [
+        "orders.tests_refunds.RefundGatewaySeamTests.test_the_real_sdk_client_receives_the_credentials_as_its_auth"
+      ]
+    }
+  ]
+}

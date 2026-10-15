@@ -7,6 +7,7 @@ in ``common`` (the shared-kernel app, like audit/permissions/roles)
 because the rule is cross-app: orders computes discounts today, and any
 future pricing or reporting consumer must quantize identically.
 """
+
 from decimal import ROUND_HALF_EVEN, Decimal
 
 TWO_PLACES = Decimal("0.01")

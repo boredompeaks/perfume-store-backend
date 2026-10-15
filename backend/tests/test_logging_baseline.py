@@ -11,12 +11,13 @@
   one INFO line per event.
 - No secret values (the Razorpay key id / secret) appear in the output.
 """
+
 import os
 from unittest.mock import patch
 
-import config.settings as config_settings
 from django.test import SimpleTestCase
 
+import config.settings as config_settings
 from common.models import AuditEvent
 from common.testing import (
     TEST_RAZORPAY_KEY_ID,
@@ -105,9 +106,7 @@ class FileHandlerTests(SimpleTestCase):
     def test_env_path_adds_rotating_handler_everywhere(self):
         built = config_settings._build_logging("INFO", "logs/app.log")
         file_handler = built["handlers"]["file"]
-        self.assertEqual(
-            file_handler["class"], "logging.handlers.RotatingFileHandler"
-        )
+        self.assertEqual(file_handler["class"], "logging.handlers.RotatingFileHandler")
         self.assertEqual(file_handler["filename"], "logs/app.log")
         self.assertEqual(built["root"]["handlers"], ["console", "file"])
 
@@ -162,9 +161,7 @@ class VerifyPaymentLogTests(ApiTestCase):
             "order_id": order_id,
         }
         payload.update(overrides)
-        return self.client.post(
-            "/api/orders/payment/verify/", payload, format="json"
-        )
+        return self.client.post("/api/orders/payment/verify/", payload, format="json")
 
     def test_signature_rejection_logs_warning_with_gateway_reference(self):
         order_id = self._checkout()

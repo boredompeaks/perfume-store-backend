@@ -3,11 +3,21 @@
 Spec §9.2 closes the API contract with "Use appropriate HTTP status codes,
 validation errors and consistent error responses" — it prescribes
 consistency, not a literal shape, so the single envelope shape
-``{"error", "code", "details"}`` is pinned here and applied by
-``common.errors.ErrorEnvelopeMiddleware`` to every JSON error response the
-backend emits: ad-hoc ``{"error": ...}`` view returns, DRF exception bodies
-(``{"detail": ...}``) and serializer field-error mappings alike.
+``{"error", "code", "details"}`` is pinned here and applied to every JSON
+error response the backend emits, from two directions that never overlap:
+the ``REST_FRAMEWORK`` exception handler envelops DRF exception bodies
+(``{"detail": ...}``, serializer field-error mappings) at the source, and
+``common.errors.ErrorEnvelopeMiddleware`` envelops the ad-hoc
+``{"error": ...}`` view returns that raise no exception. The middleware is
+idempotent, so a handler-produced envelope is never wrapped twice.
+
+``ErrorEnvelopeWireTests`` pins what the CLIENT receives: the rendered
+``response.content`` bytes. Asserting ``response.data`` alone is the trap
+that let the wire bug ship — the middleware can rewrite ``.data`` after
+Django's base handler has already rendered the body, leaving the bytes on
+the wire in the raw DRF shape.
 """
+
 import json
 from decimal import Decimal
 from unittest.mock import patch
@@ -118,3 +128,69 @@ class ErrorEnvelopeTests(ApiTestCase):
             res = self.client.get("/broken-json/")
         self.assertEqual(res.status_code, 400)
         self.assertEqual(res.content, b"{broken")
+
+
+class ErrorEnvelopeWireTests(ApiTestCase):
+    """The client-facing pin: BYTES (``response.content``), never
+    ``response.data``.
+
+    Django's base handler renders the response before the middleware chain
+    runs, so a payload rewrite that stops at ``.data`` never reaches the
+    wire — each test below asserts the exact body a socket-level client
+    would read, and asserts the envelope arrives exactly once (no
+    middleware-over-handler double wrap).
+    """
+
+    def _wire_body(self, res):
+        """Parse the rendered bytes — the only surface this class trusts."""
+        self.assertIn(b"application/json", res["Content-Type"].encode())
+        return json.loads(res.content)
+
+    def _assert_envelope_once(self, body, *, code):
+        """Exactly one envelope: exact key set, right code, no nested
+        envelope inside ``details`` and no leftover raw ``detail`` key."""
+        self.assertEqual(set(body), {"error", "code", "details"})
+        self.assertIsInstance(body["error"], str)
+        self.assertTrue(body["error"])
+        self.assertEqual(body["code"], code)
+        self.assertIsInstance(body["details"], dict)
+        self.assertNotIn("detail", body)
+        for value in body["details"].values():
+            if isinstance(value, dict):
+                self.assertFalse({"error", "code", "details"} <= set(value))
+
+    def test_401_permission_bytes_are_envelope(self):
+        res = self.client.get("/api/orders/")
+        self.assertEqual(res.status_code, 401)
+        self._assert_envelope_once(self._wire_body(res), code="not_authenticated")
+
+    def test_400_validation_bytes_are_envelope(self):
+        res = self.client.post(
+            "/api/accounts/register/", {"username": "wirepin"}, format="json"
+        )
+        self.assertEqual(res.status_code, 400)
+        body = self._wire_body(res)
+        self._assert_envelope_once(body, code="validation_error")
+        self.assertEqual(body["error"], "Validation failed.")
+        self.assertIsInstance(body["details"].get("password"), list)
+
+    def test_403_permission_bytes_are_envelope(self):
+        res = self.client.post("/api/products/", {"name": "X"}, format="json")
+        self.assertEqual(res.status_code, 403)
+        body = self._wire_body(res)
+        self._assert_envelope_once(body, code="permission_denied")
+        self.assertEqual(body["error"], "Administrator access is required.")
+
+    def test_guest_refusal_403_bytes_are_envelope(self):
+        """The GUEST-DEADEND refusal path: an ad-hoc ``Response({"error"})``
+        that raises no exception, so only the middleware can envelop it —
+        and it must do so on the rendered bytes."""
+        res = self.client.post("/api/orders/checkout/", {}, format="json")
+        self.assertEqual(res.status_code, 403)
+        self.assertEqual(
+            res.content,
+            b'{"error":"Guest checkout is not available. '
+            b'Sign in or create an account to place an order.",'
+            b'"code":"permission_denied","details":{}}',
+        )
+        self._assert_envelope_once(self._wire_body(res), code="permission_denied")

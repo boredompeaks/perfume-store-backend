@@ -11,6 +11,7 @@ constraint plus a NULL-distinctness pin -- instead of wall-clock thread
 scheduling (house pattern from test_order_number.py). Razorpay is never
 touched; no test hits the network.
 """
+
 from decimal import Decimal
 
 from django.db import IntegrityError
@@ -145,9 +146,7 @@ class IdempotencyReplayTests(IdempotencyTestBase):
 
         self.assertEqual(replay.status_code, 200, replay.data)
         self.assertEqual(replay.data["id"], first.data["id"])
-        self.assertEqual(
-            replay.data["order_number"], first.data["order_number"]
-        )
+        self.assertEqual(replay.data["order_number"], first.data["order_number"])
         self.assertEqual(replay.data["total_amount"], first.data["total_amount"])
         self.assertEqual(Order.objects.count(), 1)
         self.assertEqual(OrderItem.objects.count(), 1)
@@ -165,9 +164,7 @@ class IdempotencyReplayTests(IdempotencyTestBase):
         self.assertEqual(first.status_code, 201, first.data)
         other_session = self.second_session()
 
-        replay = self.keyed_checkout(
-            key="checkout-retry-001", client=other_session
-        )
+        replay = self.keyed_checkout(key="checkout-retry-001", client=other_session)
 
         self.assertEqual(replay.status_code, 200, replay.data)
         self.assertEqual(replay.data["id"], first.data["id"])
@@ -214,9 +211,7 @@ class IdempotencyReplayTests(IdempotencyTestBase):
         self.api_login("other", client=other_client)
         self.seed_session_cart([(self.product, 2)], client=other_client)
 
-        theirs = self.keyed_checkout(
-            key="checkout-retry-001", client=other_client
-        )
+        theirs = self.keyed_checkout(key="checkout-retry-001", client=other_client)
 
         self.assertEqual(theirs.status_code, 201, theirs.data)
         self.assertNotEqual(theirs.data["id"], first.data["id"])
@@ -225,9 +220,7 @@ class IdempotencyReplayTests(IdempotencyTestBase):
         self.assertEqual(other_order.idempotency_key, "checkout-retry-001")
 
         # and their own retry replays their own order, still two orders
-        replay = self.keyed_checkout(
-            key="checkout-retry-001", client=other_client
-        )
+        replay = self.keyed_checkout(key="checkout-retry-001", client=other_client)
         self.assertEqual(replay.status_code, 200, replay.data)
         self.assertEqual(replay.data["id"], theirs.data["id"])
         self.assertEqual(Order.objects.count(), 2)
@@ -254,14 +247,12 @@ class IdempotencyRaceAuthorityTests(IdempotencyTestBase):
         self.assertEqual(Order.objects.count(), 2)
 
     def test_unauthenticated_keyed_checkout_is_rejected(self):
-        """[R-1.13] SPEC-1-B04 moved this wall: an anonymous submission is
-        now a GUEST checkout, so it is refused for the one thing it cannot
-        supply - the guest email that is its identity - not with the 401 the
-        login requirement used to answer. A keyed guest submission that DOES
-        supply one is accepted and bound (proved in tests_guest.py); what this
-        pin keeps is that an anonymous submission never silently becomes an
-        account order, and that a rejection creates nothing.
-        """
+        """TIER1-GUEST-DEADEND: an anonymous submission is refused with the
+        one uniform guest-checkout answer -- not with the 401 the login
+        requirement used to answer, and not with the guest_email 400 that
+        followed it. What this pin keeps is that an anonymous submission
+        never silently becomes an account order, and that a rejection
+        creates nothing."""
         res = self.fresh_client().post(
             "/api/orders/checkout/",
             self.checkout_payload(),
@@ -269,6 +260,10 @@ class IdempotencyRaceAuthorityTests(IdempotencyTestBase):
             HTTP_IDEMPOTENCY_KEY="checkout-retry-001",
         )
 
-        self.assertEqual(res.status_code, 400, res.data)
-        self.assertEqual(res.data["error"], "guest_email is required")
+        self.assertEqual(res.status_code, 403, res.data)
+        self.assertEqual(
+            res.data["error"],
+            "Guest checkout is not available. "
+            "Sign in or create an account to place an order.",
+        )
         self.assertEqual(Order.objects.count(), 0)

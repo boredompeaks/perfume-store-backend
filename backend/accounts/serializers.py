@@ -26,7 +26,6 @@ MFA_STAFF_LOGIN_REQUIRED = (
 
 
 class RegisterSerializer(serializers.ModelSerializer):
-
     # Strength lives in AUTH_PASSWORD_VALIDATORS via validate_password (below) —
     # the same policy the reset path enforces, instead of a bare min_length.
     password = serializers.CharField(write_only=True)
@@ -34,17 +33,17 @@ class RegisterSerializer(serializers.ModelSerializer):
     class Meta:
         model = User
         fields = [
-            'username',
-            'email',
-            'password',
+            "username",
+            "email",
+            "password",
         ]
 
     def create(self, validated_data):
 
         user = User.objects.create_user(
-            username=validated_data['username'],
-            email=validated_data['email'],
-            password=validated_data['password'],
+            username=validated_data["username"],
+            email=validated_data["email"],
+            password=validated_data["password"],
             is_active=False,
         )
 
@@ -52,18 +51,20 @@ class RegisterSerializer(serializers.ModelSerializer):
 
     def validate_username(self, value):
         if User.objects.filter(username__iexact=value).exists():
-            raise serializers.ValidationError('This username is already taken.')
+            raise serializers.ValidationError("This username is already taken.")
         return value
 
     def validate_email(self, value):
         if not value:
-            raise serializers.ValidationError('Email is required.')
+            raise serializers.ValidationError("Email is required.")
         if User.objects.filter(email__iexact=value).exists():
-            raise serializers.ValidationError('An account already uses this email address.')
+            raise serializers.ValidationError(
+                "An account already uses this email address."
+            )
         return value
 
     def validate(self, attrs):
-        password = attrs.get('password')
+        password = attrs.get("password")
         if password:
             # Conventions.md: registration and reset must run the same
             # validate_password policy. The reset path validates against the
@@ -74,12 +75,12 @@ class RegisterSerializer(serializers.ModelSerializer):
             # messages, the exact field-error shape the reset endpoint and the
             # frontend's fieldErrors renderer already handle.
             candidate = User(
-                username=attrs.get('username', ''), email=attrs.get('email', '')
+                username=attrs.get("username", ""), email=attrs.get("email", "")
             )
             try:
                 validate_password(password, user=candidate)
             except ValidationError as error:
-                raise serializers.ValidationError({'password': list(error.messages)})
+                raise serializers.ValidationError({"password": list(error.messages)})
         return attrs
 
 

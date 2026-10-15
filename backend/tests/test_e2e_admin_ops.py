@@ -1,9 +1,10 @@
-﻿"""E2E admin/ops tests - docs/test-gaps.md e2e item 12 plus admin surface.
+"""E2E admin/ops tests - docs/test-gaps.md e2e item 12 plus admin surface.
 
 The order admin enforces a legal status flow (ALLOWED_TRANSITIONS in
 orders/admin.py): paid orders can never reach 'cancelled' because there is
 no refund flow yet (V-03) - this suite pins that contract.
 """
+
 from datetime import timedelta
 from decimal import Decimal
 
@@ -47,8 +48,12 @@ class AdminOrderLifecycleTests(ApiTestCase):
     # e2e 12. admin transitions confirmed -> shipped -> delivered; cancelling
     # a paid order must be blocked (V-03: no refund flow to reconcile with)
     def setUp(self):
-        User.objects.create_superuser("opsboss", "ops@example.com", "S3cure-Passphrase!")
-        self.assertTrue(self.client.login(username="opsboss", password="S3cure-Passphrase!"))
+        User.objects.create_superuser(
+            "opsboss", "ops@example.com", "S3cure-Passphrase!"
+        )
+        self.assertTrue(
+            self.client.login(username="opsboss", password="S3cure-Passphrase!")
+        )
         self.buyer = self.make_user("buyer")
 
     def _change_status(self, order, new_status):
@@ -151,8 +156,12 @@ class AdminOrderLifecycleTests(ApiTestCase):
 @tag("e2e")
 class AdminBulkActionsTests(ApiTestCase):
     def setUp(self):
-        User.objects.create_superuser("opsboss", "ops@example.com", "S3cure-Passphrase!")
-        self.assertTrue(self.client.login(username="opsboss", password="S3cure-Passphrase!"))
+        User.objects.create_superuser(
+            "opsboss", "ops@example.com", "S3cure-Passphrase!"
+        )
+        self.assertTrue(
+            self.client.login(username="opsboss", password="S3cure-Passphrase!")
+        )
         self.buyer = self.make_user("buyer")
 
     def _run_action(self, action, orders):
@@ -177,8 +186,8 @@ class AdminBulkActionsTests(ApiTestCase):
         self.assertEqual(res.status_code, 200)
         confirmed.refresh_from_db()
         delivered.refresh_from_db()
-        self.assertEqual(confirmed.status, "shipped")   # legal
-        self.assertEqual(delivered.status, "delivered") # skipped
+        self.assertEqual(confirmed.status, "shipped")  # legal
+        self.assertEqual(delivered.status, "delivered")  # skipped
 
     def test_mark_confirmed_and_mark_delivered_bulk(self):
         pending = make_order(self.buyer, status="pending")
@@ -194,13 +203,13 @@ class AdminBulkActionsTests(ApiTestCase):
         self.assertEqual(res.status_code, 200)
         shipped.refresh_from_db()
         delivered.refresh_from_db()
-        self.assertEqual(shipped.status, "delivered")     # legal
-        self.assertEqual(delivered.status, "delivered")   # skipped
+        self.assertEqual(shipped.status, "delivered")  # legal
+        self.assertEqual(delivered.status, "delivered")  # skipped
 
         res = self._run_action("mark_confirmed", [shipped])
         self.assertEqual(res.status_code, 200)
         shipped.refresh_from_db()
-        self.assertEqual(shipped.status, "delivered")     # terminal states skipped
+        self.assertEqual(shipped.status, "delivered")  # terminal states skipped
 
     def test_cancel_pending_bulk_spares_paid_orders(self):
         pending = make_order(self.buyer, status="pending")
@@ -229,7 +238,9 @@ class AdminSurfaceSmokeTests(ApiTestCase):
     """The admin customizations render for staff and are closed to others."""
 
     def setUp(self):
-        User.objects.create_superuser("opsboss", "ops@example.com", "S3cure-Passphrase!")
+        User.objects.create_superuser(
+            "opsboss", "ops@example.com", "S3cure-Passphrase!"
+        )
         self.buyer = self.make_user("buyer")
         self.order = make_order(self.buyer, status="confirmed", total="300.00")
         self.product = self.make_product(name="Admin Smoke", stock=2)
@@ -247,30 +258,50 @@ class AdminSurfaceSmokeTests(ApiTestCase):
         from orders.models import Coupon
 
         Coupon.objects.create(
-            code="RUNNING", discount_type="percentage", discount_value=10,
-            valid_from=timezone.now() - timedelta(days=1), valid_until=timezone.now() + timedelta(days=1),
+            code="RUNNING",
+            discount_type="percentage",
+            discount_value=10,
+            valid_from=timezone.now() - timedelta(days=1),
+            valid_until=timezone.now() + timedelta(days=1),
         )
         Coupon.objects.create(
-            code="EXPIRED", discount_type="fixed", discount_value=10,
-            valid_from=timezone.now() - timedelta(days=10), valid_until=timezone.now() - timedelta(days=5),
+            code="EXPIRED",
+            discount_type="fixed",
+            discount_value=10,
+            valid_from=timezone.now() - timedelta(days=10),
+            valid_until=timezone.now() - timedelta(days=5),
         )
         Coupon.objects.create(
-            code="SCHEDULED", discount_type="percentage", discount_value=10,
-            valid_from=timezone.now() + timedelta(days=2), valid_until=timezone.now() + timedelta(days=5),
+            code="SCHEDULED",
+            discount_type="percentage",
+            discount_value=10,
+            valid_from=timezone.now() + timedelta(days=2),
+            valid_until=timezone.now() + timedelta(days=5),
         )
         Coupon.objects.create(
-            code="INACTIVE", discount_type="percentage", discount_value=10,
+            code="INACTIVE",
+            discount_type="percentage",
+            discount_value=10,
             active=False,
-            valid_from=timezone.now() - timedelta(days=1), valid_until=timezone.now() + timedelta(days=1),
+            valid_from=timezone.now() - timedelta(days=1),
+            valid_until=timezone.now() + timedelta(days=1),
         )
         Coupon.objects.create(
-            code="UNLIMITED", discount_type="percentage", discount_value=10, usage_limit=None,
-            valid_from=timezone.now() - timedelta(days=1), valid_until=timezone.now() + timedelta(days=1),
+            code="UNLIMITED",
+            discount_type="percentage",
+            discount_value=10,
+            usage_limit=None,
+            valid_from=timezone.now() - timedelta(days=1),
+            valid_until=timezone.now() + timedelta(days=1),
         )
         Coupon.objects.create(
-            code="LIMITED", discount_type="percentage", discount_value=10,
-            usage_limit=50, used_count=7,
-            valid_from=timezone.now() - timedelta(days=1), valid_until=timezone.now() + timedelta(days=1),
+            code="LIMITED",
+            discount_type="percentage",
+            discount_value=10,
+            usage_limit=50,
+            used_count=7,
+            valid_from=timezone.now() - timedelta(days=1),
+            valid_until=timezone.now() + timedelta(days=1),
         )
         res = self.client.get("/admin/orders/coupon/")
         self.assertEqual(res.status_code, 200)

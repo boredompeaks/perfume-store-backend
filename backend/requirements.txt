@@ -1,31 +1,25 @@
-# Direct dependencies (pinned from venv install, Python 3.14.2)
-# Transitive deps are resolved by pip; regenerate with `pip freeze` if needed.
-Django==6.1.1
-djangorestframework==3.18.1
-djangorestframework-simplejwt==5.5.1
-django-cors-headers==4.9.0
-# SPEC-20-9: scannable MFA enrollment QR from the otpauth:// provisioning
-# URI (common/qr.py). Pure Python, no runtime dependencies, emits SVG
-# without an image library.
-segno==1.6.1
-razorpay==2.0.1
-# SPEC-22-01: production Postgres. Django's postgresql backend loads psycopg3
-# at first connection, so without this the documented postgres DATABASE_URL
-# crashes the moment prod takes its first query. [binary] ships prebuilt
-# libpq wheels (no compiler needed in the image).
-psycopg[binary]==3.3.6
-# SPEC-22-04 [R-22.13]: error tracking, imported ONLY when SENTRY_DSN is set
-# (config/settings.py _init_error_tracking). Without a DSN the package is
-# never imported, so the app boots and behaves exactly as it did before it
-# was added - which is also why the test suite never needs it: the SDK init
-# is stubbed. Official SDK, pinned like everything else here.
-sentry-sdk==2.71.0
-# WSGI server for config.wsgi (the Dockerfile CMD); Django's dev server is
-# not a production server.
-gunicorn==26.2.0
-# Serves STATIC_ROOT from the app process, so DEBUG=false deployments still
-# ship admin CSS/JS without a separate web server or object store.
-whitenoise==6.11.0
-python-dotenv==1.2.3
-Pillow==12.3.0
-coverage==7.16.1
+# Pointer file. The pinned dependency set lives in requirements.lock, which is
+# generated from requirements.in by the pinned pip-tools:
+#
+#     pip-compile --generate-hashes --no-emit-index-url --no-emit-trusted-host \
+#         --allow-unsafe --output-file=requirements.lock requirements.in
+#
+# (Same command as the one in requirements.in; the lock's own generated header
+# prints an extra `--no-index` from pip-compile's internal invocation, which
+# this command does not pass.)
+#
+# Install with either name - this pointer and the lock resolve to the identical
+# set, which is the point of keeping the pointer: `pip install -r
+# requirements.txt` (the documented developer command in backend/README.md) and
+# `pip install -r requirements.lock` (what CI runs) cannot disagree.
+#
+# Both this file and requirements.lock must be present in any directory that
+# installs from this pointer: pip resolves the `-r` include RELATIVE TO THIS
+# FILE, so a build context that copies only requirements.txt gets an error
+# rather than a partial install. That is why backend/Dockerfile copies both.
+#
+# Why a lock at all: transitive dependencies were resolved at install time, so
+# a commit that changed no Python could pull a different version of a library
+# and turn a green suite red. Every direct pin here is still a decision recorded
+# in requirements.in, next to the reason it was made.
+-r requirements.lock

@@ -123,9 +123,7 @@ def dockerfile_build_env():
         logical.append((buffer + line).strip())
         buffer = ""
     layers = [
-        line
-        for line in logical
-        if line.startswith("RUN ") and "collectstatic" in line
+        line for line in logical if line.startswith("RUN ") and "collectstatic" in line
     ]
     assert len(layers) == 1, f"expected one collectstatic layer, got {layers}"
     env = {}
@@ -184,7 +182,6 @@ def run_backend(argv, env):
 def manage(*argv, env):
     """Run `manage.py <argv>` in the hermetic environment above."""
     return run_backend([sys.executable, "manage.py", *argv], env)
-
 
 
 class DeploymentFilesExistTests(SimpleTestCase):
@@ -976,4 +973,3 @@ class ComposeRuntimeEnvContractTests(SimpleTestCase):
         # What the container CMD loads, and what the compose healthcheck probes.
         self.assertIn("WSGI WSGIHandler", res.stdout)
         self.assertIn("HEALTH 200", res.stdout)
-

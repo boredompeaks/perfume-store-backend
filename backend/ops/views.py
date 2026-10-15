@@ -6,6 +6,7 @@ from django.http import JsonResponse
 from django.shortcuts import render
 
 from common.permissions import capability_required
+
 from . import alerts
 from .alerts import check_payment_failure_spike
 from .services import (
@@ -54,6 +55,16 @@ def api_settings(request):
             "whatsapp_number": row.whatsapp_number,
             "whatsapp_message": row.whatsapp_message,
             "instagram_url": row.instagram_url,
+            # SPEC-1-B07d: the RESOLVED window, not the raw column. Publishing
+            # it is a policy disclosure, and a customer who cannot see the
+            # deadline cannot meet it - this is the same class of data as the
+            # contact channels above (a published store rule: no PII, no money,
+            # no capability or order information), so it belongs on the one
+            # public settings surface the spec already has. It is read-only
+            # here, so disclosing it hands a caller nothing they could not get
+            # by asking a shop assistant, and the resolve means the storefront
+            # never keeps its own copy of the default.
+            "return_window_days": row.resolved_return_window_days(),
         }
     )
 
@@ -112,9 +123,9 @@ def dashboard(request):
         user = users.get(row["user_id"])
         recent_orders.append({**row, "username": user.username if user else "—"})
 
-    recent_movements = StockMovement.objects.select_related(
-        "product", "created_by"
-    )[:10]
+    recent_movements = StockMovement.objects.select_related("product", "created_by")[
+        :10
+    ]
 
     low_stock_items = products.objects.filter(
         stock__gt=0, stock__lte=health["low_stock_threshold"]

@@ -28,6 +28,7 @@ Pins the whole feature end to end:
   or other-user marker, the TTL kill switch) still challenged there;
 - secret exposure: shown exactly once at setup, never returned again.
 """
+
 import base64
 from datetime import timedelta
 from unittest import mock
@@ -478,9 +479,7 @@ class MFAEnrollmentReachTests(ApiTestCase):
         self.assertContains(res, "Enroll your device")
 
     def test_enrollment_url_is_configuration_not_a_constant(self):
-        with override_settings(
-            MFA_ENROLL_URL="https://elsewhere.example.com/enroll"
-        ):
+        with override_settings(MFA_ENROLL_URL="https://elsewhere.example.com/enroll"):
             self.assertContains(
                 self.admin_login_page(), "https://elsewhere.example.com/enroll"
             )
@@ -513,9 +512,11 @@ class MFAEnrollmentReachTests(ApiTestCase):
         # config.admin.MFAAdminSite.login flags the enrollment block on the
         # unrendered login page; an already-authenticated visit is a redirect
         # that has no form at all.
-        self.client.force_login(User.objects.create_superuser(
-            username="root", email="root@example.com", password=PASSWORD
-        ))
+        self.client.force_login(
+            User.objects.create_superuser(
+                username="root", email="root@example.com", password=PASSWORD
+            )
+        )
         res = self.admin_login_page()
         self.assertEqual(res.status_code, 302)
 
@@ -579,7 +580,7 @@ class MfaQrTests(SimpleTestCase):
             artifact.startswith(qr.SVG_DATA_URI_PREFIX)
             and artifact.startswith("data:image/svg+xml;base64,")
         )
-        svg = base64.b64decode(artifact[len("data:image/svg+xml;base64,"):])
+        svg = base64.b64decode(artifact[len("data:image/svg+xml;base64,") :])
         root = ElementTree.fromstring(svg)
         self.assertTrue(root.tag.endswith("svg"))
         modules = len(segno.make(uri, error=qr.ERROR_CORRECTION).matrix) + (
@@ -601,7 +602,7 @@ class MfaQrTests(SimpleTestCase):
         artifact = qr.qr_data_uri(totp.otpauth_uri(TEST_TOTP_SECRET, "boss"))
         self.assertNotIn(
             TEST_TOTP_SECRET,
-            base64.b64decode(artifact[len("data:image/svg+xml;base64,"):]).decode(),
+            base64.b64decode(artifact[len("data:image/svg+xml;base64,") :]).decode(),
         )
 
 
@@ -932,9 +933,7 @@ class MfaTrustDeviceTests(ApiTestCase):
         )
         device = TOTPDevice.objects.get(user=newbie)
         self.assertIsNone(device.trusted_until)
-        res = self.client.post(
-            self.LOGIN_PATH, login_payload("newbie"), format="json"
-        )
+        res = self.client.post(self.LOGIN_PATH, login_payload("newbie"), format="json")
         self.assertEqual(res.status_code, 400, res.data)
         self.assertIn("authentication code", res.data["details"]["totp"][0])
 
@@ -1180,9 +1179,7 @@ class StorefrontLoginSplitTests(ApiTestCase):
     def test_customer_door_refuses_a_privileged_account_and_audits_it(self):
         boss = make_privileged("boss")
         enroll_via_model(boss)
-        res = self.client.post(
-            self.CUSTOMER_DOOR, login_payload("boss"), format="json"
-        )
+        res = self.client.post(self.CUSTOMER_DOOR, login_payload("boss"), format="json")
         self.assertEqual(res.status_code, 403)
         self.assertNotIn("access", res.data)
         self.assertIn("staff sign-in page", res.data["error"])
@@ -1278,7 +1275,7 @@ class AdminMFAEnforcementTests(ApiTestCase):
         self.assertContains(res, "Enter your authentication code.")
 
     def test_privileged_with_valid_code_logs_in(self):
-        res = self.admin_login("boss", totp=self.valid_code())
+        self.admin_login("boss", totp=self.valid_code())
         self.assertTrue(self.is_logged_in())
 
     def test_privileged_with_invalid_code_refused(self):
@@ -1305,15 +1302,15 @@ class AdminMFAEnforcementTests(ApiTestCase):
         helper = self.make_user("helper")
         helper.is_staff = True
         helper.save()
-        res = self.admin_login("helper")
+        self.admin_login("helper")
         self.assertTrue(self.is_logged_in())
 
     def test_superuser_requires_code(self):
         root = make_privileged("root", is_superuser=True)
         enroll_via_model(root)
-        res = self.admin_login("root")
+        self.admin_login("root")
         self.assertFalse(self.is_logged_in())
-        res = self.admin_login("root", totp=self.valid_code())
+        self.admin_login("root", totp=self.valid_code())
         self.assertTrue(self.is_logged_in())
 
 
@@ -1538,9 +1535,10 @@ class AdminMfaTrustDeviceTests(ApiTestCase):
 
 class AdminSiteWiringTests(SimpleTestCase):
     def test_default_site_is_mfa_site_with_mfa_form(self):
+        from django.contrib import admin
+
         from accounts.admin import MFAAdminAuthenticationForm
         from config.admin import MFAAdminSite
-        from django.contrib import admin
 
         self.assertIsInstance(admin.site, MFAAdminSite)
         self.assertIs(admin.site.login_form, MFAAdminAuthenticationForm)

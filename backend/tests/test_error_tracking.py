@@ -41,9 +41,9 @@ import urllib.error
 from pathlib import Path
 from unittest.mock import patch
 
-import config.settings as config_settings
 from django.test import SimpleTestCase
 
+import config.settings as config_settings
 from tests.test_settings_security import run_settings_import
 
 BACKEND_DIR = Path(__file__).resolve().parent.parent
@@ -368,16 +368,23 @@ class MalformedDsnBootTests(SimpleTestCase):
         self.assertIn("CLIENT True", res.stdout)
 
     def test_the_pinned_sdk_is_really_installed(self):
-        # The pin in requirements.txt is a promise until the package is
+        # The pin in requirements.lock is a promise until the package is
         # importable: an environment that never installed it would make every
         # "against the real SDK" pin above pass vacuously, down the
-        # ImportError branch. The expected version is READ OUT of the pin
+        # ImportError branch. The expected version is READ OUT OF THE PIN
         # rather than restated, so bumping it cannot turn this into a lie.
+        #
+        # requirements.lock, not requirements.txt: the direct-dependency file
+        # is now a POINTER (`-r requirements.lock`) and carries no pins of its
+        # own, so the regex would find nothing there. The assertion is
+        # unchanged in strength -- it still reads the shipped pin and compares
+        # it to what is actually importable -- only the file holding the pin
+        # moved, which is why the path is derived rather than hardcoded twice.
         import sentry_sdk
 
-        requirements = (BACKEND_DIR / "requirements.txt").read_text(encoding="utf-8")
-        pinned = re.search(r"^sentry-sdk==(\S+)", requirements, re.M)
-        self.assertIsNotNone(pinned, "requirements.txt must pin sentry-sdk")
+        lock = (BACKEND_DIR / "requirements.lock").read_text(encoding="utf-8")
+        pinned = re.search(r"^sentry-sdk==(\S+)", lock, re.M)
+        self.assertIsNotNone(pinned, "requirements.lock must pin sentry-sdk")
         self.assertEqual(sentry_sdk.VERSION, pinned.group(1))
 
 

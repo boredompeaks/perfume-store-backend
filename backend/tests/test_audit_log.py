@@ -22,8 +22,8 @@ from common.roles import (
     CAPABILITY_ROLES,
     ROLE_ADMIN,
     ROLE_CATALOGUE,
-    ROLE_SUPPORT,
     ROLE_SUPERADMIN,
+    ROLE_SUPPORT,
     STAFF_ROLES,
 )
 from common.testing import ApiTestCase
@@ -112,7 +112,7 @@ class ApiPrivilegedActionLoggingTests(ApiTestCase):
 
     def test_denied_and_invalid_attempts_log_nothing(self):
         """A refused request is not a privileged action: no write, no record."""
-        support = make_role_user(ROLE_SUPPORT, "blocked-scribe")
+        make_role_user(ROLE_SUPPORT, "blocked-scribe")
         support_client = self.fresh_client()
         self.api_login("blocked-scribe", client=support_client)
         res = support_client.post(
@@ -158,7 +158,7 @@ class AuditLogRouteTests(ApiTestCase):
                 self.assertEqual(res.status_code, 403)
 
     def test_admin_role_reads_api_and_admin_entries(self):
-        writer = make_role_user(ROLE_CATALOGUE, "route-scribe")
+        make_role_user(ROLE_CATALOGUE, "route-scribe")
         api_client = self.fresh_client()
         self.api_login("route-scribe", client=api_client)
         res = api_client.post(

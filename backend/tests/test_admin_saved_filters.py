@@ -15,9 +15,9 @@ safe rather than a shortcut around the admin's own gates:
   replayed spec can never turn into a 400.
 """
 
+import re
 from decimal import Decimal
 from html import unescape
-import re
 from unittest.mock import patch
 
 from django.contrib.auth.models import Group, User

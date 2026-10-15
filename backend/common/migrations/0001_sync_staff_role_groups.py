@@ -21,7 +21,6 @@ def remove_staff_role_groups(apps, schema_editor):
 
 
 class Migration(migrations.Migration):
-
     dependencies = [
         ("auth", "__latest__"),
     ]

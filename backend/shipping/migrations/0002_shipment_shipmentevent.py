@@ -6,47 +6,124 @@ from django.db import migrations, models
 
 
 class Migration(migrations.Migration):
-
     dependencies = [
-        ('orders', '0019_order_shipping_method_code'),
-        ('shipping', '0001_initial'),
+        ("orders", "0019_order_shipping_method_code"),
+        ("shipping", "0001_initial"),
         migrations.swappable_dependency(settings.AUTH_USER_MODEL),
     ]
 
     operations = [
         migrations.CreateModel(
-            name='Shipment',
+            name="Shipment",
             fields=[
-                ('id', models.BigAutoField(auto_created=True, primary_key=True, serialize=False, verbose_name='ID')),
-                ('tracking_number', models.CharField(max_length=100, unique=True)),
-                ('carrier', models.CharField(blank=True, default='', max_length=60)),
-                ('status', models.CharField(choices=[('label_created', 'Label created'), ('dispatched', 'Dispatched'), ('in_transit', 'In transit'), ('delivered', 'Delivered'), ('exception', 'Exception')], default='label_created', max_length=20)),
-                ('estimated_delivery', models.DateTimeField(blank=True, null=True)),
-                ('internal_note', models.TextField(blank=True, default='')),
-                ('created_at', models.DateTimeField(auto_now_add=True)),
-                ('updated_at', models.DateTimeField(auto_now=True)),
-                ('order', models.ForeignKey(on_delete=django.db.models.deletion.CASCADE, related_name='shipments', to='orders.order')),
+                (
+                    "id",
+                    models.BigAutoField(
+                        auto_created=True,
+                        primary_key=True,
+                        serialize=False,
+                        verbose_name="ID",
+                    ),
+                ),
+                ("tracking_number", models.CharField(max_length=100, unique=True)),
+                ("carrier", models.CharField(blank=True, default="", max_length=60)),
+                (
+                    "status",
+                    models.CharField(
+                        choices=[
+                            ("label_created", "Label created"),
+                            ("dispatched", "Dispatched"),
+                            ("in_transit", "In transit"),
+                            ("delivered", "Delivered"),
+                            ("exception", "Exception"),
+                        ],
+                        default="label_created",
+                        max_length=20,
+                    ),
+                ),
+                ("estimated_delivery", models.DateTimeField(blank=True, null=True)),
+                ("internal_note", models.TextField(blank=True, default="")),
+                ("created_at", models.DateTimeField(auto_now_add=True)),
+                ("updated_at", models.DateTimeField(auto_now=True)),
+                (
+                    "order",
+                    models.ForeignKey(
+                        on_delete=django.db.models.deletion.CASCADE,
+                        related_name="shipments",
+                        to="orders.order",
+                    ),
+                ),
             ],
             options={
-                'verbose_name': 'shipment',
-                'verbose_name_plural': 'shipments',
-                'ordering': ('-created_at', '-id'),
+                "verbose_name": "shipment",
+                "verbose_name_plural": "shipments",
+                "ordering": ("-created_at", "-id"),
             },
         ),
         migrations.CreateModel(
-            name='ShipmentEvent',
+            name="ShipmentEvent",
             fields=[
-                ('id', models.BigAutoField(auto_created=True, primary_key=True, serialize=False, verbose_name='ID')),
-                ('from_status', models.CharField(blank=True, choices=[('label_created', 'Label created'), ('dispatched', 'Dispatched'), ('in_transit', 'In transit'), ('delivered', 'Delivered'), ('exception', 'Exception')], max_length=20, null=True)),
-                ('to_status', models.CharField(choices=[('label_created', 'Label created'), ('dispatched', 'Dispatched'), ('in_transit', 'In transit'), ('delivered', 'Delivered'), ('exception', 'Exception')], max_length=20)),
-                ('created_at', models.DateTimeField(auto_now_add=True)),
-                ('actor', models.ForeignKey(blank=True, null=True, on_delete=django.db.models.deletion.SET_NULL, related_name='shipment_events', to=settings.AUTH_USER_MODEL)),
-                ('shipment', models.ForeignKey(on_delete=django.db.models.deletion.CASCADE, related_name='events', to='shipping.shipment')),
+                (
+                    "id",
+                    models.BigAutoField(
+                        auto_created=True,
+                        primary_key=True,
+                        serialize=False,
+                        verbose_name="ID",
+                    ),
+                ),
+                (
+                    "from_status",
+                    models.CharField(
+                        blank=True,
+                        choices=[
+                            ("label_created", "Label created"),
+                            ("dispatched", "Dispatched"),
+                            ("in_transit", "In transit"),
+                            ("delivered", "Delivered"),
+                            ("exception", "Exception"),
+                        ],
+                        max_length=20,
+                        null=True,
+                    ),
+                ),
+                (
+                    "to_status",
+                    models.CharField(
+                        choices=[
+                            ("label_created", "Label created"),
+                            ("dispatched", "Dispatched"),
+                            ("in_transit", "In transit"),
+                            ("delivered", "Delivered"),
+                            ("exception", "Exception"),
+                        ],
+                        max_length=20,
+                    ),
+                ),
+                ("created_at", models.DateTimeField(auto_now_add=True)),
+                (
+                    "actor",
+                    models.ForeignKey(
+                        blank=True,
+                        null=True,
+                        on_delete=django.db.models.deletion.SET_NULL,
+                        related_name="shipment_events",
+                        to=settings.AUTH_USER_MODEL,
+                    ),
+                ),
+                (
+                    "shipment",
+                    models.ForeignKey(
+                        on_delete=django.db.models.deletion.CASCADE,
+                        related_name="events",
+                        to="shipping.shipment",
+                    ),
+                ),
             ],
             options={
-                'verbose_name': 'shipment event',
-                'verbose_name_plural': 'shipment events',
-                'ordering': ('created_at', 'id'),
+                "verbose_name": "shipment event",
+                "verbose_name_plural": "shipment events",
+                "ordering": ("created_at", "id"),
             },
         ),
     ]
