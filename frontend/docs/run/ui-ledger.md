@@ -154,7 +154,7 @@ user has not vetoed).
 | U-W4-F1 | guest checkout plumbing (sessionStorage + header) | 4 | **IN-AUDIT** | 1 | `30778db` PARTIAL: backend REFUSES anonymous checkout (uniform 403, mints nothing — TIER1-GUEST-DEADEND owner decision verified). Frontend: flag-gated wall, server copy verbatim, guest-token store ready for future mint. BACKEND_REQUESTS P1. |
 | U-W4-F3 | restock opt-in on sold-out PDP | 4 | **IN-AUDIT** | 1 | `8ac8fcd` RestockForm + flag consumer #2; BACKEND_REQUESTS P1 (endpoint IsAuthenticated, email ignored by trigger). |
 | U-W4-F4 | /track-order page | 4 | **IN-AUDIT** | 2 | `52d745d` (resume after builder hallucinated missing worktree); fixed silent `starting-style`→`starting` 0B no-op; indexable:false; 24 routes. |
-| AUDIT-W4 | Wave-4 full audit | — | pending | — | owner directive: invoke release-engineer immediately after this audit ships (RE train 10/9+, BUG-4 owner-waived for this gate). |
+| AUDIT-W4 | Wave-4 full audit | — | **SHIP** | 1 | Floor: **132/17 vitest, build 0, 24 routes, 36,690 B css (=34,308+2,382 exact)**; guards mutation-proven; 1 P3 (track-order nested `<main>` — next build); PUSHED `origin/spec-ui=083fe74fbc8a45d32689d89b56ef628b08eaa7a6` (orch will ls-verify). |
 
 RE train: **10/9 — GATE DUE.** BLOCKED on §14.3 precondition BUG-4 (e2e unproven "must run
 with backend up before §14 — do not waive"): NO frontend agent may run python (ui-builder +
