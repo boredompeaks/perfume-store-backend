@@ -895,6 +895,24 @@ def cmd_run(args: argparse.Namespace) -> int:
     }
     try:
         info = preflight(base, ua, need_buyers)
+        # DB mode capability is checked BEFORE any HTTP wave: racing and
+        # then discovering invariants cannot be evaluated would spend the
+        # window (throttles, intents) for a run that cannot report.
+        if not args.emit_sql and not args.skip_db:
+            dsn = os.getenv("LOAD_PG_DSN") or os.getenv("DATABASE_URL") or ""
+            if not dsn:
+                raise SetupError(
+                    "no DB mode: set LOAD_PG_DSN/DATABASE_URL for live checks, "
+                    "or pass --emit-sql for the server-side round trip, or "
+                    "--skip-db to race UNVERIFIED"
+                )
+            try:
+                import psycopg  # noqa: F401
+            except ImportError as exc:
+                raise SetupError(
+                    "psycopg not importable — run with backend\\venv\\Scripts\\python "
+                    "or use --emit-sql/--verify-json round-trip mode"
+                ) from exc
         need_secret = any(p in phases for p in ("oversell", "coupon", "double-capture"))
         secret = ""
         if need_secret:
