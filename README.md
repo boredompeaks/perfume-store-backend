@@ -1,9 +1,11 @@
 # Perfume Store
 
-A monorepo with two deployables that ship independently through their own CI
-paths: a Django/DRF backend API and a Next.js storefront. Configuration is
-environment-driven (`.env` at runtime; the `.env.example` files document the
-keys); no secret or deployment URL lives in code.
+Perfume Store is a monorepo with two deployables that ship independently
+through their own CI paths: a Django/DRF backend API — accounts, catalog,
+session cart, coupons and Razorpay checkout — and a Next.js storefront on
+Cloudflare. Configuration is environment-driven (`.env` at runtime; the
+`.env.example` files document the keys); no secret or deployment URL lives
+in code.
 
 - **`backend/`** — Django 6.1 / Django REST Framework e-commerce API:
   JWT accounts, session cart, coupons, Razorpay payments, Celery async
@@ -39,7 +41,7 @@ copy .env.example .env                          # app keys; settings loads .env 
 # for a host run that is your own container/instance with a published port
 # (the compose `db` service is reachable only on the compose network).
 # Unset, settings falls back to SQLite for a quick smoke run; CI certifies
-# PostgreSQL only and asserts the engine before it runs anything.
+# PostgreSQL only and asserts the engine before it runs the suite.
 venv\Scripts\python manage.py migrate
 venv\Scripts\python manage.py runserver
 ```
@@ -114,9 +116,10 @@ start db and redis (health-gated) → migration review (fail-closed
 and wait for `/health/` → recreate worker and beat on the released image.
 
 **Storefront** — `.github/workflows/frontend-deploy.yml` on pushes to
-`feat/add-frontend` that touch `frontend/**`: OpenNext build, then
-`wrangler deploy` to the Cloudflare worker. It is not part of
-`docker-compose.yml`; the backend compose stack never serves the storefront.
+`feat/add-frontend` that touch `frontend/**` or the workflow file itself:
+OpenNext build, then `wrangler deploy` to the Cloudflare worker. It is not
+part of `docker-compose.yml`; the backend compose stack never serves the
+storefront.
 
 ## Documentation gates & ledgers
 
@@ -130,8 +133,9 @@ and wait for `/health/` → recreate worker and beat on the released image.
   (`scripts/figures/`); the printer side is the `floor` subcommand, which
   runs the suite and prints the bullet instead of letting a number be typed.
 
-Both run in CI (`backend-tests.yml`) and nightly over the whole corpus
-(`doc-claims-nightly.yml`). The ledgers live in `backend/docs/`:
+The claim scan runs in CI (`backend-tests.yml`) and nightly over the whole
+corpus (`doc-claims-nightly.yml`); the figure gate runs in CI
+(`backend-tests.yml`). The ledgers live in `backend/docs/`:
 `spec-run-state.md` (status and certified-floor index), `run/` (per-section
 evidence files), `changes.md` (append-only changelog, one row per task) and
 `conventions.md` (the coding rules every change is held to).
