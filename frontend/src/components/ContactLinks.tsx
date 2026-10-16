@@ -124,7 +124,12 @@ export default function ContactLinks({
             aria-label={item.label}
             title={item.label}
             {...(item.external ? { target: "_blank", rel: "noreferrer" } : {})}
-            className="flex h-10 w-10 items-center justify-center border border-hairline bg-surface text-ink transition-all hover:border-bronze hover:text-bronze active:scale-95"
+            {/* §5.8 CHANGE: the boundary is the control token, not the
+                decorative hairline. A 40×40 control whose only affordance is a
+                border and a glyph needs a 1.4.11 boundary (field-border), while
+                the hairline is decorative-only (§2.1). The glyph passes on its
+                own at distance; the boundary now does too. */}
+            className="flex h-10 w-10 items-center justify-center border border-field-border bg-surface text-ink transition-all hover:border-bronze hover:text-bronze active:scale-95"
           >
             {item.icon}
           </a>
