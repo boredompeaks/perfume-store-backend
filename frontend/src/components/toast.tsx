@@ -34,7 +34,7 @@ export function ToastProvider({ children }: { children: React.ReactNode }) {
       {children}
       <div
         aria-live="polite"
-        className="pointer-events-none fixed inset-x-4 bottom-4 z-50 flex flex-col gap-2 sm:left-auto sm:right-6 sm:w-80"
+        className="pointer-events-none fixed inset-x-4 bottom-4 z-(--z-toast) flex flex-col gap-2 sm:left-auto sm:right-6 sm:w-80"
       >
         {items.map((item) => (
           <div
@@ -46,7 +46,7 @@ export function ToastProvider({ children }: { children: React.ReactNode }) {
             {item.action && (
               <Link
                 href={item.action.href}
-                className="shrink-0 underline underline-offset-4 text-bronze-soft transition-colors hover:text-white"
+                className="shrink-0 underline underline-offset-4 text-paper transition-colors hover:text-white"
               >
                 {item.action.label}
               </Link>

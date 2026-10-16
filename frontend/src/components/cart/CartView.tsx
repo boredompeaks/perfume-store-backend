@@ -5,6 +5,7 @@ import { useQuery } from "@tanstack/react-query";
 import { useAuth } from "@/lib/auth";
 import { getCart } from "@/lib/cart-api";
 import { formatINR } from "@/lib/money";
+import { templateConfig } from "@/lib/template.config";
 import CartLineItem from "./CartLineItem";
 import CouponForm from "./CouponForm";
 
@@ -12,7 +13,7 @@ function CartSkeleton() {
   return (
     <div aria-hidden="true" className="space-y-6">
       {[1, 2, 3].map((n) => (
-        <div key={n} className="flex gap-4 border-b border-line pb-6">
+        <div key={n} className="flex gap-4 border-b border-hairline pb-6">
           <div className="skeleton aspect-[4/5] h-28 w-24" />
           <div className="flex-1 space-y-3 py-1">
             <div className="skeleton h-4 w-1/2" />
@@ -37,11 +38,11 @@ export default function CartView() {
 
   if (isError || !cart) {
     return (
-      <div className="border border-line p-10 text-center">
+      <div className="border border-hairline p-10 text-center">
         <p className="font-display text-2xl tracking-tight">
           We couldn&apos;t load your cart.
         </p>
-        <p className="mx-auto mt-3 max-w-sm text-ink-muted">
+        <p className="mx-auto mt-3 max-w-sm text-ink-secondary">
           Check your connection and try again.
         </p>
         <button
@@ -57,11 +58,11 @@ export default function CartView() {
 
   if (cart.items.length === 0) {
     return (
-      <div className="border border-line p-16 text-center">
+      <div className="border border-hairline p-16 text-center">
         <p className="font-display text-2xl tracking-tight">
           Your cart is empty.
         </p>
-        <p className="mx-auto mt-3 max-w-sm text-ink-muted">
+        <p className="mx-auto mt-3 max-w-sm text-ink-secondary">
           Nothing here yet — the shelf is one click away.
         </p>
         <Link
@@ -89,22 +90,22 @@ export default function CartView() {
         ))}
       </div>
 
-      <aside className="self-start border border-line p-6 lg:sticky lg:top-24">
+      <aside className="self-start border border-hairline p-6 lg:sticky lg:top-24">
         <h2 className="font-display text-xl tracking-tight">Summary</h2>
 
         <div className="mt-4 flex items-baseline justify-between text-sm">
-          <span className="text-ink-muted">Subtotal</span>
+          <span className="text-ink-secondary">Subtotal</span>
           <span>{formatINR(subtotal)}</span>
         </div>
-        <p className="mt-1 text-xs text-ink-muted">
+        <p className="mt-1 text-xs text-ink-secondary">
           Final totals are confirmed at checkout.
         </p>
 
-        <div className="mt-5 border-t border-line pt-5">
+        <div className="mt-5 border-t border-hairline pt-5">
           <CouponForm />
         </div>
 
-        <div className="mt-6 border-t border-line pt-6">
+        <div className="mt-6 border-t border-hairline pt-6">
           {status === "authenticated" ? (
             <Link
               href="/checkout"
@@ -118,9 +119,16 @@ export default function CartView() {
                 href="/login?next=/checkout"
                 className="block bg-ink px-6 py-3 text-center text-sm text-paper transition-colors hover:bg-bronze"
               >
-                Sign in to checkout
+                {/* guestCheckout flips COPY only (U-W3-T5): the guest wall
+                    (redirect to /login?next=/checkout) stays the real behavior
+                    until F1 ships guest checkout server-side. Pointing the href
+                    at /checkout now would promise a flow the backend does not
+                    have, so the flag cannot move the target yet. */}
+                {templateConfig.featureFlags.guestCheckout
+                  ? "Sign in to checkout"
+                  : "Proceed to checkout"}
               </Link>
-              <p className="mt-3 text-center text-xs text-ink-muted">
+              <p className="mt-3 text-center text-xs text-ink-secondary">
                 Your cart is saved on this device.
               </p>
             </>

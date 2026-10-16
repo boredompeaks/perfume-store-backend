@@ -75,13 +75,13 @@ export default function RegisterForm() {
 
   if (registered) {
     return (
-      <div className="border border-line p-8">
+      <div className="border border-hairline p-8">
         <h2 className="font-display text-2xl tracking-tight">
           {registered.emailFailed
             ? "Account created — one step left."
             : "Check your email."}
         </h2>
-        <p className="mt-3 text-ink-muted">
+        <p className="mt-3 text-ink-secondary">
           {registered.emailFailed
             ? "We created your account, but the verification email could not be sent just now. You can request it again below."
             : `We sent a verification link to ${email}. Open it to activate your account — sign-in stays locked until then.`}
@@ -114,7 +114,7 @@ export default function RegisterForm() {
           className={`${inputClass} w-full`}
           required
         />
-        <p id="reg-username-hint" className="mt-1 text-sm text-ink-muted" aria-live="polite">
+        <p id="reg-username-hint" className="mt-1 text-sm text-ink-secondary" aria-live="polite">
           {availability.state === "checking"
             ? "Checking availability…"
             : availability.state === "ok"
@@ -166,7 +166,7 @@ export default function RegisterForm() {
           required
           minLength={8}
         />
-        <p className="mt-1 text-sm text-ink-muted">At least 8 characters.</p>
+        <p className="mt-1 text-sm text-ink-secondary">At least 8 characters.</p>
         {fieldErrors.password?.map((msg) => (
           <p key={msg} role="alert" className="mt-1 text-sm text-bronze">
             {msg}
@@ -188,7 +188,7 @@ export default function RegisterForm() {
         {pending ? "Creating account…" : "Create account"}
       </button>
 
-      <p className="text-sm text-ink-muted">
+      <p className="text-sm text-ink-secondary">
         Already have an account?{" "}
         <Link href="/login" className="underline underline-offset-4 transition-colors hover:text-bronze">
           Sign in

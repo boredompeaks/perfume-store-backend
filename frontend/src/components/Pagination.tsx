@@ -53,7 +53,7 @@ export default function Pagination({
 
       {pageWindow(currentPage, totalPages).map((entry, index) =>
         entry === "gap" ? (
-          <span key={`gap-${index}`} className="px-1 text-sm text-ink-muted">
+          <span key={`gap-${index}`} className="px-1 text-sm text-ink-secondary">
             …
           </span>
         ) : entry === currentPage ? (

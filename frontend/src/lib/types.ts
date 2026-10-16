@@ -23,8 +23,6 @@ export type CartItem = {
 
 export type Cart = {
   id: number;
-  /** Exposed by the backend (V-09) — deliberately ignored by the frontend. */
-  session_id: string;
   items: CartItem[];
   created_at: string;
   updated_at: string;

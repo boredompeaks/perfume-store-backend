@@ -15,15 +15,15 @@ export default function ProductCard({
   return (
     <Link
       href={`/products/${product.slug}`}
-      className="card-lift group block border border-transparent p-3 transition-colors hover:border-line"
+      className="card-lift group block border border-transparent p-3 transition-colors hover:border-hairline"
     >
-      <div className="relative aspect-[4/5] overflow-hidden bg-bronze-soft">
+      <div className="relative aspect-[4/5] overflow-hidden bg-hairline">
         <ProductImage
           src={product.image}
           alt={product.name}
           priority={priority}
           sizes="(min-width: 1024px) 25vw, (min-width: 640px) 33vw, 50vw"
-          className="transition-transform duration-500 group-hover:scale-[1.04]"
+          className="transition-transform duration-(--motion-hover-dur) group-hover:scale-(--hover-scale)"
         />
         {soldOut && (
           <span className="absolute left-3 top-3 bg-ink px-2 py-1 text-xs uppercase tracking-wide text-paper">
@@ -35,11 +35,11 @@ export default function ProductCard({
         <h3 className="font-display text-lg tracking-tight">
           {product.name}
         </h3>
-        <p className="shrink-0 text-sm text-ink-muted">
+        <p className="shrink-0 text-sm text-ink-secondary">
           {formatINR(product.price)}
         </p>
       </div>
-      <p className="mt-0.5 text-sm text-ink-muted">{product.size} ml</p>
+      <p className="mt-0.5 text-sm text-ink-secondary">{product.size} ml</p>
     </Link>
   );
 }

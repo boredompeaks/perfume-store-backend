@@ -8,6 +8,7 @@ import {
   useState,
 } from "react";
 import { apiFetch } from "./api";
+import { clearGuestToken } from "./guest-token";
 import { buildLoginBody, loginEndpoint, type LoginSurface } from "./mfa";
 import { forgetShipping } from "./shipping-store";
 import {
@@ -97,6 +98,10 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     clearTokens();
     // PII: never leave saved checkout details behind on a logged-out device.
     forgetShipping();
+    // The guest order credential's ONLY clear point (G1 policy): explicit
+    // logout — never a tab/storage event, which would fight sessionStorage's
+    // own tab scope.
+    clearGuestToken();
     setUserId(null);
     setStatus("anonymous");
   }, []);

@@ -7,12 +7,8 @@ import { useQuery } from "@tanstack/react-query";
 import { useAuth } from "@/lib/auth";
 import { cartCount, getCart } from "@/lib/cart-api";
 import { site } from "@/lib/site";
+import { templateConfig } from "@/lib/template.config";
 import MenuOverlay from "./MenuOverlay";
-
-const navLinks = [
-  { href: "/products", label: "Shop" },
-  { href: "/products?ordering=-created_at", label: "New arrivals" },
-];
 
 function CartIcon() {
   return (
@@ -61,8 +57,8 @@ export default function Header() {
   return (
     <>
       <header
-        className={`sticky top-0 z-40 border-b border-line bg-paper transition-shadow ${
-          scrolled ? "shadow-[0_2px_12px_-6px_rgb(28_25_23/0.15)]" : ""
+        className={`sticky top-0 z-(--z-header) border-b border-hairline bg-paper transition-shadow ${
+          scrolled ? "shadow-(--elevation-bar)" : ""
         }`}
       >
         <div className="relative mx-auto flex h-16 max-w-6xl items-center justify-between px-4 sm:px-6">
@@ -91,7 +87,7 @@ export default function Header() {
               aria-label="Primary"
               className="hidden items-center gap-7 md:flex"
             >
-              {navLinks.map((link) => (
+              {templateConfig.nav.map((link) => (
                 <Link
                   key={link.label}
                   href={link.href}
@@ -122,7 +118,7 @@ export default function Header() {
                 <button
                   type="button"
                   onClick={logout}
-                  className="hidden text-ink-muted transition-colors hover:text-bronze sm:inline"
+                  className="hidden text-ink-secondary transition-colors hover:text-bronze sm:inline"
                 >
                   Sign out
                 </button>

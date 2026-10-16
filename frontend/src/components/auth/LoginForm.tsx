@@ -127,7 +127,7 @@ export default function LoginForm({
       </form>
 
       {variant === "staff" && (
-        <p className="mt-6 border-t border-line pt-6 text-sm text-ink-muted">
+        <p className="mt-6 border-t border-hairline pt-6 text-sm text-ink-secondary">
           Setting up for the first time?{" "}
           <Link
             href="/staff/mfa/enroll"
@@ -147,7 +147,7 @@ export default function LoginForm({
         email recovery are storefront concerns (SPEC-20-10).
       */}
       {variant === "customer" && (
-        <div className="mt-6 space-y-2 border-t border-line pt-6 text-sm text-ink-muted">
+        <div className="mt-6 space-y-2 border-t border-hairline pt-6 text-sm text-ink-secondary">
           <p>
             Staff member?{" "}
             <Link href="/staff/login" className="underline underline-offset-4 transition-colors hover:text-bronze">

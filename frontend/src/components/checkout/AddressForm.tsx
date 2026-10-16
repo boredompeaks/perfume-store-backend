@@ -138,7 +138,7 @@ export default function AddressForm({
           real forget control. Not a code comment: a customer-facing notice. */}
       <div
         data-testid="pii-disclosure"
-        className="border border-line bg-surface p-4 text-sm text-ink-muted"
+        className="border border-hairline bg-surface p-4 text-sm text-ink-secondary"
       >
         {prefilledAtMount && !forgotten ? (
           <p className="text-ink">

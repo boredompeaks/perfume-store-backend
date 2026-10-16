@@ -41,7 +41,7 @@ export default function OrderDetailView({
 
   if (authStatus === "anonymous" || (error instanceof ApiError && error.status === 401)) {
     return (
-      <div className="border border-line p-10 text-center">
+      <div className="border border-hairline p-10 text-center">
         <p className="font-display text-2xl tracking-tight">
           Sign in to view this order.
         </p>
@@ -57,14 +57,14 @@ export default function OrderDetailView({
 
   if (isError || !orders) {
     return (
-      <p className="text-ink-muted">Couldn&apos;t load this order.</p>
+      <p className="text-ink-secondary">Couldn&apos;t load this order.</p>
     );
   }
 
   const order: Order | undefined = orders.find((o) => o.id === orderId);
   if (!order) {
     return (
-      <div className="border border-line p-10 text-center">
+      <div className="border border-hairline p-10 text-center">
         <p className="font-display text-2xl tracking-tight">
           Order #{orderId} wasn&apos;t found.
         </p>
@@ -83,13 +83,13 @@ export default function OrderDetailView({
       {paymentSuccess && order.status === "confirmed" && (
         <div
           data-testid="payment-success-banner"
-          className="mb-8 border border-line bg-surface p-6"
+          className="mb-8 border border-hairline bg-surface p-6"
           role="status"
         >
           <h2 className="font-display text-2xl tracking-tight">
             Payment received — thank you.
           </h2>
-          <p className="mt-2 text-sm text-ink-muted">
+          <p className="mt-2 text-sm text-ink-secondary">
             Order #{order.id} is confirmed. A confirmation summary is below.
           </p>
         </div>
@@ -100,17 +100,17 @@ export default function OrderDetailView({
           Order #{order.id}
         </h2>
         <OrderStatusBadge status={order.status} />
-        <span className="text-sm text-ink-muted">
+        <span className="text-sm text-ink-secondary">
           {formatOrderDate(order.created_at)}
         </span>
       </div>
 
       <div className="mt-8 grid gap-10 lg:grid-cols-[1fr_380px]">
         <div>
-          <h3 className="text-sm font-medium uppercase tracking-wide text-ink-muted">
+          <h3 className="text-sm font-medium uppercase tracking-wide text-ink-secondary">
             Items
           </h3>
-          <ul className="mt-3 divide-y divide-line border-y border-line">
+          <ul className="mt-3 divide-y divide-hairline border-y border-hairline">
             {order.items.map((item) => (
               <li
                 key={item.id}
@@ -118,7 +118,7 @@ export default function OrderDetailView({
               >
                 <span>
                   {item.product_name}{" "}
-                  <span className="text-ink-muted">
+                  <span className="text-ink-secondary">
                     × {item.quantity} · {formatINR(item.price)} each
                   </span>
                 </span>
@@ -129,7 +129,7 @@ export default function OrderDetailView({
 
           <dl className="mt-4 space-y-1 text-sm">
             <div className="flex justify-between">
-              <dt className="text-ink-muted">Subtotal</dt>
+              <dt className="text-ink-secondary">Subtotal</dt>
               <dd>
                 {formatINR(
                   order.items.reduce((s, i) => s + Number(i.subtotal), 0),
@@ -138,21 +138,21 @@ export default function OrderDetailView({
             </div>
             {Number(order.discount_amount) > 0 && (
               <div className="flex justify-between">
-                <dt className="text-ink-muted">
+                <dt className="text-ink-secondary">
                   Coupon {order.coupon ? `(${order.coupon})` : ""}
                 </dt>
                 <dd>−{formatINR(order.discount_amount)}</dd>
               </div>
             )}
-            <div className="flex justify-between border-t border-line pt-2 text-base">
+            <div className="flex justify-between border-t border-hairline pt-2 text-base">
               <dt>Total</dt>
               <dd className="font-medium">{formatINR(order.total_amount)}</dd>
             </div>
           </dl>
         </div>
 
-        <aside className="self-start border border-line p-6 text-sm lg:sticky lg:top-24">
-          <h3 className="text-sm font-medium uppercase tracking-wide text-ink-muted">
+        <aside className="self-start border border-hairline p-6 text-sm lg:sticky lg:top-24">
+          <h3 className="text-sm font-medium uppercase tracking-wide text-ink-secondary">
             Delivery to
           </h3>
           <address className="mt-3 not-italic leading-relaxed">
@@ -166,11 +166,11 @@ export default function OrderDetailView({
           </address>
 
           {order.status === "pending" && (
-            <div className="mt-6 border-t border-line pt-6" data-testid="resume-payment-panel">
-              <h3 className="text-sm font-medium uppercase tracking-wide text-ink-muted">
+            <div className="mt-6 border-t border-hairline pt-6" data-testid="resume-payment-panel">
+              <h3 className="text-sm font-medium uppercase tracking-wide text-ink-secondary">
                 Payment pending
               </h3>
-              <p className="mt-2 text-xs text-ink-muted">
+              <p className="mt-2 text-xs text-ink-secondary">
                 This order hasn&apos;t been paid yet. You can complete the
                 payment safely — the amount is locked server-side.
               </p>

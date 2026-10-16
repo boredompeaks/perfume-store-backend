@@ -1,11 +1,15 @@
 import type { Metadata } from "next";
 import { LegalSection, LegalShell } from "@/components/legal/LegalShell";
+import { getReturnWindow } from "@/lib/policies";
 
 export const metadata: Metadata = {
   title: "Terms & Conditions",
 };
 
-export default function TermsPage() {
+export default async function TermsPage() {
+  // A-12.D.2, same binding as /returns: number only when the API publishes
+  // one, otherwise the sentence ships without its window claim.
+  const { days } = await getReturnWindow();
   return (
     <LegalShell title="Terms & Conditions">
       <LegalSection title="Using this store">
@@ -54,7 +58,8 @@ export default function TermsPage() {
       <LegalSection title="Returns and refunds">
         <p>
           Our return and refund process is described on the Returns page.
-          In short: unopened items within 7 days of delivery, refunds issued
+          In short: unopened items
+          {days ? ` within ${days} days of delivery` : ""}, refunds issued
           manually to the original payment method.
         </p>
       </LegalSection>

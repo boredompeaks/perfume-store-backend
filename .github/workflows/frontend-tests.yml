@@ -25,8 +25,13 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  # Hermetic: vitest unit tests (node env, no network) + next build
-  # (env-independent: every NEXT_PUBLIC_* has a code fallback).
+  # Hermetic: vitest unit tests (node env, no network) + next build.
+  # Env-independence with ONE documented exception: every NEXT_PUBLIC_* has a
+  # code fallback EXCEPT NEXT_PUBLIC_ADMIN_ORIGIN, which is fail-if-unset by
+  # owner contract (src/app/admin/page.tsx: `next build` FAILS when it is
+  # unset; no localhost default, no code fallback). The build step below
+  # supplies that single value so CI stays hermetic without weakening the
+  # product guard.
   unit-build:
     runs-on: ubuntu-latest
     defaults:
@@ -48,6 +53,13 @@ jobs:
         run: npm run test
 
       - name: Production build (next build)
+        # Single workflow-provided exception to the env-independent comment
+        # above: the admin redirect origin is fail-if-unset by owner contract
+        # (no code fallback, no localhost default), so CI supplies the same
+        # value as frontend/.env.local.example:30. Hermetic constant, not a
+        # product fallback -- the guard in src/app/admin/page.tsx stands.
+        env:
+          NEXT_PUBLIC_ADMIN_ORIGIN: https://api.boredompeaks.me
         run: npm run build
 
   # Playwright e2e is DISABLED-BY-DEFAULT by design: the current suite

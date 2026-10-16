@@ -70,7 +70,11 @@ export default function PaymentLauncher({
             email: contact.email,
             contact: contact.phone,
           },
-          theme: { color: "#8a5a24" },
+          // A literal, not a Tailwind class: Razorpay's checkout iframe is
+          // outside this document, so it cannot read the cascade. `#8A5A24`
+          // was the pre-refs bronze and is void (§2.1.1); this is
+          // `--color-bronze` #8C5338 spelled out.
+          theme: { color: "#8C5338" },
           handler: (response) => {
             void confirmPayment(response);
           },
@@ -148,7 +152,7 @@ export default function PaymentLauncher({
         <h3 className="font-display text-xl tracking-tight text-ink">
           Payment received — order not completed.
         </h3>
-        <p className="mt-3 text-sm text-ink-muted">
+        <p className="mt-3 text-sm text-ink-secondary">
           Your payment for order #{order.id} was captured, but the order
           could not be fulfilled (an item became unavailable). Our team
           reconciles this manually — please contact support and quote order
@@ -169,11 +173,11 @@ export default function PaymentLauncher({
 
   if (phase.kind === "maybe-processed") {
     return (
-      <div className="border border-line p-6" role="alert">
+      <div className="border border-hairline p-6" role="alert">
         <h3 className="font-display text-xl tracking-tight">
           Your payment may have gone through.
         </h3>
-        <p className="mt-3 text-sm text-ink-muted">
+        <p className="mt-3 text-sm text-ink-secondary">
           We couldn&apos;t confirm it just now, and starting another payment
           could double-charge you. Check your orders — if it isn&apos;t
           marked confirmed, contact support.
@@ -190,7 +194,7 @@ export default function PaymentLauncher({
 
   if (phase.kind === "working") {
     return (
-      <p className="text-sm text-ink-muted" role="status" aria-live="polite">
+      <p className="text-sm text-ink-secondary" role="status" aria-live="polite">
         {phase.label}
       </p>
     );
@@ -198,7 +202,7 @@ export default function PaymentLauncher({
 
   if (phase.kind === "dismissed" || phase.kind === "verify-error") {
     return (
-      <div className="border border-line p-6">
+      <div className="border border-hairline p-6">
         <h3 className="font-display text-xl tracking-tight">
           {phase.kind === "dismissed"
             ? "Payment not completed."
@@ -207,7 +211,7 @@ export default function PaymentLauncher({
         {"message" in phase && phase.message ? (
           <p className="mt-2 text-sm text-bronze">{phase.message}</p>
         ) : (
-          <p className="mt-2 text-sm text-ink-muted">
+          <p className="mt-2 text-sm text-ink-secondary">
             The order stays pending — nothing was charged yet.
           </p>
         )}
@@ -221,7 +225,7 @@ export default function PaymentLauncher({
             Retry payment
           </button>
         </div>
-        <p className="mt-3 text-xs text-ink-muted">
+        <p className="mt-3 text-xs text-ink-secondary">
           Retrying reuses this order&apos;s existing payment session — you
           won&apos;t be charged twice for a completed payment.
         </p>
@@ -231,7 +235,7 @@ export default function PaymentLauncher({
 
   if (phase.kind === "failed") {
     return (
-      <div className="border border-line p-6" role="alert">
+      <div className="border border-hairline p-6" role="alert">
         <p className="text-sm text-bronze">{phase.message}</p>
         <button
           type="button"
@@ -255,7 +259,7 @@ export default function PaymentLauncher({
       >
         {buttonLabel ?? `Pay ${formatINR(order.total_amount)}`}
       </button>
-      <p className="mt-3 text-xs text-ink-muted">
+      <p className="mt-3 text-xs text-ink-secondary">
         A secure Razorpay window will open. Complete the payment there.
       </p>
     </div>

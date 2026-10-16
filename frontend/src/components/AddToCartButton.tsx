@@ -49,13 +49,13 @@ export default function AddToCartButton({
   });
 
   if (soldOut) {
-    return <p className="text-sm text-ink-muted">Sold out</p>;
+    return <p className="text-sm text-ink-secondary">Sold out</p>;
   }
 
   return (
     <div className="flex items-stretch gap-3">
       <div
-        className="flex items-center border border-line"
+        className="flex items-center border border-hairline"
         role="group"
         aria-label="Quantity"
       >
@@ -64,7 +64,7 @@ export default function AddToCartButton({
           onClick={() => setQty((q) => Math.max(1, q - 1))}
           disabled={qty <= 1}
           aria-label="Decrease quantity"
-          className="px-3 py-2 text-ink-muted transition-colors hover:text-ink disabled:opacity-40"
+          className="px-3 py-2 text-ink-secondary transition-colors hover:text-ink disabled:opacity-40"
         >
           −
         </button>
@@ -76,7 +76,7 @@ export default function AddToCartButton({
           onClick={() => setQty((q) => Math.min(maxQty, q + 1))}
           disabled={qty >= maxQty}
           aria-label="Increase quantity"
-          className="px-3 py-2 text-ink-muted transition-colors hover:text-ink disabled:opacity-40"
+          className="px-3 py-2 text-ink-secondary transition-colors hover:text-ink disabled:opacity-40"
         >
           +
         </button>

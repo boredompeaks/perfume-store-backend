@@ -56,11 +56,11 @@ export default function ResetPasswordClient({
 
   if (state.kind === "invalid") {
     return (
-      <div className="border border-line p-8">
+      <div className="border border-hairline p-8">
         <h2 className="font-display text-2xl tracking-tight">
           This reset link is invalid or expired.
         </h2>
-        <p className="mt-3 text-ink-muted">
+        <p className="mt-3 text-ink-secondary">
           Reset links are one-time. Request a fresh email and open the newest
           link.
         </p>
@@ -76,11 +76,11 @@ export default function ResetPasswordClient({
 
   if (state.kind === "done") {
     return (
-      <div className="border border-line p-8">
+      <div className="border border-hairline p-8">
         <h2 className="font-display text-2xl tracking-tight">
           Password updated.
         </h2>
-        <p className="mt-3 text-ink-muted">
+        <p className="mt-3 text-ink-secondary">
           You can sign in with your new password now.
         </p>
         <a

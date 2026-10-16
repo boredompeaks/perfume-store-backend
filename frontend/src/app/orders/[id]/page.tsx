@@ -24,7 +24,7 @@ export default async function OrderPage({
   return (
     <div className="mx-auto max-w-6xl px-4 py-10 sm:px-6">
       <div className="mt-0">
-        <Link href="/orders" className="text-sm text-ink-muted underline underline-offset-4 transition-colors hover:text-bronze" prefetch={false}>
+        <Link href="/orders" className="text-sm text-ink-secondary underline underline-offset-4 transition-colors hover:text-bronze" prefetch={false}>
           ← All orders
         </Link>
       </div>
@@ -35,7 +35,7 @@ export default async function OrderPage({
             paymentSuccess={paymentParam === "success"}
           />
         ) : (
-          <p className="text-ink-muted">Order not found.</p>
+          <p className="text-ink-secondary">Order not found.</p>
         )}
       </div>
     </div>

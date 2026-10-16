@@ -52,8 +52,8 @@ export default function EmailOnlyForm({
 
   if (state.kind === "sent") {
     return (
-      <div className="border border-line p-8">
-        <p className="text-ink-muted" role="status" aria-live="polite">
+      <div className="border border-hairline p-8">
+        <p className="text-ink-secondary" role="status" aria-live="polite">
           {state.message}
         </p>
       </div>

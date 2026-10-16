@@ -37,7 +37,7 @@ export default function VerifyEmailClient({
 
   if (state.kind === "working") {
     return (
-      <p className="text-ink-muted" role="status" aria-live="polite">
+      <p className="text-ink-secondary" role="status" aria-live="polite">
         Verifying your email…
       </p>
     );
@@ -45,11 +45,11 @@ export default function VerifyEmailClient({
 
   if (state.kind === "verified") {
     return (
-      <div className="border border-line p-8">
+      <div className="border border-hairline p-8">
         <h2 className="font-display text-2xl tracking-tight">
           Email verified.
         </h2>
-        <p className="mt-3 text-ink-muted">
+        <p className="mt-3 text-ink-secondary">
           Your account is active. You can sign in now.
         </p>
         <a
@@ -63,11 +63,11 @@ export default function VerifyEmailClient({
   }
 
   return (
-    <div className="border border-line p-8">
+    <div className="border border-hairline p-8">
       <h2 className="font-display text-2xl tracking-tight">
         This link is invalid or expired.
       </h2>
-      <p className="mt-3 text-ink-muted">
+      <p className="mt-3 text-ink-secondary">
         Verification links are one-time. Request a fresh email and open the
         newest link.
       </p>

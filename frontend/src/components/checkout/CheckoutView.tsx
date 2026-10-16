@@ -8,6 +8,7 @@ import { useAuth } from "@/lib/auth";
 import { getCart } from "@/lib/cart-api";
 import { formatINR } from "@/lib/money";
 import { checkout } from "@/lib/orders-api";
+import { templateConfig } from "@/lib/template.config";
 import {
   loadShipping,
   saveShipping,
@@ -21,6 +22,10 @@ type Step = "details" | "review" | "pay";
 
 export default function CheckoutView() {
   const { status: authStatus } = useAuth();
+  // featureFlags.guestCheckout gates the whole guest path (default true):
+  // off = the sign-in wall below, exactly as it was; on = the wall is down
+  // and the backend's own answer decides what a guest may do.
+  const guestCheckoutEnabled = templateConfig.featureFlags.guestCheckout;
 
   const {
     data: cart,
@@ -38,23 +43,29 @@ export default function CheckoutView() {
     null,
   );
   const [creationError, setCreationError] = useState<string | null>(null);
+  const [refused, setRefused] = useState(false);
   const [creating, setCreating] = useState(false);
 
   if (authStatus === "loading" || cartLoading) {
     return (
-      <div className="border border-line p-10 text-ink-muted" role="status">
+      <div className="border border-hairline p-10 text-ink-secondary" role="status">
         Loading checkout…
       </div>
     );
   }
 
-  if (authStatus === "anonymous") {
+  // The sign-in wall: exactly the old behavior whenever guest checkout is
+  // off. With guestCheckout on, an anonymous visitor gets the real flow, and
+  // the backend's verified contract (TIER1-GUEST-DEADEND: one uniform 403
+  // that mints nothing) is surfaced at submit as a sign-in hand-off below —
+  // never faked as success, never pre-judged here.
+  if (authStatus === "anonymous" && !guestCheckoutEnabled) {
     return (
-      <div className="border border-line p-10 text-center">
+      <div className="border border-hairline p-10 text-center">
         <p className="font-display text-2xl tracking-tight">
           Sign in to check out.
         </p>
-        <p className="mx-auto mt-3 max-w-sm text-ink-muted">
+        <p className="mx-auto mt-3 max-w-sm text-ink-secondary">
           Orders are tied to your account. Your cart is saved on this device
           and waits for you.
         </p>
@@ -71,7 +82,7 @@ export default function CheckoutView() {
 
   if (cartError || !cart) {
     return (
-      <div className="border border-line p-10 text-center">
+      <div className="border border-hairline p-10 text-center">
         <p className="font-display text-2xl tracking-tight">
           We couldn&apos;t load your cart.
         </p>
@@ -88,7 +99,7 @@ export default function CheckoutView() {
 
   if (cart.items.length === 0 && !order) {
     return (
-      <div className="border border-line p-10 text-center">
+      <div className="border border-hairline p-10 text-center">
         <p className="font-display text-2xl tracking-tight">
           Your cart is empty.
         </p>
@@ -109,6 +120,7 @@ export default function CheckoutView() {
 
   const createOrder = (details: ShippingDetails) => {
     setCreationError(null);
+    setRefused(false);
     setCreating(true);
     checkout({
       full_name: details.full_name,
@@ -123,15 +135,14 @@ export default function CheckoutView() {
         setOrder(created);
         setShipping(details);
         saveShipping(details); // PII save — the moment a working order exists.
-        try {
-          sessionStorage.removeItem("aurel.coupon");
-        } catch {
-          // ignore
-        }
         setStep("pay");
       })
       .catch((err: unknown) => {
         if (err instanceof ApiError) {
+          // The backend's uniform guest refusal (403, one body for every
+          // reason) becomes a sign-in hand-off rather than a retry loop; its
+          // own message is the copy — nothing is invented on top of it.
+          setRefused(authStatus === "anonymous" && err.status === 403);
           setCreationError(
             err.status === 404
               ? "Your cart session expired. Please add items again."
@@ -167,8 +178,8 @@ export default function CheckoutView() {
                 }}
               />
             </div>
-            <div className="mt-8 border-t border-line pt-6">
-              <h3 className="text-sm font-medium uppercase tracking-wide text-ink-muted">
+            <div className="mt-8 border-t border-hairline pt-6">
+              <h3 className="text-sm font-medium uppercase tracking-wide text-ink-secondary">
                 Coupon
               </h3>
               <div className="mt-3">
@@ -186,7 +197,7 @@ export default function CheckoutView() {
             >
               Review your order
             </h2>
-            <ul className="mt-6 divide-y divide-line border-y border-line">
+            <ul className="mt-6 divide-y divide-hairline border-y border-hairline">
               {cart.items.map((item) => (
                 <li
                   key={item.id}
@@ -194,7 +205,7 @@ export default function CheckoutView() {
                 >
                   <span>
                     {item.product.name}{" "}
-                    <span className="text-ink-muted">× {item.quantity}</span>
+                    <span className="text-ink-secondary">× {item.quantity}</span>
                   </span>
                   <span>
                     {formatINR(Number(item.product.price) * item.quantity)}
@@ -202,16 +213,28 @@ export default function CheckoutView() {
                 </li>
               ))}
             </ul>
-            <p className="mt-3 text-sm text-ink-muted">
+            <p className="mt-3 text-sm text-ink-secondary">
               Subtotal {formatINR(clientSubtotal)}
               {couponCode ? ` · coupon ${couponCode}` : ""}
             </p>
-            <p className="text-xs text-ink-muted">
+            <p className="text-xs text-ink-secondary">
               The final total is computed server-side when the order is
               created.
             </p>
 
-            {creationError && (
+            {creationError && refused && (
+              <div role="alert" className="mt-4 border border-hairline p-5">
+                <p className="text-sm">{creationError}</p>
+                <Link
+                  href="/login?next=/checkout"
+                  data-testid="checkout-signin"
+                  className="mt-4 inline-block bg-ink px-6 py-3 text-sm text-paper transition-colors hover:bg-bronze"
+                >
+                  Sign in
+                </Link>
+              </div>
+            )}
+            {creationError && !refused && (
               <p role="alert" className="mt-4 text-sm text-bronze">
                 {creationError}
               </p>
@@ -246,52 +269,75 @@ export default function CheckoutView() {
             <h2 id="step-pay" className="font-display text-2xl tracking-tight">
               Payment
             </h2>
-            <p className="mt-3 text-sm text-ink-muted">
+            <p className="mt-3 text-sm text-ink-secondary">
               Order #{order.id} · total{" "}
               <strong className="text-ink">
                 {formatINR(order.total_amount)}
               </strong>{" "}
               — computed and held server-side.
             </p>
-            <p className="mt-1 text-xs text-ink-muted">
+            <p className="mt-1 text-xs text-ink-secondary">
               The cart is now frozen into this order. Editing it on the cart
               page won&apos;t change this amount.
             </p>
 
             <div className="mt-6">
-              <PaymentLauncher
-                order={order}
-                contact={{
-                  name: shipping.full_name,
-                  email: shipping.email,
-                  phone: shipping.phone,
-                }}
-              />
+              {authStatus === "anonymous" ? (
+                /* Verified contract: create_payment and verify_payment are
+                   IsAuthenticated, so a guest is never routed into the Razorpay
+                   flow — no JWT is faked and no payment call is attempted.
+                   The order exists; signing in is where their path resumes. */
+                <div
+                  className="border border-hairline p-5"
+                  role="status"
+                  data-testid="guest-pay-handoff"
+                >
+                  <p className="text-sm text-ink-secondary">
+                    Your order is created and waiting for payment. Sign in to
+                    complete it.
+                  </p>
+                  <Link
+                    href="/login?next=/checkout"
+                    className="mt-4 inline-block bg-ink px-6 py-3 text-sm text-paper transition-colors hover:bg-bronze"
+                  >
+                    Sign in to pay
+                  </Link>
+                </div>
+              ) : (
+                <PaymentLauncher
+                  order={order}
+                  contact={{
+                    name: shipping.full_name,
+                    email: shipping.email,
+                    phone: shipping.phone,
+                  }}
+                />
+              )}
             </div>
           </section>
         )}
       </div>
 
-      <aside className="self-start border border-line p-6 lg:sticky lg:top-24">
+      <aside className="self-start border border-hairline p-6 lg:sticky lg:top-24">
         <h2 className="font-display text-xl tracking-tight">Order summary</h2>
         <div className="mt-4 flex items-baseline justify-between text-sm">
-          <span className="text-ink-muted">Cart subtotal</span>
+          <span className="text-ink-secondary">Cart subtotal</span>
           <span>{formatINR(clientSubtotal)}</span>
         </div>
         {order && (
           <>
             <div className="mt-2 flex items-baseline justify-between text-sm">
-              <span className="text-ink-muted">Order total (server)</span>
+              <span className="text-ink-secondary">Order total (server)</span>
               <span>{formatINR(order.total_amount)}</span>
             </div>
             {Number(order.discount_amount) > 0 && (
-              <p className="mt-1 text-xs text-ink-muted">
+              <p className="mt-1 text-xs text-ink-secondary">
                 Includes coupon discount of {formatINR(order.discount_amount)}.
               </p>
             )}
           </>
         )}
-        <p className="mt-4 border-t border-line pt-4 text-xs text-ink-muted">
+        <p className="mt-4 border-t border-hairline pt-4 text-xs text-ink-secondary">
           Payments are processed by Razorpay. Card details never touch our
           servers.
         </p>

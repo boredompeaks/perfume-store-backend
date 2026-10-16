@@ -22,6 +22,14 @@ type Opts = {
   auth?: boolean;
   /** Next server-fetch caching (ISR) for server-component data calls. */
   revalidate?: number;
+  /**
+   * HTTP status of a SUCCESSFUL response (errors still reject as ApiError,
+   * and a 401-refresh cycle reports the status of the response that finally
+   * succeeded). For surfaces that answer the same body at two 2xx codes —
+   * restock opt-in is 201 created / 200 already-registered — the parsed
+   * body alone cannot tell them apart.
+   */
+  onStatus?: (status: number) => void;
 };
 
 const MUTATION_METHODS = new Set(["POST", "PATCH", "PUT", "DELETE"]);
@@ -156,6 +164,7 @@ export async function apiFetch<T>(
     throw new ApiError(res.status, message, fieldErrors, extras);
   }
 
+  opts.onStatus?.(res.status);
   if (res.status === 204) return undefined as T;
   return (await res.json()) as T;
 }

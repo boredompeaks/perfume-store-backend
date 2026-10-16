@@ -18,7 +18,7 @@ export default function OrdersListView() {
 
   if (authStatus === "loading" || (authStatus === "authenticated" && isPending)) {
     return (
-      <p className="text-ink-muted" role="status">
+      <p className="text-ink-secondary" role="status">
         Loading your orders…
       </p>
     );
@@ -26,7 +26,7 @@ export default function OrdersListView() {
 
   if (authStatus === "anonymous" || (error instanceof ApiError && error.status === 401)) {
     return (
-      <div className="border border-line p-10 text-center">
+      <div className="border border-hairline p-10 text-center">
         <p className="font-display text-2xl tracking-tight">
           Sign in to see your orders.
         </p>
@@ -42,8 +42,8 @@ export default function OrdersListView() {
 
   if (isError || !orders) {
     return (
-      <div className="border border-line p-10 text-center">
-        <p className="text-ink-muted">Couldn&apos;t load your orders.</p>
+      <div className="border border-hairline p-10 text-center">
+        <p className="text-ink-secondary">Couldn&apos;t load your orders.</p>
         <button
           type="button"
           onClick={() => refetch()}
@@ -57,7 +57,7 @@ export default function OrdersListView() {
 
   if (orders.length === 0) {
     return (
-      <div className="border border-line p-16 text-center">
+      <div className="border border-hairline p-16 text-center">
         <p className="font-display text-2xl tracking-tight">No orders yet.</p>
         <Link
           href="/products"
@@ -70,7 +70,7 @@ export default function OrdersListView() {
   }
 
   return (
-    <ul className="divide-y divide-line border-y border-line">
+    <ul className="divide-y divide-hairline border-y border-hairline">
       {orders.map((order) => {
         const itemSummary = order.items
           .map((item) => `${item.product_name} × ${item.quantity}`)
@@ -87,14 +87,14 @@ export default function OrdersListView() {
                   Order #{order.id}
                 </span>
                 <OrderStatusBadge status={order.status} />
-                <span className="text-sm text-ink-muted">
+                <span className="text-sm text-ink-secondary">
                   {formatOrderDate(order.created_at)}
                 </span>
                 <span className="ml-auto text-sm">
                   {formatINR(order.total_amount)}
                 </span>
               </div>
-              <p className="mt-1 truncate text-sm text-ink-muted">
+              <p className="mt-1 truncate text-sm text-ink-secondary">
                 {itemSummary}
               </p>
             </Link>

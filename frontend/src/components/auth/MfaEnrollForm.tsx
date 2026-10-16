@@ -113,7 +113,7 @@ export default function MfaEnrollForm() {
       <form onSubmit={onConfirm} className="space-y-6" noValidate>
         <div>
           <h2 className="font-display text-xl">Scan, then confirm</h2>
-          <ol className="mt-2 list-decimal space-y-1 pl-5 text-sm text-ink-muted">
+          <ol className="mt-2 list-decimal space-y-1 pl-5 text-sm text-ink-secondary">
             <li>Open your authenticator app and add a new account.</li>
             <li>
               {qr
@@ -130,7 +130,7 @@ export default function MfaEnrollForm() {
             alt="QR code for adding this account to an authenticator app"
             width={192}
             height={192}
-            className="border border-line-strong bg-surface p-2"
+            className="border border-field-border bg-surface p-2"
           />
         )}
 
@@ -138,13 +138,13 @@ export default function MfaEnrollForm() {
             from the provisioning URI the backend already returns, but plenty
             of authenticator flows cannot scan (no camera, a desktop app that
             wants the key), and the secret is the last resort. */}
-        <div className="space-y-3 border border-line p-4 text-sm">
+        <div className="space-y-3 border border-hairline p-4 text-sm">
           <p>
-            <span className="block text-ink-muted">Setup key</span>
+            <span className="block text-ink-secondary">Setup key</span>
             <code className="block break-all">{phase.setup.secret}</code>
           </p>
           <p>
-            <span className="block text-ink-muted">Setup link</span>
+            <span className="block text-ink-secondary">Setup link</span>
             <code className="block break-all">{phase.setup.otpauth_uri}</code>
           </p>
         </div>
@@ -184,7 +184,7 @@ export default function MfaEnrollForm() {
 
   return (
     <form onSubmit={onSetup} className="space-y-4" noValidate>
-      <p className="text-sm text-ink-muted">
+      <p className="text-sm text-ink-secondary">
         Multi-factor authentication is mandatory for staff accounts. Sign in
         with your credentials once to generate a secret, then scan it with
         your authenticator app.

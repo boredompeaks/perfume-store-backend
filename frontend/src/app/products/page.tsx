@@ -70,7 +70,7 @@ async function ProductSection({ filters }: { filters: ProductFilters }) {
         <p className="font-display text-2xl tracking-tight">
           Nothing matches.
         </p>
-        <p className="mx-auto mt-3 max-w-sm text-ink-muted">
+        <p className="mx-auto mt-3 max-w-sm text-ink-secondary">
           Try a different search, or widen the price range.
         </p>
         <Link
@@ -85,7 +85,7 @@ async function ProductSection({ filters }: { filters: ProductFilters }) {
 
   return (
     <>
-      <p className="mt-6 text-sm text-ink-muted" aria-live="polite">
+      <p className="mt-6 text-sm text-ink-secondary" aria-live="polite">
         {count} {count === 1 ? "product" : "products"}
         {isFiltered(filters) ? " matching your filters" : ""}
       </p>

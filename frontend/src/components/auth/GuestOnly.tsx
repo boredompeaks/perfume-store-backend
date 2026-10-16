@@ -26,7 +26,7 @@ export default function GuestOnly({
 
   if (status !== "anonymous") {
     return (
-      <div className="py-24 text-center text-sm text-ink-muted" role="status">
+      <div className="py-24 text-center text-sm text-ink-secondary" role="status">
         {status === "loading"
           ? "Loading…"
           : "You're already signed in — taking you to your orders…"}
