@@ -28,14 +28,19 @@ test("orders list and detail render; pending order shows resume panel", async ({
   expect(res.status()).toBe(201);
   const order = (await res.json()) as {
     id: number;
+    order_number: string;
     total_amount: string;
     status: string;
   };
   expect(order.status).toBe("pending");
 
-  // List: row with id, item summary, server total.
+  // List: row with order_number (the customer-facing reference — §5.5
+  // replaces the sequential id in all customer-facing text), item summary,
+  // server total.
   await page.goto("/orders");
-  const row = page.getByRole("link", { name: new RegExp(`Order #${order.id}`) });
+  const row = page.getByRole("link", {
+    name: new RegExp(`Order #${order.order_number}`),
+  });
   await expect(row).toBeVisible();
   await expect(row.getByText("marj × 2")).toBeVisible();
   await expect(row.getByText("₹4,000.00")).toBeVisible();
@@ -43,7 +48,9 @@ test("orders list and detail render; pending order shows resume panel", async ({
 
   // Detail: items, server total, delivery block, resume panel.
   await row.click();
-  await expect(page.getByRole("heading", { name: `Order #${order.id}` })).toBeVisible();
+  await expect(
+    page.getByRole("heading", { name: `Order ${order.order_number}` }),
+  ).toBeVisible();
   await expect(page.getByTestId("resume-payment-panel")).toBeVisible();
   await expect(page.getByText("marj × 2")).toBeVisible();
   await expect(page.getByText("₹4,000.00").first()).toBeVisible();
