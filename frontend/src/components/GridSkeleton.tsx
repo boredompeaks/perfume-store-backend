@@ -7,15 +7,20 @@
  * does not skeleton all 12 of its products (that would be 36 instances).
  *
  * `gridClassName` is the route's own column/gutter string so the fallback and
- * the real grid are one declaration. The default is the string the home page's
- * New-arrivals grid ships verbatim (`grid-cols-2 gap-x-4 gap-y-12
- * sm:grid-cols-3 lg:grid-cols-4`) — the skeleton's whole job is to match the
- * grid it stands in for, so it inherits home's `sm:grid-cols-3` and its 48px
- * row gap as-is even though §4 keeps the product grid at two columns on `sm`
- * and P1 caps inside-section gaps at 32px; those two are §5.1's to fix, and
- * changing the default here would make the skeleton LIE about the grid above
- * it. The listing passes its own §5.2 2/2/3/4 string explicitly below; when
- * home adopts it, this default becomes that string and the prop can go.
+ * the real grid are one declaration. The default mirrors the home
+ * New-arrivals grid's SHAPE — its columns (`grid-cols-2 sm:grid-cols-3
+ * lg:grid-cols-4`) and its `gap-x-4` are `app/page.tsx:35` exactly — but its
+ * row gap is NOT what home ships: the default carries `gap-y-12` (48px) while
+ * home ships `gap-y-8` (32px). (This comment used to claim the two strings
+ * were verbatim identical; the wave-6 audit corrected the claim — comment
+ * only, the default itself is deliberately unchanged in this pass.) The
+ * row-gap drift, along with home's `sm:grid-cols-3` where §4 keeps two
+ * columns on `sm`, is §5.1's to reconcile when home adopts the §5.2
+ * 2/2/3/4 string; until then the skeleton's job is to match the grid above
+ * it, and the default's own 48px row gap — over P1's 32px inside-section
+ * cap — travels with home's row gap untouched. The listing passes its own
+ * §5.2 2/2/3/4 string explicitly below; when home adopts it, this default
+ * becomes that string and the prop can go.
  */
 export default function GridSkeleton({
   count = 4,
