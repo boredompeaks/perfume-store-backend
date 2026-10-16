@@ -1558,7 +1558,7 @@ addition this redesign makes.**
 - **The phone line is conditional** on `contact.supportPhone` (KEEP) — unconfigured
   channels render nothing rather than a dead link. That is correct and it is
   unusual; most sites in this category show every channel always.
-- **CHANGE:** the contact buttons get `--border-field` (4.90:1) instead of
+- **CHANGE:** the contact buttons get `--border-field` (3.90:1) instead of
   `--border-line` (1.30:1). A 40×40 control whose only affordance is a hairline
   and a glyph is a 1.4.11 failure; the glyph itself passes at 17.49:1, but the
   boundary should too.
@@ -1711,8 +1711,12 @@ too.
 The coverage contract asks for an explicit decision here, so:
 
 **`/admin` — the Django admin lives on the API origin, not here.**
-`admin/page.tsx` is a 5-line `redirect()` to `process.env.ADMIN_URL`. **KEEP it
-exactly.** It already has `noindex, follow: false` (KEEP). There is no storefront
+`admin/page.tsx` is a `redirect()` (307) to `process.env.NEXT_PUBLIC_ADMIN_ORIGIN`
+— the shipped contract since U-W5-T1: the var is **fail-if-unset** (an unset or
+non-absolute value fails `next build` at module scope; no localhost default), the
+origin is normalized to the backend's `/admin/` mount, and `permanentRedirect` is
+deliberately not used so a cached 308 can never pin a moved admin host.
+**KEEP it** as shipped. It already has `noindex, follow: false` (KEEP). There is no storefront
 `/admin` to design: spec §5 and §13 both place the admin in a **separate
 application surface** with its own layout, navigation tree, access control layer
 and visual hierarchy, and the backend has already built it — the Django admin
