@@ -126,6 +126,13 @@ must hold + evidence artifact):
 Deliverable: `scripts/security_smoke.sh <base-url>` (fast regression subset)
 + a red-team report doc (per attack: attempted / invariant / result /
 severity) — this report is also a public trust artifact (see decisions.md).
+**T1a (families 1-5) SHIPPED 2026-10-16** — cycle 1 FIX 2xP3 -> cycle 2 SHIP,
+pushed origin/lane/a @79da100; 58 live rows vs api.boredompeaks.me (33 PASS /
+1 FAIL F3-C4 Medium throttle-cache hypothesis / 24 BLOCKED), smoke 33 checks
+green, floors 2151 both engines. **BLOCKED-ROWS OWNER OPS:** seed UAT
+(manage.py seed_demo), set RAZORPAY_WEBHOOK_SECRET, one test account,
+shipping on — then a second-pass task closes the 24. Q-OPS1 SHIPPED same day
+(lane/b @c36a3b5): compose.uat.yml overlay authored, compose config green.
 
 T2 — Load / stress / resource against the REAL URL (after red team):
 - k6 profiles: catalog browse + cart ops (read-heavy), then checkout ramp.
