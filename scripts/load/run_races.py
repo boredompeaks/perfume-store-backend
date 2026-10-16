@@ -593,7 +593,6 @@ INVARIANT_DEFS = {
             "SELECT count(*) AS captured FROM orders_order "
             "WHERE id IN ({order_ids}) AND payment_status = 'captured'"
         ),
-        "params": ("order_ids",),
         "expect_from": "expected_captured",
     },
     "T2-INV-3-ledger-once-per-capture": {
@@ -623,7 +622,6 @@ INVARIANT_DEFS = {
             "    OR (r.payment_status <> 'captured'"
             "        AND COALESCE(m.mv_rows, 0) <> 0)"
         ),
-        "params": ("order_ids",),
         "expect": {"rule": "scalar_eq", "column": "violations", "value": 0},
     },
     "T2-INV-5-coupon-burned-once": {
@@ -639,7 +637,6 @@ INVARIANT_DEFS = {
             "      AND o.payment_status = 'captured')"
             "    AS captured_coupon_orders"
         ),
-        "params": ("coupon_code",),
         "expect": {
             "rule": "row_eq",
             "value": {"used_count": 1, "captured_coupon_orders": 1},
@@ -657,7 +654,6 @@ INVARIANT_DEFS = {
             "      AND e.to_status = 'confirmed') AS capture_transitions"
             " FROM orders_order o WHERE o.id = {capture_order_id}"
         ),
-        "params": ("capture_order_id", "capture_payment_id"),
         "expect": {
             "rule": "row_eq",
             "value_from": {
@@ -681,7 +677,6 @@ INVARIANT_DEFS = {
             "  (SELECT count(*) FROM orders_orderitem i"
             "    WHERE i.order_id = {capture_order_id}) AS item_rows"
         ),
-        "params": ("capture_order_id",),
         "expect": {
             "rule": "row_eq",
             "computed": {"mv_rows": "eq:item_rows"},
@@ -696,13 +691,12 @@ INVARIANT_DEFS = {
             "SELECT count(*) AS active_holds FROM products_stockreservation"
             " WHERE order_id IN ({order_ids}) AND status = 'active'"
         ),
-        "params": ("order_ids",),
         "expect": {"rule": "scalar_eq", "column": "active_holds", "value": 0},
     },
 }
 
 
-def checks_for_phase(phase: str, ctx: dict, results: dict) -> list[dict]:
+def checks_for_phase(phase: str, results: dict) -> list[dict]:
     """Materialize the invariant list for one phase with this run's values."""
     checks: list[dict] = []
 
@@ -940,7 +934,7 @@ def cmd_run(args: argparse.Namespace) -> int:
             pr: dict = {}
             phase_runners[phase](ctx, pr)
             results["phases"][phase] = pr
-            checks = checks_for_phase(phase, ctx, pr)
+            checks = checks_for_phase(phase, pr)
             if args.emit_sql:
                 write_json(
                     args.emit_sql.format(phase=phase)
