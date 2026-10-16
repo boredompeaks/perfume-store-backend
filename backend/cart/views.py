@@ -25,6 +25,18 @@ class CartMutationRateThrottle(ScopedRateThrottle):
         return super().allow_request(request, view)
 
 
+def _object_body(data):
+    """The write body as a dict, or ``{}`` when it is not a JSON object.
+
+    A JSON array / scalar / null body parses fine but has no ``.get`` to
+    call, so reading keys off it raised AttributeError — a 500 on a public
+    write endpoint (F7-B1). Reading it as the empty object routes every
+    such body into the endpoint's own missing-key 400, byte-identical to
+    posting ``{}``; form posts are QueryDict (a dict subclass) and are
+    unaffected."""
+    return data if isinstance(data, dict) else {}
+
+
 # SPEC-17-03 [R-17.18]: this GET is the SPA's boot call (the header's cart
 # badge runs it on every page load), so it is the natural surface to issue
 # the csrftoken cookie from: the browser has the double-submit cookie in
@@ -52,8 +64,9 @@ def cart_detail(request):
         return Response(serializer.data)
 
     elif request.method == "POST":
-        product_id = request.data.get("product_id")
-        quantity = request.data.get("quantity", 1)
+        body = _object_body(request.data)
+        product_id = body.get("product_id")
+        quantity = body.get("quantity", 1)
 
         if not product_id:
             return Response(
@@ -144,7 +157,7 @@ def cart_item_detail(request, item_id):
         )
 
     if request.method == "PATCH":
-        quantity = request.data.get("quantity")
+        quantity = _object_body(request.data).get("quantity")
 
         if quantity is None:
             return Response(
@@ -223,7 +236,7 @@ def cart_coupon(request):
 
         return Response(serializer.data)
 
-    code = request.data.get("code")
+    code = _object_body(request.data).get("code")
 
     if not code:
         return Response(
