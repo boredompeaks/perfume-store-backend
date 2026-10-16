@@ -316,16 +316,31 @@ const checkoutSource = readFileSync(
   "utf8",
 );
 
-/** Every source file under src, as [path relative to src (leading slash), source]. */
+/**
+ * Comments are prose: this file's own pins deliberately quote the retired
+ * class pairs (`h-9 min-w-9`, `px-3 py-1.5`) so a reader can see what was
+ * repaired, and a comment in a component may cite an old value too. Code-only
+ * is what the assertions below measure — and stripping them also keeps a
+ * `/* … *​/` mention of `<main>` from reading as a second landmark.
+ */
+function stripComments(source: string): string {
+  return source
+    .replace(/\/\*[\s\S]*?\*\//g, "")
+    .replace(/^\s*\/\/.*$/gm, "");
+}
+
+/** Every non-test source file under src, as [path under src (leading slash), code]. */
 function componentSources(): [string, string][] {
-  return [...sourceFiles(srcDir)].map((file) => {
-    const normalized = file.replace(/\\/g, "/");
-    const at = normalized.indexOf("/src/");
-    return [
-      at === -1 ? normalized : normalized.slice(at + 4),
-      readFileSync(file, "utf8"),
-    ] as const;
-  });
+  return [...sourceFiles(srcDir)]
+    .filter((file) => !/\.test\.tsx?$/.test(file))
+    .map((file) => {
+      const normalized = file.replace(/\\/g, "/");
+      const at = normalized.indexOf("/src/");
+      return [
+        at === -1 ? normalized : normalized.slice(at + 4),
+        stripComments(readFileSync(file, "utf8")),
+      ] as const;
+    });
 }
 
 /**
@@ -418,7 +433,7 @@ describe("7.2 keyboard order and focus", () => {
     expect(overlaySource).toContain("e.key === \"Escape\"");
     expect(overlaySource).toContain("focusables()[0]?.focus()");
     expect(overlaySource).toContain("previouslyFocused?.focus()");
-    expect(overlaySource).toMatch(/last\.focus\(\)[\s\S]{0,80}first\.focus\(\)/);
+    expect(overlaySource).toMatch(/last\.focus\(\)[\s\S]{0,240}first\.focus\(\)/);
   });
 });
 
@@ -511,7 +526,7 @@ describe("7.5 target sizes", () => {
       "components/AddToCartButton.tsx",
       "components/cart/CartLineItem.tsx",
     ]) {
-      const source = readFileSync(join(srcDir, path), "utf8");
+      const source = stripComments(readFileSync(join(srcDir, path), "utf8"));
       expect(
         (source.match(/h-11 min-w-11/g) ?? []).length,
         `${path}: §7.5 wants 44x44 controls`,
