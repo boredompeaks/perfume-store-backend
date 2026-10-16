@@ -53,7 +53,7 @@ orchestrator via orch-bridge BE-010 with full contracts; backend halves
 
 | ID | Task | Lane | Notes |
 |---|---|---|---|
-| Q-P1 | F7-backend half: refresh token -> HttpOnly+Secure+SameSite cookie on `/api/accounts/refresh` (+ Origin/CSRF check on the refresh endpoint); dual-accept migration window; then stop issuing body refresh tokens | A | **SHIPPED 2026-10-15** — audit cycle 1 FIX (P3 changelog typo) + cycle 2 BUGS-FOUND (P2: 2 tracked 0-byte `__init__.py` deleted in worktree, restored from HEAD) + cycle 3 SHIP, pushed origin/lane/a @f432791; 2129 OK both engines, cov 99.81%; contract posted bridge BE-015 |
+| Q-P1 | F7-backend half: refresh token -> HttpOnly+Secure+SameSite cookie on `/api/accounts/refresh` (+ Origin/CSRF check on the refresh endpoint); dual-accept migration window; then stop issuing body refresh tokens | A | **SHIPPED 2026-10-15** — audit cycle 1 FIX (P3 changelog typo) + cycle 2 BUGS-FOUND (P2: 2 tracked empty package-init files deleted in worktree by an external cleaner, restored from HEAD) + cycle 3 SHIP, pushed origin/lane/a @f432791; 2129 OK both engines, cov 99.81%; contract posted bridge BE-015 |
 | Q-P2 | (owner) F6 HSTS + Access policies + Turnstile keys — quick dashboard session; checklist in decisions.md | owner | Blocks nothing but Q-S3's edge half |
 
 ## Phase T — Proof program: red team, then load against the REAL URL
