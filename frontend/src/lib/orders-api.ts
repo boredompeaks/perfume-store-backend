@@ -1,7 +1,51 @@
 import { API_BASE } from "./config";
 import { ApiError, apiFetch } from "./api";
 import { getGuestToken, setGuestToken } from "./guest-token";
-import type { CouponPreview, Order, PaymentSession } from "./types";
+import type { CouponPreview, Order, OrderItem, PaymentSession } from "./types";
+
+/**
+ * The order READ record — every field the customer-facing order surfaces
+ * (list rows, detail header, lifecycle timeline, totals) consume. Every
+ * member is verified field-by-field against the backend's projections; a
+ * field the serializers do not ship is deliberately absent here rather than
+ * invented (§0b.1):
+ *
+ * - `OrderSerializer.fields` — backend/orders/serializers.py:78-137:
+ *   `order_number` :80, `payment_status` / `fulfilment_status` :97-98,
+ *   `shipping_amount` / `shipping_method_code` :112-120, `currency` :124,
+ *   the six lifecycle timestamps :131-136.
+ * - `OrderItemSerializer.fields` — backend/orders/serializers.py:16-29:
+ *   `sku` :20, `variant_name` :21, `currency` :28.
+ *
+ * NOT here: `OrderStatusEvent` rows. The detail serializer never exposes
+ * them, so §5.5's lifecycle timeline is fed by the six timestamps below —
+ * exactly what the spec names, nothing more.
+ */
+export type OrderItemRecord = OrderItem & {
+  /** Frozen at checkout (backend/orders/models.py:448-451); empty string today, never a live lookup. */
+  sku: string;
+  /** Frozen at checkout (models.py:453-456); mirrors the product name until variants ship. */
+  variant_name: string;
+  currency: string;
+};
+
+export type OrderRecord = Omit<Order, "items"> & {
+  items: OrderItemRecord[];
+  /** Customer-facing reference ORD-YYYY-NNNNNN; `id` stays in the URL/API only (§5.5, §12-G4). */
+  order_number: string;
+  payment_status: string;
+  fulfilment_status: string;
+  shipping_amount: string;
+  /** Frozen delivery-option code — `""` (never null) when the order was priced with no shipping configured (models.py:257-262). */
+  shipping_method_code: string;
+  currency: string;
+  paid_at: string | null;
+  fulfilled_at: string | null;
+  shipped_at: string | null;
+  delivered_at: string | null;
+  cancelled_at: string | null;
+  refunded_at: string | null;
+};
 
 /**
  * The guest read credential's only wire home (backend
@@ -105,7 +149,7 @@ export type OrderHistoryPage = {
   current_page: number;
   next_page: boolean;
   previous_page: boolean;
-  results: Order[];
+  results: OrderRecord[];
 };
 
 export function fetchOrderHistoryPage(
@@ -117,8 +161,19 @@ export function fetchOrderHistoryPage(
   return apiFetch<OrderHistoryPage>(`/api/orders/?${params}`, { auth: true });
 }
 
-export function fetchOrders(): Promise<Order[]> {
+export function fetchOrders(): Promise<OrderRecord[]> {
   return fetchOrderHistoryPage().then((page) => page.results);
+}
+
+/**
+ * CHANGE-13 / §5.5: the detail page is fed by its OWN keyed read —
+ * `GET /api/orders/<id>/` (backend/orders/views/order.py:84). Owner-checked:
+ * the caller's order only, one uniform 404 for unknown-or-foreign ids
+ * (order.py:91-95 — the UI must not distinguish those cases), 401 when
+ * signed out.
+ */
+export function fetchOrder(orderId: number): Promise<OrderRecord> {
+  return apiFetch<OrderRecord>(`/api/orders/${orderId}/`, { auth: true });
 }
 
 /**
