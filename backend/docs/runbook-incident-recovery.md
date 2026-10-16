@@ -53,7 +53,7 @@ used to defer to is now built. §3a below is how you consume one of those dumps.
 
 | Signal | Where it shows up | First move |
 |---|---|---|
-| Health probe degraded (non-`ok`, HTTP 503) | `GET /health/` (`ops/views.py:24`, checks from `ops/services.get_health`) — `database`, `media_writable`, `smtp_configured`, `razorpay_mode` | read the failing check name; `database: false` is a DB incident |
+| Health probe degraded (non-`ok`, HTTP 503) | `GET /health/` (`ops/views.py`, `health` view; checks from `ops.services.get_health`) — the public body carries only `database`, `media_writable` and `shipping_configured` (the Q-S2/F2 split) | read the failing check name; `database: false` is a DB incident. The business counters and configuration modes that used to ride this body (`smtp_configured`, `razorpay_mode`, pending-order/cart/stock counts) moved to the staff endpoint `GET /api/v1/admin/health/` behind `reports.read` (same capability as the dashboard) |
 | Payment failures spiking | `ops.alerts.notify_payment_failure_spike` (mail to `ALERT_RECIPIENTS`, one per `ALERT_COOLDOWN_SECONDS`) + audit rows `payment.signature_rejected` | check the gateway dashboard before touching data |
 | Stock-out / low-stock alert | `ops.alerts.notify_out_of_stock` / `notify_low_stock` | usually a symptom, not the incident |
 | Suspicious admin activity | `ops.alerts.notify_security_change` + audit log `/admin/audit-log/` | §2 triage, then §4 escalation |
@@ -65,7 +65,10 @@ evidence of health — `GET /health/` is the authority.
 
 ## 2. Triage (first 15 minutes, no writes)
 
-1. `GET /health/` — which check is red, and is the database reachable?
+1. `GET /health/` — which check is red, and is the database reachable? (The
+   public body is deploy-relevant checks only; the full payload — SMTP,
+   Razorpay mode, order/cart/stock counters — needs `GET /api/v1/admin/health/`
+   with `reports.read`.)
 2. `manage.py showmigrations` — pending migrations mean the schema on disk is
    behind the code; do **not** run `migrate` on an incident's database
    without a restore rehearsal (§0) and a second pair of eyes.
