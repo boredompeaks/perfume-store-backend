@@ -37,8 +37,8 @@ name: ghcr-publish
 on:
   push:
     branches: [spec-comp, feat/add-frontend]
-    # Same shape as backend-tests' path filter: a push that cannot change
-    # the image (frontend-only, docs-only) does not spend build minutes.
+    # Frontend-only or root-doc-only pushes skip; backend/docs/** matches
+    # backend/** below, so a backend docs-only change DOES spend a build.
     paths:
       - "backend/**"
       - "docker-compose.yml"

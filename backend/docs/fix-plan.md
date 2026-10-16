@@ -1,5 +1,7 @@
 # Phase-by-phase fix plan
 
+> **DATED SNAPSHOT — historical record, not a status source.** This document is frozen as of 2026-09-18: it records what was true when written and is no longer maintained as fixes ship. Do not read a status out of it — the live source of truth for any finding, plan item, or vulnerability named here is the run ledger: `spec-run-state.md`, the per-section reports under `run/`, and the append-only `changes.md`.
+
 Ordered so that each phase is shippable and doesn't break the last. "Why" is stated for every item; finding IDs reference `audit.md` / `vulnerabilities.md`.
 
 ## Phase 0 — Repo & environment hygiene (done in audit session)

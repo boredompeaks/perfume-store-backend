@@ -358,11 +358,20 @@ class products(models.Model):
                 # opt-out.
                 continue
             try:
+                # SPEC-Q-RS1: the address is owner-shaped, not
+                # user-shaped — an account row mails user.email (a
+                # submitted body email never redirects it), a guest row
+                # mails its normalized email column.
+                recipient = (
+                    preference.email
+                    if preference.user_id is None
+                    else preference.user.email
+                )
                 notifications.send_email(
                     "back_in_stock",
                     {"product": product, "frontend_url": settings.FRONTEND_URL},
                     f"Back in stock: {product.name}",
-                    preference.user.email,
+                    recipient,
                 )
             except Exception:
                 # Log-only: one user's SMTP failure must not abort the
@@ -371,8 +380,12 @@ class products(models.Model):
                 # the next crossing retries this row, as it did when the
                 # send ran under the stock lock.
                 logger.exception(
-                    "Back-in-stock email failed: user %s, product %s",
-                    preference.user_id,
+                    "Back-in-stock email failed: %s, product %s",
+                    (
+                        f"guest {preference.email}"
+                        if preference.user_id is None
+                        else f"user {preference.user_id}"
+                    ),
                     product.pk,
                 )
                 RestockNotification.objects.filter(
@@ -498,20 +511,44 @@ class RestockNotification(models.Model):
     - a customer wanting a fresh mail without a sell-out opts out and
       back in (the opt-in clears notified_at).
 
-    Unique per (user, product): at most one preference row per pair, the
-    DB constraint is the concurrency authority (two concurrent opt-ins
-    race to one row — conventions.md forbids check-then-act). Placement
-    in products/ (not a new app): the write trigger is
-    ``products.adjust_stock`` and every other customer-facing mount lives
-    under the products/cart URL namespaces; a one-model feature does not
-    earn an app.
+    SPEC-Q-RS1 (BE-012): two owner shapes, exactly one per row, enforced
+    by a DB check constraint (the orders account-xor-guest precedent): an
+    ACCOUNT row has a ``user`` and an empty ``email`` column (the
+    account's own address on ``user.email`` remains the only address the
+    trigger mails — a submitted body email never redirects an authed
+    opt-in); a GUEST row has ``user`` NULL and the normalized submitted
+    address in ``email``. The guest half of the surface exists so a
+    signed-out shopper can still be notified; never trust a submitted
+    address blindly — the view validates its format before a row is
+    armed, and the pair of partial/unique constraints below is the race
+    authority for each shape (no check-then-act): accounts stay unique
+    per (user, product), guests per (email, product).
+
+    Unique per owner-shape: at most one preference row per account pair
+    and one per guest (email, product) pair, the DB constraints are the
+    concurrency authority (two concurrent opt-ins race to one row —
+    conventions.md forbids check-then-act). Placement in products/ (not a
+    new app): the write trigger is ``products.adjust_stock`` and every
+    other customer-facing mount lives under the products/cart URL
+    namespaces; a one-model feature does not earn an app.
     """
 
+    # NULL means the row is a GUEST opt-in: the owner is the normalized
+    # address in ``email``, not an account (SPEC-Q-RS1). CASCADE stays:
+    # deleting an account drops that account's opt-ins; guest rows have
+    # no account to cascade from and die with the product.
     user = models.ForeignKey(
         "auth.User",
         on_delete=models.CASCADE,
         related_name="restock_notifications",
+        null=True,
+        blank=True,
     )
+    # The guest opt-in address (SPEC-Q-RS1), stored normalized (strip +
+    # lower, the view's contract). Empty string on account rows — the
+    # empty/non-empty split is what the XOR check constraint reads, so it
+    # must be "" and never NULL there.
+    email = models.EmailField(max_length=254, blank=True, default="")
     product = models.ForeignKey(
         products,
         on_delete=models.CASCADE,
@@ -528,6 +565,28 @@ class RestockNotification(models.Model):
                 fields=["user", "product"],
                 name="uniq_user_product_restock_optin",
             ),
+            # Guest rows race on their own key: NULL users never collide
+            # under the account constraint (SQL NULLs are distinct), so
+            # the (email, product) pair needs its own uniqueness among
+            # guest rows — get_or_create's IntegrityError-retry semantics
+            # lean on whichever constraint the row shape hits.
+            models.UniqueConstraint(
+                fields=["email", "product"],
+                condition=models.Q(user__isnull=True),
+                name="uniq_guest_email_product_restock_optin",
+            ),
+            # [R-1.13-style two-owner invariant]: a row is an account
+            # opt-in (user set, email empty) or a guest opt-in (user
+            # null, email non-empty), never neither and never both.
+            # "Neither" is an opt-in no owner could ever act on; "both"
+            # would carry two competing addresses for one trigger send.
+            models.CheckConstraint(
+                condition=(
+                    models.Q(user__isnull=False, email="")
+                    | models.Q(user__isnull=True, email__gt="")
+                ),
+                name="restock_owner_xor_ck",
+            ),
         ]
         indexes = [
             # The restock trigger's exact lookup: armed (active, unnotified)
@@ -542,7 +601,8 @@ class RestockNotification(models.Model):
 
     def __str__(self):
         state = "active" if self.active else "opted out"
-        return f"{self.user_id} -> {self.product_id} ({state})"
+        owner = self.user_id if self.user_id is not None else self.email
+        return f"{owner} -> {self.product_id} ({state})"
 
 
 class StockReservation(models.Model):

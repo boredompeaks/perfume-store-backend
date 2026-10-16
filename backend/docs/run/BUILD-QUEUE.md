@@ -11,9 +11,9 @@ Status legend: `PENDING` | `BUILDING` | `IN-AUDIT` | `SHIPPED` | `BLOCKED(owner)
 Queue execution APPROVED by owner 2026-10-15 (name not yet decided — run
 everything EXCEPT Phase N; frontend tasks are agent-owned per owner).
 **PAUSED by owner 2026-10-15T11:01** after Q-S1+Q-S3 audits returned SHIP;
-resumed 2026-10-15T~17:0x per owner continue. **PHASE S COMPLETE** — all four
-tasks SHIPPED (auditor SHIP cycle 1 each), lanes pushed; GATE_PHASE opened at
-the section boundary. Cross-orchestrator coordination channel:
+resumed 2026-10-15T~17:0x per owner continue. **PHASE S COMPLETE + PROMOTED
+2026-10-15** — PR #38 merged `a43f058` (integrated tip 2114 OK both engines,
+cov 99.81%, xf=2). Cross-orchestrator coordination channel:
 `C:\Users\Admin\AppData\Local\Temp\opencode\orch-bridge.md` (+bridge-watch.ps1).
 
 ---
@@ -26,6 +26,7 @@ the section boundary. Cross-orchestrator coordination channel:
 | Q-S2 | F2: split /health/ — public keeps `{"status":"ok","checks":{...deploy-relevant}}` (FIRST verify release.sh's exact wait contract); pending_orders/carts/stock/razorpay_mode/smtp_configured move behind a staff-capability endpoint or die if nothing reads them | A | **SHIPPED 2026-10-15** — auditor SHIP cycle 1, pushed origin/lane/a @163851b; floor 2093→2096 both engines, cov 99.81%; waiters proven body-blind; P3 notes (brief figure wrong; fixture email) travel with next build; stale-docs findings routed Q-D2 |
 | Q-S3 | F3: ACCESS GATE on `/api/accounts/username-available/` + `/api/accounts/register/` (Turnstile/challenge + tightened throttle); drop numeric `user.id` from the register response. Owner chose gate-over-removal | B | **SHIPPED 2026-10-15** — auditor SHIP cycle 1, pushed origin/lane/b @90520c0; dedicated scopes 5/min + env-gated signed-challenge (zero-config invariant verified, mutation 9 pins); tests 2093->2101 (+8); api-contract register row stale -> Q-D2; register `id` drop flagged orch-bridge BE-003; residual oracles run/Q-S3-evidence.md |
 | Q-S4 | F8-verify + hardening: prove MFAAdminSite enforces the MFA code field on the Django admin path (SPEC-17-05/20-13 built it; pentest saw only pre-enrollment login); verify storefront MFA enrollment requires an already-privileged session + throttle; add throttle/lockout on the Django admin login form if the API auth-scope does not cover it | B | **SHIPPED 2026-10-15** — auditor SHIP cycle 1, pushed origin/lane/b @6a6de0a; floor 2101→2111 both engines, cov 99.81%; AdminLoginThrottle mutation-proven (M1/M2, 3 pins each); matrix run/Q-S4-evidence.md; V-18 in vulnerabilities.md stale (auditor/human file) |
+| Q-RS1 | (FO ask BE-012) restock endpoint accepts optional submitted email for unauthenticated guests (throttle-bounded, no enumeration oracle); authed path mails user.email unchanged | B | **SHIPPED 2026-10-15** — cycle 1 BUGS-FOUND (P2: unparseable guest body 400'd instead of uniform 401) + cycle 2 SHIP, pushed origin/lane/b @6ab9305; 2130 OK both engines, cov 99.82%; oracle 12/12; my handoff's authed-400 claim REFUTED (parent=201, adjudicated+verified); shape posted bridge BE-016 |
 
 Owner-side parallel actions (dashboard, not agents):
 - F6: Cloudflare Always-HTTPS + HSTS header on test.boredompeaks.me.
@@ -41,11 +42,18 @@ Owner-side parallel actions (dashboard, not agents):
 | Q-F2 | F5: sitemap/og/JSON-LD read the right SITE var in EVERY build path (deploy.yml sets NEXT_PUBLIC_SITE_URL already — something else wins); rebuild+deploy; regression: sitemap `<loc>` hosts = public host only | |
 | Q-F3 | F7-frontend half: consume the HttpOnly refresh cookie (dual-accept window vs legacy localStorage token, then purge `aurel.refresh`) | pairs with Q-P1 |
 
+Execution note 2026-10-15: npm is denied in the backend-agent sandbox, so
+Q-F1 and the Q-F3 frontend half (types.ts drops, cookie consumption,
+`aurel.session`/`aurel.refresh` purge) were handed to the frontend
+orchestrator via orch-bridge BE-010 with full contracts; backend halves
+(Q-P1) ship on the lanes. Q-F2 collapsed to the env-host contract
+(FE-003 option b, BE-007).
+
 ## Phase P — Hardening pairs
 
 | ID | Task | Lane | Notes |
 |---|---|---|---|
-| Q-P1 | F7-backend half: refresh token -> HttpOnly+Secure+SameSite cookie on `/api/accounts/refresh` (+ Origin/CSRF check on the refresh endpoint); dual-accept migration window; then stop issuing body refresh tokens | A | Pairs with Q-F3. Existing logged-in users must not be bricked |
+| Q-P1 | F7-backend half: refresh token -> HttpOnly+Secure+SameSite cookie on `/api/accounts/refresh` (+ Origin/CSRF check on the refresh endpoint); dual-accept migration window; then stop issuing body refresh tokens | A | **SHIPPED 2026-10-15** — audit cycle 1 FIX (P3 changelog typo) + cycle 2 BUGS-FOUND (P2: 2 tracked empty package-init files deleted in worktree by an external cleaner, restored from HEAD) + cycle 3 SHIP, pushed origin/lane/a @f432791; 2129 OK both engines, cov 99.81%; contract posted bridge BE-015 |
 | Q-P2 | (owner) F6 HSTS + Access policies + Turnstile keys — quick dashboard session; checklist in decisions.md | owner | Blocks nothing but Q-S3's edge half |
 
 ## Phase T — Proof program: red team, then load against the REAL URL
@@ -59,6 +67,10 @@ a client demo).
 T0 — Seed: promote the demo seed script (untracked until T0 lands it in-tree)
 -> `manage.py seed_demo` (marked
 rows, cleanup flag). Both red team and load runs start from known state.
+**SHIPPED 2026-10-15** — auditor SHIP cycle 1, pushed origin/lane/a @be5b53c;
+orders app home, marker-queryset cleanup (foreign rows + role groups proven
+survive), 2134 OK both engines cov 99.81%; builder also repaired the
+external-cleaner venv damage (see Q-D3 report) — owner should stop that cleaner.
 
 T1 — Red-team attack catalog (each item = attempted attack + invariant that
 must hold + evidence artifact):
@@ -134,12 +146,12 @@ T2 — Load / stress / resource against the REAL URL (after red team):
 | ID | Task | Notes |
 |---|---|---|
 | Q-D1 | (a) slim `spec-run-state.md` -> index template; promotion narratives -> `run/promotions.md` | orchestrator bookkeeping |
-| Q-D2 | (c) docs freshness pass, priority: `deploy-runbook.md` (wrong since compose/release changed), `api-contract.md` (error wire format changed by ENVELOPE-WIRE), `test-gaps.md` (0 missed now); mark fix-plan/vulnerabilities/audit as dated snapshots | |
-| Q-D3 | SECURITY.md (reporting channel, scope, test-mode note) + CONTRIBUTING.md (lane/spec-comp/PR flow, conventions pointer, test commands) | license-independent |
+| Q-D2 | (c) docs freshness pass, priority: `deploy-runbook.md` (wrong since compose/release changed), `api-contract.md` (error wire format changed by ENVELOPE-WIRE), `test-gaps.md` (0 missed now); mark fix-plan/vulnerabilities/audit as dated snapshots | Q-D2a **SHIPPED 2026-10-15** (cycle 1 FIX 3xP3 -> cycle 2 SHIP, pushed origin/lane/b @efcbb7a; 2130 OK both engines cov 99.82%); snapshot-marking half = Q-D2b **SHIPPED 2026-10-16** (cycle 1 SHIP, pushed origin/lane/b @15ff0c6; banners + V-18 remediated with cites; 2130 OK both engines) |
+| Q-D3 | SECURITY.md (reporting channel, scope, test-mode note) + CONTRIBUTING.md (lane/spec-comp/PR flow, conventions pointer, test commands) | **SHIPPED 2026-10-16** — cycle 1 BUGS-FOUND (P2 cadence-window flake on lane/a accepted pre-existing; P3 ghcr cell) -> cycle 2 SHIP, pushed origin/lane/a @21f78e2; suite 2134 OK both engines cov 99.81%; RE note: ghcr-publish.yml inline comment carries the same false docs-only claim (RE-owned, optional gate chore) |
 | Q-D4 | (d) conventions rule ("comment the why and the invariant, never the what; history belongs in changes.md") + opportunistic trim; optional top-10 narrative-header pass | no mass scrub |
 | Q-D5 | (b) changes.md rotation -> `changes/changes-2026Q4.md` + pointer row | SCHEDULED AT THIS QUEUE'S FINAL PROMOTION BOUNDARY (byte-integrity baseline + scanner scope updated in the same gate) |
 | Q-D6 | README refresh (owner 2026-10-15): verify every command still true, freshen product one-liner, keep current repo-name branding — NO product-name rename until name is finalized | rides Phase D |
-| Q-D7 | test-infra: fix two pre-existing environmental reds hit independently by both Q-S1+Q-S3 builders — (a) celery cadence pin is deterministic-fail 02:17-03:17 UTC daily (wall-clock invariant needs a freeze/mock, not the real clock), (b) restore-drill TEMP-glob cross-process race when suites run concurrently | both builders root-caused; after-runs clean |
+| Q-D7 | test-infra: fix two pre-existing environmental reds hit independently by both Q-S1+Q-S3 builders — (a) celery cadence pin is deterministic-fail 02:17-03:17 UTC daily (wall-clock invariant needs a freeze/mock, not the real clock), (b) restore-drill TEMP-glob cross-process race when suites run concurrently | both builders root-caused; **SHIPPED 2026-10-15** — auditor SHIP cycle 1, pushed origin/lane/b @267a68d; window-proof + concurrency-proof + 5 mutations reverted; both engines 2114 OK/99.81% |
 
 ## Phase N — Naming (blocked on owner shortlist reply)
 

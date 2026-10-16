@@ -400,9 +400,23 @@ unreachable or the media mount is unwritable. Three things consume it:
 3. **An external uptime monitor.** Register it against the public
    `https://<host>/health/` and treat **any non-200 as down** - a 503 is a real
    degradation signal, not a monitoring hiccup. Poll no faster than once a
-   minute: the endpoint counts orders and carts on every call. Point it at the
-   public URL through the TLS front door, not at `127.0.0.1` inside the
-   container, or it measures nothing an outage would break.
+   minute: behind the public body the probe still computes the staff-side
+   counters (pending orders, carts, stock) on every call - they left the wire,
+   not the request path. Point it at the public URL through the TLS front door,
+   not at `127.0.0.1` inside the container, or it measures nothing an outage
+   would break.
+
+**What the public body carries (Q-S2/F2).** Since the health split the
+anonymous body is exactly `{status, checks}`, with `checks` limited to the two
+keys that drive the status code (`database`, `media_writable`) plus the
+pre-launch marker `shipping_configured`. The business counters and
+configuration modes (`pending_orders`, `carts`, the stock counters,
+`smtp_configured`, `razorpay_mode`) moved to a staff-only twin,
+`GET /api/v1/admin/health/`, gated by the `reports.read` capability that
+already gates the ops dashboard rendering the same numbers. Nothing in the
+release path parses body fields - every waiter above compares status codes
+only - so the split is invisible to the deploy; a monitor or script that *did*
+read a moved field must switch to the staff endpoint.
 
 Which monitor is a deployment fact and stays out of this repository - no
 vendor token, DSN or account id belongs in a runbook. Create the check in
@@ -418,11 +432,15 @@ bypass the front door and the HSTS redirect entirely.
 
 ## Email delivery verification (SPEC-22-10, closes R-22.18)
 
-### What `/health/` proves, and what it cannot
+### What the health surface proves, and what it cannot
 
-`/health/`'s `smtp_configured` check is a **configuration** check: it is true
-when `EMAIL_HOST_USER` and `EMAIL_HOST_PASSWORD` are non-empty
-(`ops/services.py`, `get_health`). It cannot tell you the difference between
+`smtp_configured` is a **configuration** check: it is true when
+`EMAIL_HOST_USER` and `EMAIL_HOST_PASSWORD` are non-empty
+(`ops/services.py`, `get_health`). Since the Q-S2/F2 health split it is no
+longer on the public `/health/` body - it moved to the staff endpoint
+`GET /api/v1/admin/health/` behind `reports.read` (see "Uptime" above) - so
+read it there, or on the ops dashboard that renders the same payload. It
+cannot tell you the difference between
 
 - the app can *attempt* a send,
 - the server *accepted* the message, and
@@ -517,7 +535,7 @@ repository owes is the configuration contract, and `DEFAULT_FROM_EMAIL` /
 | `spf=fail` (or `permerror`) | the sending host is not in the SPF record, or the record exceeds 10 lookups | fix the provider's record; flatten `include:` chains |
 | `dkim=none` | signing is off at the provider | enable it; until then SPF alignment alone must carry DMARC |
 | `dkim=fail` on a *forwarded* copy | forwarding breaks the signature; it is not evidence about the original send | check the original in the sending mailbox, not the forwarded copy |
-| `550 relay denied` / `535` at send time | the account may not be permitted to send for that domain, or the password/app-password was rotated (SMTP step in "Secret rotation") | re-check `EMAIL_HOST_USER` / `EMAIL_HOST_PASSWORD` at the provider, then re-probe. A stale password still shows `smtp_configured: true` on `/health/` - this is exactly the case the probe exists for |
+| `550 relay denied` / `535` at send time | the account may not be permitted to send for that domain, or the password/app-password was rotated (SMTP step in "Secret rotation") | re-check `EMAIL_HOST_USER` / `EMAIL_HOST_PASSWORD` at the provider, then re-probe. A stale password still shows `smtp_configured: true` on the staff health endpoint (`GET /api/v1/admin/health/`) - this is exactly the case the probe exists for |
 | Delivered to junk at one provider only | reputation of that provider's shared sending IP | use a dedicated sending subdomain or a dedicated provider; do not "fix" it with the app |
 | Nothing arrives and **no bounce** | the envelope sender (`Return-Path`) is not a monitored mailbox, or the bounce was discarded upstream | make `Return-Path` a mailbox somebody reads, and watch it: an SMTP acceptance is not a delivery |
 | Bounces arrive | invalid or unreachable addresses | this store has **no bounce-processing code** - handle bounces as an operator task on the provider's suppression list. Never set the envelope sender to a customer's address; it is a data-protection problem, not just a deliverability one |
@@ -693,15 +711,17 @@ and a green `backend-tests` run on it.
 cd /srv/perfume-store
 git fetch --quiet --prune origin
 git -c advice.detachedHead=false checkout --quiet --detach <known-good-sha>
-./scripts/release.sh          # build -> migration-review checkpoint -> migrate -> collectstatic -> restart
+./scripts/release.sh          # build -> substrate (db+redis) -> migration-review checkpoint -> migrate -> collectstatic -> restart app (+ worker/beat) on the released image
 ```
 
 `release.sh` is idempotent at every step, so re-running it on the older commit
-is a normal release of that commit: it rebuilds the image, re-checks that no
+is a normal release of that commit: it rebuilds the image, waits for the
+database and redis substrate, re-checks that no
 model change is missing its migration, re-runs `migrate` (which applies
 whatever migrations that older tree has that the database does not - normally
-none, because migrations are applied in order), re-collects static files and
-recreates the container, waiting for `/health/`.
+none, because migrations are applied in order), re-collects static files,
+recreates the container waiting for `/health/`, and recreates the celery
+worker and beat on that same image.
 
 **Then pick the data remedy.** The schema state is the decision, not the
 severity of the symptom:
@@ -856,7 +876,7 @@ docker compose exec -T db psql -U "$POSTGRES_USER" -d "$POSTGRES_DB" \
 
 # b. update the repo-root .env (DATABASE_URL if set, else POSTGRES_PASSWORD)
 # c. recreate the app so it connects with the new password
-./scripts/release.sh          # build -> migrate check -> migrate -> collectstatic -> restart
+./scripts/release.sh          # build -> substrate -> migration-review -> migrate -> collectstatic -> restart (+ worker/beat)
 
 # d. verify before touching anything else
 curl -fsS https://<host>/health/ | grep '"status": *"ok"'
@@ -884,7 +904,8 @@ the normal release.
 `manage.py email_send_probe --send` against an `ALERT_RECIPIENTS` mailbox, and
 confirm it in the receiving inbox (and check its `Authentication-Results`
 header). A restart alone is not the verification: a stale credential still
-reports `smtp_configured: true` on `/health/`, and a password-reset flow would
+reports `smtp_configured: true` on the staff health endpoint
+(`GET /api/v1/admin/health/`), and a password-reset flow would
 fail for real customers instead. See "Email delivery verification" above.
 Nothing else in the app caches the credential, so the restart is sufficient
 for the *code*, and the probe is what verifies the *delivery*.

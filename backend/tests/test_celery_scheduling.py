@@ -47,7 +47,7 @@ proven) is historical: the worker landed first, the sites followed.
 """
 
 import pathlib
-from datetime import timedelta
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from io import StringIO
 from unittest import mock
@@ -165,37 +165,53 @@ class BeatScheduleShapeTests(SimpleTestCase):
         )
 
 
-def _utcnow():
-    """Timezone-aware UTC now, which is what celery's schedules expect.
+# The cadence pins below read time from HERE, never from the wall clock: a
+# suite run inside the final hour before the daily 03:17 UTC purge used to go
+# red because the wait to the next fire is legitimately under an hour there
+# (measured: at 02:30 UTC the wait is 2820s, which no `> 3600` reading can
+# satisfy). One probe sits INSIDE that 02:17-03:17 UTC window on purpose, so
+# every claim below is evaluated at the phase that used to fail it.
+CADENCE_PROBE_INSTANTS = (
+    datetime(2026, 6, 1, 2, 30, 0, tzinfo=UTC),
+    datetime(2026, 6, 1, 12, 45, 7, tzinfo=UTC),
+)
 
-    Naive datetimes are deprecated in this Python and would make the estimate
-    ambiguous across the DST boundary the schedule is explicitly UTC for.
+
+def _frozen_remaining(schedule, when):
+    """Seconds from `when` until `schedule`'s next fire, with no wall clock.
+
+    Celery reads two clocks for one estimate: the `last_run_at` argument (the
+    test supplies `when`) and the schedule's own `nowfun` - by default the
+    app's `now`, i.e. real time. Freezing only the argument measures a frozen
+    instant against a still-live clock and the difference is garbage
+    (measured: it reports about -11.8 million seconds). Both are pinned to
+    the same instant, after which the estimate is a pure function of `when` -
+    the same number a run that happened at that instant would have seen,
+    minus the dependence on when the suite started.
     """
-    from datetime import UTC, datetime
+    with mock.patch.object(schedule, "nowfun", return_value=when):
+        return schedule.remaining_estimate(when).total_seconds()
 
-    return datetime.now(UTC)
 
+def _next_fires(schedule, now, count=3):
+    """The next `count` datetimes `schedule` fires at, frozen at `now`.
 
-def _next_fires(schedule, count=3):
-    """The next `count` datetimes `schedule` fires at, by walking is_due.
-
-    `crontab.is_due(last_run_at)` answers "did you fire since", so the walk
-    passes the previous fire each time - which is exactly how beat's own tick
-    loop drives it, and what makes the answer a schedule rather than a
-    constant. (Measured at this pin: the signature takes the datetime directly
-    and returns a `(fired, when)` tuple; it does not take an elapsed interval.)
+    Each fire is the previous one plus the wait to it: stand ON a fire and
+    ask again and the answer is exactly one full period (crontab returns the
+    fire strictly AFTER the instant you give it), so the sequence walks
+    itself forward using only the public estimate API - no parsed crontab
+    fields. Every question goes through `_frozen_remaining`, so the rendered
+    times cannot drift with the wall clock. The previous form seeded the
+    real clock and advanced a cursor that `is_due` re-read only after a fire
+    it could never reach again, so it reported only its own seed - the
+    minute it asserted was the minute of "now + 20s", not of any scheduled
+    fire.
     """
     fires = []
-    last_run = _utcnow() - timedelta(days=1)
-    cursor = _utcnow()
-    for _ in range(60 * 24 * 60):
-        cursor = cursor + timedelta(seconds=20)
-        fired, _when = schedule.is_due(last_run)
-        if fired:
-            fires.append(cursor)
-            last_run = cursor
-            if len(fires) >= count:
-                break
+    cursor = now
+    for _ in range(count):
+        cursor = cursor + timedelta(seconds=_frozen_remaining(schedule, cursor))
+        fires.append(cursor)
     return fires
 
 
@@ -747,6 +763,13 @@ class CadenceTests(SimpleTestCase):
     period must stay INSIDE the bound it has to respect), not as exact
     literals: an operator retuning `CELERY_BEAT_*` legitimately changes these
     numbers, and a pin that forbade that would make the knobs decorative.
+
+    Every reading here comes from a FROZEN clock (see `_frozen_remaining`
+    and `CADENCE_PROBE_INSTANTS`). The bounds are properties of the schedule,
+    so they must hold at every instant - including the final hour before the
+    daily purge, where a single remaining-wait read legitimately drops below
+    the hour a wall-clock pin demanded and turned the daily-sweep pin red
+    between 02:17 and 03:17 UTC every day.
     """
 
     def test_the_drain_fires_on_its_configured_cadence(self):
@@ -761,19 +784,26 @@ class CadenceTests(SimpleTestCase):
         that the schedule matches the configured value; the arithmetic of what
         that means for a retry's real wait is documented where it belongs, in
         the settings comment that owns the cadence.
+
+        Evaluated at both frozen probe instants: with both of celery's clocks
+        pinned the interval's wait is its `run_every`, so the same two bounds
+        are asserted twice across the day instead of against whenever the
+        suite happened to start.
         """
         from django.conf import settings
 
         entry = celery_app.conf.beat_schedule["drain_notification_outbox"]
         interval = entry["schedule"]
-        remaining = interval.remaining_estimate(_utcnow()).total_seconds()
         configured = settings.CELERY_BEAT_DRAIN_OUTBOX_SECONDS
-        self.assertLessEqual(
-            remaining,
-            configured,
-            "the drain must fire within its configured interval",
-        )
-        self.assertGreater(remaining, 0)
+        for when in CADENCE_PROBE_INSTANTS:
+            with self.subTest(when=when):
+                remaining = _frozen_remaining(interval, when)
+                self.assertLessEqual(
+                    remaining,
+                    configured,
+                    "the drain must fire within its configured interval",
+                )
+                self.assertGreater(remaining, 0)
 
     def test_the_reservation_sweep_fires_well_inside_the_reservation_ttl(self):
         """A hold can only be released before it goes stale. A tick slower than
@@ -782,23 +812,43 @@ class CadenceTests(SimpleTestCase):
         from django.conf import settings
 
         entry = celery_app.conf.beat_schedule["expire_reservations"]
-        remaining = entry["schedule"].remaining_estimate(_utcnow()).total_seconds()
-        self.assertLess(remaining, settings.RESERVATION_TTL)
+        for when in CADENCE_PROBE_INSTANTS:
+            with self.subTest(when=when):
+                remaining = _frozen_remaining(entry["schedule"], when)
+                self.assertLess(remaining, settings.RESERVATION_TTL)
 
     def test_the_purge_is_a_daily_sweep_not_a_sub_daily_one(self):
         """It enforces a bound measured in DAYS, so anything more frequent
-        deletes nothing extra and only adds write load to the outbox table."""
+        deletes nothing extra and only adds write load to the outbox table.
+
+        The assertion is on the PERIOD - one full fire-to-fire gap - not on a
+        single remaining-wait read. The wait to the next fire is legitimately
+        under an hour during the last hour before every fire, so a per-read
+        `remaining > 3600` evaluated at whatever instant the wall clock
+        happened to show was false by construction between 02:17 and 03:17
+        UTC every day. The period is exact and phase-free: ask for the wait,
+        stand on the fire it names, ask again - that second answer IS the
+        gap between fires. A sub-daily schedule answers 3600 there and fails
+        the strict bound at EVERY phase, where the old per-read form caught
+        it only when the wall clock happened to sit far enough from a fire.
+        """
         from django.conf import settings
 
         entry = celery_app.conf.beat_schedule["purge_notification_outbox"]
-        remaining = entry["schedule"].remaining_estimate(_utcnow()).total_seconds()
-        self.assertGreater(remaining, 3600)
-        self.assertLess(
-            remaining,
-            settings.NOTIFICATION_OUTBOX_TTL_SECONDS,
-            "the purge must fire INSIDE the TTL it enforces, or spent rows "
-            "outlive the bound that is meant to delete them",
-        )
+        for when in CADENCE_PROBE_INSTANTS:
+            with self.subTest(when=when):
+                to_fire = _frozen_remaining(entry["schedule"], when)
+                self.assertGreater(to_fire, 0, "a fire must always be ahead")
+                period = _frozen_remaining(
+                    entry["schedule"], when + timedelta(seconds=to_fire)
+                )
+                self.assertGreater(period, 3600, "the purge must not be sub-daily")
+                self.assertLess(
+                    period,
+                    settings.NOTIFICATION_OUTBOX_TTL_SECONDS,
+                    "the purge must fire INSIDE the TTL it enforces, or spent rows "
+                    "outlive the bound that is meant to delete them",
+                )
 
     def test_no_sweep_is_scheduled_off_the_top_of_the_hour(self):
         """The purge sits at minute 17, deliberately.
@@ -814,10 +864,16 @@ class CadenceTests(SimpleTestCase):
         # A crontab renders its own next-run times; asking for the first two
         # and reading the minute off them is how the schedule is checked
         # without reaching into celery's internals for the parsed fields.
-        fires = _next_fires(entry["schedule"], count=2)
-        self.assertTrue(fires)
-        for fire in fires:
-            self.assertNotEqual(fire.minute, 0, "the purge must not land on the hour")
+        # Rendered at the frozen probes, so what the minute is read off is a
+        # real scheduled fire rather than an artefact of the real clock.
+        for when in CADENCE_PROBE_INSTANTS:
+            with self.subTest(when=when):
+                fires = _next_fires(entry["schedule"], when, count=2)
+                self.assertTrue(fires)
+                for fire in fires:
+                    self.assertNotEqual(
+                        fire.minute, 0, "the purge must not land on the hour"
+                    )
 
 
 class EnvDocumentationTests(SimpleTestCase):
