@@ -438,6 +438,55 @@
 }
 
 /* ==========================================================================
+   §5.1 HOME — the settle reveal, the page's ONE accent moment (P2). The
+   three sections below the hero (new arrivals, house position, fact strip)
+   fade and settle 8px into place in reading order as they are reached
+   (`animation-timeline: view()`, §3 override O4). Nothing else on that page
+   moves: the hero never animates — it is the first-screen content and the
+   LCP candidate (§10, §3 "Never on the hero") — and hover transitions answer
+   a state the customer caused.
+
+   O4's shape, honoured to the letter:
+   - The BASE state carries no `opacity` and no `transform`. The default is
+     the final state, so a crawler, a screen reader and a reduced-motion
+     customer all get the settled page.
+   - The animation exists only inside `@media (prefers-reduced-motion:
+     no-preference)` — the primary, opt-in gate (§8.3) — and inside
+     `@supports (animation-timeline: view())`, so a browser without
+     scroll-driven animations (Firefox today) never enters the rule at all
+     rather than running a time-based fade from `opacity: 0` (§3's row:
+     "the @supports default state must be opacity:1").
+   - `animation-fill-mode: both` supplies the pre-entry state, so there is
+     no one-frame flash of the final layout before the timeline takes hold.
+   - Duration and easing are intent tokens (`enter`), never a raw ms value.
+     On a progress-based timeline the duration is not the mapper, but naming
+     the token keeps the declaration inside the token contract.
+   - Amplitude: 8px, well under §3's 24px / 6%-of-viewport cap.
+   No script, no IntersectionObserver, no will-change: 0 KB, compositor-only
+   (transform + opacity), one scroll listener fewer than the refs shipped.
+   ======================================================================== */
+@keyframes settle-in {
+  from {
+    opacity: 0;
+    transform: translateY(-8px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+@media (prefers-reduced-motion: no-preference) {
+  @supports (animation-timeline: view()) {
+    .settle {
+      animation: settle-in var(--motion-enter-dur) var(--motion-ease) both;
+      animation-timeline: view();
+      animation-range: entry 0% entry 40%;
+    }
+  }
+}
+
+/* ==========================================================================
    §3 / §7.6 REDUCED MOTION — enforced AT THE TOKEN LAYER.
    The block below neutralises the tokens themselves, so a component cannot
    opt out by forgetting: every duration in the system is read from a
@@ -455,8 +504,8 @@
    blanket `animation-duration` cannot neutralise a progress-based
    `animation-timeline`, where the duration is the mapper — scroll-driven work
    must additionally be declared inside `@media (prefers-reduced-motion:
-   no-preference)`. None exists yet, so that gate belongs to the task that
-   introduces it.
+   no-preference)`. The first scroll-driven rule — `.settle` above, for §5.1's
+   home page — carries that gate itself.
    ========================================================================== */
 @media (prefers-reduced-motion: reduce) {
   :root {
