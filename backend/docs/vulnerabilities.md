@@ -1,5 +1,7 @@
 # Flagged vulnerabilities & security weaknesses
 
+> **DATED SNAPSHOT — historical record, not a status source.** This document is frozen as of 2026-10-16: it records what was true when written and is no longer maintained as fixes ship. Do not read a status out of it — the live source of truth for any finding, plan item, or vulnerability named here is the run ledger: `spec-run-state.md`, the per-section reports under `run/`, and the append-only `changes.md`.
+
 Severity counts: **3 CRITICAL · 4 HIGH · 8 MEDIUM · 6 LOW** (21 total).
 
 | ID | Severity | Vulnerability | Location | Status |
@@ -21,7 +23,7 @@ Severity counts: **3 CRITICAL · 4 HIGH · 8 MEDIUM · 6 LOW** (21 total).
 | V-15 | LOW | Slug generation race → 500 IntegrityError under concurrent creates | `products/models.py:30-41` | OPEN |
 | V-16 | LOW | `username-available` enables username enumeration | `accounts/views.py:79-93` | OPEN |
 | V-17 | LOW | Unverified-but-active users: verification tokens remain valid after activation (account takeover vector only if email compromised; acceptable, note only) | `accounts/views.py:96-106` | OPEN |
-| V-18 | LOW | Admin at default URL, no 2FA/lockout | `config/urls.py:10-11` | OPEN |
+| V-18 | LOW | Admin at default URL, no 2FA/lockout | `config/urls.py:157` | REMEDIATED (2FA/lockout): MFA at the admin door shipped as SPEC-17-05 and SPEC-20-13; the admin login failed-attempt throttle shipped as Q-S4 (lane/b `6a6de0a`, evidence `run/Q-S4-evidence.md`). The default `/admin/` mount remains |
 | V-19 | LOW | `ProductSerializer` `__all__` — future column leaks; `OrderSerializer` exposes `user` id | serializers | OPEN |
 | V-20 | LOW | Pagination unordered (data-integrity of listings, also DoS-light via repeated full scans) | `products/views.py:89` | OPEN |
 | V-21 | LOW | No security headers beyond Django defaults (XSS protection config removed in modern Django; X_FRAME_OPTIONS default) | `config/settings.py` | OPEN |
