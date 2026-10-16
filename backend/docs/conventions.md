@@ -110,4 +110,23 @@ claim pass unlisted.
 
 - Black-compatible formatting (88 cols), no tabs.
 - No commented-out code blocks; remove dead code (e.g. `orders/views.py:280-282`).
-- Comments explain *why*; the code explains *how*.
+- Comments explain *why*; the code explains *how*. Comment the WHY and the
+  invariant, never the WHAT: a comment that restates the next line (`#
+  Check stock` above a stock check, a banner naming the function beneath
+  it) rots the moment the line changes and tells a reader nothing the code
+  did not. The comment-worthy invariant is the one the code cannot show on
+  its own — a concurrency authority, a deliberate omission, a cross-module
+  coupling. Change history does not belong in a comment; it belongs in
+  `docs/changes.md`.
+
+  Before (what + history):
+
+      # Check stock
+      if quantity > product.stock:  # added after the oversell bug
+
+  After (why + invariant):
+
+      # Advisory only: stock can drop between here and capture, so the
+      # authority for "enough stock" is commit_order_sale's summed
+      # re-check at payment time, not this unlocked read.
+      if quantity > product.stock:

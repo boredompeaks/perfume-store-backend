@@ -158,10 +158,6 @@ def _checkout_response(order, status_code):
     return Response(OrderSerializer(order).data, status=status_code)
 
 
-# ==================================
-# Create Order / Checkout
-# ==================================
-
 # The shipping fields that identify a checkout submission; must stay in step
 # with the required_fields list inside create_order (both describe the same
 # payload), which is why the duplicate guard reads them from the request
@@ -414,18 +410,10 @@ def create_order(request):
     guest_email = ""
     owner = {"user": user}
 
-    # =========================
-    # Get current session
-    # =========================
-
     if not request.session.session_key:
         return Response({"error": "Cart not found"}, status=status.HTTP_404_NOT_FOUND)
 
     session_id = request.session.session_key
-
-    # =========================
-    # Find cart
-    # =========================
 
     try:
         cart = Cart.objects.get(session_id=session_id)
@@ -433,18 +421,10 @@ def create_order(request):
     except Cart.DoesNotExist:
         return Response({"error": "Cart not found"}, status=status.HTTP_404_NOT_FOUND)
 
-    # =========================
-    # Get cart items
-    # =========================
-
     cart_items = cart.items.select_related("product").all()
 
     if not cart_items.exists():
         return Response({"error": "Cart is empty"}, status=status.HTTP_400_BAD_REQUEST)
-
-    # =========================
-    # Validate checkout data
-    # =========================
 
     required_fields = [
         "full_name",
@@ -471,10 +451,6 @@ def create_order(request):
 
         if length_rejection is not None:
             return length_rejection
-
-    # =========================
-    # Calculate cart subtotal
-    # =========================
 
     # SPEC-6-01 [6.2.22]: a cart line that outlasted its stock (stock can
     # drop after the item was added) must not become an order the customer
@@ -557,10 +533,6 @@ def create_order(request):
             status=status.HTTP_400_BAD_REQUEST,
         )
 
-    # =========================
-    # Coupon
-    # =========================
-
     coupon = None
     discount_amount = Decimal("0.00")
 
@@ -585,13 +557,11 @@ def create_order(request):
                 {"error": "Invalid coupon code"}, status=status.HTTP_400_BAD_REQUEST
             )
 
-        # Check active
         if not coupon.active:
             return Response(
                 {"error": "This coupon is inactive"}, status=status.HTTP_400_BAD_REQUEST
             )
 
-        # Check validity dates
         now = timezone.now()
 
         if now < coupon.valid_from:
@@ -605,14 +575,12 @@ def create_order(request):
                 {"error": "This coupon has expired"}, status=status.HTTP_400_BAD_REQUEST
             )
 
-        # Check usage limit
         if coupon.usage_limit is not None and coupon.used_count >= coupon.usage_limit:
             return Response(
                 {"error": "This coupon has reached its usage limit"},
                 status=status.HTTP_400_BAD_REQUEST,
             )
 
-        # Check minimum order amount
         if subtotal_amount < coupon.minimum_order_amount:
             return Response(
                 {
@@ -622,7 +590,6 @@ def create_order(request):
                 status=status.HTTP_400_BAD_REQUEST,
             )
 
-        # Calculate discount
         if coupon.discount_type == "percentage":
             # Quantize before any comparison or storage: the raw division
             # carries extra decimal places, and an unquantized discount
@@ -641,20 +608,12 @@ def create_order(request):
         # Never discount more than subtotal
         discount_amount = min(discount_amount, subtotal_amount)
 
-    # =========================
-    # Final total
-    # =========================
-    #
     # [R-1.07] SPEC-1-B05: still the MERCHANDISE total. The shipping charge is
     # added inside the atomic block below, once the collapse guards have had
     # their say, so a replay never reprices an order that already exists.
 
     merchandise_total = subtotal_amount - discount_amount
 
-    # =========================
-    # Create order
-    # =========================
-    #
     # The whole block is wrapped in the try so a shipping refusal PROPAGATES
     # out of it and rolls it back whole, rather than being answered from
     # inside it: a return from inside an atomic block commits whatever the
@@ -941,10 +900,6 @@ def create_order(request):
             status=status.HTTP_400_BAD_REQUEST,
         )
 
-    # =========================
-    # Return order
-    # =========================
-
     return _checkout_response(order, status.HTTP_201_CREATED)
 
 
@@ -1039,13 +994,11 @@ def validate_redeemable_coupon(code, cart):
     ):
         return None, None, _uniform_coupon_rejection()
 
-    # Calculate cart subtotal
     subtotal = Decimal("0.00")
 
     for item in cart.items.select_related("product"):
         subtotal += item.product.price * item.quantity
 
-    # Check minimum order amount
     if subtotal < coupon.minimum_order_amount:
         return None, None, _uniform_coupon_rejection()
 
@@ -1085,7 +1038,6 @@ def apply_coupon(request):
     if rejection is not None:
         return rejection
 
-    # Calculate discount
     if coupon.discount_type == "percentage":
         # Same quantize parity as checkout (F-11): the preview must show
         # the exact 2-dp discount the order will store.
