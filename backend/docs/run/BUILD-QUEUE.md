@@ -67,6 +67,10 @@ a client demo).
 T0 — Seed: promote the demo seed script (untracked until T0 lands it in-tree)
 -> `manage.py seed_demo` (marked
 rows, cleanup flag). Both red team and load runs start from known state.
+**SHIPPED 2026-10-15** — auditor SHIP cycle 1, pushed origin/lane/a @be5b53c;
+orders app home, marker-queryset cleanup (foreign rows + role groups proven
+survive), 2134 OK both engines cov 99.81%; builder also repaired the
+external-cleaner venv damage (see Q-D3 report) — owner should stop that cleaner.
 
 T1 — Red-team attack catalog (each item = attempted attack + invariant that
 must hold + evidence artifact):
@@ -142,8 +146,8 @@ T2 — Load / stress / resource against the REAL URL (after red team):
 | ID | Task | Notes |
 |---|---|---|
 | Q-D1 | (a) slim `spec-run-state.md` -> index template; promotion narratives -> `run/promotions.md` | orchestrator bookkeeping |
-| Q-D2 | (c) docs freshness pass, priority: `deploy-runbook.md` (wrong since compose/release changed), `api-contract.md` (error wire format changed by ENVELOPE-WIRE), `test-gaps.md` (0 missed now); mark fix-plan/vulnerabilities/audit as dated snapshots | |
-| Q-D3 | SECURITY.md (reporting channel, scope, test-mode note) + CONTRIBUTING.md (lane/spec-comp/PR flow, conventions pointer, test commands) | license-independent |
+| Q-D2 | (c) docs freshness pass, priority: `deploy-runbook.md` (wrong since compose/release changed), `api-contract.md` (error wire format changed by ENVELOPE-WIRE), `test-gaps.md` (0 missed now); mark fix-plan/vulnerabilities/audit as dated snapshots | Q-D2a **SHIPPED 2026-10-15** (cycle 1 FIX 3xP3 -> cycle 2 SHIP, pushed origin/lane/b @efcbb7a; 2130 OK both engines cov 99.82%); snapshot-marking half = Q-D2b building lane/b |
+| Q-D3 | SECURITY.md (reporting channel, scope, test-mode note) + CONTRIBUTING.md (lane/spec-comp/PR flow, conventions pointer, test commands) | license-independent; cycle 1 BUGS-FOUND: BUG-1 P2 pre-existing 02:17-03:17 cadence-window flake on lane/a (fix exists on lane/b Q-D7, rides next gate; non-blocking per auditor), BUG-2 P3 one-cell ghcr-publish claim -> fix cycle 2 dispatched; auditor also confirmed ledger :43/:81 merge-authority contradiction = orchestrator cleanup |
 | Q-D4 | (d) conventions rule ("comment the why and the invariant, never the what; history belongs in changes.md") + opportunistic trim; optional top-10 narrative-header pass | no mass scrub |
 | Q-D5 | (b) changes.md rotation -> `changes/changes-2026Q4.md` + pointer row | SCHEDULED AT THIS QUEUE'S FINAL PROMOTION BOUNDARY (byte-integrity baseline + scanner scope updated in the same gate) |
 | Q-D6 | README refresh (owner 2026-10-15): verify every command still true, freshen product one-liner, keep current repo-name branding — NO product-name rename until name is finalized | rides Phase D |
