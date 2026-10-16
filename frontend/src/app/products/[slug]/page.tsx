@@ -240,6 +240,12 @@ export default async function ProductPage({ params }: Props) {
         36ch (§2.2.4) and the plate is `--measure` wide (§5.2 item 7), which
         is exactly what "the story image drifting as the notes beside it are
         read" (STITCH §2 row 3) needs to sit beside.
+
+        Plate colour: §5.2 item 7 still names the retired bronze-soft tint,
+        but §2.1.1 dropped that token — hairline is its canonical plate and
+        the one the 4:5 product plate already ships (ProductCard.tsx:8
+        records the succession); referencing the retired name would fail the
+        colour-token guard in lib/ui.test.ts.
       */}
       <section className="mt-16 border-t border-hairline pt-8 md:mt-24 lg:mt-32 lg:grid lg:grid-cols-[var(--measure)_var(--measure)] lg:gap-8">
         <div>
