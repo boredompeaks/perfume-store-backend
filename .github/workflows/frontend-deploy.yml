@@ -34,10 +34,15 @@ jobs:
         run: npm install --no-fund --no-audit
 
       - name: OpenNext build
+        # Hermetic deploy env. NEXT_PUBLIC_ADMIN_ORIGIN is fail-if-unset by
+        # owner contract (src/app/admin/page.tsx guard, U-W5-T1) -- `next
+        # build` dies at /admin without it. Same value as
+        # frontend/.env.local.example:30 and frontend-tests.yml (1d6520f).
+        # Product guard stands; this is a workflow-provided constant.
         env:
           NEXT_PUBLIC_API_BASE_URL: https://api.boredompeaks.me
           NEXT_PUBLIC_SITE_URL: https://test.boredompeaks.me
-          ADMIN_URL: https://api.boredompeaks.me/admin/
+          NEXT_PUBLIC_ADMIN_ORIGIN: https://api.boredompeaks.me
           NEXTJS_ENV: production
         run: npx opennextjs-cloudflare build
 
