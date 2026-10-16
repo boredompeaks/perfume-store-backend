@@ -1,12 +1,15 @@
-# SPEC-T1a — Red-team attack catalog, first half (families 1-5)
+# SPEC-T1 — Red-team attack catalog (T1a families 1-5, T1b families 6-10)
 
-Task SPEC-T1a on lane A, owner charter: **"break the hardening."**
-Deliverable of BUILD-QUEUE Phase T, T1 items 1-5. Every row below is one
+Task SPEC-T1a (SHIPPED `79da100`) + SPEC-T1b (this half) on lane A, owner
+charter: **"break the hardening."**
+Deliverable of BUILD-QUEUE Phase T, T1 items 1-10. Every row below is one
 attack run LIVE from this sandbox over HTTPS against the real test
 deployment (`api.boredompeaks.me`, storefront `test.boredompeaks.me`), test
 mode only, no real money anywhere, webhook/intent volume capped, UAT OOM
-accepted as informative. Runner: `scripts/redteam_t1a.py` (stdlib urllib, no
-new dependencies); regression subset: `scripts/security_smoke.sh`.
+accepted as informative. Runner: `scripts/redteam_t1b.py` for families 6-9
+(reusing T1a's `scripts/redteam_t1a.py` transport by import; stdlib urllib,
+no new dependencies); regression subset: `scripts/security_smoke.sh`
+(families 1-10).
 
 Row verdicts: **PASS** = invariant held under attack (evidence in the row);
 **FAIL** = invariant broken on the live env (finding with repro in the row);
@@ -22,14 +25,24 @@ is named in the row and remediated in the deployment section below).
 | 3 — Coupons | 5 | 1 | 5 | 11 |
 | 4 — Guest / cart | 13 | 0 | 2 | 15 |
 | 5 — RBAC matrix / delist | 6 | 0 | 4 | 10 |
-| **Total** | **33** | **1** | **24** | **58** |
+| 6 — Auth / MFA (T1b) | 10 | 0 | 4 | 14 |
+| 7 — Input / validation (T1b) | 9 | 1 | 2 | 12 |
+| 8 — Oracles / info leaks (T1b) | 10 | 0 | 1 | 11 |
+| 9 — Notifications / outbox (T1b) | 3 | 0 | 3 | 6 |
+| **Total (families 1-9)** | **65** | **2** | **34** | **101** |
 
-One finding: **F3-C4 (Medium)** — the coupon scope's shipped default budget
-was not enforced per client at 12 shots; controls localize it as
-deployment-shaped, not view-shaped (detail below). The 24 BLOCKED rows are
-not defects: they need state/config the box does not have (deployment
-section). All executable money-path, uniformity, session and RBAC attacks
-held.
+Family 10 is the smoke extension, not attack rows: `bash
+scripts/security_smoke.sh` runs **52 checks, 0 failed** on the run recorded
+for T1b (33 from T1a + 19 added; family-10 section below).
+
+T1a's finding stands: **F3-C4 (Medium)** — the coupon scope's shipped
+default budget was not enforced per client at 12 shots; controls localize it
+as deployment-shaped, not view-shaped (detail below). T1b's new finding:
+**F7-B1 (Medium)** — non-object JSON bodies 500 on the cart write (detail
+below). The 34 BLOCKED rows are not defects: they need state/config the box
+does not have (deployment section + T1b's STEP ZERO re-probe). All executable
+money-path, uniformity, session, RBAC, auth-throttle, input-validation and
+oracle attacks held.
 
 ## STEP ZERO — environment capability verdict
 
@@ -93,6 +106,65 @@ Secondary observation: `GET https://test.boredompeaks.me/health/` answers
   (12-shot window, 30-shot control, 25-shot continuation, 10-way parallel),
   no brute force, no payload above 300 bytes.
 - The runner exits 0 when a run completes; verdicts live in the rows.
+
+## T1b STEP ZERO — environment re-probe (owner-ops delta vs T1a)
+
+Re-probed live before any T1b attack (raw rows in the runner's env phase).
+Delta vs T1a's appendix A: **none — all four owner ops are still pending**:
+
+| Probe (T1a gap) | T1a observed | T1b observed |
+|---|---|---|
+| `seed_demo` | products `count:0`, `demo-plenty-perfume` 404 | products `count:0`, `demo-plenty-perfume` 404 |
+| seeded account | `demo-customer` login 401 | `demo-customer` login 401 |
+| `RAZORPAY_WEBHOOK_SECRET` | unsigned delivery 503 (fail-closed) | unsigned delivery 503 (fail-closed) |
+| shipping | `shipping_configured:false` | `shipping_configured:false` |
+
+This task's one authorized fixture: registration of `rt_t1b_fixture`
+(password fixture `quiet harbor lane`, email `rt_t1b_fixture@redteam.invalid`)
+answers 400 "An account already uses this email address." — the account was
+created by this run's first invocation (the 201 shape is T1a's Q-S3
+measurement) — and its login answers 401 (inactive until the emailed token).
+Because every delta is zero, T1b does **not** re-run T1a's families: the 24
+BLOCKED rows above stay as recorded, and the second pass remains queued to
+T1a's runner for whenever the owner ops land (seed, webhook secret, one
+activated account, shipping).
+
+## T1b method notes (families 6-9) — how this half's evidence was produced
+
+- One runner, phases `env,f7,f6,f8,f9` (the default order puts f7 before f6
+  so f6's register-scope flood starts from a clean window); evidence JSON is
+  rewritten after every phase. Regenerate with
+  `backend\venv\Scripts\python scripts/redteam_t1b.py --base <url> [--only
+  <phases>]` (the raw JSON is deliberately uncommitted — the tables below
+  carry every row inline). The transport (per-identity cookie jar, the
+  browser-shaped sessioned-POST helpers, the envelope checker) is imported
+  from `scripts/redteam_t1a.py`, not copied.
+- Identity model matches T1a: a bare cookie-less client for anonymous and
+  wrong-layer-sensitive probes, a sessioned identity for writes that must
+  clear the CSRF gate. A fresh sessionless identity was used for the family-9
+  trigger matrix (see the self-correction note below).
+- Throttle discipline: every flood phase begins by sleeping one full 60 s
+  window (spend from other processes is invisible to this runner); the
+  register/recovery floods fire INVALID payloads, so the budget is measured
+  with zero accounts created and zero mail sent (ScopedRateThrottle spends in
+  `initial()`, before the view runs); burst caps are logged shot-by-shot —
+  auth <= 45, register <= 25, recovery <= 25, each at least 3x the shipped
+  default so a refusal index is observable at all (T1a's C5 measured a 5/min
+  scope first refusing at shot 19 here, i.e. per-client budgets on this box
+  run at a multiple of the configured rate).
+- Three requests exceed T1a's small-probe norm because the attack IS their
+  size — one ~6 MB multipart image, one ~300 KB JSON object, one depth-2500
+  body — each fired once, never in a loop; plus one 4 KB URL probe.
+- Two measurement self-corrections, both T1a's wrong-layer lesson repeating:
+  the first family-9 matrix fired sessioned POSTs without CSRF material and
+  therefore measured Django's referer gate (403s) instead of the triggers'
+  own gates — re-executed with a fresh sessionless identity; the first
+  family-8 source-map probes concatenated an absolute URL onto the request
+  path, so their "results" were local transport errors — re-executed as
+  path-only probes that really hit the edge. Only the corrected runs appear
+  in the tables below. One runner crash (family 6's JWT battery) and one
+  verdict-shape fix (the 6 MB upload's transport abort) each cost one phase
+  re-execution; totals come from the final runs.
 
 ## Family 1 — Order lifecycle / capture
 
@@ -239,8 +311,145 @@ Fast, anonymous-only, `bash + curl` only; `bash scripts/security_smoke.sh
 
 Deliberately out of the subset (they burn throttle windows or need
 credentials): the 12-shot throttle burst, any registration/recovery call,
-and every staff-role cell. T1b appends the families 6-10 subset to this same
-script.
+and every staff-role cell. (T1b has since extended this same script with the
+families 6-10 subset — see the family-10 section below for the current
+total.)
+
+## Family 6 — Auth / MFA (T1b)
+
+| ID | Attempted attack | Invariant that must hold | Result (live evidence) | Verdict | Severity |
+|---|---|---|---|---|---|
+| F6-A1 | credential-stuffing spray: up to 45 storefront login POSTs, one real username (the fixture), wrong passwords, fresh window | the auth scope refuses per-client within a bounded shot count (429), and every non-refusal is the same uniform 401 (no user-existence oracle under spray) | statuses=[401 x33, 429]; first refusal at shot 34/34; shipped default auth=10/min; non-429 bodies uniform: True | **PASS** | n/a |
+| F6-A2 | register-scope spray: up to 25 empty-body register POSTs in a fresh window (the throttle spends before the view runs, so nothing is created) | the dedicated register scope refuses per-client within a bounded shot count; the 400s stay uniform (no payload oracle) | statuses=[400 x14, 429]; first refusal at shot 15/15; shipped default register=5/min; no account created (all payloads invalid); non-429 uniform: True | **PASS** | n/a |
+| F6-M1 | unauthenticated MFA battery: setup/confirm/disable/trust/status with no credentials at all (Q-S4's refusals re-verified on prod) | every MFA surface refuses an unauthenticated caller through the 401/403 envelope before any enrollment logic runs, and no secret or otpauth URI ever appears in a refusal | setup=401; confirm=401; disable=403; trust=403; status=403; envelope shape ok: True; secret disclosed: False | **PASS** | n/a |
+| F6-M2 | MFA setup with the run's REAL registered account credentials (`rt_t1b_fixture`, inactive pending email token) vs a ghost account | the credential bootstrap never opens for an unverified account, and the refusal is byte-identical to the ghost's (no account-state oracle through the enrollment door) | real=401 ghost=401 byte-identical: True; body {"error":"Invalid credentials.","code":"not_authenticated","details":{}} | **PASS** | n/a |
+| F6-M3 | two different ghost accounts against MFA setup (control for M2) | the uniform rejection does not depend on the username shape | 401 vs 401; byte-identical: True | **PASS** | n/a |
+| F6-R1 | cross-origin refresh: POST the refresh seam from `https://evil.example` (the sibling-origin/CSRF shape Q-P1's gate exists for) | the origin gate refuses BEFORE any carrier is read, so the probe neither sweeps nor mints from a victim cookie (no refresh_token Set-Cookie on the refusal) and the refusal is named | 403; named refusal: True; cookie swept by probe: False; body {"error":"Cross-origin refresh requests are not allowed.","code":"permission_denied","details":{}} | **PASS** | n/a |
+| F6-R2 | refresh cookie contract from the client's view: a forged body token with the trusted origin and with NO origin (non-browser shape); scan every Set-Cookie and every response body | the refresh_token cookie carries HttpOnly/Secure/Path=/api//SameSite=Lax wherever it is set, and no refresh token is ever issued in a response body [R-17.12] | statuses 401/401; cookie set: True; flags ok: True (HttpOnly, Path=/api/, SameSite=Lax, Secure each asserted); refresh in body: False; window-open (token reached validation, not refused by carrier name); cookie: refresh_token=""; HttpOnly; Max-Age=0; Path=/api/; SameSite=Lax | **PASS** | n/a |
+| F6-J1 | JWT alg confusion: an alg=none unsigned token and an HS512 token signed with an attacker key, presented as Bearer on an authed endpoint | simplejwt validates against its algorithm allowlist and the server key — neither forgery authenticates (401 token_not_valid envelope) | alg-none=401; hs512-attacker=401 | **PASS** | n/a |
+| F6-J2 | JWT key confusion: HS256 tokens signed with a wrong key, one with exp in the future and one with exp already past | an unknown-key token is refused before any claim matters; no exp/alg claim on a forged signature ever authenticates | future-exp=401 past-exp=401; envelope 401: True; exp enforcement with a VALID signature not isolable without a server-minted token (see F6-J3/J5) | **PASS** | n/a |
+| F6-J3 | logout invalidation: log in, log out, replay the blacklisted refresh token | logout blacklists the refresh token [R-17.8] so a stolen refresh can no longer mint access tokens | BLOCKED: no activated account is obtainable on this deployment: seed_demo never ran (demo-customer 401) and the run's registered fixture stays inactive until an emailed token this sandbox cannot receive | **BLOCKED** | n/a |
+| F6-J4 | refresh rotation replay after logout (BLACKLIST_AFTER_ROTATION observed over the wire) | a rotated-out refresh token is refused on replay and the replacement is single-use | BLOCKED: same no-activated-account gap as F6-J3 | **BLOCKED** | n/a |
+| F6-J5 | refresh issuance on successful login: Set-Cookie HttpOnly + absence of the refresh token from the 200 body, proven from the client's view | login mints the refresh token ONLY into an HttpOnly cookie [R-17.12] (the observable rejection-path half is F6-R2) | BLOCKED: same no-activated-account gap as F6-J3 | **BLOCKED** | n/a |
+| F6-P1 | password-reset oracle, absent-vs-absent control: two emails that cannot exist, body and timing compared | the recovery endpoint answers one uniform message (no status/body diff) whatever the email | 200 vs 200; byte-identical: True; elapsed_ms 145.4/74.6 (single-shot pairs over WAN — indicative only, no timing claim); body {"message":"If an active account exists for this email, a password-reset link has been sent."} | **PASS** | n/a |
+| F6-P2 | password-reset, existing-vs-absent differential: an ACTIVE account's email vs a missing one (body + timing) | an existing-account reset is indistinguishable from a miss | BLOCKED: no active account exists on this deployment (the query filters is_active=True; seed absent, fixture inactive) — the existing-half cannot be exercised | **BLOCKED** | n/a |
+
+## Family 7 — Input / validation (T1b)
+
+| ID | Attempted attack | Invariant that must hold | Result (live evidence) | Verdict | Severity |
+|---|---|---|---|---|---|
+| F7-MA1 | register mass assignment: is_active/is_staff/is_superuser/role/staff_roles/id smuggled into a real registration, then a login attempt with the created credentials | the serializer's explicit field whitelist drops every extra key and create() hardcodes is_active=False — the planted is_active can never activate the account (login stays 401) and no privileged field is echoed | register=201 login-after=401; privileged fields echoed: False; is_active honored: False; register body {"message":"User registered. Check your email to verify the account.","user":{"username":"rt_t1b_mass_bdf738",...}} | **PASS** | n/a |
+| F7-MA2 | product-create mass assignment battery (negative stock, is_active, forged id/created_at) as anonymous | the capability check runs before serializer validation, so a mass-assignment payload never reaches a model field from an anonymous caller (HasProductsWriteOrReadOnly) | 403 {"error":"Administrator access is required.","code":"permission_denied","details":{}} | **PASS** | n/a |
+| F7-MA3 | guest-checkout order-address mass assignment: user/status/total/payment_status smuggled into the address payload (sessioned, browser-shaped) | TIER1-GUEST-DEADEND refuses before any payload field is read, so privileged keys are byte-identical to the plain payload's refusal | mass=403 plain=403 byte-identical: True | **PASS** | n/a |
+| F7-SQ1 | SQLi via search: tautology, stacked DROP, UNION/credential-exfil, and quote-break payloads against the product search | ORM parameterisation keeps every payload an inert value — all answers are 2xx/4xx with no SQL error text and no 5xx | statuses=[200, 200, 200, 200]; no-5xx: True; no SQL error text: True; sample body {"count":0,...,"results":[]} | **PASS** | n/a |
+| F7-SQ2 | SQLi via ordering/filter: CASE-expression ordering, ordering-in-statement, tautology min_price, quote-break category | ordering is an explicit whitelist (unknown values fall to the default sort), price filters are Decimal-validated (400), category is an ORM exact match — no 5xx, no SQL error text | statuses=[200, 200, 400, 200]; ordering fell back to default: True; price refused 400: True; no SQL error text: True | **PASS** | n/a |
+| F7-XS1 | reflected XSS sweep on the API: `<script>` payload in search and category params | every answer is application/json (a browser will not execute a JSON document); the payload can only exist JSON-escaped inside data | statuses 200/200; content-types ['application/json', 'application/json']; json-only: True | **PASS** | n/a |
+| F7-XS2 | reflected XSS on the Django admin login: next= attribute-breakout + script payload against `/admin/login/` | the admin login page renders (200) with the payload HTML-escaped — no raw breakout reaches the document, no 5xx | 200; raw payload in HTML: False; escaped payload in HTML: True | **PASS** | n/a |
+| F7-XS3 | stored XSS via product name/description rendered in the admin changelist and storefront: the payload POST was attempted first (anon → 403), then the admin form was probed (→ 302) | a stored payload can only enter the catalogue through a products.write capability; the admin render half must be verified with a staff session | BLOCKED: the anonymous write was refused at the capability gate (payload never reaches the catalogue) AND the admin add-form answers a login redirect — no staff account exists to complete a login (R-17.9 MFA door + no seeded credentials), so the RENDER half cannot be exercised on this deployment | **BLOCKED** | n/a |
+| F7-UP1 | anonymous upload battery: polyglot image (GIF header + script) with a path-traversal filename, then one 6 MB image over the MAX_UPLOAD_MB ceiling (multipart, sessioned) | the capability gate refuses the write before any storage layer runs — nothing is ever accepted (no 2xx), no 5xx, and no traceback leaks; nothing is stored | statuses=polyglot 403, oversize transport-abort (no response: this sandbox aborted the 6 MB send mid-flight — ConnectionAbortedError after ~19 s, so the app-level oversize refusal was not observable from this client); nothing accepted + no traceback: True | **PASS** | n/a |
+| F7-UP2 | server-side upload seam: oversize rejection message, polyglot content sniffing, and traversal-filename neutralisation inside the S3/media storage layer | MAX_UPLOAD_MB validation, Pillow content verification and suffixed-key storage all fire on a real staff upload (products.validate_image_size, .env.example media contract) | BLOCKED: the upload seam is reachable only through products.write (staff) and the Django admin (session+MFA); no staff account exists on this deployment (seed absent, R-17.9 MFA door) | **BLOCKED** | n/a |
+| F7-B1 | serialization bombs against the cart write: 2500-deep nested array (the classic bomb), a nested OBJECT of the same depth (depth control), and a bare scalar (shape control) — sessioned, browser-shaped | the write refuses every payload shape inside 4xx — object or not, shallow or deep — never 5xx, never a traceback | array-depth2500=500, object-depth2500=400, scalar=500; no traceback anywhere: True; depth itself is handled (object-depth → 400); the 5xx fires on NON-OBJECT bodies (hypothesis: a dict-assuming line like request.data.get runs on a list/scalar and raises) | **FAIL** | Medium |
+| F7-B2 | huge-JSON probe: one 300000-byte object posted to the cart write (sessioned, browser-shaped) | an oversized-but-well-formed body stays in 4xx with no 5xx and no traceback (the view refuses the payload or the edge caps it) | 400 {"error":"product_id is required","code":"validation_error","details":{}}; no traceback: True | **PASS** | n/a |
+
+## Family 8 — Oracles / info leaks (T1b)
+
+| ID | Attempted attack | Invariant that must hold | Result (live evidence) | Verdict | Severity |
+|---|---|---|---|---|---|
+| F8-E1 | product existence timing/status differential (existing vs absent detail GETs, medians over 5 shots each) | an existing row must not be distinguishable from an absent one by timing beyond noise (delisted-vs-absent status uniformity already proved byte-identically in T1a F5-D1) | BLOCKED: the catalogue is empty (products count=0, seed_demo never ran) — there is no existing row to compare against; only the absent side exists | **BLOCKED** | n/a |
+| F8-E2 | order existence oracle: anon GET order 1 vs 999999, 4 shots each (status, body, timing) | order_detail is uniform-401 before any lookup — byte-identical bodies and no usable timing gap between a plausible and an absent id | bodies byte-identical: True; medians 78.2ms vs 82.2ms; body {"error":"Authentication credentials were not provided.","code":"not_authenticated","details":{}} | **PASS** | n/a |
+| F8-E3 | user existence oracle: login with a REAL registered username (inactive) vs a never-existing username, 4 shots each (status, body, timing) | one uniform 401 for unknown, wrong-password and inactive — byte-identical bodies and no usable timing gap (no user-enumeration channel through login) | statuses 401/401; byte-identical: True; medians 299.0ms vs 319.4ms (WAN medians, close either direction — no reproducible gap) | **PASS** | n/a |
+| F8-E4 | cartless coupon existence differential (regression re-check of T1a F3-C1): two absent codes, no session | the cartless preview answers one uniform not-found before it reads the code — no code-existence oracle | 404 vs 404; byte-identical: True | **PASS** | n/a |
+| F8-H1 | GET /health/ post-F2 split: scan the public body for the staff keys Q-S2 moved behind health_detail and for non-whitelisted checks | the public probe carries only status + the deploy-relevant whitelist (database/media_writable/shipping_configured); no business counter or config mode reappears (Q-S2/F2 invariant, shape originally verified in T1a STEP ZERO) | 200; checks=['database', 'media_writable', 'shipping_configured']; staff keys leaked: none; extra checks: none | **PASS** | n/a |
+| F8-H2 | source-map probe: fetch the storefront index, try `<script>.map` for 3 discovered bundles | no published .map may serve the original sources (200 map = source disclosure) | bundles found: 3; map probes: three `/_next/static/chunks/*.js.map` = 404; 200 maps: none | **PASS** | n/a |
+| F8-S1 | stack traces under forced errors: deep-nest bomb, huge JSON, lone-surrogate body, 4KB query string — every 5xx the run produced is scanned for traceback markers | DEBUG stays off in production: any 5xx body must be the generic error page — no Traceback, no settings dump, no file paths | statuses: deep-nest-bomb=500, huge-json=400, lone-surrogate=400, long-url=200; 5xx produced: ['deep-nest-bomb']; traceback leaked: none | **PASS** | n/a |
+| F8-D1 | Django debug page: two nonexistent paths (API root + admin) probed for the DEBUG traceback/settings pages | DEBUG=False serves plain 404s (JSON envelope on API routes, bare redirects elsewhere) — never the debug page | statuses 404/302; debug page markers: absent | **PASS** | n/a |
+| F8-C1 | CORS preflight abuse: evil origin (+ credential-shaped ACRH/ACRM) with a trusted-origin control | the evil origin never receives Access-Control-Allow-Origin (a browser cannot read the response cross-origin); the control shows the probe measures CORS policy, not the absence of middleware | evil status 200 ACAO=absent; control status 200 ACAO=https://test.boredompeaks.me | **PASS** | n/a |
+| F8-C2 | CORS null-origin + non-preflight evil-origin probes (credentials trick: allow-credentials without a matching ACAO) | neither null nor evil ever receives ACAO; allow-credentials is never granted to an origin that got no ACAO | null ACAO=absent status 200; evil GET ACAO=absent status 200; allow-credentials=absent | **PASS** | n/a |
+| F8-H3 | Host-header/cache poisoning: Host: evil.example on /health/, X-Forwarded-Host on a slash-redirecting path, Host: evil on the same path (Location builders are the classic poison) | the attacker host never appears in any application body, header or Location — the edge/Django answer with the canonical host or refuse, never a reflected evil host a cache could key on | statuses 403/301/403; app reflection of evil.example: none; edge-rejected: health-host-evil=403, slash-redirect-host-evil=403 (Cloudflare error pages, excluded by marker); XFH Location: /api/v1/store/products/ (relative, canonical); Host Location: none | **PASS** | n/a |
+
+## Family 9 — Notifications / outbox (T1b)
+
+| ID | Attempted attack | Invariant that must hold | Result (live evidence) | Verdict | Severity |
+|---|---|---|---|---|---|
+| F9-F1 | enqueue/mail-flood via the resend-verification trigger: up to 25 shots in a fresh window (empty-email payloads spend the throttle without sending) | the recovery scope refuses per-client within a bounded shot count, so the mail-trigger endpoint cannot be spammed; non-429 answers stay byte-uniform | statuses=[200 x18, 429]; first refusal at shot 19/19; shipped default recovery=5/min; no mail sent (empty email matches nobody); uniform: True | **PASS** | n/a |
+| F9-F2 | reachable enqueue triggers for the durable outbox: forged webhook, anonymous payment verify, guest checkout, restock arm on the seeded slug — a matrix of statuses on a fresh sessionless identity | no unauthenticated caller can enqueue into NotificationOutbox: the webhook fails closed, verify is auth-gated, checkout is the guest deadend, restock arms only for a real product row (and is throttled on top) | webhook=503; verify=401; checkout=403; restock=404 | **PASS** | n/a |
+| F9-F3 | dedup-key collision: enqueue the same event twice and observe the unique dedup_key collapse (or a collision across different payloads) | the outbox's unique dedup_key refuses the second identical enqueue while occurrence-discriminated repeats still land (common/notifications.py _dedup_key) | BLOCKED: no API surface exposes outbox rows or enqueue outcomes: the dedup key is server-side only (enqueue happens inside order/payment transactions), and there is no staff or public read route for NotificationOutbox — the collision cannot be observed from outside the box | **BLOCKED** | n/a |
+| F9-F4 | dead-letter/security-alert abuse: forged password-reset confirmation (the one alert-firing branch an anonymous caller can even aim at) | the forged confirm dies at the token gate (uniform 400, no traceback) before the branch that records AUTH_PASSWORD_RESET and fires notify_security_change; the health-alert branch only fires on a degraded probe, which a caller cannot induce | 400 {"error":"This password-reset link is invalid or expired.","code":"validation_error","details":{}}; refused at token gate: True | **PASS** | n/a |
+| F9-F5 | drain worker behaviour under poisoned payload rows (corrupt context references, oversized error strings, missing models) | drain_notifications claims, bounded-retries and dead-letters poisoned rows without crashing the worker (the property the backend suite pins in-process) | BLOCKED: the drain runs server-side on the celery beat schedule — no API route enqueues a poisoned context or reads a drain outcome, so the attack has no externally observable leg on this deployment (box-side verification belongs to T2/ops with shell access) | **BLOCKED** | n/a |
+| F9-F6 | restock-arm enqueue flood on a real product (12-shot burst, same guest email) | the restock pair throttle bounds a flood that actually arms notification rows | BLOCKED: no product row exists to arm against (seed_demo never ran; the seeded-slug probe 404s) — only the not-found path was reachable, see F9-F2's matrix | **BLOCKED** | n/a |
+
+## Finding detail — F7-B1 (Medium): non-object JSON bodies 500 on the cart write
+
+**What was attacked:** `POST /api/v1/store/cart/` (sessioned, browser-shaped)
+with three well-formed JSON body shapes in one battery — a 2500-deep nested
+array (the classic serialization bomb), a 2500-deep nested **object** (depth
+control), and a bare scalar (`42`, shape control) — plus a 300 KB object
+(family row F7-B2) and a lone-surrogate body (family row F8-S1).
+
+**Measured facts:**
+
+- nested array depth 2500 → **500**; bare scalar `42` → **500**; nested
+  object depth 2500 → **400** (`product_id is required`); 300 KB object →
+  **400**; lone surrogate → **400**.
+- Both 500 bodies are Django's generic `Server Error (500)` page — no
+  traceback, no settings, no file paths (also pinned by row F8-S1).
+- The same nested array against the login door → **400** (measured in the
+  smoke run), i.e. the failure is view-specific, not parser-wide.
+
+**Reading (cause labelled hypothesis, measurements above are facts):** depth
+is handled — the object-depth control proves the parser survives 2500
+levels. What crashes is a body whose top-level JSON value is NOT an object:
+the cart view reaches for a dict-style access on `request.data` and the
+raise escapes as a 500 (the shape of the observed statuses). The uniform
+observation across list and scalar bodies, against a dict-requiring
+validation path that answers 400, supports that reading without needing box
+access to confirm the traceback line.
+
+**Impact:** any client — or a scripted caller — can elicit a 500 from the
+cart write with a ten-byte body (`[1]`). Availability/error-shaping class:
+DEBUG is off so nothing leaks (F8-S1), but the endpoint leaves the designed
+4xx envelope for server errors, and per-request worker time is burned on the
+error path.
+
+**Remediation:** guard the view body's type before dict access (a uniform
+400 envelope for non-object JSON, ideally via serializer validation rather
+than a hand-rolled `isinstance`), add the three-shape battery as backend
+tests, then re-run `scripts/security_smoke.sh` and this row — F7-B1 turns
+PASS when all three shapes answer 4xx.
+
+## Family 10 — F1-F8 regression smoke extension (T1b)
+
+`scripts/security_smoke.sh` keeps T1a's 33 checks byte-for-byte and appends
+19 checks for the T1b families. Run recorded for this task:
+`bash scripts/security_smoke.sh` → **52 checks, 0 failed, exit 0**.
+
+- F6 (5): anonymous logout → 401; anonymous MFA setup → 401; anonymous MFA
+  status → 401/403; refresh with `Origin: https://evil.example` → 403 AND no
+  `refresh_token` Set-Cookie on the refusal (the origin-gate probe must
+  never sweep or mint); (all four auth-scope spends stay inside one fresh
+  window — the smoke never touches register/recovery budgets, per T1a's
+  exclusion).
+- F7 (6): SQLi search tautology → no 5xx and no SQL error text; SQLi
+  ordering injection → no 5xx; deep-nest bomb against the login door →
+  never authenticates (not 200) and never leaks a traceback (this is the
+  leak/auth invariant; the exact 4xx-vs-5xx handling of the cart shape is
+  finding F7-B1 and must stay green either way once fixed); reflected XSS
+  in search served as application/json; polyglot image with path-traversal
+  filename → 401/403; admin login `next=` payload stays HTML-escaped.
+- F8 (5): public /health/ carries deploy checks only (no business keys);
+  evil-origin preflight receives no ACAO; **instrument control**: the
+  trusted-origin preflight MUST receive ACAO (so the evil-origin check can
+  never go vacuously green); unknown path → plain 404 without debug
+  markers; poisoned `X-Forwarded-Host` never reaches a Location header.
+- F9 (3): forged password-reset confirmation → 400 at the token gate;
+  restock arm on an absent slug → uniform 404, twin byte-identical.
+
+Still deliberately excluded (they burn register/recovery windows or need
+credentials): the register/recovery floods' refusal-index bursts (measured
+once per release by the runner instead), any registration call, and every
+staff-role cell. The source-map probes (F8-H2) live in the runner only —
+they depend on the storefront's build layout, which this API-focused script
+must not couple to.
 
 ## Gates and tree integrity
 
@@ -259,6 +468,32 @@ script.
   this file (outputs recorded in the task report and the changelog row).
 - No backend code touched: `git diff 4740f33..HEAD -- backend/` shows only
   this report and the changelog row — zero `.py` (proof re-run at commit).
+
+## T1b gates and tree integrity
+
+- Floor printed by `python scripts/changelog_figures.py floor --task
+  SPEC-T1b` (artifact `scripts/figures/SPEC-T1b.json`), both engines of the
+  pair:
+  - sqlite: Ran 2151 tests, OK (expected failures=2), cov 99.81% (10775
+    stmts, 0 missed, 1472 branches, 23 partial), test exit 0, coverage exit 0
+  - postgresql (lane A container pg2a, engine probed by the tool): Ran 2151
+    tests, OK (expected failures=2), cov 99.81% (10775 stmts, 0 missed, 1472
+    branches, 23 partial), test exit 0, coverage exit 0
+- Pre-flight before any T1b work, re-derived this session on both engines:
+  2151 tests OK (skipped=2, expected failures=2), cov 99.81% — floor held
+  unchanged (backend untouched by this task).
+- Smoke: `bash scripts/security_smoke.sh` → 52 checks, 0 failed, exit 0.
+- `manage.py makemigrations --check` → "No changes detected", exit 0.
+- `ruff check --config backend/pyproject.toml scripts/redteam_t1b.py` →
+  All checks passed, exit 0.
+- `doc_claims.py --base 63e2778` and `changelog_figures.py check --base
+  63e2778` are run as the last step after the changelog row (outputs
+  recorded in the task report and the row itself).
+- No backend code touched by THIS task: `git diff b7f3fde..HEAD -- backend/`
+  shows only this report and the changelog row — zero `.py` (b7f3fde was the
+  lane/a tip this task started from; Q-D4's comment-only `.py` trims and the
+  ledger-sync doc rows between 63e2778 and b7f3fde pre-date this task and
+  belong to their own rows — proof re-run at commit).
 
 ## Appendix A — environment capability inventory (STEP ZERO probes)
 

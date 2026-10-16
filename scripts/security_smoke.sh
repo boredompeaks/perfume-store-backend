@@ -1,10 +1,12 @@
 #!/usr/bin/env bash
-# SPEC-T1a / T1 deliverable: security regression smoke, families 1-5.
+# SPEC-T1 deliverable: security regression smoke, families 1-10.
 #
 # Fast anonymous-only subset of the red-team catalog (T1-report.md), meant to
 # re-run after every future release: each check asserts an invariant that
 # survived the live attack run, so a regression turns this script red before
-# anyone re-attacks. T1b appends the families 6-10 subset later.
+# anyone re-attacks. Families 1-5 are T1a's original subset (kept intact);
+# families 6-10 are T1b's additions (auth/MFA, input-validation, oracles,
+# notifications, and the cross-family regression checks).
 #
 # Usage: scripts/security_smoke.sh [base-url]
 #   base-url defaults to the live UAT API (test mode; no real money anywhere).
@@ -57,13 +59,25 @@ status_ge4() {
   esac
 }
 
+# status_not5xx "desc" -> pass when the answer is not a server error
+# (2xx or 4xx are both fine: the invariant under test is "no 5xx", the
+# exact class is per-endpoint).
+status_not5xx() {
+  local desc="$1"
+  case "$LAST_STATUS" in
+    5[0-9][0-9]) fail "$desc: status $LAST_STATUS is a 5xx; body: $(head -c 160 "$LAST_BODY")" ;;
+    000) fail "$desc: transport failure, no status" ;;
+    *) pass "$desc (status $LAST_STATUS)" ;;
+  esac
+}
+
 same_body() { # desc other_file
   if cmp -s "$LAST_BODY" "$2"; then pass "$1 (byte-identical)"; else
     fail "$1: bodies differ ($(head -c 120 "$LAST_BODY") vs $(head -c 120 "$2"))"
   fi
 }
 
-echo "== security smoke (families 1-5) against $BASE"
+echo "== security smoke (families 1-10) against $BASE"
 
 # --- Family 1: forged webhook deliveries must never be accepted -------------
 printf '%s' '{"event":"payment.captured","payload":{"x":"y"}}' >"$TMP/wh.json"
@@ -160,6 +174,126 @@ status_in "F5 second nonexistent product 404" "404"
 same_body "F5 nonexistent slugs byte-identical" "$TMP/prod404"
 req GET /api/products/zz-smoke-absent-one/
 same_body "F5 legacy mount byte-identical to v1" "$TMP/prod404"
+
+# --- Family 6: auth/MFA refusals + refresh cookie contract ----------------
+printf '%s' '{}' >"$TMP/e.json"
+req POST /api/v1/account/logout/ "$TMP/e.json"
+status_in "F6 anonymous logout refused" "401"
+req POST /api/v1/account/mfa/setup/ "$TMP/e.json"
+status_in "F6 anonymous MFA setup refused" "401"
+req GET /api/v1/account/mfa/status/
+status_in "F6 anonymous MFA status refused" "401 403"
+req POST /api/v1/account/token/refresh/ "$TMP/e.json" "Origin: https://evil.example"
+status_in "F6 cross-origin refresh refused" "403"
+# An origin-gate probe must never mint from or sweep the victim's cookie.
+if grep -qi '^set-cookie:.*refresh_token=' "$LAST_HDRS"; then
+  fail "F6 refresh probe answered with a refresh_token Set-Cookie"
+else
+  pass "F6 refresh probe carries no refresh_token Set-Cookie"
+fi
+
+# --- Family 7: input validation ------------------------------------------
+req GET "/api/v1/store/products/?search=%27%20OR%20%271%27%3D%271"
+status_not5xx "F7 SQLi search tautology stays out of 5xx"
+if grep -qiE 'syntax error|SQLSTATE' "$LAST_BODY"; then
+  fail "F7 SQLi search leaked SQL error text"
+fi
+req GET "/api/v1/store/products/?ordering=%28CASE%20WHEN%20%281%3D1%29%20THEN%20price%20ELSE%20id%20END%29"
+status_not5xx "F7 SQLi ordering injection stays out of 5xx"
+
+# Deep-nesting bomb against a JSON-parsing door: the contract this checks
+# is that it never authenticates and never leaks a traceback. The exact
+# 4xx-vs-5xx handling is report finding F7-B1 (500 today); once that is
+# fixed this check must stay green either way.
+OPEN=$(printf '%.0s[' $(seq 1 2500))
+CLOSE=$(printf '%.0s]' $(seq 1 2500))
+printf '%s' "${OPEN}1${CLOSE}" >"$TMP/nest.json"
+req POST /api/v1/account/storefront/login/ "$TMP/nest.json"
+if [ "$LAST_STATUS" = "200" ] || [ "$LAST_STATUS" = "000" ]; then
+  fail "F7 deep-nest bomb got status $LAST_STATUS from login"
+elif grep -Fq 'Traceback (most recent call last)' "$LAST_BODY" \
+  || grep -Fq 'DEBUG = True' "$LAST_BODY"; then
+  fail "F7 deep-nest bomb response leaked a traceback"
+else
+  pass "F7 deep-nest bomb never authenticates, never leaks (status $LAST_STATUS)"
+fi
+
+req GET "/api/v1/store/products/?search=%3Cscript%3Ealert(1)%3C%2Fscript%3E"
+if [ "$LAST_STATUS" = "200" ] && grep -qi 'content-type: application/json' "$LAST_HDRS"; then
+  pass "F7 reflected XSS payload served as application/json"
+else
+  fail "F7 XSS probe: status $LAST_STATUS or content-type not JSON"
+fi
+
+# Polyglot image with a path-traversal filename, anonymous multipart.
+printf 'GIF89a<script>alert(1)</script>' >"$TMP/p.gif"
+poly_code=$(curl -sS --max-time 25 -X POST -H "User-Agent: $UA" \
+  -F 'name=smoke-poly' -F 'price=1.00' \
+  -F "image=@$TMP/p.gif;filename=../../evil.png;type=image/gif" \
+  -w '%{http_code}' -o "$TMP/poly_body" \
+  "$BASE/api/v1/store/products/" 2>/dev/null) || poly_code="000"
+case "$poly_code" in
+  401|403) pass "F7 polyglot+traversal upload refused (status $poly_code)" ;;
+  *) fail "F7 polyglot upload not refused cleanly: status $poly_code; body: $(head -c 160 "$TMP/poly_body" 2>/dev/null)" ;;
+esac
+
+req GET '/admin/login/?next=%22%3E%3Cscript%3Ealert(1)%3C%2Fscript%3E'
+if [ "$LAST_STATUS" = "200" ] && ! grep -Fq '<script>alert(1)</script>' "$LAST_BODY"; then
+  pass "F7 admin login next= payload stays escaped"
+else
+  fail "F7 admin login reflected the raw payload (status $LAST_STATUS)"
+fi
+
+# --- Family 8: oracles / info leaks ---------------------------------------
+req GET /health/
+if grep -Fq '"database"' "$LAST_BODY" && ! grep -Fq 'pending_orders' "$LAST_BODY" \
+  && ! grep -Fq 'low_stock' "$LAST_BODY"; then
+  pass "F8 public health carries deploy checks only"
+else
+  fail "F8 public health body wrong: $(head -c 160 "$LAST_BODY")"
+fi
+
+req OPTIONS /api/v1/store/products/ "" "Origin: https://evil.example" \
+  "Access-Control-Request-Method: GET" \
+  "Access-Control-Request-Headers: authorization"
+if grep -qi '^access-control-allow-origin:' "$LAST_HDRS"; then
+  fail "F8 evil origin received an Access-Control-Allow-Origin header"
+else
+  pass "F8 evil origin receives no ACAO"
+fi
+req OPTIONS /api/v1/store/products/ "" "Origin: https://test.boredompeaks.me" \
+  "Access-Control-Request-Method: GET"
+if grep -qi '^access-control-allow-origin:' "$LAST_HDRS"; then
+  pass "F8 CORS instrument: trusted origin receives ACAO (control)"
+else
+  fail "F8 control preflight got no ACAO - the evil-origin check above is vacuous"
+fi
+
+req GET /definitely-not-a-real-path-smoke/
+if [ "$LAST_STATUS" = "404" ] && ! grep -Fq 'Traceback (most recent call last)' "$LAST_BODY" \
+  && ! grep -Fq 'DEBUG = True' "$LAST_BODY"; then
+  pass "F8 unknown path: plain 404, no debug page"
+else
+  fail "F8 unknown path: status $LAST_STATUS or debug markers present"
+fi
+
+req GET /api/v1/store/products "" "X-Forwarded-Host: evil.example"
+if grep -qi '^location:.*evil\.example' "$LAST_HDRS"; then
+  fail "F8 slash-redirect Location carries the poisoned host"
+else
+  pass "F8 poisoned X-Forwarded-Host never reaches a Location header"
+fi
+
+# --- Family 9: notifications / outbox --------------------------------------
+printf '%s' '{"uid":"smoke-forged","token":"smoke-forged"}' >"$TMP/confirm.json"
+req POST /api/v1/account/password-reset/confirm/ "$TMP/confirm.json"
+status_in "F9 forged reset confirmation refused at token gate" "400"
+printf '%s' '{"email":"smoke@redteam.invalid"}' >"$TMP/restock.json"
+req POST /api/v1/store/products/zz-smoke-restock/restock-notifications/ "$TMP/restock.json"
+status_in "F9 restock arm on absent product is uniform not-found" "404"
+cp "$LAST_BODY" "$TMP/restock_miss"
+req POST /api/v1/store/products/zz-smoke-restock/restock-notifications/ "$TMP/restock.json"
+same_body "F9 restock not-found twin byte-identical" "$TMP/restock_miss"
 
 echo "== $CHECKS checks, $FAILS failed"
 if [ "$FAILS" -gt 0 ]; then exit 1; fi
