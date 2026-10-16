@@ -229,10 +229,10 @@ Fast, anonymous-only, `bash + curl` only; `bash scripts/security_smoke.sh
   changelist → 302 to login only.
 - F3 (3): cartless coupon preview refused for two absent codes, byte-identical
   (no cartless oracle).
-- F4 (7): guest refusal 403 and byte-identical across full/empty/malformed
+- F4 (6): guest refusal 403 and byte-identical across full/empty/malformed
   payloads; cart 200 with sessionid absent from the body; sessioned POST
   without CSRF material → 401/403.
-- F5 (13): anonymous GETs on five admin/order surfaces → 401/403/302;
+- F5 (14): anonymous GETs on five admin/order surfaces → 401/403/302;
   anonymous POSTs on fulfil/cancel/refund → 401/403; customer order list and
   detail → 401; two nonexistent product slugs → byte-identical 404, legacy
   mount byte-identical to v1.

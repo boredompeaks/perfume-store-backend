@@ -1140,7 +1140,7 @@ def phase4(H: Http, F: Ledger, cart_ref: Http):
     item_resps.append(
         ("PATCH/1",
          jarB.request(
-             f"/api/v1/store/cart/1/",
+             "/api/v1/store/cart/1/",
              "PATCH",
              {"quantity": 7},
              headers=trusted_b,
