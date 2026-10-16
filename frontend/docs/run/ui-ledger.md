@@ -188,6 +188,12 @@ agent configs land in ui-wt/.opencode/agents — check that dir before every dis
 Auditor findings come to the user; NO fix dispatch without approval. Check periodically:
 (1) ui-wt/.opencode/agents for new configs, (2) orch-bridge.md for backend messages,
 (3) git fetch origin.
+Standing sync rule (user, 2026-10-16): before merging a lane into spec-ui, RE-MERGE the
+current spec-ui tip INTO the lane first (lanes run in different worktree dirs — no
+exceptions), then merge the lane forward; after every sync run the silent-deletion check
+(`git diff --diff-filter=D <baseline>..HEAD` empty + per-lane content markers). Wave-6
+merges predate this rule; retro-verified clean (0 deletions, union of t1+t2+t3 present,
+t3 cart files byte-identical, ui.test.ts delta = t3's +7 only).
 | BUG-10 | Tailwind @source pin | — | **CLOSED** | 1 | fixed `adbc7ea` (pre-WP0 tip); stylesheet bloat eliminated at source |
 | BUG-4 | e2e unproven (servers down) | — | **OPEN** | — | still must run with backend up; WP0 put a current backend in-tree — close during wave with e2e tasks |
 
