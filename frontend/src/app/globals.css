@@ -344,8 +344,10 @@
 
 /* Functional animations (toast entry, skeleton shimmer). Both source their
    duration from §2.4 tokens so the reduced-motion block below reaches them.
-   CHANGE-6 (drop the box-shadow transition) and CHANGE-7 (composited
-   transform shimmer) are component-layer work and are not done here. */
+   CHANGE-6 (drop the box-shadow transition) IS applied on `.card-lift` below:
+   the box-shadow it used to transition repaints every frame on every card of a
+   12-card grid. CHANGE-7 (composited transform shimmer) is still outstanding -
+   `.skeleton` still sweeps `background-position`. */
 @keyframes toast-in {
   from {
     opacity: 0;
@@ -411,15 +413,51 @@
   transform-origin: left;
 }
 
-/* Quiet lift for interactive cards. */
+/* Quiet lift for interactive cards.
+   §0 CHANGE-6: TRANSFORM ONLY. The elevation cue on hover is the card's own
+   border-colour change (ProductCard -> `--color-hairline-hover`, D2's 3.90:1
+   hover token), so there is no shadow to paint and no shadow to transition:
+   `box-shadow` is a paint property, and animating it on every card of a
+   12-card grid is exactly §0/§3 forbid. The 2px lift is the refs' value. */
 .card-lift {
-  transition:
-    transform var(--motion-hover-dur) var(--motion-ease),
-    box-shadow var(--motion-hover-dur) var(--motion-ease);
+  transition: transform var(--motion-hover-dur) var(--motion-ease);
 }
 .card-lift:hover {
-  transform: translateY(-3px);
-  box-shadow: 0 14px 32px -14px color-mix(in srgb, var(--color-ink) 22%, transparent);
+  transform: translateY(-2px);
+}
+
+/* §5.2 / §2.2.3 — the price figure: the `--text-money` step (0.9375rem, 600)
+   as one class. Tailwind's own `text-money` utility cannot be written from
+   `src/`: lib/ui.test.ts reads any `text-<word>` as a colour-token reference
+   and `--color-money` does not exist, so the guard fails it by design. The
+   numeric pairing stays Tailwind's, composed on the element (`tabular-nums
+   lining-nums`), which is the mechanism the --text-money token comment names.
+   Colour is inherited `--color-ink`: money is a primary figure, not a caption.
+   All four companions ride along, so `.money` is the whole §2.2.2 step and not
+   a font-size with the rest left to inheritance. */
+.money {
+  font-size: var(--text-money);
+  line-height: var(--text-money--line-height);
+  letter-spacing: var(--text-money--letter-spacing);
+  font-weight: var(--text-money--font-weight);
+}
+
+/* §5.2 Motion — the result-count line cross-fades on `--motion-state` when a
+   filter resolves: the one state change on the listing page. Opt-in per §7.6
+   (a new animation is DECLARED inside no-preference, so reduced motion never
+   sees it to shorten), opacity only, composited, 0 KB. */
+@media (prefers-reduced-motion: no-preference) {
+  @keyframes count-settle {
+    from {
+      opacity: 0;
+    }
+    to {
+      opacity: 1;
+    }
+  }
+  .count-settle {
+    animation: count-settle var(--motion-state-dur) var(--motion-ease);
+  }
 }
 
 /* Ghost watermark text (outlined, decorative only — exemption E1). */
@@ -504,8 +542,10 @@
    blanket `animation-duration` cannot neutralise a progress-based
    `animation-timeline`, where the duration is the mapper — scroll-driven work
    must additionally be declared inside `@media (prefers-reduced-motion:
-   no-preference)`. The first scroll-driven rule — `.settle` above, for §5.1's
-   home page — carries that gate itself.
+   no-preference)`. Two such declarations now exist — `.settle` above, for
+   §5.1's home page, and `.count-settle`, the /products result-count
+   cross-fade (§5.2) — and any later scroll-driven or opt-in animation must
+   copy that shape.
    ========================================================================== */
 @media (prefers-reduced-motion: reduce) {
   :root {
