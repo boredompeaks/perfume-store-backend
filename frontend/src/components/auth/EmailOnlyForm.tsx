@@ -52,7 +52,12 @@ export default function EmailOnlyForm({
 
   if (state.kind === "sent") {
     return (
-      <div className="border border-hairline p-8">
+      // §5.10: the success state is a field-border panel, so the swap from
+      // form to message is a visible container change rather than vanished
+      // fields. The server's message renders verbatim — the backend answers
+      // uniformly whether or not the account exists, and the UI never
+      // branches on it (uniform-response rule, conventions.md Security).
+      <div className="border border-field-border p-8">
         <p className="text-ink-secondary" role="status" aria-live="polite">
           {state.message}
         </p>
@@ -77,7 +82,7 @@ export default function EmailOnlyForm({
         />
       </div>
       {state.kind === "error" && (
-        <p role="alert" className="text-sm text-bronze">
+        <p role="alert" className="text-sm text-danger">
           {state.message}
         </p>
       )}

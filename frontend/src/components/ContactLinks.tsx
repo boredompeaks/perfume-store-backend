@@ -76,6 +76,12 @@ type ContactItem = {
  * The one contact-row used in the footer and the contact page. Values come
  * from admin-configured settings (fallback: env/site.ts); unconfigured
  * channels render nothing instead of dead links.
+ *
+ * §5.8 CHANGE: the 40×40 button boundary is the control token
+ * (`border-field-border`), not the decorative hairline — a control whose only
+ * affordance is a border and a glyph needs a 1.4.11 boundary, and the
+ * hairline is decorative-only (§2.1). The glyph already passed on its own;
+ * now the boundary does too.
  */
 export default function ContactLinks({
   settings = fallbackContact,
@@ -124,7 +130,7 @@ export default function ContactLinks({
             aria-label={item.label}
             title={item.label}
             {...(item.external ? { target: "_blank", rel: "noreferrer" } : {})}
-            className="flex h-10 w-10 items-center justify-center border border-hairline bg-surface text-ink transition-all hover:border-bronze hover:text-bronze active:scale-95"
+            className="flex h-10 w-10 items-center justify-center border border-field-border bg-surface text-ink transition-all hover:border-bronze hover:text-bronze active:scale-95"
           >
             {item.icon}
           </a>

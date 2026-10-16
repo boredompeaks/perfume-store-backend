@@ -255,7 +255,7 @@
      A new z-index is a new token, or it is a bug. Note the scanner no longer
      reads this file's neighbours, so a raw `z-50` typed into a component is
      the only thing that could reintroduce one. */
-  --z-sticky: 30; /* sticky purchase / summary panels — no consumer yet */
+  --z-sticky: 30; /* sticky purchase / summary panels — CartView.tsx */
   --z-header: 40; /* <header> — Header.tsx */
   --z-overlay: 50; /* menu overlay, any modal — MenuOverlay.tsx */
   --z-toast: 60; /* above the overlay: a confirmation must not hide behind it — toast.tsx */
@@ -344,8 +344,10 @@
 
 /* Functional animations (toast entry, skeleton shimmer). Both source their
    duration from §2.4 tokens so the reduced-motion block below reaches them.
-   CHANGE-6 (drop the box-shadow transition) and CHANGE-7 (composited
-   transform shimmer) are component-layer work and are not done here. */
+   CHANGE-6 (drop the box-shadow transition) IS applied on `.card-lift` below:
+   the box-shadow it used to transition repaints every frame on every card of a
+   12-card grid. CHANGE-7 (composited transform shimmer) is still outstanding -
+   `.skeleton` still sweeps `background-position`. */
 @keyframes toast-in {
   from {
     opacity: 0;
@@ -385,6 +387,25 @@
   animation: shimmer var(--motion-loading-dur) linear infinite;
 }
 
+/* §5.3 — the stepper value cross-fade on the cart quantity control. The
+   declaration sits inside the no-preference gate (§3's primary layer), so
+   under reduced motion there is no opacity step at all: the new value is
+   simply there, at full opacity, from its first frame. */
+@keyframes qty-crossfade-in {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
+
+@media (prefers-reduced-motion: no-preference) {
+  .qty-crossfade {
+    animation: qty-crossfade-in var(--motion-enter-dur) var(--motion-ease);
+  }
+}
+
 /* ——— UI polish layer ——— */
 
 /* Animated underline for footer/nav links. Compositor-only (`transform`,
@@ -411,15 +432,56 @@
   transform-origin: left;
 }
 
-/* Quiet lift for interactive cards. */
+/* Quiet lift for interactive cards.
+   §0 CHANGE-6: TRANSFORM ONLY. The elevation cue on hover is the card's own
+   border-colour change (ProductCard -> `--color-hairline-hover`, D2's 3.90:1
+   hover token), so there is no shadow to paint and no shadow to transition:
+   `box-shadow` is a paint property, and animating it on every card of a
+   12-card grid is exactly §0/§3 forbid. The 2px lift is the refs' value. */
 .card-lift {
-  transition:
-    transform var(--motion-hover-dur) var(--motion-ease),
-    box-shadow var(--motion-hover-dur) var(--motion-ease);
+  transition: transform var(--motion-hover-dur) var(--motion-ease);
 }
 .card-lift:hover {
-  transform: translateY(-3px);
-  box-shadow: 0 14px 32px -14px color-mix(in srgb, var(--color-ink) 22%, transparent);
+  transform: translateY(-2px);
+}
+
+/* §5.2 / §2.2.3 — the price figure: the `--text-money` step (0.9375rem, 600)
+   as one class. Tailwind's own `text-money` utility IS legal from `src/` —
+   CartLineItem.tsx ships it — because lib/ui.test.ts carries `money` in
+   NOT_A_COLOUR and pins it with an `isColourCandidate("text", "money")`
+   case: the guard reads it as the --text-* type step it is rather than as a
+   missing `--color-money`, so nothing "fails by design" (an earlier version
+   of this comment claimed exactly that, before the exemption landed in the
+   ui.test merge; wave-6 audit corrected the claim). `.money` stays the
+   one-class spelling for the whole step. The numeric pairing stays
+   Tailwind's, composed on the element (`tabular-nums lining-nums`), which is
+   the mechanism the --text-money token comment names. Colour is inherited
+   `--color-ink`: money is a primary figure, not a caption. All four
+   companions ride along, so `.money` is the whole §2.2.2 step and not a
+   font-size with the rest left to inheritance. */
+.money {
+  font-size: var(--text-money);
+  line-height: var(--text-money--line-height);
+  letter-spacing: var(--text-money--letter-spacing);
+  font-weight: var(--text-money--font-weight);
+}
+
+/* §5.2 Motion — the result-count line cross-fades on `--motion-state` when a
+   filter resolves: the one state change on the listing page. Opt-in per §7.6
+   (a new animation is DECLARED inside no-preference, so reduced motion never
+   sees it to shorten), opacity only, composited, 0 KB. */
+@media (prefers-reduced-motion: no-preference) {
+  @keyframes count-settle {
+    from {
+      opacity: 0;
+    }
+    to {
+      opacity: 1;
+    }
+  }
+  .count-settle {
+    animation: count-settle var(--motion-state-dur) var(--motion-ease);
+  }
 }
 
 /* Ghost watermark text (outlined, decorative only — exemption E1). */
@@ -435,6 +497,123 @@
   inset: 0;
   pointer-events: none;
   background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='160' height='160'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='2'/%3E%3CfeColorMatrix values='0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0.05 0'/%3E%3C/filter%3E%3Crect width='160' height='160' filter='url(%23n)'/%3E%3C/svg%3E");
+}
+
+/* ==========================================================================
+   §5.1 HOME — the settle reveal, the page's ONE accent moment (P2). The
+   three sections below the hero (new arrivals, house position, fact strip)
+   fade and settle 8px into place in reading order as they are reached
+   (`animation-timeline: view()`, §3 override O4). Nothing else on that page
+   moves: the hero never animates — it is the first-screen content and the
+   LCP candidate (§10, §3 "Never on the hero") — and hover transitions answer
+   a state the customer caused.
+
+   O4's shape, honoured to the letter:
+   - The BASE state carries no `opacity` and no `transform`. The default is
+     the final state, so a crawler, a screen reader and a reduced-motion
+     customer all get the settled page.
+   - The animation exists only inside `@media (prefers-reduced-motion:
+     no-preference)` — the primary, opt-in gate (§8.3) — and inside
+     `@supports (animation-timeline: view())`, so a browser without
+     scroll-driven animations (Firefox today) never enters the rule at all
+     rather than running a time-based fade from `opacity: 0` (§3's row:
+     "the @supports default state must be opacity:1").
+   - `animation-fill-mode: both` supplies the pre-entry state, so there is
+     no one-frame flash of the final layout before the timeline takes hold.
+   - Duration and easing are intent tokens (`enter`), never a raw ms value.
+     On a progress-based timeline the duration is not the mapper, but naming
+     the token keeps the declaration inside the token contract.
+   - Amplitude: 8px, well under §3's 24px / 6%-of-viewport cap.
+   No script, no IntersectionObserver, no will-change: 0 KB, compositor-only
+   (transform + opacity), one scroll listener fewer than the refs shipped.
+   ======================================================================== */
+@keyframes settle-in {
+  from {
+    opacity: 0;
+    transform: translateY(-8px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+@media (prefers-reduced-motion: no-preference) {
+  @supports (animation-timeline: view()) {
+    .settle {
+      animation: settle-in var(--motion-enter-dur) var(--motion-ease) both;
+      animation-timeline: view();
+      animation-range: entry 0% entry 40%;
+    }
+  }
+}
+
+/* ==========================================================================
+   §5.2 /products/[slug] — THE PDP'S ONE ACCENT MOMENT (P2): the still-life
+   plate drifts as the notes beside it are read (STITCH §2 row 3: "the story
+   image drifting as the notes beside it are read — one sticky frame on a
+   scroll timeline, desktop only. The bottle itself never moves"). The frame
+   is the element's own `lg:sticky` (§5.2: "a position: sticky frame with
+   translateY on a scroll() timeline"); the keyframes travel 6% of viewport
+   height (-3vh → +3vh), which is §5.2's stated amplitude and sits inside
+   §3's 24px / 6%-of-viewport cap.
+
+   Three gates, in order, same shape as `.settle`: reduced motion never sees
+   the declaration (§7.6 opt-in, so the drift is simply absent rather than
+   shortened), `min-width: 1024px` is §5.2's "lg+ only", and `@supports
+   (animation-timeline: scroll())` keeps a browser without scroll-driven
+   animations on the settled base state instead of running a time-based
+   drift (§3 O4's rule, applied to this timeline). Transform only,
+   composited, 0 KB; intent token `narrative` — §2.4's one-accent row. The
+   LCP bottle is a different element and never animates.
+   ======================================================================== */
+@keyframes story-drift {
+  from {
+    transform: translateY(-3vh);
+  }
+  to {
+    transform: translateY(3vh);
+  }
+}
+
+@media (prefers-reduced-motion: no-preference) {
+  @media (min-width: 1024px) {
+    @supports (animation-timeline: scroll()) {
+      .story-drift {
+        animation: story-drift var(--motion-narrative-dur) var(--motion-ease)
+          both;
+        animation-timeline: scroll();
+      }
+    }
+  }
+}
+
+/* §5.2 sticky bottom purchase bar (xs/sm only): while the bar is up,
+   reserve its height at the END of the document so it can never cover the
+   footer's last row. `--space-24` (96px) is the bar's height plus safe-area
+   slack, and the whole rule is scoped below `lg` because the bar itself is
+   `lg:hidden` — §5.2: "lg removes it entirely … never both at once". */
+@media (max-width: 1023px) {
+  body.pdp-buybar-open {
+    padding-bottom: var(--space-24);
+  }
+}
+
+/* ==========================================================================
+   §3 — VIEW TRANSITIONS (the cart line removal, §5.3).
+   The removal wrapper in CartLineItem names ONE element per visible row —
+   "one snapshot per visible line", capped at 20 rows by CartView — so the
+   browser re-lays-out and cross-fades the lines that closed up. The implicit
+   root snapshot is switched off here: the summary, heading and header are
+   state, not motion, and §5.3 gives /cart no accent moment of its own. A
+   browser without the API, and every customer under prefers-reduced-motion,
+   takes the wrapper's instant-reflow path instead — the UA's transition
+   animations read no --motion-* token, so the media query there is the layer
+   that can reach them.
+   ======================================================================== */
+::view-transition-old(root),
+::view-transition-new(root) {
+  animation: none;
 }
 
 /* ==========================================================================
@@ -455,8 +634,13 @@
    blanket `animation-duration` cannot neutralise a progress-based
    `animation-timeline`, where the duration is the mapper — scroll-driven work
    must additionally be declared inside `@media (prefers-reduced-motion:
-   no-preference)`. None exists yet, so that gate belongs to the task that
-   introduces it.
+   no-preference)`. Four such declarations now exist in this file — `.settle`
+   (§5.1's home reveal), `.count-settle` (the /products result-count
+   cross-fade, §5.2), `.qty-crossfade` (the cart stepper value, §5.3) and
+   `.story-drift` (the PDP accent, §5.2) — and any later scroll-driven or
+   opt-in animation must copy that shape. (The wave-6 audit found this
+   comment claiming "two"; a grep of the gate count is the check, and it now
+   reads four.)
    ========================================================================== */
 @media (prefers-reduced-motion: reduce) {
   :root {

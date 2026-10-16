@@ -14,7 +14,8 @@ function CartSkeleton() {
     <div aria-hidden="true" className="space-y-6">
       {[1, 2, 3].map((n) => (
         <div key={n} className="flex gap-4 border-b border-hairline pb-6">
-          <div className="skeleton aspect-[4/5] h-28 w-24" />
+          {/* 96×120 — the same thumb the populated row renders (§5.3). */}
+          <div className="skeleton h-30 w-24 shrink-0" />
           <div className="flex-1 space-y-3 py-1">
             <div className="skeleton h-4 w-1/2" />
             <div className="skeleton h-3 w-1/3" />
@@ -26,6 +27,15 @@ function CartSkeleton() {
   );
 }
 
+/**
+ * §5.3 `/cart` — line items (left) and the sticky summary (right).
+ *
+ * Money here is display arithmetic on server-provided prices only: the
+ * subtotal has no server field yet (BACKEND_REQUESTS P1 "Totals in the cart
+ * payload"), so it is labelled an estimate, and the applied coupon's discount
+ * and post-coupon total are rendered verbatim by `CouponForm` from the
+ * apply-coupon preview. No pricing rule is implemented in this component.
+ */
 export default function CartView() {
   const { status } = useAuth();
   const { data: cart, isPending, isError, refetch } = useQuery({
@@ -75,32 +85,45 @@ export default function CartView() {
     );
   }
 
-  // Display arithmetic on server-provided prices only; totals are
-  // confirmed server-side at checkout / apply-coupon.
   const subtotal = cart.items.reduce(
     (sum, item) => sum + Number(item.product.price) * item.quantity,
     0,
   );
+  const guestCheckout = templateConfig.featureFlags.guestCheckout;
 
   return (
     <div className="grid gap-12 lg:grid-cols-[1fr_360px]">
-      <div>
+      <div className="divide-y divide-hairline">
         {cart.items.map((item) => (
-          <CartLineItem key={item.id} item={item} />
+          <CartLineItem
+            key={item.id}
+            item={item}
+            /* §3 "Cart - line removed": one snapshot per visible line, and the
+               row's own cap — snapshot memory scales with the captured area. */
+            vtName={
+              cart.items.length <= 20 ? `cart-line-${item.id}` : undefined
+            }
+          />
         ))}
       </div>
 
-      <aside className="self-start border border-hairline p-6 lg:sticky lg:top-24">
+      <aside className="z-(--z-sticky) self-start border border-field-border p-6 lg:sticky lg:top-24">
         <h2 className="font-display text-xl tracking-tight">Summary</h2>
 
-        <div className="mt-4 flex items-baseline justify-between text-sm">
-          <span className="text-ink-secondary">Subtotal</span>
-          <span>{formatINR(subtotal)}</span>
+        <div className="mt-4 flex items-baseline justify-between gap-3 text-sm">
+          <span className="text-ink-secondary">
+            Subtotal <span className="text-xs">(estimate)</span>
+          </span>
+          <span className="tabular-nums">{formatINR(subtotal)}</span>
         </div>
         <p className="mt-1 text-xs text-ink-secondary">
-          Final totals are confirmed at checkout.
+          Delivery is charged once a destination is set; totals are confirmed
+          at checkout.
         </p>
 
+        {/* The coupon block shows the real discount and the post-coupon total
+            from the server preview — §5.3 "the cart can now show the coupon
+            discount for real". */}
         <div className="mt-5 border-t border-hairline pt-5">
           <CouponForm />
         </div>
@@ -114,31 +137,50 @@ export default function CartView() {
               Proceed to checkout
             </Link>
           ) : status === "anonymous" ? (
-            <>
-              <Link
-                href="/login?next=/checkout"
-                className="block bg-ink px-6 py-3 text-center text-sm text-paper transition-colors hover:bg-bronze"
-              >
-                {/* guestCheckout flips COPY only (U-W3-T5): the guest wall
-                    (redirect to /login?next=/checkout) stays the real behavior
-                    until F1 ships guest checkout server-side. Pointing the href
-                    at /checkout now would promise a flow the backend does not
-                    have, so the flag cannot move the target yet. */}
-                {templateConfig.featureFlags.guestCheckout
-                  ? "Sign in to checkout"
-                  : "Proceed to checkout"}
-              </Link>
-              <p className="mt-3 text-center text-xs text-ink-secondary">
-                Your cart is saved on this device.
-              </p>
-            </>
+            guestCheckout ? (
+              <>
+                {/* §5.3 CTA by auth state (CHANGE-11). CheckoutView owns the
+                    sign-in wall when the flag is off, and surfaces the
+                    backend's own refusal verbatim when an anonymous order is
+                    refused (BACKEND_REQUESTS P1, TIER1-GUEST-DEADEND) — the
+                    cart promises the door, not the outcome. */}
+                <Link
+                  href="/checkout"
+                  className="block bg-ink px-6 py-3 text-center text-sm text-paper transition-colors hover:bg-bronze"
+                >
+                  Checkout as guest
+                </Link>
+                <p className="mt-3 text-center text-xs text-ink-secondary">
+                  or{" "}
+                  <Link
+                    href="/login?next=/checkout"
+                    className="link-underline"
+                  >
+                    sign in
+                  </Link>
+                </p>
+              </>
+            ) : (
+              <>
+                <Link
+                  href="/login?next=/checkout"
+                  className="block bg-ink px-6 py-3 text-center text-sm text-paper transition-colors hover:bg-bronze"
+                >
+                  Sign in to checkout
+                </Link>
+                <p className="mt-3 text-center text-xs text-ink-secondary">
+                  Your cart is saved on this device.
+                </p>
+              </>
+            )
           ) : (
-            <span
-              aria-hidden="true"
-              className="block bg-ink px-6 py-3 text-center text-sm text-paper opacity-60"
+            <button
+              type="button"
+              disabled
+              className="block w-full bg-ink px-6 py-3 text-center text-sm text-paper opacity-60"
             >
-              …
-            </span>
+              Proceed to checkout
+            </button>
           )}
         </div>
       </aside>

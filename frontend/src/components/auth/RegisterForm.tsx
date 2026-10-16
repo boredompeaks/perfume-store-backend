@@ -13,6 +13,17 @@ type Availability =
   | { state: "taken" }
   | { state: "short" };
 
+/**
+ * The account-created terminal state. `message` is the SERVER's copy,
+ * rendered verbatim in both branches (§5.9): the 201 message on success,
+ * the 503 `error` when the account exists but the verification email could
+ * not be sent. The 503 is a state of its own — not a failure of the form —
+ * so it renders in a status panel (role="status"), distinct from the
+ * role="alert" error surfaces, with the §5.9-named link to
+ * /resend-verification.
+ */
+type Registered = { emailFailed: boolean; message: string };
+
 export default function RegisterForm() {
   const [username, setUsername] = useState("");
   const [email, setEmail] = useState("");
@@ -20,7 +31,7 @@ export default function RegisterForm() {
   const [fieldErrors, setFieldErrors] = useState<Record<string, string[]>>({});
   const [formError, setFormError] = useState<string | null>(null);
   const [pending, setPending] = useState(false);
-  const [registered, setRegistered] = useState<{ emailFailed: boolean } | null>(null);
+  const [registered, setRegistered] = useState<Registered | null>(null);
   const [availability, setAvailability] = useState<Availability>({ state: "idle" });
   const latestCheck = useRef(0);
 
@@ -53,16 +64,19 @@ export default function RegisterForm() {
     setFormError(null);
     setFieldErrors({});
     try {
-      await register(username.trim(), email.trim(), password);
-      setRegistered({ emailFailed: false });
+      const res = await register(username.trim(), email.trim(), password);
+      setRegistered({ emailFailed: false, message: res.message });
     } catch (err) {
       if (err instanceof ApiError) {
         if (err.status === 503) {
-          // Backend created the account but the verification email failed.
-          setRegistered({ emailFailed: true });
+          // Backend created the account but the verification email failed —
+          // its `error` string is the copy for that state, verbatim.
+          setRegistered({ emailFailed: true, message: err.message });
         } else if (err.fieldErrors) {
           setFieldErrors(err.fieldErrors);
         } else {
+          // Includes the 429 throttle wording: whatever the server said,
+          // shown exactly as said (server copy verbatim, §5.9 / P5).
           setFormError(err.message);
         }
       } else {
@@ -75,28 +89,21 @@ export default function RegisterForm() {
 
   if (registered) {
     return (
-      <div className="border border-hairline p-8">
-        <h2 className="font-display text-2xl tracking-tight">
-          {registered.emailFailed
-            ? "Account created — one step left."
-            : "Check your email."}
-        </h2>
-        <p className="mt-3 text-ink-secondary">
-          {registered.emailFailed
-            ? "We created your account, but the verification email could not be sent just now. You can request it again below."
-            : `We sent a verification link to ${email}. Open it to activate your account — sign-in stays locked until then.`}
-        </p>
+      <div className="border border-hairline p-8" role="status" aria-live="polite">
+        <p className="text-ink">{registered.message}</p>
         <Link
           href="/resend-verification"
           className="mt-6 inline-block bg-ink px-6 py-3 text-sm text-paper transition-colors hover:bg-bronze"
         >
-          {registered.emailFailed
-            ? "Resend verification email"
-            : "Resend verification email"}
+          Resend verification email
         </Link>
       </div>
     );
   }
+
+  const hasUsernameError = Boolean(fieldErrors.username?.length);
+  const hasEmailError = Boolean(fieldErrors.email?.length);
+  const hasPasswordError = Boolean(fieldErrors.password?.length);
 
   return (
     <form onSubmit={onSubmit} className="space-y-4" noValidate>
@@ -110,7 +117,10 @@ export default function RegisterForm() {
           autoComplete="username"
           value={username}
           onChange={(e) => setUsername(e.target.value)}
-          aria-describedby="reg-username-hint"
+          aria-invalid={hasUsernameError ? true : undefined}
+          aria-describedby={
+            hasUsernameError ? "reg-username-hint reg-username-err" : "reg-username-hint"
+          }
           className={`${inputClass} w-full`}
           required
         />
@@ -125,11 +135,15 @@ export default function RegisterForm() {
                   ? "At least 3 characters."
                   : ""}
         </p>
-        {fieldErrors.username?.map((msg) => (
-          <p key={msg} role="alert" className="mt-1 text-sm text-bronze">
-            {msg}
-          </p>
-        ))}
+        {hasUsernameError && (
+          <div id="reg-username-err">
+            {fieldErrors.username?.map((msg) => (
+              <p key={msg} role="alert" className="mt-1 text-sm text-danger">
+                {msg}
+              </p>
+            ))}
+          </div>
+        )}
       </div>
 
       <div>
@@ -142,14 +156,20 @@ export default function RegisterForm() {
           autoComplete="email"
           value={email}
           onChange={(e) => setEmail(e.target.value)}
+          aria-invalid={hasEmailError ? true : undefined}
+          aria-describedby={hasEmailError ? "reg-email-err" : undefined}
           className={`${inputClass} w-full`}
           required
         />
-        {fieldErrors.email?.map((msg) => (
-          <p key={msg} role="alert" className="mt-1 text-sm text-bronze">
-            {msg}
-          </p>
-        ))}
+        {hasEmailError && (
+          <div id="reg-email-err">
+            {fieldErrors.email?.map((msg) => (
+              <p key={msg} role="alert" className="mt-1 text-sm text-danger">
+                {msg}
+              </p>
+            ))}
+          </div>
+        )}
       </div>
 
       <div>
@@ -162,20 +182,29 @@ export default function RegisterForm() {
           autoComplete="new-password"
           value={password}
           onChange={(e) => setPassword(e.target.value)}
+          aria-invalid={hasPasswordError ? true : undefined}
+          aria-describedby={hasPasswordError ? "reg-password-err" : undefined}
           className={`${inputClass} w-full`}
           required
           minLength={8}
         />
+        {/* Static hint only — the real policy is the server's
+            validate_password (SPEC-1-03); its messages arrive under
+            `password` and render per message below, never paraphrased. */}
         <p className="mt-1 text-sm text-ink-secondary">At least 8 characters.</p>
-        {fieldErrors.password?.map((msg) => (
-          <p key={msg} role="alert" className="mt-1 text-sm text-bronze">
-            {msg}
-          </p>
-        ))}
+        {hasPasswordError && (
+          <div id="reg-password-err">
+            {fieldErrors.password?.map((msg) => (
+              <p key={msg} role="alert" className="mt-1 text-sm text-danger">
+                {msg}
+              </p>
+            ))}
+          </div>
+        )}
       </div>
 
       {formError && (
-        <p role="alert" className="text-sm text-bronze" aria-live="polite">
+        <p role="alert" className="text-sm text-danger" aria-live="polite">
           {formError}
         </p>
       )}

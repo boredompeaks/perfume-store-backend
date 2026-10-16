@@ -111,8 +111,12 @@ export default function LoginForm({
           </div>
         )}
 
+        {/* CHANGE-2: validation and failure copy is `--color-danger`, never
+            the accent — bronze must never mean "this failed". The message
+            itself is the server's, verbatim (401 ambiguity, 429 throttle
+            wording); the non-ApiError branch is the network-down state. */}
         {error && (
-          <p role="alert" className="text-sm text-bronze" aria-live="polite">
+          <p role="alert" className="text-sm text-danger" aria-live="polite">
             {error}
           </p>
         )}

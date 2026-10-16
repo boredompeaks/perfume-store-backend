@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { ApiError } from "./api";
-import { applyCartCoupon, removeCartCoupon } from "./cart-api";
+import { applyCartCoupon, deleteCartItem, removeCartCoupon } from "./cart-api";
 
 const ok = (body: unknown) =>
   new Response(JSON.stringify(body), {
@@ -69,6 +69,37 @@ describe("applyCartCoupon", () => {
     );
 
     const e = await applyCartCoupon("SAVE10").catch((x) => x);
+    expect(e).toBeInstanceOf(ApiError);
+    expect(e.status).toBe(404);
+    expect(e.message).toBe("Cart not found");
+  });
+});
+
+describe("deleteCartItem — the cart line removal path", () => {
+  it("DELETEs /api/cart/{id}/ with the session credentials and returns the cart body", async () => {
+    const remaining = { ...cartBody, items: [{ id: 9, quantity: 2 }] };
+    const fetchMock = vi.fn().mockResolvedValue(ok(remaining));
+    vi.stubGlobal("fetch", fetchMock);
+
+    const result = await deleteCartItem(7);
+
+    // The re-render path CartLineItem relies on: the mutated cart body, so
+    // no follow-up GET is needed after a line disappears.
+    expect(result.items).toHaveLength(1);
+    const [url, init] = fetchMock.mock.calls[0];
+    expect(String(url)).toContain("/api/cart/7/");
+    expect(init.method).toBe("DELETE");
+    expect(init.credentials).toBe("include");
+    expect(init.body).toBeUndefined();
+  });
+
+  it("maps cart-not-found 404 to an ApiError so the line can surface and refetch", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockResolvedValue(err(404, { error: "Cart not found" })),
+    );
+
+    const e = await deleteCartItem(7).catch((x) => x);
     expect(e).toBeInstanceOf(ApiError);
     expect(e.status).toBe(404);
     expect(e.message).toBe("Cart not found");
