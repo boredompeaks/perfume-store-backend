@@ -74,7 +74,8 @@ the status-family label (`validation_error`, `not_authenticated`,
 - Throttle scopes are recorded inside the permission column (point 1) because
   the checklist's ten points have no separate throttle slot; scopes come from
   the views (`auth`, `register`, `recovery`, `cart`, `coupon`, `payment`) and
-  `THROTTLE_*_RATE` settings.
+  their env knobs — `THROTTLE_*_RATE` for every scope above except `payment`,
+  whose knob is `PAYMENT_THROTTLE_RATE`.
 - Refreshed 2026-10-16 (SPEC-Q-D2a docs-freshness pass): the error-envelope
   description follows ENVELOPE-WIRE (handler + middleware, wire bytes); the
   register row follows Q-S3 (dedicated `register` scope, optional env-gated

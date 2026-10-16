@@ -79,9 +79,12 @@ by `test_registration_gap_missing_email_currently_accepted`.
 22. Serializer explicit fields — DELIVERED (every serializer names its `fields`;
     `'__all__'` appears nowhere in the tree).
 
-Variant selection (SPEC-6-08) was added later on top of this list; its
-expectedFailure is the untruncated-slug pin
-(`test_slug_overflow_without_collision_currently_exceeds_max_length`).
+Variant selection (SPEC-6-08) was added later on top of this list and carries
+no expectedFailure of its own (products holds none — the untruncated-slug flip
+it once shipped was un-xfailed by PG-2b and survives as the plain pin
+`test_long_name_without_collision_truncated_to_slug_max_length`; the tree's
+two remaining flips are the accounts missing-email pin and the e2e F-18 pin
+named in the E2E section below).
 
 ### cart (7 enumerated) — DELIVERED in `cart/tests.py` (50 tests)
 
