@@ -7,9 +7,10 @@ password the shared validators reject fails both paths in the same
 field-error shape.
 """
 
+import os
 import time
 import unittest
-from datetime import timedelta
+from datetime import date, timedelta
 from unittest import mock
 
 from django.conf import settings
@@ -23,6 +24,7 @@ from django.utils.encoding import force_bytes
 from django.utils.http import urlsafe_base64_encode
 from rest_framework.settings import api_settings
 from rest_framework.throttling import ScopedRateThrottle
+from rest_framework_simplejwt.token_blacklist.models import OutstandingToken
 from rest_framework_simplejwt.tokens import RefreshToken
 
 from accounts.serializers import RegisterSerializer
@@ -35,6 +37,7 @@ from accounts.views import (
     username_available,
 )
 from common.testing import ApiTestCase, extract_link_params
+from config.settings import _env_iso_date
 
 
 def make_inactive_user(username="pending", email=None):
@@ -1426,3 +1429,252 @@ class RefreshCookieTests(ApiTestCase):
         self.assertEqual(res.status_code, 400, res.data)
         self.assertIn("refresh", res.data["details"])
         self.assertEqual(self.client.cookies[COOKIE_NAME].value, "")
+
+
+@tag("accounts")
+class RefreshBodyWindowConfigTests(SimpleTestCase):
+    """SPEC-Q-P1 (F7 backend half): the dual-accept window for the legacy
+    body-borne refresh token is configuration, not a code path - a flag, an
+    anchor and a duration, all env-driven, with the generous default (open,
+    90 days past the cutover anchor) that keeps Q-F3's frontend migration
+    from bricking an already-logged-in browser. The literals below are the
+    shipped defaults pinned on purpose: changing them is a deployment
+    decision and must move this test in the same commit."""
+
+    def test_window_defaults_are_open_and_generous(self):
+        self.assertTrue(settings.JWT_REFRESH_BODY_ACCEPT_ENABLED)
+        self.assertEqual(settings.JWT_REFRESH_BODY_ACCEPT_START, date(2026, 10, 15))
+        self.assertEqual(settings.JWT_REFRESH_BODY_ACCEPT_DAYS, 90)
+
+    def test_window_anchor_env_parsing_is_fail_safe(self):
+        # All three readings of the anchor knob: absent -> default, valid
+        # ISO date -> parsed, malformed -> default rather than a boot crash
+        # (a typo must never take the deployment down, and must not silently
+        # close the window early either - the default is the generous one).
+        with mock.patch.dict(os.environ, {}, clear=False):
+            os.environ.pop("TEST_REFRESH_ANCHOR", None)
+            self.assertEqual(
+                _env_iso_date("TEST_REFRESH_ANCHOR", date(2026, 10, 15)),
+                date(2026, 10, 15),
+            )
+            os.environ["TEST_REFRESH_ANCHOR"] = "2030-01-02"
+            self.assertEqual(
+                _env_iso_date("TEST_REFRESH_ANCHOR", date(2026, 10, 15)),
+                date(2030, 1, 2),
+            )
+            os.environ["TEST_REFRESH_ANCHOR"] = "not-a-date"
+            self.assertEqual(
+                _env_iso_date("TEST_REFRESH_ANCHOR", date(2026, 10, 15)),
+                date(2026, 10, 15),
+            )
+
+    def test_window_knobs_are_documented_in_env_example(self):
+        # The knobs exist only as long as a deployer can find them; the
+        # example file is where every env-driven key in this repo is named.
+        with open(".env.example", encoding="utf-8") as handle:
+            example = handle.read()
+        for key in (
+            "JWT_REFRESH_BODY_ACCEPT_ENABLED",
+            "JWT_REFRESH_BODY_ACCEPT_START",
+            "JWT_REFRESH_BODY_ACCEPT_DAYS",
+        ):
+            self.assertIn(key, example)
+
+
+@tag("accounts")
+class RefreshDualAcceptAndOriginTests(ApiTestCase):
+    """SPEC-Q-P1 (F7 backend half) on /api/accounts/token/refresh/ (the route
+    spec section 9.2's /auth/refresh row maps to, mounted under /api/accounts/
+    and /api/v1/account/): the rotated refresh token leaves ONLY as the
+    HttpOnly+Secure+SameSite cookie, a cross-origin POST is refused by an
+    explicit Origin gate (SameSite=Lax alone does not cover same-site sibling
+    hosts, and DRF's csrf_exempt dispatch means Django's middleware never
+    checks Origin here), and the legacy body carrier is accepted only while
+    the env-gated dual-accept window is open - closed, it is refused by name
+    while the cookie path keeps working, so no logged-in browser is bricked."""
+
+    REFRESH = "/api/accounts/token/refresh/"
+
+    def _login(self, username="seambuyer"):
+        self.make_user(username, password="S3cure-Passphrase!")
+        res = self.client.post(
+            "/api/accounts/login/",
+            {"username": username, "password": "S3cure-Passphrase!"},
+            format="json",
+        )
+        self.assertEqual(res.status_code, 200, res.data)
+        return res
+
+    def _legacy_refresh(self, username="legacybuyer"):
+        """A refresh token exactly as the pre-Q-F3 client presents it: body
+        only, no cookie in the jar - this is the carrier the window exists
+        to keep alive."""
+        user = self.make_user(username)
+        return str(RefreshToken.for_user(user))
+
+    # ------------------------------------------------------------------
+    # issuance: cookie only, never the body
+    # ------------------------------------------------------------------
+
+    def test_refresh_issues_the_token_only_as_an_httponly_secure_cookie(self):
+        self._login()
+        original = self.client.cookies[COOKIE_NAME].value
+        res = self.client.post(self.REFRESH, {}, format="json")
+        self.assertEqual(res.status_code, 200, res.data)
+        # The body is the leak surface: a refresh token in JSON is readable
+        # by any injected script - R-17.12 forbids it on every response.
+        self.assertNotIn("refresh", res.data)
+        cookie = res.cookies[COOKIE_NAME]
+        self.assertTrue(cookie["httponly"])
+        self.assertTrue(cookie["secure"], "tests run with DEBUG=False")
+        self.assertEqual(cookie["samesite"], "Lax")
+        self.assertEqual(cookie["path"], settings.JWT_REFRESH_COOKIE_PATH)
+        # Rotation really re-set it rather than passing the old value on.
+        self.assertNotEqual(cookie.value, original)
+
+    # ------------------------------------------------------------------
+    # Origin/CSRF gate
+    # ------------------------------------------------------------------
+
+    def test_cross_origin_refresh_is_rejected_and_the_cookie_survives(self):
+        self._login("originbuyer")
+        original = self.client.cookies[COOKIE_NAME].value
+        real_lock = OutstandingToken.objects.select_for_update
+        with mock.patch(
+            "accounts.views.OutstandingToken.objects.select_for_update",
+            wraps=real_lock,
+        ) as lock:
+            res = self.client.post(
+                self.REFRESH, {}, format="json", HTTP_ORIGIN="https://evil.example"
+            )
+        self.assertEqual(res.status_code, 403, res.data)
+        self.assertNotIn("access", res.data)
+        # An attacker's probe must not sweep the victim's live cookie...
+        self.assertEqual(self.client.cookies[COOKIE_NAME].value, original)
+        # ...and must never reach the rotation transaction's row lock.
+        lock.assert_not_called()
+
+    def test_origin_gate_wins_over_the_window_gate(self):
+        # Window closed + foreign origin must answer 403 (the origin verdict),
+        # not 400 (the window verdict) and not 200: the cross-site caller is
+        # refused before any carrier question is asked.
+        token = self._legacy_refresh("evilbody")
+        with override_settings(JWT_REFRESH_BODY_ACCEPT_ENABLED=False):
+            res = self.client.post(
+                self.REFRESH,
+                {"refresh": token},
+                format="json",
+                HTTP_ORIGIN="https://evil.example",
+            )
+        self.assertEqual(res.status_code, 403, res.data)
+
+    def test_sandboxed_null_origin_is_rejected(self):
+        self._login("nullorigin")
+        res = self.client.post(self.REFRESH, {}, format="json", HTTP_ORIGIN="null")
+        self.assertEqual(res.status_code, 403, res.data)
+
+    def test_same_origin_and_trusted_origin_refreshes_are_accepted(self):
+        self._login("trustedorigin")
+        same = self.client.post(
+            self.REFRESH, {}, format="json", HTTP_ORIGIN="http://testserver"
+        )
+        self.assertEqual(same.status_code, 200, same.data)
+        trusted = self.client.post(
+            self.REFRESH,
+            {},
+            format="json",
+            HTTP_ORIGIN=settings.CSRF_TRUSTED_ORIGINS[0],
+        )
+        self.assertEqual(trusted.status_code, 200, trusted.data)
+
+    # ------------------------------------------------------------------
+    # dual-accept window
+    # ------------------------------------------------------------------
+
+    def test_legacy_body_token_is_accepted_while_the_window_is_open(self):
+        token = self._legacy_refresh()
+        # No Origin header either: a non-browser client presents the legacy
+        # carrier and makes no cross-site claim - both facts stay accepted
+        # while the window is open (the default posture).
+        res = self.client.post(self.REFRESH, {"refresh": token}, format="json")
+        self.assertEqual(res.status_code, 200, res.data)
+        self.assertIn("access", res.data)
+        self.assertNotIn("refresh", res.data)
+        self.assertTrue(self.client.cookies[COOKIE_NAME]["httponly"])
+
+    def test_non_json_body_is_not_the_cookie_surface(self):
+        # A JSON list body is not a dict, and the cookie merge has never
+        # applied to a non-dict carrier (pre-Q-P1 behaviour, kept - the
+        # browser surface this seam defines is a JSON object), so the
+        # serializer's own validation answers it without a refill.
+        self._login("listbody")
+        res = self.client.post(self.REFRESH, ["not-a-dict"], format="json")
+        self.assertEqual(res.status_code, 400, res.data)
+        self.assertNotIn("access", res.data)
+
+    def test_body_token_is_refused_once_the_window_flag_is_closed(self):
+        token = self._legacy_refresh("flagclosed")
+        with override_settings(JWT_REFRESH_BODY_ACCEPT_ENABLED=False):
+            res = self.client.post(self.REFRESH, {"refresh": token}, format="json")
+        self.assertEqual(res.status_code, 400, res.data)
+        self.assertNotIn("access", res.data)
+        # The refusal is NAMED for the legacy client, under this API's usual
+        # validation envelope - not the generic "field is required".
+        self.assertIn("refresh", res.data["details"])
+        self.assertIn(
+            "Legacy body refresh tokens are no longer accepted.",
+            res.data["details"]["refresh"][0],
+        )
+
+    def test_body_token_is_refused_after_the_window_deadline(self):
+        token = self._legacy_refresh("pastwindow")
+        with override_settings(
+            JWT_REFRESH_BODY_ACCEPT_START=date(2026, 1, 1),
+            JWT_REFRESH_BODY_ACCEPT_DAYS=7,
+        ):
+            res = self.client.post(self.REFRESH, {"refresh": token}, format="json")
+        self.assertEqual(res.status_code, 400, res.data)
+        self.assertNotIn("access", res.data)
+
+    def test_cookie_refresh_still_works_when_the_body_window_is_closed(self):
+        # The window retires the BODY carrier only. A browser that already
+        # holds the HttpOnly cookie refreshes exactly as before - this is
+        # the no-bricking guarantee the generous default protects.
+        self._login("cookieafterclose")
+        with override_settings(JWT_REFRESH_BODY_ACCEPT_ENABLED=False):
+            res = self.client.post(self.REFRESH, {}, format="json")
+        self.assertEqual(res.status_code, 200, res.data)
+        self.assertIn("access", res.data)
+        self.assertNotIn("refresh", res.data)
+
+    def test_closed_window_prefers_the_cookie_over_a_stray_body_token(self):
+        # A transitional client may send both carriers. Once the window is
+        # shut the cookie is authoritative: a stale body token must not fail
+        # a request that carried a perfectly good cookie.
+        self._login("bothcarriers")
+        with override_settings(JWT_REFRESH_BODY_ACCEPT_ENABLED=False):
+            res = self.client.post(
+                self.REFRESH, {"refresh": "not-a-jwt"}, format="json"
+            )
+        self.assertEqual(res.status_code, 200, res.data)
+        self.assertIn("access", res.data)
+
+    # ------------------------------------------------------------------
+    # rotation mutation gate
+    # ------------------------------------------------------------------
+
+    def test_successful_refresh_locks_the_presented_token_row(self):
+        # Rotation mutates the blacklist tables; simplejwt's check-then-
+        # blacklist is not atomic on its own, so the OutstandingToken row of
+        # the presented token is locked FOR UPDATE inside the rotation's
+        # transaction - a concurrent replay of the same token serializes
+        # behind the rotation and dies blacklisted instead of double-spending.
+        self._login("lockbuyer")
+        real_lock = OutstandingToken.objects.select_for_update
+        with mock.patch(
+            "accounts.views.OutstandingToken.objects.select_for_update",
+            wraps=real_lock,
+        ) as lock:
+            res = self.client.post(self.REFRESH, {}, format="json")
+        self.assertEqual(res.status_code, 200, res.data)
+        lock.assert_called_once()
