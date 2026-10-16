@@ -2,7 +2,7 @@
 
 import Link from "next/link";
 import { useQuery } from "@tanstack/react-query";
-import { useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { ApiError, apiFetch } from "@/lib/api";
 import { useAuth } from "@/lib/auth";
 import { getCart } from "@/lib/cart-api";
@@ -150,6 +150,22 @@ export default function CheckoutView() {
   // enters review, stable across every "Create order" retry of that attempt,
   // replaced when they go Back and start a new one (5.4 step 2).
   const attemptKey = useRef<string>("");
+
+  // §7.2 — a step change replaces the panel, so without this the focus is
+  // left on the button that just disappeared (the gap the spec names as real
+  // and absent). Focus moves to the new step's `<h2 tabindex="-1">`: -1 is
+  // not a tab stop, so §7.2's "no tabindex above 0" still holds, and the
+  // heading is what a screen reader announces as the new location. The ref
+  // tracks the heading of whichever step is mounted; the guard keeps the
+  // first render from stealing focus from wherever the customer was.
+  const stepHeading = useRef<HTMLHeadingElement | null>(null);
+  const previousStep = useRef<Step>(step);
+
+  useEffect(() => {
+    if (previousStep.current === step) return;
+    previousStep.current = step;
+    stepHeading.current?.focus();
+  }, [step]);
 
   if (gate === "loading" || cartLoading) {
     return (
@@ -385,6 +401,8 @@ export default function CheckoutView() {
           <section aria-labelledby="step-details">
             <h2
               id="step-details"
+              ref={stepHeading}
+              tabIndex={-1}
               className="font-display text-2xl tracking-tight"
             >
               Delivery details
@@ -411,6 +429,8 @@ export default function CheckoutView() {
           <section aria-labelledby="step-review">
             <h2
               id="step-review"
+              ref={stepHeading}
+              tabIndex={-1}
               className="font-display text-2xl tracking-tight"
             >
               Review your order
@@ -501,7 +521,12 @@ export default function CheckoutView() {
 
         {step === "pay" && order && shipping && (
           <section aria-labelledby="step-pay">
-            <h2 id="step-pay" className="font-display text-2xl tracking-tight">
+            <h2
+              id="step-pay"
+              ref={stepHeading}
+              tabIndex={-1}
+              className="font-display text-2xl tracking-tight"
+            >
               Payment
             </h2>
             <p className="mt-3 text-sm text-ink-secondary">
