@@ -3,6 +3,7 @@
 import Link from "next/link";
 import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { useEffect, useState } from "react";
+import { flushSync } from "react-dom";
 import { ApiError } from "@/lib/api";
 import { deleteCartItem, patchCartItem } from "@/lib/cart-api";
 import { formatINR } from "@/lib/money";
@@ -10,7 +11,40 @@ import type { Cart, CartItem } from "@/lib/types";
 import ProductImage from "../ProductImage";
 import { useToast } from "../toast";
 
-export default function CartLineItem({ item }: { item: CartItem }) {
+/**
+ * §3 "Cart - line removed": the removal View Transition. The browser
+ * re-lays-out and cross-fades the named lines — R1 forbids the hand-written
+ * `height` animation this replaces. Instant reflow whenever the browser has
+ * no `startViewTransition`, and always under `prefers-reduced-motion`: the
+ * UA's transition animations read no `--motion-*` token, so the media query
+ * in this wrapper is the layer that can reach them.
+ */
+function withRemovalTransition(update: () => void): void {
+  const doc = document as Document & {
+    startViewTransition?: (updateCallback: () => void) => unknown;
+  };
+  const reduced = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+  if (reduced || typeof doc.startViewTransition !== "function") {
+    update();
+    return;
+  }
+  try {
+    // flushSync so the new DOM exists before the snapshot is taken; without
+    // it the transition would capture the row that is about to disappear.
+    doc.startViewTransition(() => flushSync(update));
+  } catch {
+    update();
+  }
+}
+
+export default function CartLineItem({
+  item,
+  vtName,
+}: {
+  item: CartItem;
+  /** Unique `view-transition-name` for this row; absent above the §3 cap. */
+  vtName?: string;
+}) {
   const queryClient = useQueryClient();
   const toast = useToast();
   const [qty, setQty] = useState(item.quantity);
@@ -46,7 +80,7 @@ export default function CartLineItem({ item }: { item: CartItem }) {
   const remove = useMutation({
     mutationFn: () => deleteCartItem(item.id),
     onSuccess: (cart) => {
-      applyCart(cart);
+      withRemovalTransition(() => applyCart(cart));
       toast("Removed from cart");
     },
     onError: (error) => {
@@ -61,10 +95,13 @@ export default function CartLineItem({ item }: { item: CartItem }) {
   const busy = patch.isPending || remove.isPending;
 
   return (
-    <div className="flex gap-4 border-b border-hairline py-6 first:pt-0">
+    <div
+      className="flex gap-4 py-6 first:pt-0"
+      style={vtName ? { viewTransitionName: vtName } : undefined}
+    >
       <Link
         href={`/products/${item.product.slug}`}
-        className="relative aspect-[4/5] h-28 w-24 shrink-0 bg-hairline"
+        className="relative h-30 w-24 shrink-0 bg-hairline"
         aria-label={item.product.name}
       >
         <ProductImage
@@ -83,11 +120,11 @@ export default function CartLineItem({ item }: { item: CartItem }) {
             >
               {item.product.name}
             </Link>
-            <p className="mt-0.5 text-sm text-ink-secondary">
+            <p className="mt-0.5 text-sm tabular-nums text-ink-secondary">
               {item.product.size} ml · {formatINR(item.product.price)} each
             </p>
           </div>
-          <p className="shrink-0 text-sm">
+          <p className="shrink-0 text-money tabular-nums">
             {formatINR(Number(item.product.price) * qty)}
           </p>
         </div>
@@ -113,7 +150,16 @@ export default function CartLineItem({ item }: { item: CartItem }) {
             >
               −
             </button>
-            <span className="w-8 text-center text-sm">{qty}</span>
+            {/* §5.3 "stepper value cross-fade": the key remounts the value so
+                the enter-token fade replays on every step. Reduced motion
+                drops the rule at the media layer, so the number is simply
+                there. */}
+            <span
+              key={qty}
+              className="qty-crossfade w-8 text-center text-sm tabular-nums"
+            >
+              {qty}
+            </span>
             <button
               type="button"
               onClick={() => {
@@ -140,7 +186,7 @@ export default function CartLineItem({ item }: { item: CartItem }) {
         </div>
 
         {lineError && (
-          <p role="alert" className="mt-2 text-sm text-bronze">
+          <p role="alert" className="mt-2 text-sm text-danger">
             {lineError}
           </p>
         )}

@@ -93,6 +93,12 @@ const NOT_A_COLOUR = new Set([
   "md",
   // `text-shadow`, which puts a shadow size under the `text-` prefix.
   "shadow",
+  // Our own `--text-*` type steps that Tailwind also exposes as `text-*`
+  // utilities: typography, never a colour. `money` is §5.3's money style
+  // (`--text-money`, 0.9375rem/600) — added when the cart line total first
+  // used it; pinned by the isColourCandidate case below so the entry cannot
+  // be dropped while the class ships.
+  "money",
   // Background and caret keywords that share a colour prefix: position, size,
   // attachment, repeat.
   "auto", "top", "bottom", "cover", "contain", "fixed", "local", "scroll",
@@ -252,6 +258,7 @@ describe("isColourCandidate", () => {
     for (const [prefix, name] of [
       ["shadow", "md"],
       ["text", "shadow"],
+      ["text", "money"], // --text-money, §5.3 — a type step, not a colour
       ["caret", "auto"],
       ["bg", "top"],
       ["bg", "no-repeat"],
