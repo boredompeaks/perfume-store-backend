@@ -70,7 +70,7 @@ describe("legal ToC (§5.11)", () => {
   });
 
   it("keeps the prose at the measure and body steps (§5.11, §2.2.4)", () => {
-    expect(proseSource).toContain("max-w-measure");
+    expect(proseSource).toContain("max-w-(--measure)");
     expect(proseSource).toContain("text-body");
     expect(proseSource).toContain("text-h2");
   });
@@ -111,8 +111,9 @@ describe("contact (§5.8)", () => {
   });
 
   it("the contact button boundary is the control token, not the hairline", () => {
-    // §5.8 CHANGE: `--border-field` instead of `--border-line`. Both classes
-    // are real tokens, so this is a value pin, not a token-existence check.
+    // §5.8 CHANGE: the control boundary token replaces the decorative hairline
+    // on a 40×40 affordance. Both classes are real tokens, so this is a value
+    // pin, not a token-existence check.
     expect(contactLinksSource).toContain("border-field-border");
     expect(contactLinksSource).not.toContain("border-hairline");
   });
