@@ -72,15 +72,19 @@ describe("LoginForm (§5.9 customer door)", () => {
     expect(totpIdx).toBeGreaterThan(-1);
     const guard = loginForm.lastIndexOf("variant === ", totpIdx);
     expect(guard).toBeGreaterThan(-1);
-    expect(loginForm.slice(guard, guard + 18)).toContain('"staff"');
+    expect(loginForm.slice(guard, guard + 19)).toBe('variant === "staff"');
     expect(loginPage).toContain('variant="customer"');
     expect(loginPage).not.toContain('variant="staff"');
   });
 
   it("reports the server's message verbatim on the customer door", () => {
     // ApiError.message carries the envelope's `error` string (401 ambiguity,
-    // 429 throttle wording) — the customer branch renders it unwrapped.
-    expect(loginForm).toMatch(/variant === "staff"[\s\S]*err\.fieldErrors\?\.totp\?\.\[0\] \?\? err\.message\s*:\s*err\.message/);
+    // 429 throttle wording). staff → fieldErrors.totp[0] ?? err.message;
+    // customer → err.message, unwrapped; non-ApiError → network fallback.
+    expect(loginForm).toContain('variant === "staff"');
+    expect(loginForm).toContain("err.fieldErrors?.totp?.[0] ?? err.message");
+    expect(loginForm).toMatch(/err\.message\)\s*:\s*err\.message/);
+    expect(loginForm).toContain("Sign-in failed. Check your connection and try again.");
   });
 
   it("preserves the guest-wall next handoff (login → next ?? home)", () => {
@@ -115,9 +119,15 @@ describe("RegisterForm (§5.9)", () => {
 
   it("gives the 503 state its own status surface plus the §5.9 resend link", () => {
     expect(registerForm).toMatch(/role="status" aria-live="polite"/);
-    expect(registerForm).toContain('href="/resend-verification"');
-    // …and keeps it distinct from the error surfaces (role="alert").
-    expect(registerForm).not.toMatch(/role="status"[^>]*role="alert"/);
+    // The panel (status → its closing div) carries the resend link and NO
+    // role="alert": the account-created states are not error surfaces.
+    const statusIdx = registerForm.indexOf('role="status" aria-live="polite"');
+    expect(statusIdx).toBeGreaterThan(-1);
+    const panelEnd = registerForm.indexOf("</div>", statusIdx);
+    expect(panelEnd).toBeGreaterThan(statusIdx);
+    const panel = registerForm.slice(statusIdx, panelEnd);
+    expect(panel).toContain('href="/resend-verification"');
+    expect(panel).not.toContain('role="alert"');
   });
 
   it("keeps the live username-availability debounce wired to the hint", () => {
