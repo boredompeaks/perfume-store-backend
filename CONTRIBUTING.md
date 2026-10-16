@@ -64,7 +64,7 @@ backend\venv\Scripts\python.exe scripts\changelog_figures.py check --base <base-
 |---|---|
 | `backend-tests` | Django system check, migration-drift check, PostgreSQL suite behind the coverage gate, the certified failure-set gate, the doc-claims and changelog-figure gates, the scripts' own tests — then lint: ruff check, ruff format, pre-commit, mypy |
 | `secret-scan` | gitleaks on pushes and pull requests |
-| `ghcr-publish` | builds the backend image (pushes it only off pull requests); frontend-only or docs-only changes don't spend the build |
+| `ghcr-publish` | runs on pushes **and** pull requests to `spec-comp`/`feat/add-frontend` when they touch `backend/**` (which includes `backend/docs/**`, so a backend docs-only change triggers it too), `docker-compose.yml`, `Procfile`, `scripts/**`, or the workflow file itself; every trigger builds the backend image, but the image is published only from push events (`push: ${{ github.event_name != 'pull_request' }}` — a pull request builds without publishing), and a change matching none of those paths (e.g. a frontend-only change or an edit to a root-level doc like this one) skips the run |
 | `frontend-tests` | vitest and the production build; the playwright e2e job self-skips unless explicitly armed |
 
 Deploys are separate: gated on green `backend-tests` and green `secret-scan`
