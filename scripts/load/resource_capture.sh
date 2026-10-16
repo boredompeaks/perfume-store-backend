@@ -135,7 +135,24 @@ cleanup() {
   echo "capture complete: $outdir" >&2
 }
 
-trap cleanup INT TERM EXIT
+# Operator interrupt vs planned duration stop: the duration auto-stop drops
+# this sentinel before signalling; on_signal reads it so a completed capture
+# exits 0 while a Ctrl-C exits 130 — the header's claim, made true by the
+# trap itself (auditor BUG-3: `trap cleanup INT TERM` resumed the wait with
+# its exit 0, so Ctrl-C delivered 0, not 130).
+duration_stop_flag="$outdir/.duration_stop"
+
+on_signal() {
+  cleanup
+  if [ -f "$duration_stop_flag" ]; then
+    echo "duration completed — exiting 0" >&2
+    exit 0
+  fi
+  exit 130
+}
+
+trap on_signal INT TERM
+trap cleanup EXIT
 
 # --- sampler: docker stats ---------------------------------------------------
 if command -v docker >/dev/null 2>&1 && docker info >/dev/null 2>&1; then
@@ -215,6 +232,9 @@ if [ "$duration" -gt 0 ] 2>/dev/null; then
   (
     sleep "$duration"
     echo "duration ${duration}s elapsed — stopping" >&2
+    # Sentinel FIRST: on_signal distinguishes this planned stop (exit 0)
+    # from an operator Ctrl-C (exit 130).
+    touch "$duration_stop_flag"
     kill -TERM $$ 2>/dev/null
   ) &
   pids+=($!)

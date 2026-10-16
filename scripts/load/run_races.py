@@ -107,7 +107,9 @@ LOGIN_PACE_S = float(os.getenv("LOAD_LOGIN_PACE_S", "7"))
 # 'auth' throttle is 10/min per ident and anonymous logins key on the
 # client ident: pace logins across ALL threads so the wave never starts
 # with a buyer stuck at 429.
-INTENT_CAP = int(os.getenv("LOAD_MAX_INTENTS", "25"))
+# Default aligned with k6_profiles.js LOAD_MAX_INTENTS (both 20): one
+# ceiling value, two files, no silent divergence (auditor BUG-4).
+INTENT_CAP = int(os.getenv("LOAD_MAX_INTENTS", "20"))
 # 'payment' scope is 10/min per user — the double-capture replay width
 # stays under it by construction.
 CAPTURE_REPLAYS = int(os.getenv("LOAD_CAPTURE_REPLAYS", "6"))
@@ -744,7 +746,38 @@ def checks_for_phase(phase: str, results: dict) -> list[dict]:
                 "value": int(results["expected_captured"]),
             }
         c.pop("expect_from", None)
+        # value_from resolution: a row_eq whose expected columns name run
+        # results (e.g. razorpay_payment_id -> the capture_payment_id this
+        # phase minted) becomes a concrete row_eq/value before it leaves
+        # this function, so both live mode and the --verify-json round trip
+        # compare against real values, never against key names (auditor
+        # BUG-1: the form was emitted but nothing consumed it).
+        exp = c.get("expect") or {}
+        if exp.get("rule") == "row_eq" and "value_from" in exp:
+            c["expect"] = {
+                "rule": "row_eq",
+                "value": resolve_value_from(exp["value_from"], results),
+            }
     return checks
+
+
+def resolve_value_from(mapping: dict, context: dict) -> dict:
+    """Resolve a value_from expectation against the run's results context.
+
+    A STRING names a context key iff that key exists in the context (so
+    "capture_payment_id" becomes the minted payment id); any other string
+    stays a literal (so "captured" remains "captured"), and non-strings
+    pass through untouched. Never raises on a missing key: an unresolved
+    name compares as itself and shows up as a visible column mismatch
+    rather than a crash.
+    """
+    resolved = {}
+    for col, want in mapping.items():
+        if isinstance(want, str) and want in context:
+            resolved[col] = context[want]
+        else:
+            resolved[col] = want
+    return resolved
 
 
 def _id_list(ids: list) -> str:
@@ -762,8 +795,15 @@ def _sql_literal(value) -> str:
     raise ValueError(f"unsupported literal type: {type(value)!r}")
 
 
-def evaluate_checks(checks: list[dict], rows_by_id: dict) -> list[dict]:
-    """Pure evaluation shared by live-DB mode and --verify-json mode."""
+def evaluate_checks(
+    checks: list[dict], rows_by_id: dict, context: dict | None = None
+) -> list[dict]:
+    """Pure evaluation shared by live-DB mode and --verify-json mode.
+
+    ``context`` is the run's results dict, used only when a check still
+    carries the raw ``value_from`` form (live mode passes it; the emitted
+    round-trip file already carries the resolved ``value`` form).
+    """
     verdicts = []
     for c in checks:
         rows = rows_by_id.get(c["id"])
@@ -782,12 +822,21 @@ def evaluate_checks(checks: list[dict], rows_by_id: dict) -> list[dict]:
                 got = rows[0].get(expect["column"])
                 ok = got == expect["value"]
                 detail = f"{expect['column']}={got!r}, expected {expect['value']!r}"
-        elif rule == "row_eq" and "value" in expect:
+        elif rule == "row_eq" and ("value" in expect or "value_from" in expect):
             if not rows:
                 ok, detail = False, "query returned no rows"
             else:
+                # value_from is resolved here too (belt to checks_for_phase's
+                # suspenders): a hand-written or stale checks file that still
+                # names context keys must evaluate, not report "unsupported
+                # expect form" and fail every run on a clean DB (BUG-1).
+                want_map = (
+                    expect["value"]
+                    if "value" in expect
+                    else resolve_value_from(expect["value_from"], context or {})
+                )
                 mismatches = []
-                for col, want in expect["value"].items():
+                for col, want in want_map.items():
                     got = rows[0].get(col)
                     if got != want:
                         mismatches.append(f"{col}: got {got!r}, expected {want!r}")
@@ -959,7 +1008,7 @@ def cmd_run(args: argparse.Namespace) -> int:
                 log(f"phase {phase}: --skip-db given — invariants UNVERIFIED")
                 continue
             rows_by_id = run_live_db_checks(checks)
-            verdicts = evaluate_checks(checks, rows_by_id)
+            verdicts = evaluate_checks(checks, rows_by_id, context=pr)
             all_verdicts.extend([{"phase": phase, **v} for v in verdicts])
             for v in verdicts:
                 log(f"  {v['id']}: {'PASS' if v['ok'] else 'FAIL'} ({v.get('detail')})")
@@ -1002,7 +1051,9 @@ def cmd_verify_json(args: argparse.Namespace) -> int:
     rows_by_id = {
         entry["id"]: entry.get("rows", []) for entry in supplied.get("checks", [])
     }
-    verdicts = evaluate_checks(emitted.get("checks", []), rows_by_id)
+    verdicts = evaluate_checks(
+        emitted.get("checks", []), rows_by_id, context=supplied.get("context") or {}
+    )
     failed = [v for v in verdicts if not v["ok"]]
     for v in verdicts:
         log(f"  {v['id']}: {'PASS' if v['ok'] else 'FAIL'} ({v.get('detail')})")

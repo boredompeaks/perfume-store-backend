@@ -84,6 +84,11 @@ export const CONFIG = {
   p95InternalMs: numEnv('LOAD_P95_INTERNAL_MS', 500),
   p95RazorpayMs: numEnv('LOAD_P95_RAZORPAY_MS', 2500),
   errRateMax: numEnv('LOAD_ERROR_RATE_MAX', 0.01),
+  // Race legs carry headroom above the profile error ceiling: their waves
+  // are one-shot bursts where a throttle blip is noise but a collapse is
+  // still a finding — the ceiling exists so knee-style reading (p95 +
+  // error rate) applies to EVERY scenario, not just the steady-state ones.
+  raceErrRateMax: numEnv('LOAD_RACE_ERROR_RATE_MAX', 0.05),
   buyerLogins: [],
   productSlugs: [],
   productIds: {},
@@ -197,7 +202,13 @@ export const SCENARIOS = {
     exec: 'raceOversellCheckout',
     thresholds: {
       checks: ['rate==1'],
-      http_req_failed: ['rate<0.5'],
+      // Knee-style pair on every scenario (auditor BUG-2): latency p95 +
+      // an error ceiling. These HTTP legs answer 2xx (checkouts create,
+      // replays no-op), so a breach here is a real finding, not expected
+      // 409 noise — the capture-level 409s live in run_races.py's DB
+      // verdicts, not on this wire.
+      http_req_duration: ['p(95)<' + CONFIG.p95InternalMs],
+      http_req_failed: ['rate<' + CONFIG.raceErrRateMax],
     },
   },
   // Race leg 2 — single-use coupon double-burn at CHECKOUT level (same
@@ -211,7 +222,8 @@ export const SCENARIOS = {
     exec: 'raceCouponCheckout',
     thresholds: {
       checks: ['rate==1'],
-      http_req_failed: ['rate<0.5'],
+      http_req_duration: ['p(95)<' + CONFIG.p95InternalMs],
+      http_req_failed: ['rate<' + CONFIG.raceErrRateMax],
     },
   },
   // Race leg 3 — double-capture REPLAY at HTTP level: captureReplays
@@ -227,6 +239,8 @@ export const SCENARIOS = {
     exec: 'raceCaptureReplay',
     thresholds: {
       checks: ['rate==1'],
+      http_req_duration: ['p(95)<' + CONFIG.p95InternalMs],
+      http_req_failed: ['rate<' + CONFIG.raceErrRateMax],
     },
   },
 };
