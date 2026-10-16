@@ -17,9 +17,16 @@
  * that gets its own copy and a "Try again" affordance.
  *
  * Head tags: a "use client" page cannot export `metadata` (Next.js build
- * error), so <title>/<meta> are rendered directly — the documented React 19
- * alternative. The registry (pages.ts, indexable: false) keeps robots.txt
- * and the sitemap in lockstep with the spec's noindex (§8).
+ * error — confirmed again in this wave), and the manual <title>/<meta>/<link>
+ * tags this page used to render were SHADOWED: the root layout's default
+ * title sat first in the document, so the browser (and a crawler) read
+ * "Maison Aurel — Perfumes composed with restraint" as this route's title and
+ * the site-default description as its meta — §8.1's /track-order row was not
+ * actually conformed. The route's head tags now live on the server segment
+ * layout (./layout.tsx), which merges over the root defaults, all four values
+ * coming from the page registry (pages.ts) so this page, robots.txt and the
+ * sitemap share one source: title "Track your order" (bare — §8.1 line 2010),
+ * canonical /track-order, robots `noindex, follow`, OG cleared.
  */
 import { useState } from "react";
 import { inputClass } from "@/lib/ui";
@@ -172,12 +179,6 @@ export default function TrackOrderPage() {
 
   return (
     <>
-      <title>Track your order</title>
-      <meta name="robots" content="noindex, follow" />
-      <meta
-        name="description"
-        content="Look up where your parcel is using your order number."
-      />
       {/* Plain container, not <main>: the layout already renders the page's
           single <main id="main"> (layout.tsx) and every other page nests
           inside it — a page-level <main> made this the only page with

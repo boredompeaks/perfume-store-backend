@@ -1,10 +1,12 @@
 import { Suspense } from "react";
 import Link from "next/link";
+import type { Metadata } from "next";
 import GridSkeleton from "@/components/GridSkeleton";
 import ProductCard from "@/components/ProductCard";
 import { fetchProductsPage } from "@/lib/products-api";
 import { toJsonLdScriptContent } from "@/lib/json-ld";
 import { getReturnWindow } from "@/lib/policies";
+import { pageMetadata } from "@/lib/pages";
 import { site } from "@/lib/site";
 
 // Rendered on demand with the underlying fetch cached for 60s
@@ -12,6 +14,14 @@ import { site } from "@/lib/site";
 // access would otherwise bake the empty "New arrivals" state into the
 // prerender until an unverified background revalidation.
 export const dynamic = "force-dynamic";
+
+// §8.1 `/` row: canonical is `/`, robots index, title the exact default
+// string (absolute so the root template cannot re-wrap it), description the
+// site's real one. Title/description already arrive from the root layout;
+// pageMetadata (registry-driven generation layer) adds the canonical and
+// pins both values so home cannot drift from the robots.txt/sitemap pair
+// built from the same registry entry.
+export const metadata: Metadata = pageMetadata("/", { absoluteTitle: true });
 
 /** §5.1 §2 — new arrivals: newest four (the server's default page size). */
 async function NewArrivals() {
