@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useState, type ReactNode } from "react";
 import {
   forgetShipping,
   hasStoredShipping,
@@ -36,12 +36,27 @@ export default function AddressForm({
   serverError,
   submitLabel,
   onSubmit,
+  onDestinationBlur,
+  afterFields,
 }: {
   initial: ShippingDetails | null;
   pending: boolean;
   serverError: string | null;
   submitLabel: string;
   onSubmit: (details: ShippingDetails) => void;
+  /**
+   * Spec 5.4 CHANGE-12: the delivery estimate fires on blur of pincode AND
+   * state, so the destination fields report their own blur instead of the
+   * parent polling form state it does not own. Everything else about this
+   * form (fields, validation, the PII disclosure) is untouched.
+   */
+  onDestinationBlur?: (details: ShippingDetails) => void;
+  /**
+   * Spec 5.4: the delivery estimate renders "below the fields" — a slot
+   * inserted directly after the field grid. The PII disclosure and the submit
+   * button below keep their own order and styling.
+   */
+  afterFields?: ReactNode;
 }) {
   const [details, setDetails] = useState<ShippingDetails>(
     initial ?? {
@@ -112,6 +127,11 @@ export default function AddressForm({
               onChange={(e) => set(f.key)(e.target.value)}
               aria-invalid={errors[f.key] ? true : undefined}
               aria-describedby={errors[f.key] ? `addr-${f.key}-err` : undefined}
+              onBlur={
+                f.key === "state" || f.key === "pincode"
+                  ? () => onDestinationBlur?.(details)
+                  : undefined
+              }
               className={`${inputClass} w-full`}
               required
             />
@@ -127,6 +147,8 @@ export default function AddressForm({
           </div>
         ))}
       </div>
+
+      {afterFields && <div className="mt-6">{afterFields}</div>}
 
       {serverError && (
         <p role="alert" className="text-sm text-bronze" aria-live="polite">

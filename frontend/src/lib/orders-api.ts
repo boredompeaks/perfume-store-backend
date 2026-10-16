@@ -30,6 +30,13 @@ export type CheckoutPayload = {
   state: string;
   pincode: string;
   coupon_code?: string;
+  /**
+   * The delivery OPTION chosen on the checkout delivery step (spec 5.4 /
+   * backend orders/views/checkout.py SHIPPING_METHOD_FIELD): a method CODE
+   * from `GET /api/shipping/estimate/` (the `method` slug), never an amount.
+   * The server prices it; the client never sends money.
+   */
+  shipping_method?: string;
 };
 
 type CheckoutResponse = Order & {
@@ -47,17 +54,28 @@ type CheckoutResponse = Order & {
 /**
  * Creates the Order — server computes the total; client never sends amounts.
  *
- * The JWT rides only when one exists (`auth: true` attaches it if held), so
- * the signed-in request is byte-identical to before; an anonymous caller sends
+ * The JWT rides only when one exists (`auth: true` attaches it if held), so the
+ * signed-in request is byte-identical to before; an anonymous caller sends
  * no Authorization header and the backend decides (its verified contract
  * refuses guests with one uniform 403). On a success that carries a guest
  * token, the credential is stashed for the guest order read below.
+ *
+ * `idempotencyKey` (spec 5.4 step 2, backend IDEMPOTENCY_KEY_HEADER) is the
+ * caller's per-attempt key: stable across retries of ONE order attempt, so a
+ * replay returns the original order instead of minting a second one (length
+ * cap 128 server-side). Omitted when the caller has no attempt to key.
  */
-export async function checkout(payload: CheckoutPayload): Promise<Order> {
+export async function checkout(
+  payload: CheckoutPayload,
+  idempotencyKey?: string,
+): Promise<Order> {
   const order = await apiFetch<CheckoutResponse>("/api/orders/checkout/", {
     method: "POST",
     body: payload,
     auth: true,
+    headers: idempotencyKey
+      ? { "Idempotency-Key": idempotencyKey }
+      : undefined,
   });
   if (order.guest_token) setGuestToken(order.guest_token);
   return order;
