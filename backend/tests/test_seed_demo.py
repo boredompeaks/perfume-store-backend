@@ -13,6 +13,7 @@ from datetime import timedelta
 from decimal import Decimal
 from io import StringIO
 
+from django.contrib.auth import authenticate
 from django.contrib.auth.models import Group, User
 from django.core.management import call_command
 from django.test import TestCase
@@ -143,6 +144,20 @@ class SeedDemoTests(TestCase):
             },
         )
 
+    def test_seeded_customer_logs_in_with_the_printed_demo_credential(self):
+        out = _run()
+        # Hand-written literal, NOT the command's own constant (a pin derived
+        # from the constant would agree with a wrong constant from both
+        # sides): the demo credential is what the seed prints for humans to
+        # sign in with, so changing it must be a conscious, pinned update —
+        # and it must stay plainly fake, never password-shaped, or secret
+        # scanners read it as a real credential (GitGuardian incidents
+        # 38269594/38269595).
+        self.assertIn("demo-customer / demo-account", out)
+        self.assertIsNotNone(
+            authenticate(username="demo-customer", password="demo-account")
+        )
+
 
 class SeedDemoCleanupTests(TestCase):
     """``--cleanup``: removes exactly the marked set; foreign rows live."""
@@ -151,7 +166,7 @@ class SeedDemoCleanupTests(TestCase):
         """Rows sharing the seeded MODELS but outside the marker domain —
         including near-misses that contain 'demo' without the prefix."""
         foreign_user = User.objects.create_user(
-            username="real-buyer", password="x-not-demo"
+            username="real-buyer", password="fixture"
         )
         near_miss_user = User.objects.create_user(
             username="demo",

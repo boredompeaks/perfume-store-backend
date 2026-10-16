@@ -39,7 +39,12 @@ from orders.models import Coupon, Order, OrderItem
 from products.models import StockMovement, products
 
 DEMO_TAG = "demo-"
-DEMO_PASSWORD = "Demo-Pass-123!"
+# Deliberately fake AND deliberately low-entropy: a password-shaped literal
+# (mixed case + digits + symbol) here trips GitGuardian's Generic Password
+# detector even in a seed fixture (incident 38269594), while the seeded
+# demo accounts only need a stable, plainly-fake credential the command
+# prints for humans to sign in with.
+DEMO_PASSWORD = "demo-account"
 
 
 def _demo_users():
