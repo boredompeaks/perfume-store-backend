@@ -1,0 +1,903 @@
+{
+  "task": "MUT-2a",
+  "kind": "mutation-weekly-triage-recompute",
+  "generated": "2026-10-17",
+  "run": {
+    "workflow": ".github/workflows/mutation-weekly.yml",
+    "run_id": "38249016821",
+    "run_date": "2026-10-12",
+    "branch": "feat/add-frontend",
+    "status": "SUCCESS",
+    "tool": "mutmut==2.5.1 (pinned via requirements.lock)",
+    "engine": "SQLite (DATABASE_URL unset by the workflow on purpose)",
+    "artifact_retention_days": 7,
+    "artifact_expires_approx": "2026-10-19"
+  },
+  "source": {
+    "note": "CI artifact 'mutation-report' downloaded before expiry; every figure below was re-parsed from these bytes this session, never copied from the brief",
+    "files": {
+      "index.html": {
+        "sha256": "8c71eaa8dbbe96959b641c15755932c38a309b24d6d30275295c90716a303315",
+        "bytes": 454
+      },
+      "orders/state.py.html": {
+        "sha256": "bb60d13ef6d463d46e6297f7aab959f95de779b7cd6cef02218533811c4a1b9c",
+        "bytes": 15787
+      },
+      "common/permissions.py.html": {
+        "sha256": "03a0e2a93fa23d25b3a8bd702352f3395b42717c91ad94be7c5ba32d06e3e01b",
+        "bytes": 20694
+      }
+    },
+    "method": "regex parse of the index headline/table rows and of each file page's <h3>Mutant N</h3><pre> hunks; run_line = hunk old-start + offset of the '-' line"
+  },
+  "headline": {
+    "total": 187,
+    "killed": 113,
+    "survived": 74,
+    "skipped": 0,
+    "killed_pct": 60.43
+  },
+  "files": {
+    "orders/state.py": {
+      "total": 109,
+      "skipped": 0,
+      "killed": 76,
+      "killed_pct": 69.72,
+      "survived_index": 33,
+      "survived_parsed": 33,
+      "survivor_ids": [
+        8,
+        9,
+        19,
+        25,
+        27,
+        28,
+        67,
+        68,
+        69,
+        71,
+        72,
+        75,
+        77,
+        79,
+        81,
+        83,
+        85,
+        87,
+        89,
+        91,
+        92,
+        93,
+        94,
+        95,
+        96,
+        97,
+        98,
+        101,
+        102,
+        103,
+        104,
+        107,
+        108
+      ]
+    },
+    "common/permissions.py": {
+      "total": 78,
+      "skipped": 0,
+      "killed": 37,
+      "killed_pct": 47.44,
+      "survived_index": 41,
+      "survived_parsed": 41,
+      "survivor_ids": [
+        121,
+        126,
+        128,
+        130,
+        131,
+        132,
+        134,
+        135,
+        138,
+        140,
+        141,
+        142,
+        143,
+        144,
+        145,
+        146,
+        147,
+        158,
+        159,
+        164,
+        165,
+        166,
+        167,
+        168,
+        169,
+        170,
+        171,
+        172,
+        173,
+        174,
+        175,
+        176,
+        177,
+        178,
+        179,
+        182,
+        183,
+        184,
+        185,
+        186,
+        187
+      ]
+    }
+  },
+  "consistency_checks": {
+    "index_killed_plus_survived_equals_total": true,
+    "per_file_survived_parsed_matches_index": true,
+    "per_file_killed_plus_survived_equals_total": true,
+    "index_file_row_totals_sum_to_headline": true
+  },
+  "classification": {
+    "buckets": {
+      "REAL": 49,
+      "EXPECTED": 4,
+      "WEAK": 21
+    },
+    "subtags": {
+      "REAL:scope": 37,
+      "EXPECTED:annotation": 1,
+      "REAL:hole": 12,
+      "WEAK:display": 10,
+      "WEAK:equivalent": 5,
+      "WEAK:dead-vocab": 4,
+      "EXPECTED:equivalent": 1,
+      "EXPECTED:decorator": 2,
+      "WEAK:message": 2
+    },
+    "survivors": [
+      {
+        "mutant": 8,
+        "file": "orders/state.py",
+        "run_line": 53,
+        "old": "    \"delivered\": set(),",
+        "new": "    \"XXdeliveredXX\": set(),",
+        "bucket": "REAL",
+        "subtag": "scope",
+        "why": "the terminal key rename makes ALLOWED_TRANSITIONS['delivered'] a KeyError in the admin change-form message (direct index in orders/admin.py save_model), and test_terminal_states_cannot_move drives exactly that path -- but it lives in the excluded tests/ package, so the scoped runner never saw the crash"
+      },
+      {
+        "mutant": 9,
+        "file": "orders/state.py",
+        "run_line": 54,
+        "old": "    \"cancelled\": set(),",
+        "new": "    \"XXcancelledXX\": set(),",
+        "bucket": "REAL",
+        "subtag": "scope",
+        "why": "same direct-index KeyError for the 'cancelled' terminal key, killed by the same excluded test_terminal_states_cannot_move pin"
+      },
+      {
+        "mutant": 19,
+        "file": "orders/state.py",
+        "run_line": 102,
+        "old": "TRANSITION_PRECONDITIONS: dict[str, list[Callable[[\"Order\"], list[str]]]] = {}",
+        "new": "TRANSITION_PRECONDITIONS: dict[str, list[Callable[[\"XXOrderXX\"], list[str]]]] = {}",
+        "bucket": "EXPECTED",
+        "subtag": "annotation",
+        "why": "the mutation only rewrites a forward-reference string inside a runtime-evaluated annotation; typing never resolves it at runtime, and mypy -- scoped to orders/state.py per the [tool.mypy] config -- is the instrument that would flag the mangled name"
+      },
+      {
+        "mutant": 25,
+        "file": "orders/state.py",
+        "run_line": 153,
+        "old": "PAYMENT_METHOD_COD = \"cod\"",
+        "new": "PAYMENT_METHOD_COD = \"XXcodXX\"",
+        "bucket": "REAL",
+        "subtag": "hole",
+        "why": "no test in the tree spells the literal 'cod' (grep-verified this session: only state.py and the migration choices do) and every test reference derives the value from the constant, so the wire spelling recorded in DB rows and migration choices is unpinned"
+      },
+      {
+        "mutant": 27,
+        "file": "orders/state.py",
+        "run_line": 156,
+        "old": "    (PAYMENT_METHOD_PREPAID, \"Prepaid\"),",
+        "new": "    (PAYMENT_METHOD_PREPAID, \"XXPrepaidXX\"),",
+        "bucket": "WEAK",
+        "subtag": "display",
+        "why": "display label on PAYMENT_METHOD_CHOICES; accept, or pin with a hand-written literal if the admin widget text is ever made contract"
+      },
+      {
+        "mutant": 28,
+        "file": "orders/state.py",
+        "run_line": 157,
+        "old": "    (PAYMENT_METHOD_COD, \"Cash on delivery\"),",
+        "new": "    (PAYMENT_METHOD_COD, \"XXCash on deliveryXX\"),",
+        "bucket": "WEAK",
+        "subtag": "display",
+        "why": "display label on PAYMENT_METHOD_CHOICES; accept, or pin with a hand-written literal if the admin widget text is ever made contract"
+      },
+      {
+        "mutant": 67,
+        "file": "orders/state.py",
+        "run_line": 272,
+        "old": "LIFECYCLE_SEQUENCE = (\"pending\", \"confirmed\", \"shipped\", \"delivered\", \"cancelled\")",
+        "new": "LIFECYCLE_SEQUENCE = (\"pending\", \"confirmed\", \"XXshippedXX\", \"delivered\", \"cancelled\")",
+        "bucket": "WEAK",
+        "subtag": "equivalent",
+        "why": "observationally equivalent under the current LEGACY_STATUS_DIMENSIONS: the payment value this status maps to is always implied by an earlier lifecycle status, so no status_for_payment input can distinguish the rename; a hand-written literal pin on the sequence is the only kill and is worth adding as documentation"
+      },
+      {
+        "mutant": 68,
+        "file": "orders/state.py",
+        "run_line": 272,
+        "old": "LIFECYCLE_SEQUENCE = (\"pending\", \"confirmed\", \"shipped\", \"delivered\", \"cancelled\")",
+        "new": "LIFECYCLE_SEQUENCE = (\"pending\", \"confirmed\", \"shipped\", \"XXdeliveredXX\", \"cancelled\")",
+        "bucket": "WEAK",
+        "subtag": "equivalent",
+        "why": "observationally equivalent under the current LEGACY_STATUS_DIMENSIONS: the payment value this status maps to is always implied by an earlier lifecycle status, so no status_for_payment input can distinguish the rename; a hand-written literal pin on the sequence is the only kill and is worth adding as documentation"
+      },
+      {
+        "mutant": 69,
+        "file": "orders/state.py",
+        "run_line": 272,
+        "old": "LIFECYCLE_SEQUENCE = (\"pending\", \"confirmed\", \"shipped\", \"delivered\", \"cancelled\")",
+        "new": "LIFECYCLE_SEQUENCE = (\"pending\", \"confirmed\", \"shipped\", \"delivered\", \"XXcancelledXX\")",
+        "bucket": "WEAK",
+        "subtag": "equivalent",
+        "why": "observationally equivalent under the current LEGACY_STATUS_DIMENSIONS: the payment value this status maps to is always implied by an earlier lifecycle status, so no status_for_payment input can distinguish the rename; a hand-written literal pin on the sequence is the only kill and is worth adding as documentation"
+      },
+      {
+        "mutant": 71,
+        "file": "orders/state.py",
+        "run_line": 295,
+        "old": "        if LEGACY_STATUS_DIMENSIONS.get(status, (\"\", \"\"))[0] == payment_status:",
+        "new": "        if LEGACY_STATUS_DIMENSIONS.get(status, (\"XXXX\", \"\"))[0] == payment_status:",
+        "bucket": "WEAK",
+        "subtag": "equivalent",
+        "why": "the get-default is dead code under the file's own totality invariant (LEGACY_STATUS_DIMENSIONS covers every LIFECYCLE_SEQUENCE entry), so no input can observe the default; a set-equality totality pin would kill it and document the invariant"
+      },
+      {
+        "mutant": 72,
+        "file": "orders/state.py",
+        "run_line": 295,
+        "old": "        if LEGACY_STATUS_DIMENSIONS.get(status, (\"\", \"\"))[0] == payment_status:",
+        "new": "        if LEGACY_STATUS_DIMENSIONS.get(status, (\"\", \"XXXX\"))[0] == payment_status:",
+        "bucket": "WEAK",
+        "subtag": "equivalent",
+        "why": "the get-default is dead code under the file's own totality invariant (LEGACY_STATUS_DIMENSIONS covers every LIFECYCLE_SEQUENCE entry), so no input can observe the default; a set-equality totality pin would kill it and document the invariant"
+      },
+      {
+        "mutant": 75,
+        "file": "orders/state.py",
+        "run_line": 307,
+        "old": "TRIGGER_ORDER_CREATE = \"order_create\"",
+        "new": "TRIGGER_ORDER_CREATE = \"XXorder_createXX\"",
+        "bucket": "REAL",
+        "subtag": "hole",
+        "why": "every test assertion derives the expected trigger from the constant (recomputed oracle) while migration 0016 hardcodes the 'order_create' spelling, so a rename drifts the audit vocabulary from its migration-recorded choices with the suite green; pin with a hand-written literal"
+      },
+      {
+        "mutant": 77,
+        "file": "orders/state.py",
+        "run_line": 308,
+        "old": "TRIGGER_ADMIN_CHANGE_FORM = \"admin_change_form\"",
+        "new": "TRIGGER_ADMIN_CHANGE_FORM = \"XXadmin_change_formXX\"",
+        "bucket": "REAL",
+        "subtag": "hole",
+        "why": "every test assertion derives the expected trigger from the constant (recomputed oracle) while migration 0016 hardcodes the 'admin_change_form' spelling, so a rename drifts the audit vocabulary from its migration-recorded choices with the suite green; pin with a hand-written literal"
+      },
+      {
+        "mutant": 79,
+        "file": "orders/state.py",
+        "run_line": 309,
+        "old": "TRIGGER_ADMIN_BULK_ACTION = \"admin_bulk_action\"",
+        "new": "TRIGGER_ADMIN_BULK_ACTION = \"XXadmin_bulk_actionXX\"",
+        "bucket": "REAL",
+        "subtag": "hole",
+        "why": "every test assertion derives the expected trigger from the constant (recomputed oracle) while migration 0016 hardcodes the 'admin_bulk_action' spelling, so a rename drifts the audit vocabulary from its migration-recorded choices with the suite green; pin with a hand-written literal"
+      },
+      {
+        "mutant": 81,
+        "file": "orders/state.py",
+        "run_line": 310,
+        "old": "TRIGGER_PAYMENT_VERIFY = \"payment_verify\"",
+        "new": "TRIGGER_PAYMENT_VERIFY = \"XXpayment_verifyXX\"",
+        "bucket": "REAL",
+        "subtag": "hole",
+        "why": "every test assertion derives the expected trigger from the constant (recomputed oracle) while migration 0016 hardcodes the 'payment_verify' spelling, so a rename drifts the audit vocabulary from its migration-recorded choices with the suite green; pin with a hand-written literal"
+      },
+      {
+        "mutant": 83,
+        "file": "orders/state.py",
+        "run_line": 311,
+        "old": "TRIGGER_ADMIN_API_FULFIL = \"admin_api_fulfil\"",
+        "new": "TRIGGER_ADMIN_API_FULFIL = \"XXadmin_api_fulfilXX\"",
+        "bucket": "REAL",
+        "subtag": "hole",
+        "why": "every test assertion derives the expected trigger from the constant (recomputed oracle) while migration 0016 hardcodes the 'admin_api_fulfil' spelling, so a rename drifts the audit vocabulary from its migration-recorded choices with the suite green; pin with a hand-written literal"
+      },
+      {
+        "mutant": 85,
+        "file": "orders/state.py",
+        "run_line": 312,
+        "old": "TRIGGER_ADMIN_API_CANCEL = \"admin_api_cancel\"",
+        "new": "TRIGGER_ADMIN_API_CANCEL = \"XXadmin_api_cancelXX\"",
+        "bucket": "REAL",
+        "subtag": "hole",
+        "why": "every test assertion derives the expected trigger from the constant (recomputed oracle) while migration 0016 hardcodes the 'admin_api_cancel' spelling, so a rename drifts the audit vocabulary from its migration-recorded choices with the suite green; pin with a hand-written literal"
+      },
+      {
+        "mutant": 87,
+        "file": "orders/state.py",
+        "run_line": 318,
+        "old": "TRIGGER_PAYMENT_FAILED = \"payment_failed\"",
+        "new": "TRIGGER_PAYMENT_FAILED = \"XXpayment_failedXX\"",
+        "bucket": "REAL",
+        "subtag": "hole",
+        "why": "every test assertion derives the expected trigger from the constant (recomputed oracle) while migration 0016 hardcodes the 'payment_failed' spelling, so a rename drifts the audit vocabulary from its migration-recorded choices with the suite green; pin with a hand-written literal"
+      },
+      {
+        "mutant": 89,
+        "file": "orders/state.py",
+        "run_line": 325,
+        "old": "TRIGGER_PAYMENT_WEBHOOK = \"payment_webhook\"",
+        "new": "TRIGGER_PAYMENT_WEBHOOK = \"XXpayment_webhookXX\"",
+        "bucket": "REAL",
+        "subtag": "hole",
+        "why": "every test assertion derives the expected trigger from the constant (recomputed oracle) while migration 0016 hardcodes the 'payment_webhook' spelling, so a rename drifts the audit vocabulary from its migration-recorded choices with the suite green; pin with a hand-written literal"
+      },
+      {
+        "mutant": 91,
+        "file": "orders/state.py",
+        "run_line": 328,
+        "old": "    (TRIGGER_ORDER_CREATE, \"Order created\"),",
+        "new": "    (TRIGGER_ORDER_CREATE, \"XXOrder createdXX\"),",
+        "bucket": "WEAK",
+        "subtag": "display",
+        "why": "STATUS_EVENT_TRIGGERS display label (admin-widget text); accept, or pin by literal if the label becomes contract"
+      },
+      {
+        "mutant": 92,
+        "file": "orders/state.py",
+        "run_line": 329,
+        "old": "    (TRIGGER_ADMIN_CHANGE_FORM, \"Admin change form\"),",
+        "new": "    (TRIGGER_ADMIN_CHANGE_FORM, \"XXAdmin change formXX\"),",
+        "bucket": "WEAK",
+        "subtag": "display",
+        "why": "STATUS_EVENT_TRIGGERS display label (admin-widget text); accept, or pin by literal if the label becomes contract"
+      },
+      {
+        "mutant": 93,
+        "file": "orders/state.py",
+        "run_line": 330,
+        "old": "    (TRIGGER_ADMIN_BULK_ACTION, \"Admin bulk action\"),",
+        "new": "    (TRIGGER_ADMIN_BULK_ACTION, \"XXAdmin bulk actionXX\"),",
+        "bucket": "WEAK",
+        "subtag": "display",
+        "why": "STATUS_EVENT_TRIGGERS display label (admin-widget text); accept, or pin by literal if the label becomes contract"
+      },
+      {
+        "mutant": 94,
+        "file": "orders/state.py",
+        "run_line": 331,
+        "old": "    (TRIGGER_PAYMENT_VERIFY, \"Payment verified\"),",
+        "new": "    (TRIGGER_PAYMENT_VERIFY, \"XXPayment verifiedXX\"),",
+        "bucket": "WEAK",
+        "subtag": "display",
+        "why": "STATUS_EVENT_TRIGGERS display label (admin-widget text); accept, or pin by literal if the label becomes contract"
+      },
+      {
+        "mutant": 95,
+        "file": "orders/state.py",
+        "run_line": 332,
+        "old": "    (TRIGGER_ADMIN_API_FULFIL, \"Admin fulfilment API\"),",
+        "new": "    (TRIGGER_ADMIN_API_FULFIL, \"XXAdmin fulfilment APIXX\"),",
+        "bucket": "WEAK",
+        "subtag": "display",
+        "why": "STATUS_EVENT_TRIGGERS display label (admin-widget text); accept, or pin by literal if the label becomes contract"
+      },
+      {
+        "mutant": 96,
+        "file": "orders/state.py",
+        "run_line": 333,
+        "old": "    (TRIGGER_ADMIN_API_CANCEL, \"Admin cancel API\"),",
+        "new": "    (TRIGGER_ADMIN_API_CANCEL, \"XXAdmin cancel APIXX\"),",
+        "bucket": "WEAK",
+        "subtag": "display",
+        "why": "STATUS_EVENT_TRIGGERS display label (admin-widget text); accept, or pin by literal if the label becomes contract"
+      },
+      {
+        "mutant": 97,
+        "file": "orders/state.py",
+        "run_line": 334,
+        "old": "    (TRIGGER_PAYMENT_FAILED, \"Payment verification failed\"),",
+        "new": "    (TRIGGER_PAYMENT_FAILED, \"XXPayment verification failedXX\"),",
+        "bucket": "WEAK",
+        "subtag": "display",
+        "why": "STATUS_EVENT_TRIGGERS display label (admin-widget text); accept, or pin by literal if the label becomes contract"
+      },
+      {
+        "mutant": 98,
+        "file": "orders/state.py",
+        "run_line": 335,
+        "old": "    (TRIGGER_PAYMENT_WEBHOOK, \"Payment webhook\"),",
+        "new": "    (TRIGGER_PAYMENT_WEBHOOK, \"XXPayment webhookXX\"),",
+        "bucket": "WEAK",
+        "subtag": "display",
+        "why": "STATUS_EVENT_TRIGGERS display label (admin-widget text); accept, or pin by literal if the label becomes contract"
+      },
+      {
+        "mutant": 101,
+        "file": "orders/state.py",
+        "run_line": 346,
+        "old": "WEBHOOK_EVENT_AUTHORIZED = \"payment.authorized\"",
+        "new": "WEBHOOK_EVENT_AUTHORIZED = \"XXpayment.authorizedXX\"",
+        "bucket": "WEAK",
+        "subtag": "dead-vocab",
+        "why": "WEBHOOK_EVENT_AUTHORIZED has zero runtime consumers today (only CAPTURED and the refund frozenset are read by orders/webhooks.py), so nothing can observe the spelling; accept until an authorized-event writer exists, then pin the literal"
+      },
+      {
+        "mutant": 102,
+        "file": "orders/state.py",
+        "run_line": 346,
+        "old": "WEBHOOK_EVENT_AUTHORIZED = \"payment.authorized\"",
+        "new": "WEBHOOK_EVENT_AUTHORIZED = None",
+        "bucket": "WEAK",
+        "subtag": "dead-vocab",
+        "why": "WEBHOOK_EVENT_AUTHORIZED has zero runtime consumers today (only CAPTURED and the refund frozenset are read by orders/webhooks.py), so nothing can observe the spelling; accept until an authorized-event writer exists, then pin the literal"
+      },
+      {
+        "mutant": 103,
+        "file": "orders/state.py",
+        "run_line": 347,
+        "old": "WEBHOOK_EVENT_FAILED = \"payment.failed\"",
+        "new": "WEBHOOK_EVENT_FAILED = \"XXpayment.failedXX\"",
+        "bucket": "WEAK",
+        "subtag": "dead-vocab",
+        "why": "WEBHOOK_EVENT_FAILED has zero runtime consumers (the failed-verify writer records TRIGGER_PAYMENT_FAILED, a different constant), so the spelling is unobservable; accept until a failed-event handler exists, then pin the literal"
+      },
+      {
+        "mutant": 104,
+        "file": "orders/state.py",
+        "run_line": 347,
+        "old": "WEBHOOK_EVENT_FAILED = \"payment.failed\"",
+        "new": "WEBHOOK_EVENT_FAILED = None",
+        "bucket": "WEAK",
+        "subtag": "dead-vocab",
+        "why": "WEBHOOK_EVENT_FAILED has zero runtime consumers (the failed-verify writer records TRIGGER_PAYMENT_FAILED, a different constant), so the spelling is unobservable; accept until a failed-event handler exists, then pin the literal"
+      },
+      {
+        "mutant": 107,
+        "file": "orders/state.py",
+        "run_line": 355,
+        "old": "WEBHOOK_EVENT_REFUND_DONE = \"refund.processed\"",
+        "new": "WEBHOOK_EVENT_REFUND_DONE = \"XXrefund.processedXX\"",
+        "bucket": "REAL",
+        "subtag": "hole",
+        "why": "test_provider_spelling_of_a_settled_refund_is_also_recorded posts the literal refund.processed but asserts only the RECORDED outcome, which the unhandled path also returns, so the mutation silently degrades the provider's settled-refund spelling to unhandled while the suite stays green; pin it with the order/payment-binding asserts the payment.refunded twin test already carries"
+      },
+      {
+        "mutant": 108,
+        "file": "orders/state.py",
+        "run_line": 355,
+        "old": "WEBHOOK_EVENT_REFUND_DONE = \"refund.processed\"",
+        "new": "WEBHOOK_EVENT_REFUND_DONE = None",
+        "bucket": "REAL",
+        "subtag": "hole",
+        "why": "test_provider_spelling_of_a_settled_refund_is_also_recorded posts the literal refund.processed but asserts only the RECORDED outcome, which the unhandled path also returns, so the mutation silently degrades the provider's settled-refund spelling to unhandled while the suite stays green; pin it with the order/payment-binding asserts the payment.refunded twin test already carries"
+      },
+      {
+        "mutant": 121,
+        "file": "common/permissions.py",
+        "run_line": 69,
+        "old": "    if not (user and user.is_authenticated):",
+        "new": "    if not (user or user.is_authenticated):",
+        "bucket": "REAL",
+        "subtag": "hole",
+        "why": "the None-user short-circuit is unpinned -- every existing pin feeds AnonymousUser, which is truthy and takes the other side of the guard -- so the branch that stops get_user_roles(None) from raising AttributeError is green-able; pin get_user_roles(None) == frozenset()"
+      },
+      {
+        "mutant": 126,
+        "file": "common/permissions.py",
+        "run_line": 99,
+        "old": "    capability = None",
+        "new": "    capability = \"\"",
+        "bucket": "REAL",
+        "subtag": "scope",
+        "why": "the '' sentinel silently displaces the base class's legacy is_staff write path (the elif that None selects), and test_write_methods_keep_the_legacy_staff_contract pins exactly that path -- in the excluded tests/ package"
+      },
+      {
+        "mutant": 128,
+        "file": "common/permissions.py",
+        "run_line": 100,
+        "old": "    message = \"You do not have permission to perform this action.\"",
+        "new": "    message = None",
+        "bucket": "EXPECTED",
+        "subtag": "equivalent",
+        "why": "DRF's APIException.__init__ substitutes PermissionDenied.default_detail when detail is None, and that default is byte-identical to the class attribute, so every raise site is observationally unchanged; an attribute-level assert could kill it, no wire-level test can"
+      },
+      {
+        "mutant": 130,
+        "file": "common/permissions.py",
+        "run_line": 134,
+        "old": "        @wraps(view)",
+        "new": "",
+        "bucket": "EXPECTED",
+        "subtag": "decorator",
+        "why": "removing @wraps changes only the wrapper's __name__/__doc__ metadata; no runtime consumer introspects it, so the suite cannot observe the mutation -- mutmut 2.5.1 can skip the decorator class via --disable-mutation-types but that is a harness choice, not a test fix"
+      },
+      {
+        "mutant": 131,
+        "file": "common/permissions.py",
+        "run_line": 173,
+        "old": "        @wraps(view)",
+        "new": "",
+        "bucket": "EXPECTED",
+        "subtag": "decorator",
+        "why": "removing @wraps changes only the wrapper's __name__/__doc__ metadata; no runtime consumer introspects it, so the suite cannot observe the mutation -- mutmut 2.5.1 can skip the decorator class via --disable-mutation-types but that is a harness choice, not a test fix"
+      },
+      {
+        "mutant": 132,
+        "file": "common/permissions.py",
+        "run_line": 198,
+        "old": "    return \"Has\" + \"\".join(part.capitalize() for part in capability.split(\".\"))",
+        "new": "    return \"XXHasXX\" + \"\".join(part.capitalize() for part in capability.split(\".\"))",
+        "bucket": "REAL",
+        "subtag": "scope",
+        "why": "the generated name contract is pinned by the factory contract tests in the excluded tests/ package (asserts __name__ for both factories); the scoped runner never ran them"
+      },
+      {
+        "mutant": 134,
+        "file": "common/permissions.py",
+        "run_line": 198,
+        "old": "    return \"Has\" + \"\".join(part.capitalize() for part in capability.split(\".\"))",
+        "new": "    return \"Has\" + \"XXXX\".join(part.capitalize() for part in capability.split(\".\"))",
+        "bucket": "REAL",
+        "subtag": "scope",
+        "why": "the generated name contract is pinned by the factory contract tests in the excluded tests/ package (asserts __name__ for both factories); the scoped runner never ran them"
+      },
+      {
+        "mutant": 135,
+        "file": "common/permissions.py",
+        "run_line": 198,
+        "old": "    return \"Has\" + \"\".join(part.capitalize() for part in capability.split(\".\"))",
+        "new": "    return \"Has\" + \"\".join(part.capitalize() for part in capability.split(\"XX.XX\"))",
+        "bucket": "REAL",
+        "subtag": "scope",
+        "why": "the generated name contract is pinned by the factory contract tests in the excluded tests/ package (asserts __name__ for both factories); the scoped runner never ran them"
+      },
+      {
+        "mutant": 138,
+        "file": "common/permissions.py",
+        "run_line": 247,
+        "old": "        _permission_class_name(capability) + \"OrReadOnly\",",
+        "new": "        _permission_class_name(capability) + \"XXOrReadOnlyXX\",",
+        "bucket": "REAL",
+        "subtag": "scope",
+        "why": "the generated name contract is pinned by the factory contract tests in the excluded tests/ package (asserts __name__ for both factories); the scoped runner never ran them"
+      },
+      {
+        "mutant": 140,
+        "file": "common/permissions.py",
+        "run_line": 257,
+        "old": "HasProductsRead = capability_permission(\"products.read\")",
+        "new": "HasProductsRead = capability_permission(\"XXproducts.readXX\")",
+        "bucket": "REAL",
+        "subtag": "scope",
+        "why": "the class-to-capability binding is pinned by the RBAC foundation contract test in the excluded tests/ package (compares .capability against CAPABILITY_ROLES and scans every pinned class in the module); the binding executes at import but no scoped-runner test behaviorally exercises this class, so survival measures the runner's label list, not the suite"
+      },
+      {
+        "mutant": 141,
+        "file": "common/permissions.py",
+        "run_line": 257,
+        "old": "HasProductsRead = capability_permission(\"products.read\")",
+        "new": "HasProductsRead = None",
+        "bucket": "REAL",
+        "subtag": "scope",
+        "why": "the class-to-capability binding is pinned by the RBAC foundation contract test in the excluded tests/ package (compares .capability against CAPABILITY_ROLES and scans every pinned class in the module); the binding executes at import but no scoped-runner test behaviorally exercises this class, so survival measures the runner's label list, not the suite"
+      },
+      {
+        "mutant": 142,
+        "file": "common/permissions.py",
+        "run_line": 258,
+        "old": "HasProductsWrite = capability_permission(\"products.write\")",
+        "new": "HasProductsWrite = capability_permission(\"XXproducts.writeXX\")",
+        "bucket": "REAL",
+        "subtag": "scope",
+        "why": "the class-to-capability binding is pinned by the RBAC foundation contract test in the excluded tests/ package (compares .capability against CAPABILITY_ROLES and scans every pinned class in the module); the binding executes at import but no scoped-runner test behaviorally exercises this class, so survival measures the runner's label list, not the suite"
+      },
+      {
+        "mutant": 143,
+        "file": "common/permissions.py",
+        "run_line": 258,
+        "old": "HasProductsWrite = capability_permission(\"products.write\")",
+        "new": "HasProductsWrite = None",
+        "bucket": "REAL",
+        "subtag": "scope",
+        "why": "the class-to-capability binding is pinned by the RBAC foundation contract test in the excluded tests/ package (compares .capability against CAPABILITY_ROLES and scans every pinned class in the module); the binding executes at import but no scoped-runner test behaviorally exercises this class, so survival measures the runner's label list, not the suite"
+      },
+      {
+        "mutant": 144,
+        "file": "common/permissions.py",
+        "run_line": 259,
+        "old": "HasProductsPublish = capability_permission(\"products.publish\")",
+        "new": "HasProductsPublish = capability_permission(\"XXproducts.publishXX\")",
+        "bucket": "REAL",
+        "subtag": "scope",
+        "why": "the class-to-capability binding is pinned by the RBAC foundation contract test in the excluded tests/ package (compares .capability against CAPABILITY_ROLES and scans every pinned class in the module); the binding executes at import but no scoped-runner test behaviorally exercises this class, so survival measures the runner's label list, not the suite"
+      },
+      {
+        "mutant": 145,
+        "file": "common/permissions.py",
+        "run_line": 259,
+        "old": "HasProductsPublish = capability_permission(\"products.publish\")",
+        "new": "HasProductsPublish = None",
+        "bucket": "REAL",
+        "subtag": "scope",
+        "why": "the class-to-capability binding is pinned by the RBAC foundation contract test in the excluded tests/ package (compares .capability against CAPABILITY_ROLES and scans every pinned class in the module); the binding executes at import but no scoped-runner test behaviorally exercises this class, so survival measures the runner's label list, not the suite"
+      },
+      {
+        "mutant": 146,
+        "file": "common/permissions.py",
+        "run_line": 260,
+        "old": "HasInventoryRead = capability_permission(\"inventory.read\")",
+        "new": "HasInventoryRead = capability_permission(\"XXinventory.readXX\")",
+        "bucket": "REAL",
+        "subtag": "scope",
+        "why": "the class-to-capability binding is pinned by the RBAC foundation contract test in the excluded tests/ package (compares .capability against CAPABILITY_ROLES and scans every pinned class in the module); the binding executes at import but no scoped-runner test behaviorally exercises this class, so survival measures the runner's label list, not the suite"
+      },
+      {
+        "mutant": 147,
+        "file": "common/permissions.py",
+        "run_line": 260,
+        "old": "HasInventoryRead = capability_permission(\"inventory.read\")",
+        "new": "HasInventoryRead = None",
+        "bucket": "REAL",
+        "subtag": "scope",
+        "why": "the class-to-capability binding is pinned by the RBAC foundation contract test in the excluded tests/ package (compares .capability against CAPABILITY_ROLES and scans every pinned class in the module); the binding executes at import but no scoped-runner test behaviorally exercises this class, so survival measures the runner's label list, not the suite"
+      },
+      {
+        "mutant": 158,
+        "file": "common/permissions.py",
+        "run_line": 272,
+        "old": "HasShippingManage = capability_permission(\"shipping.manage\")",
+        "new": "HasShippingManage = capability_permission(\"XXshipping.manageXX\")",
+        "bucket": "REAL",
+        "subtag": "scope",
+        "why": "the class-to-capability binding is pinned by the RBAC foundation contract test in the excluded tests/ package (compares .capability against CAPABILITY_ROLES and scans every pinned class in the module); the binding executes at import but no scoped-runner test behaviorally exercises this class, so survival measures the runner's label list, not the suite"
+      },
+      {
+        "mutant": 159,
+        "file": "common/permissions.py",
+        "run_line": 272,
+        "old": "HasShippingManage = capability_permission(\"shipping.manage\")",
+        "new": "HasShippingManage = None",
+        "bucket": "REAL",
+        "subtag": "scope",
+        "why": "the class-to-capability binding is pinned by the RBAC foundation contract test in the excluded tests/ package (compares .capability against CAPABILITY_ROLES and scans every pinned class in the module); the binding executes at import but no scoped-runner test behaviorally exercises this class, so survival measures the runner's label list, not the suite"
+      },
+      {
+        "mutant": 164,
+        "file": "common/permissions.py",
+        "run_line": 289,
+        "old": "HasReturnsRead = capability_permission(\"returns.read\")",
+        "new": "HasReturnsRead = capability_permission(\"XXreturns.readXX\")",
+        "bucket": "REAL",
+        "subtag": "scope",
+        "why": "the class-to-capability binding is pinned by the RBAC foundation contract test in the excluded tests/ package (compares .capability against CAPABILITY_ROLES and scans every pinned class in the module); the binding executes at import but no scoped-runner test behaviorally exercises this class, so survival measures the runner's label list, not the suite"
+      },
+      {
+        "mutant": 165,
+        "file": "common/permissions.py",
+        "run_line": 289,
+        "old": "HasReturnsRead = capability_permission(\"returns.read\")",
+        "new": "HasReturnsRead = None",
+        "bucket": "REAL",
+        "subtag": "scope",
+        "why": "the class-to-capability binding is pinned by the RBAC foundation contract test in the excluded tests/ package (compares .capability against CAPABILITY_ROLES and scans every pinned class in the module); the binding executes at import but no scoped-runner test behaviorally exercises this class, so survival measures the runner's label list, not the suite"
+      },
+      {
+        "mutant": 166,
+        "file": "common/permissions.py",
+        "run_line": 290,
+        "old": "HasReturnsWrite = capability_permission(\"returns.write\")",
+        "new": "HasReturnsWrite = capability_permission(\"XXreturns.writeXX\")",
+        "bucket": "REAL",
+        "subtag": "scope",
+        "why": "the class-to-capability binding is pinned by the RBAC foundation contract test in the excluded tests/ package (compares .capability against CAPABILITY_ROLES and scans every pinned class in the module); the binding executes at import but no scoped-runner test behaviorally exercises this class, so survival measures the runner's label list, not the suite"
+      },
+      {
+        "mutant": 167,
+        "file": "common/permissions.py",
+        "run_line": 290,
+        "old": "HasReturnsWrite = capability_permission(\"returns.write\")",
+        "new": "HasReturnsWrite = None",
+        "bucket": "REAL",
+        "subtag": "scope",
+        "why": "the class-to-capability binding is pinned by the RBAC foundation contract test in the excluded tests/ package (compares .capability against CAPABILITY_ROLES and scans every pinned class in the module); the binding executes at import but no scoped-runner test behaviorally exercises this class, so survival measures the runner's label list, not the suite"
+      },
+      {
+        "mutant": 168,
+        "file": "common/permissions.py",
+        "run_line": 291,
+        "old": "HasCustomersRead = capability_permission(\"customers.read\")",
+        "new": "HasCustomersRead = capability_permission(\"XXcustomers.readXX\")",
+        "bucket": "REAL",
+        "subtag": "scope",
+        "why": "the class-to-capability binding is pinned by the RBAC foundation contract test in the excluded tests/ package (compares .capability against CAPABILITY_ROLES and scans every pinned class in the module); the binding executes at import but no scoped-runner test behaviorally exercises this class, so survival measures the runner's label list, not the suite"
+      },
+      {
+        "mutant": 169,
+        "file": "common/permissions.py",
+        "run_line": 291,
+        "old": "HasCustomersRead = capability_permission(\"customers.read\")",
+        "new": "HasCustomersRead = None",
+        "bucket": "REAL",
+        "subtag": "scope",
+        "why": "the class-to-capability binding is pinned by the RBAC foundation contract test in the excluded tests/ package (compares .capability against CAPABILITY_ROLES and scans every pinned class in the module); the binding executes at import but no scoped-runner test behaviorally exercises this class, so survival measures the runner's label list, not the suite"
+      },
+      {
+        "mutant": 170,
+        "file": "common/permissions.py",
+        "run_line": 292,
+        "old": "HasDiscountsWrite = capability_permission(\"discounts.write\")",
+        "new": "HasDiscountsWrite = capability_permission(\"XXdiscounts.writeXX\")",
+        "bucket": "REAL",
+        "subtag": "scope",
+        "why": "the class-to-capability binding is pinned by the RBAC foundation contract test in the excluded tests/ package (compares .capability against CAPABILITY_ROLES and scans every pinned class in the module); the binding executes at import but no scoped-runner test behaviorally exercises this class, so survival measures the runner's label list, not the suite"
+      },
+      {
+        "mutant": 171,
+        "file": "common/permissions.py",
+        "run_line": 292,
+        "old": "HasDiscountsWrite = capability_permission(\"discounts.write\")",
+        "new": "HasDiscountsWrite = None",
+        "bucket": "REAL",
+        "subtag": "scope",
+        "why": "the class-to-capability binding is pinned by the RBAC foundation contract test in the excluded tests/ package (compares .capability against CAPABILITY_ROLES and scans every pinned class in the module); the binding executes at import but no scoped-runner test behaviorally exercises this class, so survival measures the runner's label list, not the suite"
+      },
+      {
+        "mutant": 172,
+        "file": "common/permissions.py",
+        "run_line": 293,
+        "old": "HasReportsRead = capability_permission(\"reports.read\")",
+        "new": "HasReportsRead = capability_permission(\"XXreports.readXX\")",
+        "bucket": "REAL",
+        "subtag": "scope",
+        "why": "the class-to-capability binding is pinned by the RBAC foundation contract test in the excluded tests/ package (compares .capability against CAPABILITY_ROLES and scans every pinned class in the module); the binding executes at import but no scoped-runner test behaviorally exercises this class, so survival measures the runner's label list, not the suite"
+      },
+      {
+        "mutant": 173,
+        "file": "common/permissions.py",
+        "run_line": 293,
+        "old": "HasReportsRead = capability_permission(\"reports.read\")",
+        "new": "HasReportsRead = None",
+        "bucket": "REAL",
+        "subtag": "scope",
+        "why": "the class-to-capability binding is pinned by the RBAC foundation contract test in the excluded tests/ package (compares .capability against CAPABILITY_ROLES and scans every pinned class in the module); the binding executes at import but no scoped-runner test behaviorally exercises this class, so survival measures the runner's label list, not the suite"
+      },
+      {
+        "mutant": 174,
+        "file": "common/permissions.py",
+        "run_line": 294,
+        "old": "HasStaffManage = capability_permission(\"staff.manage\")",
+        "new": "HasStaffManage = capability_permission(\"XXstaff.manageXX\")",
+        "bucket": "REAL",
+        "subtag": "scope",
+        "why": "the class-to-capability binding is pinned by the RBAC foundation contract test in the excluded tests/ package (compares .capability against CAPABILITY_ROLES and scans every pinned class in the module); the binding executes at import but no scoped-runner test behaviorally exercises this class, so survival measures the runner's label list, not the suite"
+      },
+      {
+        "mutant": 175,
+        "file": "common/permissions.py",
+        "run_line": 294,
+        "old": "HasStaffManage = capability_permission(\"staff.manage\")",
+        "new": "HasStaffManage = None",
+        "bucket": "REAL",
+        "subtag": "scope",
+        "why": "the class-to-capability binding is pinned by the RBAC foundation contract test in the excluded tests/ package (compares .capability against CAPABILITY_ROLES and scans every pinned class in the module); the binding executes at import but no scoped-runner test behaviorally exercises this class, so survival measures the runner's label list, not the suite"
+      },
+      {
+        "mutant": 176,
+        "file": "common/permissions.py",
+        "run_line": 295,
+        "old": "HasSettingsManage = capability_permission(\"settings.manage\")",
+        "new": "HasSettingsManage = capability_permission(\"XXsettings.manageXX\")",
+        "bucket": "REAL",
+        "subtag": "scope",
+        "why": "the class-to-capability binding is pinned by the RBAC foundation contract test in the excluded tests/ package (compares .capability against CAPABILITY_ROLES and scans every pinned class in the module); the binding executes at import but no scoped-runner test behaviorally exercises this class, so survival measures the runner's label list, not the suite"
+      },
+      {
+        "mutant": 177,
+        "file": "common/permissions.py",
+        "run_line": 295,
+        "old": "HasSettingsManage = capability_permission(\"settings.manage\")",
+        "new": "HasSettingsManage = None",
+        "bucket": "REAL",
+        "subtag": "scope",
+        "why": "the class-to-capability binding is pinned by the RBAC foundation contract test in the excluded tests/ package (compares .capability against CAPABILITY_ROLES and scans every pinned class in the module); the binding executes at import but no scoped-runner test behaviorally exercises this class, so survival measures the runner's label list, not the suite"
+      },
+      {
+        "mutant": 178,
+        "file": "common/permissions.py",
+        "run_line": 299,
+        "old": "HasPlatformConfigure = capability_permission(\"platform.configure\")",
+        "new": "HasPlatformConfigure = capability_permission(\"XXplatform.configureXX\")",
+        "bucket": "REAL",
+        "subtag": "scope",
+        "why": "the class-to-capability binding is pinned by the RBAC foundation contract test in the excluded tests/ package (compares .capability against CAPABILITY_ROLES and scans every pinned class in the module); the binding executes at import but no scoped-runner test behaviorally exercises this class, so survival measures the runner's label list, not the suite"
+      },
+      {
+        "mutant": 179,
+        "file": "common/permissions.py",
+        "run_line": 299,
+        "old": "HasPlatformConfigure = capability_permission(\"platform.configure\")",
+        "new": "HasPlatformConfigure = None",
+        "bucket": "REAL",
+        "subtag": "scope",
+        "why": "the class-to-capability binding is pinned by the RBAC foundation contract test in the excluded tests/ package (compares .capability against CAPABILITY_ROLES and scans every pinned class in the module); the binding executes at import but no scoped-runner test behaviorally exercises this class, so survival measures the runner's label list, not the suite"
+      },
+      {
+        "mutant": 182,
+        "file": "common/permissions.py",
+        "run_line": 323,
+        "old": "    if not (user and user.is_authenticated):",
+        "new": "    if  (user and user.is_authenticated):",
+        "bucket": "REAL",
+        "subtag": "scope",
+        "why": "is_privileged's whole contract is pinned in the excluded tests/ package -- test_admin_role_privileged and test_superuser_without_role_group_privileged kill the capability-string and or-to-and variants, test_anonymous_not_privileged kills the guard flips including the None-user path -- and no scoped-runner test drives the privileged True path"
+      },
+      {
+        "mutant": 183,
+        "file": "common/permissions.py",
+        "run_line": 323,
+        "old": "    if not (user and user.is_authenticated):",
+        "new": "    if not (user or user.is_authenticated):",
+        "bucket": "REAL",
+        "subtag": "scope",
+        "why": "is_privileged's whole contract is pinned in the excluded tests/ package -- test_admin_role_privileged and test_superuser_without_role_group_privileged kill the capability-string and or-to-and variants, test_anonymous_not_privileged kills the guard flips including the None-user path -- and no scoped-runner test drives the privileged True path"
+      },
+      {
+        "mutant": 184,
+        "file": "common/permissions.py",
+        "run_line": 325,
+        "old": "    return user.is_superuser or user_has_capability(user, \"staff.manage\")",
+        "new": "    return user.is_superuser or user_has_capability(user, \"XXstaff.manageXX\")",
+        "bucket": "REAL",
+        "subtag": "scope",
+        "why": "is_privileged's whole contract is pinned in the excluded tests/ package -- test_admin_role_privileged and test_superuser_without_role_group_privileged kill the capability-string and or-to-and variants, test_anonymous_not_privileged kills the guard flips including the None-user path -- and no scoped-runner test drives the privileged True path"
+      },
+      {
+        "mutant": 185,
+        "file": "common/permissions.py",
+        "run_line": 325,
+        "old": "    return user.is_superuser or user_has_capability(user, \"staff.manage\")",
+        "new": "    return user.is_superuser and user_has_capability(user, \"staff.manage\")",
+        "bucket": "REAL",
+        "subtag": "scope",
+        "why": "is_privileged's whole contract is pinned in the excluded tests/ package -- test_admin_role_privileged and test_superuser_without_role_group_privileged kill the capability-string and or-to-and variants, test_anonymous_not_privileged kills the guard flips including the None-user path -- and no scoped-runner test drives the privileged True path"
+      },
+      {
+        "mutant": 186,
+        "file": "common/permissions.py",
+        "run_line": 338,
+        "old": "    message = \"Multi-factor authentication management requires privileged staff access.\"",
+        "new": "    message = \"XXMulti-factor authentication management requires privileged staff access.XX\"",
+        "bucket": "WEAK",
+        "subtag": "message",
+        "why": "the MFA-denial message literal is pinned nowhere (grep-verified this session) and accounts/views.py echoes the attribute into an ad-hoc error body; a rename changes the 403 text -- pin the MFA 403 body literal or accept"
+      },
+      {
+        "mutant": 187,
+        "file": "common/permissions.py",
+        "run_line": 338,
+        "old": "    message = \"Multi-factor authentication management requires privileged staff access.\"",
+        "new": "    message = None",
+        "bucket": "WEAK",
+        "subtag": "message",
+        "why": "unlike the CapabilityPermission twin, None here substitutes DRF's generic default on the wire (the defaults differ), so the MFA 403 body silently changes -- pin the literal or accept"
+      }
+    ]
+  }
+}
