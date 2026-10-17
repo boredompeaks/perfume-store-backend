@@ -18,6 +18,13 @@ cov 99.81%, xf=2). Cross-orchestrator coordination channel:
 
 ---
 
+> **PAUSED 2026-10-17 (owner order)** — switched to **MUT-2** (weekly mutation
+> results triage) while the owner's webhook secret is days away. Parked, in
+> resume order: Q-HERM1 (awaiting go; FE half via FO bridge) -> T1a-second-pass
+> (34 rows; needs webhook secret + seed + shipping) -> T2-exec (needs k6 +
+> box env) -> Q-D1 (orchestrator) -> Q-D5 (end-gate). Q-G1 stays held.
+> Reminder anchored in the index Run pointers (~2026-10-20).
+
 ## Phase S — Security fixes (backend, 2 lanes, start immediately)
 
 | ID | Task | Lane | Notes |
