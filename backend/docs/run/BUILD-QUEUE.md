@@ -152,6 +152,11 @@ shipping on — then a second-pass task closes the 24. Q-OPS1 SHIPPED same day
   `5ab76aa..a246245`. Suites never ran concurrently in the first batch
   (sequential by design); the parallel batch used per-lane DB isolation only.
   Non-blocking carried: REDIS_URL owner-op (F3-C4 throttle-cache family).
+- **PROMOTED: PR #43 MERGED @ `270fe7d` (GATE-4, 2026-10-17).** Integrated
+  pair 2173 OK both engines cov 99.81% (RE-measured); SENT-BACK cycle 1 was
+  the OWNER-BRIEF:32 doc-claims parse, closed `2056ea7`; GHCR images
+  published and the deploy gate auto-released the UAT box to `270fe7d`
+  (CORS live; deploy.yml `3c7d185` checkout-retry proven in the same run).
 
 T2 — Load / stress / resource against the REAL URL (after red team):
 - k6 profiles: catalog browse + cart ops (read-heavy), then checkout ramp.

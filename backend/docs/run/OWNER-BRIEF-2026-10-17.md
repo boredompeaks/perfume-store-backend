@@ -6,19 +6,24 @@ sourced or cited from the named file — nothing hand-typed from memory.
 
 ---
 
-## 1. The gate you ordered (in flight)
+## 1. The gate you ordered — DONE (GATE-4 MERGED, images on GHCR, box already redeployed)
 
-- **GATE-4:** release-engineer promoted `636d06b..11a79fd` (3 shipped tasks —
-  Q-CORS1, T1F2a, T1F2b — plus ledger + lane merges), opens/updates the one
-  promotion PR `spec-comp -> feat/add-frontend`, merges on all-green, and
-  **publishes the containers to GHCR** (`ghcr-publish.yml` — RE owns
-  `.github/**`). You redeploy once the images are on ghcr; RE returns a
-  short plain pull/run/config brief with its MERGED report.
-- Lane merges into spec-comp were performed by the orchestrator under your
-  interim authorization (RE's `git merge*` deny stands until you grant it):
-  lane/a clean merge `7d54b00`; lane/b conflict resolved by the proven
-  row-concat resolver (A=2 rows, B=1 row, union asserted, markers=0, CR=0,
-  trailing LF) -> `11a79fd`.
+- **PR #43 MERGED @ `270fe7d`** (gh-verified 2026-10-17T10:23:35Z,
+  `spec-comp -> feat/add-frontend`, all checks green, GitGuardian PASS).
+  Integrated floor: **2173 OK both engines**, cov 99.81%, xf=2 (RE-measured).
+- **GHCR images:** `ghcr.io/boredompeaks/perfume-store-backend-backend`
+  — immutable `:sha-270fe7dc4ee772c9a0c2fc7b6769321b53a8f48c`
+  (digest `31ad96de…`), floats `:feat-add-frontend` (release line) and
+  `:spec-comp` (work line). Pull/rollback = any older `:sha-<full-sha>`.
+- **No manual redeploy was needed:** the deploy gate FIRED on the merge
+  (run 39024965172) — `release-uat OK`, container Healthy, `/health/` green.
+  **The UAT box now runs `270fe7d`: the CORS fix is LIVE.** A fresh preflight
+  should now answer `Access-Control-Allow-Headers` with `idempotency-key` —
+  try checkout again. Deploy-gate bonus: RE's `3c7d185` checkout-retry fixed
+  the collision that had broken release run 38989889212, and that fix proved
+  itself live in this very run.
+- Lane merges by orchestrator (your interim authorization): `7d54b00` +
+  `11a79fd` (changes.md row-concat, union asserted, markers=0/CR=0/LF).
 
 ---
 
@@ -35,7 +40,7 @@ sourced or cited from the named file — nothing hand-typed from memory.
 | B7 | **Permanent `git merge` allowance for release-engineer** | Until then the orchestrator keeps doing lane merges as your interim delegate (GATE-2/3/4 precedent, recorded each gate). |
 | B8 | **Line-ending attributes file** | Measured hazard: `core.autocrlf=true` made 84/417 files differ between worktrees; a floor was a property of a checkout, not a commit. Real fix = `.gitattributes` — owner decision (changes every checkout in the repo). |
 | B9 | **GitGuardian dismissals** | App-check reds on ANY historical occurrence in a PR range even after fixes (twice: incidents 38269594/95, 38291408 — you dismissed). Expect it again when history touches a prior-triggered path; your dashboard dismissal is the only clear. |
-| B10 | **CORS fix reaches the live box only via your redeploy** | Today's image was built 2026-10-16 09:12Z — it predates `d5a0e20`. Checkout stays broken in browsers until the new image is up (server logs prove the POST never arrives: preflight ACAH lacked `idempotency-key`). |
+| B10 | ~~CORS fix reaches the live box only via your redeploy~~ **RESOLVED — auto-deploy fired; box runs `270fe7d`, CORS LIVE** | Was: image built 2026-10-16 predates `d5a0e20`. The GATE-4 merge triggered the deploy gate; `/health/` green on the new build. Re-test checkout in the browser — if it still fails, capture the preflight again (it must now list `idempotency-key`). |
 | B11 | **Q-HERM1 (hermetic tests) awaiting your go** | Your directive: live URL only for finding/fixing bugs, never permanent test creds; fixture creds hygiene. Frontend half routes to FO via the bridge. |
 | B12 | **`X-Guest-Order-Token` + CORS fixed in code** (same fix) | Guest order reads + `/track-order` from the browser were broken by the identical preflight gap; heal with the same redeploy. |
 
