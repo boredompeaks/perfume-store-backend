@@ -21,6 +21,14 @@ const gridSkeletonSource = readFileSync(
   join(srcDir, "components/GridSkeleton.tsx"),
   "utf8",
 );
+const pyramidSource = readFileSync(
+  join(srcDir, "components/OlfactoryPyramid.tsx"),
+  "utf8",
+);
+const productsApiSource = readFileSync(
+  join(srcDir, "lib/products-api.ts"),
+  "utf8",
+);
 
 /**
  * U-W7-T1 — the /products/[slug] redesign's load-bearing claims, pinned as
@@ -186,6 +194,90 @@ describe("wave-6 P3 comment fixes (comment-prose, zero behaviour)", () => {
     // Behaviour unchanged by the fix: the default string still ships as-is.
     expect(gridSkeletonSource).toContain(
       'grid-cols-2 gap-x-4 gap-y-12 sm:grid-cols-3 lg:grid-cols-4',
+    );
+  });
+});
+
+/* ==========================================================================
+   U-W11-T6 slice 1 — hero/purchase panel + olfactory pyramid pins.
+   The screen is media/designs/ther_s_culaire_extrait_de_parfum_refined_hero_flow;
+   every claim below is source-level so a silent restructure fails here.
+   ======================================================================== */
+
+/** Code-only scan: prose in comments may name retired or future tokens. */
+function stripComments(source: string): string {
+  return source
+    .replace(/\/\*[\s\S]*?\*\//g, "")
+    .replace(/^\s*\/\/.*$/gm, "");
+}
+
+describe("olfactory pyramid (U-W11-T6, §5.2 item 5 / §12-G10 honesty)", () => {
+  it("renders the section only when the server publishes structured notes", () => {
+    expect(pageSource).toContain("toOlfactoryTiers(product.notes)");
+    expect(pageSource).toContain("<OlfactoryPyramid");
+    // The component's own data guard: no tiers, no section markup at all.
+    expect(pyramidSource).toMatch(
+      /if \(tiers\.length === 0\) return null;/,
+    );
+  });
+
+  it("never typesets the free-text prose field into tiers", () => {
+    // §5.2 item 5: parsing the one prose string into top/heart/base is the
+    // banned three-column icon grid in different clothes.
+    expect(stripComments(productsApiSource)).not.toMatch(/description/);
+    expect(stripComments(pyramidSource)).not.toMatch(/description/);
+    expect(pageSource).not.toMatch(/description\.(split|match|search)/);
+  });
+
+  it("toOlfactoryTiers is empty without data, one tier per populated level with it", async () => {
+    const { toOlfactoryTiers } = await import("./products-api");
+    expect(toOlfactoryTiers(undefined)).toEqual([]);
+    expect(toOlfactoryTiers({})).toEqual([]);
+    expect(toOlfactoryTiers({ top: [], heart: [], base: [] })).toEqual([]);
+    const tiers = toOlfactoryTiers({
+      top: [{ name: "Bitter Sicilian Neroli" }],
+      base: [{ name: "Baltic Amber", detail: "Pine resin tincture" }],
+    });
+    expect(tiers.map((tier) => tier.key)).toEqual(["top", "base"]);
+    expect(tiers[0]?.index).toBe("N° 01");
+    expect(tiers[0]?.notes[0]?.name).toBe("Bitter Sicilian Neroli");
+    expect(tiers[1]?.notes[0]?.detail).toBe("Pine resin tincture");
+  });
+
+  it("types the tiers from the product's optional notes field, not a guess", () => {
+    const typesSource = readFileSync(join(srcDir, "lib/types.ts"), "utf8");
+    expect(typesSource).toContain("notes?: ProductNotes");
+    expect(typesSource).toContain("export type ProductNotes");
+  });
+});
+
+describe("purchase panel (U-W11-T6 hero slice, design screen hero_flow)", () => {
+  it("frames the purchase block in a hairline panel and keeps the sticky bar anchor", () => {
+    expect(pageSource).toContain(
+      'className="settle border border-hairline bg-surface',
+    );
+    expect(pageSource).toContain("lg:col-span-5");
+    expect(pageSource).toContain("lg:col-span-7");
+    // The §5.2:1314 anchor contract is unchanged by the framing.
+    expect(pageSource).toContain(
+      'const PURCHASE_ANCHOR_ID = "pdp-purchase-anchor"',
+    );
+    expect(pageSource).toContain("id={PURCHASE_ANCHOR_ID}");
+  });
+
+  it("renders the single real volume as the selected option, never a second SKU", () => {
+    expect(pageSource).toContain('aria-label="Volume"');
+    expect(pageSource).toContain("border border-ink px-4 py-3.5");
+    expect(pageSource).toContain("{product.size} ml");
+    // P4: one SKU per product. The design screen's 100 ml sibling has no
+    // product row behind it, so it must never appear.
+    expect(pageSource).not.toMatch(/100\s*ml/);
+    expect(pageSource).not.toContain("€");
+  });
+
+  it("carries the category eyebrow on the full-width metadata bar", () => {
+    expect(pageSource).toContain(
+      'className="flex items-center gap-3 text-eyebrow uppercase text-bronze"',
     );
   });
 });

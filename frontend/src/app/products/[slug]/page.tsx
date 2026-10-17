@@ -2,6 +2,7 @@ import Link from "next/link";
 import type { Metadata } from "next";
 import { notFound } from "next/navigation";
 import AddToCartButton from "@/components/AddToCartButton";
+import OlfactoryPyramid from "@/components/OlfactoryPyramid";
 import ProductImage from "@/components/ProductImage";
 import RestockForm from "@/components/RestockForm";
 import StickyPurchaseBar from "@/components/StickyPurchaseBar";
@@ -9,7 +10,7 @@ import { ApiError } from "@/lib/api";
 import { mediaUrl } from "@/lib/config";
 import { toJsonLdScriptContent } from "@/lib/json-ld";
 import { formatINR } from "@/lib/money";
-import { fetchProduct } from "@/lib/products-api";
+import { fetchProduct, toOlfactoryTiers } from "@/lib/products-api";
 import { getReturnWindow, shippingPolicy } from "@/lib/policies";
 import { site } from "@/lib/site";
 import { templateConfig } from "@/lib/template.config";
@@ -81,11 +82,14 @@ export default async function ProductPage({ params }: Props) {
   // the same line ships minus its claim, never a fallback.
   const { days } = await getReturnWindow();
 
-  // §5.2 item 5 — `Product.description` is one free-text field (§12-G10),
-  // so there is no structured top/heart/base to typeset and none is invented
-  // (the banned three-column icon grid in different clothes). With no prose
-  // at all the notes section carries only the delivery line rather than an
-  // empty heading over nothing.
+  // §5.2 item 5 — `Product.description` is one free-text field (§12-G10);
+  // it stays prose at measure below and is never parsed into tiers. The
+  // structured pyramid (design screen "Olfactory Architecture") renders
+  // only when the server publishes `notes` (U-W11-T6; contract gap logged
+  // in BACKEND_REQUESTS.md) — with none published the section is absent
+  // rather than invented (the banned three-column grid in different clothes).
+  const pyramidTiers = toOlfactoryTiers(product.notes);
+
   const hasDescription = product.description.trim().length > 0;
 
   const productJsonLd = {
@@ -164,17 +168,37 @@ export default async function ProductPage({ params }: Props) {
         </ol>
       </nav>
 
-      <div className="mt-8 grid gap-8 md:grid-cols-2">
-        {/*
-          §5.2 item 2 — THE image, and the LCP element: one `aspect-[4/5]`
-          plate (`--color-hairline`, §2.1.1's canonical plate), the spec's own
-          `sizes` string (§10.3 KEEP), `priority` for the preload. It never
-          animates: nothing above the fold may move before LCP (§10, §3
-          "Never on the hero" — extended to the PDP's bottle by STITCH §2 row
-          3, "the bottle itself never moves"). No gallery, no dots, no
-          thumbnails (P4: the model has exactly one ImageField).
-        */}
-        <div className="relative aspect-[4/5] bg-hairline">
+      {/*
+        Design screen (ther_s_culaire…refined_hero_flow) "Top Metadata
+        Bar": the server's own category string (P5: rendered from the API or
+        not at all) over a hairline, spanning both columns. The screen's
+        batch line has no field behind it, so the bar carries only what the
+        API publishes.
+      */}
+      <div className="mt-8 flex items-center justify-between border-b border-hairline pb-4">
+        {product.category ? (
+          <p className="flex items-center gap-3 text-eyebrow uppercase text-bronze">
+            <span
+              aria-hidden="true"
+              className="inline-block h-1.5 w-1.5 rounded-full bg-bronze"
+            />
+            {product.category}
+          </p>
+        ) : null}
+      </div>
+
+      {/*
+        §5.2 item 2 — THE image, and the LCP element: one `aspect-[4/5]`
+        plate (`--color-hairline`, §2.1.1's canonical plate), the spec's own
+        `sizes` string (§10.3 KEEP), `priority` for the preload. It never
+        animates: nothing above the fold may move before LCP (§10, §3
+        "Never on the hero" — extended to the PDP's bottle by STITCH §2 row
+        3, "the bottle itself never moves"). No gallery, no dots, no
+        thumbnails (P4: the model has exactly one ImageField). The screen's
+        asymmetric split (image 7 / panel 5) replaces the old 1:1 columns.
+      */}
+      <div className="mt-10 grid items-start gap-8 lg:grid-cols-12 lg:gap-12">
+        <div className="relative aspect-[4/5] bg-hairline lg:col-span-7">
           <ProductImage
             src={product.image}
             alt={product.name}
@@ -184,30 +208,42 @@ export default async function ProductPage({ params }: Props) {
         </div>
 
         {/*
-          §5.2 item 3 — purchase block: eyebrow → h1 → price → size → stock
-          → action, `lg:sticky lg:top-24` KEEP. The `.settle` entrance is the
-          one entrance §5.2:1312-1313 sanctions for this page; because it is
-          driven by a view() timeline it has already settled wherever the
-          block is above the fold at load (so the LCP guard holds by
-          construction) and only plays on handhelds, where the block arrives
-          after the bottle.
+          §5.2 item 3 — purchase block, framed as the screen's purchase
+          module: a hairline panel (no shadow, no radius) holding eyebrow ->
+          h1 -> price -> volume -> stock -> action, `lg:sticky lg:top-24`
+          KEEP. The `.settle` entrance is the one entrance §5.2:1312-1313
+          sanctions for this page; because it is driven by a view() timeline
+          it has already settled wherever the block is above the fold at
+          load (so the LCP guard holds by construction) and only plays on
+          handhelds, where the block arrives after the bottle.
         */}
-        <div className="settle lg:sticky lg:top-24 lg:self-start">
-          {/* Eyebrow = the server's own category string (P5: rendered from the API or not at all — never a transcribed ref placeholder). */}
-          {product.category ? (
-            <p className="text-eyebrow uppercase text-bronze">
-              {product.category}
-            </p>
-          ) : null}
-          <h1 className="mt-4 font-display text-h1">{product.name}</h1>
+        <div className="settle border border-hairline bg-surface p-6 sm:p-8 lg:col-span-5 lg:sticky lg:top-24 lg:self-start">
+          <h1 className="font-display text-h1">{product.name}</h1>
           {/* §2.2.3: money is the money step with tabular lining figures, the same treatment the cards and cart lines use. */}
           <p className="mt-4 money tabular-nums lining-nums">
             {formatINR(product.price)}
           </p>
-          {/* P4: one SKU per product — a static size line, never a selector — a second SKU cannot honour. */}
-          <p className="mt-1 text-sm tabular-nums lining-nums text-ink-secondary">
-            {product.size} ml
-          </p>
+
+          {/*
+            Volume, in the screen's selector vocabulary: a rectangular
+            hairline option, selected state on the ink border (0 radius, per
+            the system). P4 and the API agree on one SKU per product, so the
+            single real volume renders as the selected option; a second
+            flacon size cannot be honoured and none is fabricated (P5). When
+            a variants contract lands, more options slot into this group.
+          */}
+          <div className="mt-6">
+            <p className="text-eyebrow uppercase text-ink-secondary">
+              Volume
+            </p>
+            <div
+              role="group"
+              aria-label="Volume"
+              className="mt-3 flex items-center justify-between border border-ink px-4 py-3.5"
+            >
+              <span className="text-label text-ink">{product.size} ml</span>
+            </div>
+          </div>
 
           {/* CHANGE-3: `--color-success` text with a 6px dot, or muted "Sold out" — the same `stock` value the JSON-LD above reads. */}
           {inStock ? (
@@ -229,17 +265,47 @@ export default async function ProductPage({ params }: Props) {
               <AddToCartButton productId={product.id} stock={product.stock} />
             )}
           </div>
+
+          {/*
+            §5.2 item 6 — the one delivery/returns line, seated in the
+            purchase panel where the screen puts its logistics rows. Both
+            numbers are the ones the store actually publishes: the dispatch
+            window from the single-source policy constant (`/shipping`
+            renders the same value), the return window only while
+            GET /api/settings/ publishes one (A-12.D.2) — with no number
+            the same line ships minus its claim, never a fallback.
+          */}
+          <p className="mt-8 border-t border-hairline pt-4 text-small text-ink-secondary">
+            <Link
+              href="/shipping"
+              className="link-underline text-ink transition-colors hover:text-bronze"
+            >
+              Typically dispatched within {shippingPolicy.dispatchWindow}
+            </Link>
+            {" · "}
+            <Link
+              href="/returns"
+              className="link-underline text-ink transition-colors hover:text-bronze"
+            >
+              Returns{days ? ` within ${days} days of delivery` : " policy"}
+            </Link>
+          </p>
         </div>
       </div>
 
+      {/* Structured pyramid, only when the server publishes notes (see above). */}
+      <OlfactoryPyramid tiers={pyramidTiers} />
+
       {/*
-        §5.2 items 5–7 — notes, the delivery line, and the still-life plate
-        that carries this page's one accent moment (P2). Two `--measure`
-        columns with a `--space-8` gutter (P1's inside-section cap), so the
-        band sits left under the bottle instead of stretching: the prose is
-        36ch (§2.2.4) and the plate is `--measure` wide (§5.2 item 7), which
-        is exactly what "the story image drifting as the notes beside it are
-        read" (STITCH §2 row 3) needs to sit beside.
+        §5.2 items 5 and 7 — the notes prose and the still-life plate that
+        carries this page's one accent moment (P2); item 6's delivery line
+        now sits in the purchase panel above, next to the add-to-cart row.
+        Two `--measure` columns with a `--space-8` gutter (P1's
+        inside-section cap), so the band sits left under the bottle instead
+        of stretching: the prose is 36ch (§2.2.4) and the plate is
+        `--measure` wide (§5.2 item 7), which is exactly what "the story
+        image drifting as the notes beside it are read" (STITCH §2 row 3)
+        needs to sit beside.
 
         Plate colour: §5.2 item 7 still names the retired bronze-soft tint,
         but §2.1.1 dropped that token — hairline is its canonical plate and
@@ -258,28 +324,6 @@ export default async function ProductPage({ params }: Props) {
               </p>
             </>
           )}
-
-          {/*
-            §5.2 item 6 — one line, `--text-small`, `--color-ink-muted`
-            (§2.1.1's canonical name: ink-secondary). The dispatch figure is
-            the policy constant `/shipping` renders verbatim; the return
-            figure appears only when the settings API publishes one (G11).
-          */}
-          <p className="mt-8 text-small text-ink-secondary">
-            <Link
-              href="/shipping"
-              className="link-underline text-ink transition-colors hover:text-bronze"
-            >
-              Typically dispatched within {shippingPolicy.dispatchWindow}
-            </Link>
-            {" · "}
-            <Link
-              href="/returns"
-              className="link-underline text-ink transition-colors hover:text-bronze"
-            >
-              Returns{days ? ` within ${days} days of delivery` : " policy"}
-            </Link>
-          </p>
         </div>
 
         {hasDescription && (
