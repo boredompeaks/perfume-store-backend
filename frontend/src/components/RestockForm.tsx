@@ -13,15 +13,20 @@ import { inputClass } from "@/lib/ui";
  * An in-stock PDP never renders it — the page gates on the same `stock > 0`
  * derivation the button uses, unchanged.
  *
- * Server truth only (P5): 201 = a new preference, 200 = an existing one
- * re-armed ("already registered"), DELETE 200 = opted out, and every 4xx
- * message is rendered VERBATIM from the backend's uniform envelope — this
- * component writes no error copy of its own beyond the client-side email
- * shape check, which it must own because today's view never reads the body.
- * A 401 is not a failure state to dress up: the endpoint is auth-only, so
- * a guest gets the server's message plus the sign-in door, inline — no
- * toast, no retry loop (the restock throttle is 5/min, so one submit is
- * one attempt).
+ * Server truth only (P5), two arms (SPEC-Q-RS1): an AUTHENTICATED submit
+ * answers 201 on a first opt-in and 200 when an existing preference is
+ * re-armed ("already registered"); a GUEST submit that carries an email
+ * answers one uniform 202 — first-time and repeat are deliberately
+ * indistinguishable (zero oracle), so 201 and 202 both render the "on
+ * the list" copy and only the authed 200 renders "already". DELETE 200 =
+ * opted out. Every 4xx message is rendered VERBATIM from the backend's
+ * uniform envelope — this component writes no error copy of its own
+ * beyond the client-side email shape check, which it must own because
+ * the guest success body carries no error channel. A 401 still exists
+ * for a signed-out caller (a POST with no submitted email edge, and
+ * every DELETE — opt-out stays ownership-scoped), so the server's
+ * message plus the sign-in door stays inline — no toast, no retry loop
+ * (throttles `restock` + `restock-guest`, so one submit is one attempt).
  */
 
 type Phase = "idle" | "registered" | "already" | "unsubscribed";
@@ -63,6 +68,9 @@ export default function RestockForm({ slug }: { slug: string }) {
     onSuccess: (result) => {
       setError(null);
       setNeedsSignIn(false);
+      // `created` is true for the authed 201 and the guest's uniform
+      // 202 (first-or-repeat by design); only the authed 200 re-arm
+      // reads as "already on the list".
       setPhase(result.created ? "registered" : "already");
     },
     onError: (err) => {

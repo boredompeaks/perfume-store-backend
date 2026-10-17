@@ -21,18 +21,29 @@ export interface RestockPreference {
 }
 
 export interface RestockOptIn {
-  /** 201 = first opt-in; 200 = an existing preference re-armed. */
+  /**
+   * True when the server signalled a registration: authed 201 (first
+   * opt-in) or the guest 202 (uniform first-or-repeat, by design).
+   * False only for the authed 200 re-arm of an existing preference.
+   */
   created: boolean;
   preference: RestockPreference;
 }
 
 /**
- * Back-in-stock opt-in (§12.G6). The endpoint is authenticated and
- * ownership-scoped server-side: the address the trigger mails is the
- * account's own, so `email` rides along for the form's contract and is
- * ignored by today's view (BACKEND_REQUESTS P1). Every 4xx arrives as the
- * uniform SPEC-9-03 envelope and surfaces as ApiError with the server's
- * message verbatim — the caller never rewrites it.
+ * Back-in-stock opt-in (§12.G6, SPEC-Q-RS1). Two live arms:
+ * an AUTHENTICATED caller gets 201 on a first opt-in and 200 when an
+ * existing preference is re-armed (their submitted email is ignored —
+ * the trigger mails user.email); a GUEST caller who submits an email
+ * gets one uniform 202, first-time or repeat, valid or invalid format —
+ * deliberately zero oracle — and the trigger mails that address. A guest
+ * POST with no submitted email (or an unparseable body) and every guest
+ * DELETE stay 401. Throttled on two scopes: `restock` (per-IP anonymous,
+ * per-user authed) plus `restock-guest` (per IP+email pair). The status
+ * is captured via apiFetch's `onStatus` because the preference body is
+ * identical at all three 2xx codes. Every 4xx arrives as the uniform
+ * SPEC-9-03 envelope and surfaces as ApiError with the server's message
+ * verbatim — the caller never rewrites it.
  */
 export async function restockSubscribe(
   slug: string,
@@ -50,12 +61,14 @@ export async function restockSubscribe(
       },
     },
   );
-  return { created: status === 201, preference };
+  return { created: status === 201 || status === 202, preference };
 }
 
 /**
  * Opt-out: a uniform, existence-hiding 200 (`{active: false}`) whether or
- * not a preference existed.
+ * not a preference existed. Authenticated-only — a guest DELETE keeps the
+ * 401 (opt-out is ownership-scoped to request.user; a guest row has no
+ * caller identity to scope by).
  */
 export function restockUnsubscribe(slug: string): Promise<{ active: boolean }> {
   return apiFetch<{ active: boolean }>(
