@@ -158,6 +158,7 @@ export default function CouponForm({
           id="coupon-code"
           type="text"
           value={code}
+          aria-describedby={error ? "coupon-code-err" : undefined}
           onChange={(e) => setCode(e.target.value)}
           placeholder="Coupon code"
           autoComplete="off"
@@ -172,7 +173,7 @@ export default function CouponForm({
         </button>
       </form>
       {error && (
-        <p role="alert" className="mt-2 text-sm text-bronze">
+        <p id="coupon-code-err" role="alert" className="mt-2 text-sm text-bronze">
           {error}
         </p>
       )}

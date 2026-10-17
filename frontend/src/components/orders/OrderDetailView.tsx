@@ -110,10 +110,27 @@ export default function OrderDetailView({
 
   return (
     <div>
+      {/* §5.5 item 3 / §7.7 — the page's single h1. First in DOM so the
+          payment-success h2 below never precedes it in the heading
+          hierarchy; `id` never appears in customer-facing text. */}
+      <div className="flex flex-wrap items-center gap-4">
+        <h1 className="font-display text-3xl tracking-tight">
+          Order {order.order_number}
+        </h1>
+        <OrderStatusBadge
+          status={order.status}
+          paymentStatus={order.payment_status}
+          fulfilmentStatus={order.fulfilment_status}
+        />
+        <span className="text-sm text-ink-secondary">
+          {formatOrderDate(order.created_at)}
+        </span>
+      </div>
+
       {paymentSuccess && order.status === "confirmed" && (
         <div
           data-testid="payment-success-banner"
-          className="mb-8 border border-hairline bg-surface p-6"
+          className="mt-8 border border-hairline bg-surface p-6"
           role="status"
         >
           <h2 className="font-display text-2xl tracking-tight">
@@ -125,22 +142,6 @@ export default function OrderDetailView({
           </p>
         </div>
       )}
-
-      {/* §5.5 item 3 — header row: order_number, status (with the two
-          dimensions where they differ), date. `id` never appears in text. */}
-      <div className="flex flex-wrap items-center gap-4">
-        <h2 className="font-display text-3xl tracking-tight">
-          Order {order.order_number}
-        </h2>
-        <OrderStatusBadge
-          status={order.status}
-          paymentStatus={order.payment_status}
-          fulfilmentStatus={order.fulfilment_status}
-        />
-        <span className="text-sm text-ink-secondary">
-          {formatOrderDate(order.created_at)}
-        </span>
-      </div>
 
       <div className="mt-8 grid gap-10 lg:grid-cols-[1fr_380px]">
         <div>
