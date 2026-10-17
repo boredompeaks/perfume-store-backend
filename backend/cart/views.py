@@ -25,6 +25,18 @@ class CartMutationRateThrottle(ScopedRateThrottle):
         return super().allow_request(request, view)
 
 
+def _object_body(data):
+    """The write body as a dict, or ``{}`` when it is not a JSON object.
+
+    A JSON array / scalar / null body parses fine but has no ``.get`` to
+    call, so reading keys off it raised AttributeError — a 500 on a public
+    write endpoint (F7-B1). Reading it as the empty object routes every
+    such body into the endpoint's own missing-key 400, byte-identical to
+    posting ``{}``; form posts are QueryDict (a dict subclass) and are
+    unaffected."""
+    return data if isinstance(data, dict) else {}
+
+
 # SPEC-17-03 [R-17.18]: this GET is the SPA's boot call (the header's cart
 # badge runs it on every page load), so it is the natural surface to issue
 # the csrftoken cookie from: the browser has the double-submit cookie in
@@ -37,39 +49,30 @@ class CartMutationRateThrottle(ScopedRateThrottle):
 @throttle_scope("cart")
 def cart_detail(request):
 
-    # Get or create session
+    # The session key is the cart's owner key; mint one so a first-time
+    # boot GET finds (or lazily creates) the cart row instead of failing.
     if not request.session.session_key:
         request.session.create()
 
     session_id = request.session.session_key
 
-    # Get or create cart
     cart, created = Cart.objects.get_or_create(session_id=session_id)
-
-    # =========================
-    # GET - View Cart
-    # =========================
 
     if request.method == "GET":
         serializer = CartSerializer(cart)
 
         return Response(serializer.data)
 
-    # =========================
-    # POST - Add Product
-    # =========================
-
     elif request.method == "POST":
-        product_id = request.data.get("product_id")
-        quantity = request.data.get("quantity", 1)
+        body = _object_body(request.data)
+        product_id = body.get("product_id")
+        quantity = body.get("quantity", 1)
 
-        # Check product ID
         if not product_id:
             return Response(
                 {"error": "product_id is required"}, status=status.HTTP_400_BAD_REQUEST
             )
 
-        # Find product
         try:
             product = products.objects.get(id=product_id)
 
@@ -91,7 +94,6 @@ def cart_detail(request):
                 {"error": "Product not found"}, status=status.HTTP_404_NOT_FOUND
             )
 
-        # Check quantity
         try:
             quantity = int(quantity)
 
@@ -107,18 +109,18 @@ def cart_detail(request):
                 status=status.HTTP_400_BAD_REQUEST,
             )
 
-        # Check stock
+        # Advisory only: stock can drop between here and capture, so the
+        # authority for "enough stock" is commit_order_sale's summed
+        # re-check at payment time, not this unlocked read.
         if quantity > product.stock:
             return Response(
                 {"error": "Not enough stock"}, status=status.HTTP_400_BAD_REQUEST
             )
 
-        # Add or update cart item
         cart_item, created = CartItem.objects.get_or_create(
             cart=cart, product=product, defaults={"quantity": quantity}
         )
 
-        # If product already exists in cart
         if not created:
             new_quantity = cart_item.quantity + quantity
 
@@ -130,7 +132,6 @@ def cart_detail(request):
             cart_item.quantity = new_quantity
             cart_item.save()
 
-        # Return updated cart
         serializer = CartSerializer(cart)
 
         return Response(serializer.data, status=status.HTTP_201_CREATED)
@@ -140,18 +141,12 @@ def cart_detail(request):
 @throttle_scope("cart")
 def cart_item_detail(request, item_id):
 
-    # =========================
-    # Get current session
-    # =========================
-
+    # Uniform cart-family 404 (conventions.md: no existence leaks): no
+    # session is answered exactly like a missing cart row.
     if not request.session.session_key:
         return Response({"error": "Cart not found"}, status=status.HTTP_404_NOT_FOUND)
 
     session_id = request.session.session_key
-
-    # =========================
-    # Find cart item
-    # =========================
 
     try:
         cart_item = CartItem.objects.get(id=item_id, cart__session_id=session_id)
@@ -161,12 +156,8 @@ def cart_item_detail(request, item_id):
             {"error": "Cart item not found"}, status=status.HTTP_404_NOT_FOUND
         )
 
-    # =========================
-    # PATCH - Update Quantity
-    # =========================
-
     if request.method == "PATCH":
-        quantity = request.data.get("quantity")
+        quantity = _object_body(request.data).get("quantity")
 
         if quantity is None:
             return Response(
@@ -188,7 +179,8 @@ def cart_item_detail(request, item_id):
                 status=status.HTTP_400_BAD_REQUEST,
             )
 
-        # Check stock
+        # Advisory like the add path: payment's summed re-check is the
+        # authority; this keeps an impossible quantity out of the row.
         if quantity > cart_item.product.stock:
             return Response(
                 {"error": "Not enough stock"}, status=status.HTTP_400_BAD_REQUEST
@@ -200,10 +192,6 @@ def cart_item_detail(request, item_id):
         serializer = CartSerializer(cart_item.cart)
 
         return Response(serializer.data)
-
-    # =========================
-    # DELETE - Remove Item
-    # =========================
 
     elif request.method == "DELETE":
         cart = cart_item.cart
@@ -234,10 +222,6 @@ def cart_coupon(request):
     except Cart.DoesNotExist:
         return Response({"error": "Cart not found"}, status=status.HTTP_404_NOT_FOUND)
 
-    # =========================
-    # DELETE - Remove Coupon
-    # =========================
-
     if request.method == "DELETE":
         # Idempotent by contract: removing when no coupon is applied still
         # succeeds (the caller's end state already holds), returning the
@@ -252,11 +236,7 @@ def cart_coupon(request):
 
         return Response(serializer.data)
 
-    # =========================
-    # POST - Apply Coupon
-    # =========================
-
-    code = request.data.get("code")
+    code = _object_body(request.data).get("code")
 
     if not code:
         return Response(

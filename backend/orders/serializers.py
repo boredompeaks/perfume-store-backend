@@ -2,10 +2,6 @@ from rest_framework import serializers
 
 from .models import Coupon, Order, OrderItem, ReturnRequest
 
-# ==================================
-# Order Item Serializer
-# ==================================
-
 
 class OrderItemSerializer(serializers.ModelSerializer):
     subtotal = serializers.ReadOnlyField()
@@ -38,11 +34,6 @@ class OrderItemSerializer(serializers.ModelSerializer):
             "subtotal",
             "currency",
         ]
-
-
-# ==================================
-# Order Serializer
-# ==================================
 
 
 class OrderSerializer(serializers.ModelSerializer):
@@ -164,11 +155,6 @@ class OrderSerializer(serializers.ModelSerializer):
         ]
 
 
-# ==================================
-# Return Request Serializer
-# ==================================
-
-
 class ReturnRequestSerializer(serializers.ModelSerializer):
     """[R-1.16] SPEC-1-B07b: ONE customer-facing projection of a return request.
 
@@ -221,11 +207,6 @@ class ReturnRequestSerializer(serializers.ModelSerializer):
             "updated_at",
         ]
         read_only_fields = fields
-
-
-# ==================================
-# Coupon Serializer
-# ==================================
 
 
 class CouponSerializer(serializers.ModelSerializer):
