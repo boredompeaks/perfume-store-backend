@@ -224,6 +224,14 @@ evidence path, fix sketch); screenshots archived
 opinion; every number is measured (ui-audit-protocol Rule 3). Handoff cites
 the ref contract of §8.
 
+**Register rule (owner, 2026-10-17):** critiques are NEVER dispatched
+mid-run. Each run appends its block to `frontend/docs/run/GATE-U-REGISTRY.md`
+(append-only; owner-ruling on GATE-U-0 = park all 16). Waves proceed
+uninterrupted — "complete the plan before the reviewers". At plan end a
+compliance pass strikes (✅) items the waves already fixed, then the owner
+rules on the remainder. GATE-U still RUNS at every gate and appends its
+rating + critiques; it just never diverts the wave queue.
+
 ## 7. Merge/sync protocol (unchanged)
 
 Lane prep → reverse-merge tip into lane → forward-merge t1→t2→t3 →
