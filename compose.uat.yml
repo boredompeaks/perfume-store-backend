@@ -1,0 +1,46 @@
+# SPEC-Q-OPS1: the overlay scripts/release-uat.sh has always invoked
+# (`docker compose -f docker-compose.yml -f compose.uat.yml`) but which was
+# never committed - the UAT host ran an owner-local copy, so a fresh checkout
+# (including deploy.yml's -x-selected release path) failed at the first compose
+# call. This file is that overlay, rebuilt from what the referencing script
+# and the base file actually require.
+#
+# UAT topology: PostgreSQL and Redis live in STANDALONE containers on the UAT
+# host (`perfume-pg`, `perfume-redis`), attached to the shared external
+# network `perfume-net`. release-uat.sh starts those containers and
+# creates/attaches the network BEFORE any compose call, then builds and ups
+# ONLY the `backend` service (`--no-deps`) and runs migrate/collectstatic in
+# one-off `docker run --network perfume-net` containers. The one thing the
+# base file cannot provide is the network attachment: its services join the
+# project-default network, which the standalone containers are not on, so
+# without this overlay the backend could never resolve perfume-pg or
+# perfume-redis by container name and the health gate would never pass.
+#
+# Everything else stays in the base file and the env contract its header
+# documents: DATABASE_URL/REDIS_URL and the DJANGO_* keys flow from the
+# repo-root .env (release-uat.sh sources it, `set -a`, before invoking
+# compose), so this overlay carries NO environment of its own and nothing
+# here can drift from what backend/config/settings.py understands. The
+# fail-closed interpolation guards of the base file (POSTGRES_PASSWORD,
+# CSRF_TRUSTED_ORIGINS) stay exactly as written - a missing key must abort
+# here too. The compose `db` and `redis` services are deliberately NOT
+# touched or networked: release-uat.sh never starts them (`--no-deps`), and
+# worker/beat are equally outside this script's contract - it builds and ups
+# only `backend`, so overlaying anything on those services would configure a
+# topology this release path never creates.
+
+services:
+  backend:
+    networks:
+      - perfume-net
+
+networks:
+  perfume-net:
+    # External, never created or garbage-collected by this compose project:
+    # the network is the UAT host's shared bus and belongs to whoever runs
+    # release-uat.sh (which creates it if absent and attaches perfume-pg /
+    # perfume-redis). `name:` pins the bare host-side name - without it the
+    # key above would be prefixed with the compose project name and would
+    # miss the network the script made.
+    name: perfume-net
+    external: true
