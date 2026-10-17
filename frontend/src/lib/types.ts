@@ -1,3 +1,25 @@
+/**
+ * One note in a pyramid tier. `name` is the material; `detail` is an optional
+ * one-line provenance copy the server may publish beside it.
+ */
+export type OlfactoryNote = {
+  name: string;
+  detail?: string;
+};
+
+/**
+ * Structured olfactory pyramid (§12-G10, BACKEND_REQUESTS.md "Structured
+ * olfactory notes on Product"). GET /api/products/{slug}/ does not publish
+ * this yet; the field is optional by design so the PDP can render the
+ * pyramid section only when the server supplies tiers and never parse or
+ * invent notes from the free-text `description` (§5.2 item 5, P5).
+ */
+export type ProductNotes = {
+  top?: OlfactoryNote[];
+  heart?: OlfactoryNote[];
+  base?: OlfactoryNote[];
+};
+
 export type Product = {
   id: number;
   name: string;
@@ -12,6 +34,8 @@ export type Product = {
   /** Relative /media/… path or null — resolve with mediaUrl(). */
   image: string | null;
   created_at: string;
+  /** Absent from the API today — see ProductNotes; drives the pyramid section. */
+  notes?: ProductNotes;
 };
 
 export type CartItem = {

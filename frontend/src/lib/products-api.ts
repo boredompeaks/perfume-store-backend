@@ -1,5 +1,5 @@
 import { apiFetch } from "./api";
-import type { Product, ProductPage } from "./types";
+import type { Product, ProductPage, ProductNotes } from "./types";
 
 export function fetchProductsPage(
   params: URLSearchParams,
@@ -11,6 +11,43 @@ export function fetchProductsPage(
 
 export function fetchProduct(slug: string): Promise<Product> {
   return apiFetch<Product>(`/api/products/${slug}/`, { revalidate: 60 });
+}
+
+/** One display tier of the olfactory pyramid (Top / Heart / Base). */
+export type PyramidTier = {
+  key: "top" | "heart" | "base";
+  /** Wide-tracked indicator, e.g. "N° 01" (design system: 11px uppercase). */
+  index: string;
+  label: string;
+  notes: NonNullable<ProductNotes["top"]>;
+};
+
+const PYRAMID_TIERS: ReadonlyArray<{
+  key: PyramidTier["key"];
+  index: string;
+  label: string;
+}> = [
+  { key: "top", index: "N° 01", label: "Top" },
+  { key: "heart", index: "N° 02", label: "Heart" },
+  { key: "base", index: "N° 03", label: "Base" },
+];
+
+/**
+ * Maps the server's optional notes object onto display tiers (U-W11-T6).
+ * Returns [] when the server publishes nothing usable: the PDP then renders
+ * no pyramid section at all. The free-text prose field is never parsed into
+ * tiers (§5.2 item 5; §12-G10: no structured notes ship today — gap logged
+ * in BACKEND_REQUESTS.md).
+ */
+export function toOlfactoryTiers(notes: ProductNotes | undefined): PyramidTier[] {
+  if (!notes) return [];
+  const tiers: PyramidTier[] = [];
+  for (const { key, index, label } of PYRAMID_TIERS) {
+    const level = notes[key];
+    if (!level || level.length === 0) continue;
+    tiers.push({ key, index, label, notes: level });
+  }
+  return tiers;
 }
 
 /** SPEC-19-4 [R-19.11]: one armed preference on one product. */
