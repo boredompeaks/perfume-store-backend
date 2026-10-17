@@ -55,7 +55,7 @@ export default function AddToCartButton({
   return (
     <div className="flex items-stretch gap-3">
       <div
-        className="flex items-center border border-hairline"
+        className="flex items-center border border-field-border"
         role="group"
         aria-label="Quantity"
       >

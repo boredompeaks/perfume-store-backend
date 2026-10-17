@@ -133,7 +133,7 @@ export default function CartLineItem({
           className={`mt-auto flex items-center justify-between pt-3 ${busy ? "opacity-60" : ""}`}
         >
           <div
-            className="flex items-center border border-hairline"
+            className="flex items-center border border-field-border"
             role="group"
             aria-label={`Quantity for ${item.product.name}`}
           >

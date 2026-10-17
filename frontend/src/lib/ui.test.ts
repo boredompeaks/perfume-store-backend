@@ -535,4 +535,71 @@ describe("7.5 target sizes", () => {
       expect(source, path).not.toContain("px-3 py-1.5");
     }
   });
+
+  it("brings the header's cart, menu and account targets to the 44px floor", () => {
+    // Menu button and cart link: h-11/p-3 give 44x44 hit boxes without
+    // layout shift (the header's h-16 is unchanged; p-3 on the 20px cart
+    // icon = 44px total width, matching the Pagination convention).
+    const cleaned = stripComments(headerSource);
+    expect(cleaned).toContain("flex h-11 min-w-11 items-center justify-center md:hidden");
+    expect(cleaned).toContain("relative flex items-center p-3");
+    // Account links (Orders / Sign out / Sign in): min-h-11 + inline-flex
+    // makes them block-level 44px-tall targets without changing the header.
+    expect(
+      (cleaned.match(/inline-flex min-h-11 items-center/g) ?? []).length,
+      "header: §7.5 wants 44px account targets",
+    ).toBeGreaterThanOrEqual(3);
+    expect(cleaned).not.toContain("p-2 md:hidden");
+    expect(cleaned).not.toContain("p-1 transition-colors");
+  });
+});
+
+/**
+ * U-W10-T3 — CouponForm's error is wired to the input via aria-describedby,
+ * following the RegisterForm pattern (§7.1 KEEP: "Form errors linked with
+ * aria-invalid + aria-describedby … apply it to every other form").
+ */
+describe("CouponForm aria wiring (U-W10-T3)", () => {
+  const couponSource = readFileSync(
+    join(srcDir, "components/cart/CouponForm.tsx"),
+    "utf8",
+  );
+
+  it("describes the coupon input with its error when one is present", () => {
+    expect(couponSource).toContain('aria-describedby={error ? "coupon-code-err" : undefined}');
+    expect(couponSource).toContain('id="coupon-code-err"');
+    expect(couponSource).toMatch(/<input[^>]*id="coupon-code"[^>]*aria-describedby=/);
+  });
+
+  it("wires the input id to its sr-only label", () => {
+    expect(couponSource).toContain('htmlFor="coupon-code"');
+    expect(couponSource).toContain('id="coupon-code"');
+  });
+});
+
+/**
+ * U-W10-T3 — /orders/[id] must have exactly one h1 (§7.7, "one thing
+ * leads"). The order-number heading is promoted from h2; the DOM order
+ * guarantees the h1 precedes the conditional payment-success h2.
+ */
+describe("orders detail heading (U-W10-T3)", () => {
+  const orderDetailSource = readFileSync(
+    join(srcDir, "components/orders/OrderDetailView.tsx"),
+    "utf8",
+  );
+
+  it("renders exactly one <h1> — the order-number heading", () => {
+    const matches = orderDetailSource.match(/<h1[\s>]/g) ?? [];
+    expect(matches.length).toBe(1);
+    expect(orderDetailSource).toMatch(/<h1[^>]*font-display[^>]*>\s*Order \{order\.order_number\}/);
+    // No other heading may be promoted above h1.
+    expect(orderDetailSource).not.toContain("<h0");
+  });
+
+  it("keeps the h1 ahead of the payment-success h2 in DOM order", () => {
+    const h1At = orderDetailSource.indexOf("<h1");
+    const h2At = orderDetailSource.indexOf("<h2");
+    expect(h1At).toBeGreaterThan(-1);
+    expect(h2At).toBeGreaterThan(h1At);
+  });
 });
