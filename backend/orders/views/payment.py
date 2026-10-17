@@ -65,12 +65,29 @@ logger = logging.getLogger(__name__)
 PAYMENT_INTENT_ATTEMPTS = 3
 
 
+def _object_body(data):
+    """The write body as a dict, or ``{}`` when it is not a JSON object.
+
+    A JSON array / scalar / null body parses fine but has no ``.get`` to
+    call, so reading keys off it raised AttributeError — a 500 on both
+    payment endpoints (F7-B1). Reading it as the empty object routes every
+    such body into the endpoint's own missing-key 400 below
+    (order_id / payment-details required), byte-identical to posting
+    ``{}``; form posts are QueryDict (a dict subclass) and are unaffected.
+    Same helper as ``cart.views._object_body``, inlined because cart.views
+    imports orders.views — importing it back here would be an
+    order-dependent circular import."""
+    return data if isinstance(data, dict) else {}
+
+
 @api_view(["POST"])
 @permission_classes([IsAuthenticated])
 @throttle_scope("payment")
 def create_payment(request):
 
-    order_id = request.data.get("order_id")
+    body = _object_body(request.data)
+
+    order_id = body.get("order_id")
 
     if not order_id:
         return Response(
@@ -172,11 +189,13 @@ def create_payment(request):
 @permission_classes([IsAuthenticated])
 def verify_payment(request):
 
-    razorpay_order_id = request.data.get("razorpay_order_id")
+    body = _object_body(request.data)
 
-    razorpay_payment_id = request.data.get("razorpay_payment_id")
+    razorpay_order_id = body.get("razorpay_order_id")
 
-    razorpay_signature = request.data.get("razorpay_signature")
+    razorpay_payment_id = body.get("razorpay_payment_id")
+
+    razorpay_signature = body.get("razorpay_signature")
 
     if not all([razorpay_order_id, razorpay_payment_id, razorpay_signature]):
         return Response(
@@ -276,7 +295,7 @@ def verify_payment(request):
             {"error": "Payment verification failed"}, status=status.HTTP_400_BAD_REQUEST
         )
 
-    order_id = request.data.get("order_id")
+    order_id = body.get("order_id")
     if not order_id:
         return Response(
             {"error": "order_id is required"}, status=status.HTTP_400_BAD_REQUEST
