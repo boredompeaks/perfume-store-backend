@@ -4,6 +4,7 @@ import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
 import { ApiError } from "@/lib/api";
 import {
+  activeFraction,
   checkoutGate,
   cheapestOption,
   estimateErrorCopy,
@@ -272,5 +273,58 @@ describe("the next=/checkout chain (D2, U-W10-T2)", () => {
 
   it("the cart's sign-in escape still carries the checkout target", () => {
     expect(cartSource).toContain('href="/login?next=/checkout"');
+  });
+});
+
+/**
+ * D1 screen (U-W12-T8), media/designs/maison_ther_commande_r_glement: the
+ * checkout restyle's load-bearing halves. The screen drives the visuals; these
+ * pins hold what it must not silently drop — the fill arithmetic that reaches
+ * the pixels (active tab's third of the rule, not a redefinition of the pinned
+ * stepFraction), the open-hairline field treatment in the control-boundary
+ * token, and the eyebrow+serif-heading pairs §7.2 moves focus between.
+ */
+describe("D1 checkout screen restyle (U-W12-T8)", () => {
+  it("fills the rule from the active tab's fraction, derived from stepFraction", () => {
+    expect(activeFraction("details")).toBeCloseTo(1 / 3, 10);
+    expect(activeFraction("review")).toBeCloseTo(2 / 3, 10);
+    expect(activeFraction("pay")).toBe(1);
+    // That fraction is what scaleX is fed, so this pin drives the pixels.
+    expect(viewSource).toContain("scaleX(${activeFraction(step)})");
+    // The 5.4 arithmetic itself is untouched: 0 / 0.5 / 1 still.
+    expect(stepFraction("details")).toBe(0);
+    expect(stepFraction("review")).toBe(0.5);
+    expect(stepFraction("pay")).toBe(1);
+  });
+
+  it("keeps the address fields open-hairline in the control-boundary token", () => {
+    // Bottom rule only, and the rule uses --color-field-border (3.90:1) —
+    // never the decorative hairline, and never back into the boxed inputClass.
+    expect(addressSource).toContain("border-b border-field-border");
+    expect(addressSource).toContain("bg-transparent");
+    expect(addressSource).not.toContain(
+      "border border-field-border bg-surface",
+    );
+    expect(addressSource).not.toContain("inputClass");
+    // Label above the field, in the small tracked eyebrow step.
+    expect(addressSource).toContain(
+      'className="mb-1 block text-eyebrow text-bronze"',
+    );
+  });
+
+  it("pairs each screen eyebrow with the focused step heading", () => {
+    for (const [eyebrow, heading] of [
+      ["Lieu de Réception", "Carriage Destination"],
+      ["Inventaire Raisonné", "Order Verification"],
+      ["Règlement Scellé", "Payment Authorization"],
+    ]) {
+      expect(viewSource).toContain(
+        `<p className="text-eyebrow text-bronze">${eyebrow}</p>`,
+      );
+      expect(viewSource).toContain(`\n              ${heading}\n`);
+    }
+    // The summary rail the screen shows, and its provider note's processor.
+    expect(viewSource).toContain("Processed securely via Razorpay.");
+    expect(viewSource).not.toContain("Stripe");
   });
 });
