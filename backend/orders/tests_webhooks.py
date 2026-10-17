@@ -918,7 +918,7 @@ class RefundEventTests(WebhookTestCase):
     def test_provider_spelling_of_a_settled_refund_is_also_recorded(self):
         # The pending order is the fixture this delivery is delivered TO; the
         # binding was never read, so the call stays and the name goes.
-        self.make_pending_order(gateway_payment="pay_TEST9")
+        order = self.make_pending_order(gateway_payment="pay_TEST9")
 
         response = self.deliver(
             {
@@ -935,10 +935,17 @@ class RefundEventTests(WebhookTestCase):
         )
 
         self.assertEqual(response.status_code, 200)
-        self.assertEqual(
-            PaymentEvent.objects.get().outcome,
-            PaymentEvent.Outcome.RECORDED,
-        )
+        event = PaymentEvent.objects.get()
+        self.assertEqual(event.outcome, PaymentEvent.Outcome.RECORDED)
+        # The outcome alone cannot tell the handled path from the unhandled
+        # fallback — both record RECORDED — so a drift that drops the
+        # provider spelling out of the handled vocabulary degrades silently
+        # (the 2026-10-12 mutation run survived on exactly that gap). These
+        # are the bindings only _apply_refunded writes, mirroring the
+        # payment.refunded twin test above.
+        self.assertEqual(event.order, order)
+        self.assertEqual(event.gateway_payment_id, "pay_TEST9")
+        self.assertEqual(event.amount, Decimal("50.00"))
         self.assertFalse(Refund.objects.exists())
 
     def test_refund_event_without_a_payment_reference_is_recorded_bare(self):
