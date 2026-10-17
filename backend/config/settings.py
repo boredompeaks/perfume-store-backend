@@ -13,7 +13,7 @@ https://docs.djangoproject.com/en/6.1/ref/settings/
 import logging
 import os
 import re
-from datetime import timedelta
+from datetime import date, timedelta
 from decimal import Decimal
 from pathlib import Path
 from urllib.parse import unquote, urlparse
@@ -894,6 +894,30 @@ MFA_TRUST_DAYS = _env_int("MFA_TRUST_DAYS", 30)
 MFA_TRUST_COOKIE_NAME = os.getenv("MFA_TRUST_COOKIE_NAME", "mfa_trusted_device")
 MFA_TRUST_COOKIE_SAMESITE = os.getenv("MFA_TRUST_COOKIE_SAMESITE", "Strict")
 
+# Q-S4 [F8]: the failed-attempt budget for the Django admin login form
+# (AdminLoginThrottle in accounts/admin.py). DRF's scoped throttle only
+# covers DRF views, so the API 'auth' rate never saw /admin/login/ — a
+# plain Django view. The form counts FAILED attempts per client ident in
+# the throttle cache; a successful login spends nothing. 'n/min' matches
+# the DRF rate shape; an empty value disables the bound (kill switch).
+ADMIN_LOGIN_THROTTLE_RATE = os.getenv("THROTTLE_ADMIN_LOGIN_RATE", "10/min")
+
+# Q-S3 [F3 ACCESS GATE]: application-level signed-challenge hook for the two
+# username-enumeration endpoints (register, username-available). Unset — the
+# zero-config default — the hook is DISABLED and both endpoints answer every
+# request exactly as before, so a deployment that has not wired an edge gate
+# keeps working and every existing test stays green. Set it to the shared
+# secret the owner-side edge gate (e.g. a Cloudflare Turnstile Worker) uses to
+# SIGN the `challenge` parameter; from then on those endpoints refuse any
+# request without a token that verifies under this secret. The exact minting
+# contract (TimestampSigner, salt and payload) is documented on
+# _enforce_access_challenge in accounts/views.py and in .env.example.
+ACCOUNT_CHALLENGE_SECRET = os.getenv("ACCOUNT_CHALLENGE_SECRET", "")
+# Freshness window for a signed challenge, in seconds. Values below 1 disable
+# the age check only — a valid signature is still required. Malformed values
+# fall back to the documented default via _env_int, never crashing startup.
+ACCOUNT_CHALLENGE_MAX_AGE = _env_int("ACCOUNT_CHALLENGE_MAX_AGE", 300)
+
 # SPEC-19-2 [R-19.20/R-19.21] admin alerts. Comma-separated staff/admin
 # mailboxes; empty disables admin alerts entirely (no guessed recipient).
 ALERT_RECIPIENTS = os.getenv("ALERT_RECIPIENTS", "")
@@ -1144,6 +1168,12 @@ REST_FRAMEWORK = {
         "coupon": os.getenv("THROTTLE_COUPON_RATE", "10/min"),
         "cart": os.getenv("THROTTLE_CART_RATE", "60/min"),
         "auth": os.getenv("THROTTLE_AUTH_RATE", "10/min"),
+        # Q-S3 [F3]: the two username-enumeration surfaces left the shared
+        # 'auth' budget for dedicated scopes, each default TIGHTER than that
+        # shared budget (a probe and a registration can no longer draw from
+        # the login budget either — separate counters, separate knobs).
+        "register": os.getenv("THROTTLE_REGISTER_RATE", "5/min"),
+        "username-probe": os.getenv("THROTTLE_USERNAME_PROBE_RATE", "5/min"),
         # Tighter than 'auth': the recovery views each send an email per
         # accepted request, so this budget is the outbound-mail-bomb bound.
         "recovery": os.getenv("THROTTLE_RECOVERY_RATE", "5/min"),
@@ -1155,6 +1185,12 @@ REST_FRAMEWORK = {
         # receive an outbound email, so the budget is the same shape as
         # the recovery bound (tighter than the generic auth budget).
         "restock": os.getenv("THROTTLE_RESTOCK_RATE", "5/min"),
+        # SPEC-Q-RS1 guest half of the same endpoint: the per-(IP + email)
+        # pair budget for anonymous opt-ins. Separate knob from 'restock'
+        # so a deployment can tighten the pair bound (the mail-bomb shape:
+        # one origin re-arming one address) without moving the per-IP
+        # volume budget the authed path also draws on.
+        "restock-guest": os.getenv("THROTTLE_RESTOCK_GUEST_RATE", "5/min"),
         # SPEC-1-06: webhook deliveries are server-to-server and arrive in
         # bursts (a retry storm, a payout sweep, a provider-side loop), so the
         # budget is a floor on honest traffic rather than an anti-brute-force
@@ -1215,6 +1251,36 @@ SIMPLE_JWT = {
 JWT_REFRESH_COOKIE_NAME = os.getenv("JWT_REFRESH_COOKIE_NAME", "refresh_token")
 JWT_REFRESH_COOKIE_PATH = os.getenv("JWT_REFRESH_COOKIE_PATH", "/api/")
 JWT_REFRESH_COOKIE_SAMESITE = os.getenv("JWT_REFRESH_COOKIE_SAMESITE", "Lax")
+
+
+# SPEC-Q-P1 (F7 backend half): the dual-accept migration window for the
+# legacy body-borne refresh token. Q-F3's frontend half stops sending the
+# token in the JSON body; until that has shipped everywhere, the refresh
+# view still ACCEPTS the body carrier so an already-logged-in browser is
+# not bricked mid-cutover - and it never ISSUES one (the rotated token
+# left as the cookie only, both before and after this window closes). The
+# window is configuration, never a code path: ENABLED is the kill switch,
+# otherwise the window closes START + DAYS after the anchor. All three are
+# env-driven and documented in .env.example; the defaults are the generous
+# posture (open, 90 days past the 2026-10-15 cutover anchor). A malformed
+# START env falls back to the default anchor instead of raising - the same
+# fail-safe pattern as _env_bool/_env_int, because a typo must not take the
+# deployment down, and must not silently close the window early either.
+def _env_iso_date(name, default):
+    raw = (os.getenv(name) or "").strip()
+    if not raw:
+        return default
+    try:
+        return date.fromisoformat(raw)
+    except ValueError:
+        return default
+
+
+JWT_REFRESH_BODY_ACCEPT_ENABLED = _env_bool("JWT_REFRESH_BODY_ACCEPT_ENABLED", True)
+JWT_REFRESH_BODY_ACCEPT_START = _env_iso_date(
+    "JWT_REFRESH_BODY_ACCEPT_START", date(2026, 10, 15)
+)
+JWT_REFRESH_BODY_ACCEPT_DAYS = _env_int("JWT_REFRESH_BODY_ACCEPT_DAYS", 90)
 
 # SPEC-17-03 [R-17.18]: the session cookie carries the cart identity, so
 # its SameSite policy is explicit deployment config rather than an implicit

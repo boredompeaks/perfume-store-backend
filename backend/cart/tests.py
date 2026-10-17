@@ -1,6 +1,6 @@
 """Cart unit tests - docs/test-gaps.md items 23-29."""
 
-import unittest
+import json
 from datetime import timedelta
 from decimal import Decimal
 from unittest import mock
@@ -197,13 +197,26 @@ class CartItemDeleteTests(ApiTestCase):
         res = self.client.delete("/api/cart/999999/")
         self.assertEqual(res.status_code, 404, res.data)
 
-    @unittest.expectedFailure
     def test_v09_cart_payload_excludes_session_id(self):
-        """V-09/F-15: the cart response leaks the raw session id (the client
-        already owns the cookie; the token adds nothing but risk). Flip when
-        `session_id` is dropped from CartSerializer."""
+        """V-09/F-15 (Q-S1): an unauthenticated cart payload must expose
+        neither a `session_id` field nor the raw session key anywhere in
+        the body — the client already owns the cookie, so echoing the
+        token back adds nothing but risk. Pinned against the REAL
+        GET /api/cart/ response, never a hand-built payload."""
         res = self.client.get("/api/cart/")
-        self.assertNotIn("session_id", res.data)
+
+        self.assertEqual(res.status_code, 200, res.data)
+        # The real cart-body key set is the canary: a field added later
+        # must land here deliberately, and session_id can never sneak back.
+        self.assertEqual(
+            set(res.data.keys()),
+            {"id", "items", "coupon_code", "created_at", "updated_at"},
+        )
+        # The raw session key must not appear ANYWHERE in the serialized
+        # body — not even smuggled inside another value.
+        session_key = self.client.session.session_key
+        self.assertTrue(session_key)  # the view minted this session
+        self.assertNotIn(session_key, json.dumps(res.data))
 
 
 @tag("cart")
@@ -562,3 +575,60 @@ class CartCouponStateTests(ApiTestCase):
         order = Order.objects.get(id=res.data["id"])
         self.assertIsNone(order.coupon)
         self.assertEqual(order.total_amount, Decimal("1000.00"))
+
+
+@tag("cart")
+class NonObjectJsonBodyTests(ApiTestCase):
+    """F7-B1 (T1b red-team, auditor-reproduced): a JSON body that is not an
+    object parses fine in DRF but has no ``.get`` to call, so every cart
+    write must refuse it with the byte-identical 400 envelope that the same
+    endpoint already returns for an object body missing the required keys —
+    never a 500.
+
+    Bodies are sent as raw strings because the DRF test client's
+    ``format="json"`` path treats falsy payloads (``[]``, ``{}``, ``0``) as
+    "no data" and would post an empty body instead of the payload under test.
+    """
+
+    # Array, nested array, number, string, null, boolean: every non-object
+    # JSON top level a parser can produce.
+    RAW_BODIES = ("[]", "[1,2]", "42", '"hello"', "null", "true")
+
+    def setUp(self):
+        self.product = self.make_product(stock=5)
+        self.seed_session_cart([(self.product, 1)])
+        self.item = CartItem.objects.get()
+
+    def _post(self, body, path="/api/cart/"):
+        return self.client.post(path, body, content_type="application/json")
+
+    def _patch(self, body):
+        return self.client.patch(
+            f"/api/cart/{self.item.id}/", body, content_type="application/json"
+        )
+
+    def _refuse_same_as_empty_object(self, post):
+        expected = post("{}")
+        self.assertEqual(expected.status_code, 400, expected.data)
+        for body in self.RAW_BODIES:
+            with self.subTest(body=body):
+                res = post(body)
+                self.assertEqual(res.status_code, 400, res.data)
+                # Byte-identical wire body, not just an equal status class.
+                self.assertEqual(res.content, expected.content)
+                self.assertEqual(res.data, expected.data)
+
+    def test_add_refuses_a_non_object_body_like_an_empty_object(self):
+        self._refuse_same_as_empty_object(self._post)
+        self.assertEqual(CartItem.objects.count(), 1)  # cart untouched
+
+    def test_patch_refuses_a_non_object_body_like_an_empty_object(self):
+        self._refuse_same_as_empty_object(self._patch)
+        self.item.refresh_from_db()
+        self.assertEqual(self.item.quantity, 1)  # quantity untouched
+
+    def test_coupon_apply_refuses_a_non_object_body_like_an_empty_object(self):
+        self._refuse_same_as_empty_object(
+            lambda body: self._post(body, "/api/cart/coupon/")
+        )
+        self.assertIsNone(Cart.objects.get().coupon_id)  # nothing persisted

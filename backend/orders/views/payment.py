@@ -64,10 +64,6 @@ logger = logging.getLogger(__name__)
 # window is a single write), and exhaustion fails loudly instead of looping.
 PAYMENT_INTENT_ATTEMPTS = 3
 
-# ==================================
-# Create Razorpay Payment
-# ==================================
-
 
 @api_view(["POST"])
 @permission_classes([IsAuthenticated])
@@ -81,7 +77,6 @@ def create_payment(request):
             {"error": "order_id is required"}, status=status.HTTP_400_BAD_REQUEST
         )
 
-    # Find user's order
     try:
         order = Order.objects.get(id=order_id, user=request.user)
 
@@ -94,7 +89,6 @@ def create_payment(request):
             {"error": "This order cannot be paid"}, status=status.HTTP_400_BAD_REQUEST
         )
 
-    # Razorpay client
     client = razorpay.Client(
         auth=(settings.RAZORPAY_KEY_ID, settings.RAZORPAY_KEY_SECRET)
     )
@@ -172,11 +166,6 @@ def create_payment(request):
             "key_id": settings.RAZORPAY_KEY_ID,
         }
     )
-
-
-# ==================================
-# Verify Razorpay Payment
-# ==================================
 
 
 @api_view(["POST"])

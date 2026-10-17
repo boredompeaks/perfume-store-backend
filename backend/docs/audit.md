@@ -1,5 +1,7 @@
 # Technical Audit — findings & runtime verification
 
+> **DATED SNAPSHOT — historical record, not a status source.** This document is frozen as of 2026-09-18: it records what was true when written and is no longer maintained as fixes ship. Do not read a status out of it — the live source of truth for any finding, plan item, or vulnerability named here is the run ledger: `spec-run-state.md`, the per-section reports under `run/`, and the append-only `changes.md`.
+
 Audit date: 2026-09-17 (static review + runtime smoke test, Python 3.14.2, Django 6.1.1).
 Code was **not modified** during this audit; findings are tracked in `fix-plan.md`.
 

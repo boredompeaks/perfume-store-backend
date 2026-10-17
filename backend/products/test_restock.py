@@ -22,9 +22,12 @@ was sent. Every send-exercising test therefore wraps its crossing in
 from unittest import mock
 
 from django.core import mail
+from django.core.cache import cache
 from django.db import connection, transaction
 from django.test import tag
 from django.utils import timezone
+from rest_framework.settings import api_settings
+from rest_framework.throttling import ScopedRateThrottle
 
 from common.testing import ApiTestCase
 from products.models import RestockNotification, products
@@ -629,3 +632,347 @@ class RestockModelTests(ApiTestCase):
         row.active = False
         row.save()
         self.assertIn("opted out", str(row))
+
+
+@tag("restock")
+class RestockGuestOptInTests(ApiTestCase):
+    """SPEC-Q-RS1 / BE-012: the guest half of the restock surface.
+
+    An unauthenticated POST that carries a submitted email arms a guest
+    row (``user`` NULL, ``email`` column) and the restock trigger mails
+    THAT address; the authenticated path keeps mailing ``user.email`` and
+    stays byte-compatible. Uniformity is the security property here:
+    every guest success is one 202 with one body — valid or invalid
+    format, first or repeat, registered address or not — so the surface
+    cannot be used as an email-format, history or registration oracle.
+    A guest without an email keeps the exact 401 the endpoint answered
+    before (byte-pinned), and so does every guest DELETE (opt-out stays
+    account-scoped by design; see the report for the opt-out gap).
+    """
+
+    def setUp(self):
+        self.product = self.make_product(name="Oud Noir", stock=0)
+        self.user = self.make_user("acct")  # acct@example.com
+
+    def _url(self, product=None):
+        return f"/api/products/{(product or self.product).slug}/restock-notifications/"
+
+    def _guest_post(self, payload, **kwargs):
+        return self.client.post(self._url(), payload, format="json", **kwargs)
+
+    def test_guest_post_with_email_arms_and_trigger_mails_submitted_address(self):
+        res = self._guest_post({"email": "Guest@Example.COM"})
+        self.assertEqual(res.status_code, 202, res.data)
+        self.assertEqual(
+            set(res.data),
+            {"product_id", "slug", "active"},
+        )
+        self.assertEqual(res.data["product_id"], self.product.id)
+        preference = RestockNotification.objects.get(product=self.product)
+        self.assertIsNone(preference.user_id)
+        # Normalized before storage: strip + lower, so case and padding
+        # variants converge on one row and one throttle identity.
+        self.assertEqual(preference.email, "guest@example.com")
+        self.assertTrue(preference.active)
+        self.assertIsNone(preference.notified_at)
+        # The trigger mails the SUBMITTED address, and no account existed
+        # for it — the user table is never consulted on the guest path.
+        with self.captureOnCommitCallbacks(execute=True):
+            self.product.adjust_stock(None, 5, "restock")
+        self.assertEqual(len(mail.outbox), 1)
+        self.assertEqual(mail.outbox[0].to, ["guest@example.com"])
+
+    def test_guest_post_without_email_keeps_the_prior_401_bytes(self):
+        """No email submitted -> the exact NotAuthenticated answer the
+        IsAuthenticated class gave before this task, not merely same-status."""
+        no_email = self._guest_post({})
+        padding_only = self._guest_post({"email": "   "})
+        not_a_string = self._guest_post({"email": 123})
+        guest_delete = self.client.delete(self._url(), format="json")
+        for res in (no_email, padding_only, not_a_string, guest_delete):
+            self.assertEqual(res.status_code, 401, res.data)
+            self.assertEqual(res.content, no_email.content)
+        self.assertEqual(RestockNotification.objects.count(), 0)
+
+    def test_guest_malformed_json_body_keeps_the_prior_401_bytes(self):
+        """A guest POST whose JSON body cannot even be parsed carries no
+        submitted email, so it must answer the same uniform 401 as every
+        other email-less guest request — not a parse-error 400 that would
+        make body parseability a probe on this surface. Three-way byte
+        pin: malformed POST, empty POST, and malformed DELETE must be
+        identical on the wire, not merely same-status."""
+        malformed = self.client.post(
+            self._url(), b"{not json", content_type="application/json"
+        )
+        no_email = self._guest_post({})
+        malformed_delete = self.client.delete(
+            self._url(), b"{not json", content_type="application/json"
+        )
+        for res in (malformed, no_email, malformed_delete):
+            self.assertEqual(res.status_code, 401, res.data)
+            self.assertEqual(res.content, no_email.content)
+        self.assertEqual(malformed.data["code"], "not_authenticated")
+        self.assertEqual(RestockNotification.objects.count(), 0)
+        # And the uniform 202 half is undisturbed by whatever the 401 fix
+        # does: valid-format and invalid-format guest opt-ins still get the
+        # byte-identical success (no format oracle smuggled in).
+        valid = self._guest_post({"email": "valid@example.org"})
+        invalid = self._guest_post({"email": "not-an-email"})
+        self.assertEqual(valid.status_code, 202, valid.data)
+        self.assertEqual(invalid.status_code, 202, invalid.data)
+        self.assertEqual(valid.content, invalid.content)
+
+    def test_authed_malformed_json_body_is_ignored_like_any_other_body(self):
+        """The authenticated path never parses the request body — the
+        pre-task contract ignores any submitted email entirely — so a
+        malformed JSON body reaches the view exactly like an empty one:
+        201 with the same bytes, account row armed. (The cycle-1 report
+        claimed this case answered 400; measured on this tree it does
+        not: neither the permission's authed branch nor the view's authed
+        path ever touches request.data, so no ParseError is raised for an
+        authenticated caller. The guest fix must leave this flow alone.)"""
+        self.api_login(username=self.user.username)
+        malformed = self.client.post(
+            self._url(), b"{not json", content_type="application/json"
+        )
+        other = self.make_user("acct2")
+        other_client = self.fresh_client()
+        self.api_login(username=other.username, client=other_client)
+        empty = other_client.post(self._url())
+        self.assertEqual(malformed.status_code, 201, malformed.data)
+        self.assertEqual(empty.status_code, 201, empty.data)
+        self.assertEqual(malformed.content, empty.content)
+        self.assertEqual(
+            RestockNotification.objects.filter(user__isnull=False).count(), 2
+        )
+
+    def test_guest_invalid_email_is_accepted_uniformly_and_arms_nothing(self):
+        """Format is validated but never disclosed: a malformed address
+        gets the byte-identical success a valid one gets, and no row is
+        armed (never trust a submitted address blindly)."""
+        valid = self._guest_post({"email": "valid@example.org"})
+        invalid = self._guest_post({"email": "not-an-email"})
+        overlong = self._guest_post({"email": f"{'a' * 250}@b.co"})
+        self.assertEqual(valid.status_code, 202, valid.data)
+        self.assertEqual(invalid.status_code, 202, invalid.data)
+        self.assertEqual(invalid.content, valid.content)
+        self.assertEqual(overlong.content, valid.content)
+        # Only the valid address armed a row.
+        self.assertEqual(
+            list(RestockNotification.objects.values_list("email", flat=True)),
+            ["valid@example.org"],
+        )
+
+    def test_guest_repeat_optin_is_uniform_and_rearms(self):
+        first = self._guest_post({"email": "repeat@example.org"})
+        # Spend the row as the trigger would.
+        RestockNotification.objects.filter(user__isnull=True).update(
+            notified_at=timezone.now()
+        )
+        second = self._guest_post({"email": "REPEAT@example.org "})
+        self.assertEqual(first.status_code, 202)
+        self.assertEqual(second.status_code, 202, second.data)
+        # Byte-identical first vs repeat: no created/re-armed signal to probe.
+        self.assertEqual(second.content, first.content)
+        self.assertEqual(RestockNotification.objects.count(), 1)
+        preference = RestockNotification.objects.get(user__isnull=True)
+        self.assertTrue(preference.active)
+        self.assertIsNone(preference.notified_at)
+
+    def test_authed_post_ignores_submitted_email_and_mails_the_account_address(self):
+        """Byte-compatible authed path: an authenticated caller who submits
+        someone else's address still gets the pre-task 201 body and the
+        trigger still mails user.email — the body email is not a redirect."""
+        _, token = self.api_login(username=self.user.username)
+        res = self.client.post(
+            self._url(), {"email": "someoneelse@example.org"}, format="json"
+        )
+        self.assertEqual(res.status_code, 201, res.data)
+        self.assertEqual(
+            set(res.data),
+            {"product_id", "slug", "active"},
+        )
+        preference = RestockNotification.objects.get(user=self.user)
+        self.assertEqual(preference.email, "")  # account rows carry no email column
+        with self.captureOnCommitCallbacks(execute=True):
+            self.product.adjust_stock(None, 5, "restock")
+        self.assertEqual(len(mail.outbox), 1)
+        self.assertEqual(mail.outbox[0].to, ["acct@example.com"])
+
+    def test_guest_response_does_not_depend_on_registration(self):
+        """No enumeration oracle: whether the submitted address belongs to
+        a registered account changes nothing on the wire (same status,
+        byte-identical body) — the guest path never queries the user table."""
+        self.assertEqual(self.user.email, "acct@example.com")
+        registered = self._guest_post({"email": "acct@example.com"})
+        unregistered = self._guest_post({"email": "stranger@nowhere.test"})
+        self.assertEqual(registered.status_code, 202)
+        self.assertEqual(unregistered.status_code, 202)
+        self.assertEqual(unregistered.content, registered.content)
+        # Both armed their own guest rows; the account's rows were untouched.
+        self.assertEqual(
+            RestockNotification.objects.filter(user__isnull=True).count(), 2
+        )
+        self.assertEqual(RestockNotification.objects.filter(user=self.user).count(), 0)
+
+    def test_guest_in_stock_refusal_matches_authed_bytes(self):
+        products.objects.filter(pk=self.product.pk).update(stock=5)
+        guest = self._guest_post({"email": "guest@example.com"})
+        _, token = self.api_login(username=self.user.username)
+        authed = self.client.post(self._url(), format="json")
+        self.assertEqual(guest.status_code, 400, guest.data)
+        self.assertEqual(authed.status_code, 400, authed.data)
+        self.assertEqual(guest.content, authed.content)
+        self.assertEqual(RestockNotification.objects.count(), 0)
+
+    def test_unknown_and_delisted_remain_uniform_for_guests(self):
+        guest_unknown = self.client.post(
+            "/api/products/no-such-fragrance/restock-notifications/",
+            {"email": "guest@example.com"},
+            format="json",
+        )
+        products.objects.filter(pk=self.product.pk).update(is_active=False)
+        guest_delisted = self._guest_post({"email": "guest@example.com"})
+        self.assertEqual(guest_unknown.status_code, 404, guest_unknown.data)
+        self.assertEqual(guest_delisted.status_code, 404, guest_delisted.data)
+        self.assertEqual(guest_delisted.content, guest_unknown.content)
+        self.assertEqual(RestockNotification.objects.count(), 0)
+
+    def test_guest_row_spends_and_rearms_like_account_rows(self):
+        """The claim/re-arm machinery is row-based and user-agnostic: a
+        guest row is spent once per stock cycle and re-armed by a sell-out
+        exactly like an account row."""
+        self._guest_post({"email": "cycle@example.org"})
+        with self.captureOnCommitCallbacks(execute=True):
+            self.product.adjust_stock(None, 5, "restock")
+        self.assertEqual(len(mail.outbox), 1)
+        # Second restock while still stocked: spent row stays silent.
+        with self.captureOnCommitCallbacks(execute=True):
+            self.product.adjust_stock(None, 3, "restock")
+        self.assertEqual(len(mail.outbox), 1)
+        # Sell-out re-arms; the next crossing re-mails.
+        with self.captureOnCommitCallbacks(execute=True):
+            self.product.adjust_stock(None, -8, "sale")
+            self.product.adjust_stock(None, 6, "restock")
+        self.assertEqual(len(mail.outbox), 2)
+        self.assertEqual(mail.outbox[1].to, ["cycle@example.org"])
+
+    def test_guest_send_failure_is_log_only_and_releases_the_claim(self):
+        self._guest_post({"email": "flaky@example.org"})
+        # mock.patch and assertLogs share one with-statement (same exit
+        # order: capture first, then assertLogs validates, then unpatch),
+        # keeping the nesting two levels deep — the three-deep
+        # patch > logs > capture shape is what partial-branches this line
+        # pair under branch coverage (the module's two pre-existing
+        # instances at the account send-failure tests carry the same arcs).
+        with (
+            mock.patch(
+                "common.notifications.send_email", side_effect=Exception("smtp down")
+            ),
+            self.assertLogs("products.restock", level="ERROR") as logs,
+        ):
+            with self.captureOnCommitCallbacks(execute=True):
+                self.product.adjust_stock(None, 5, "restock")
+        # The failure log names the guest address, not "user None".
+        self.assertIn("guest flaky@example.org", "\n".join(logs.output))
+        # Claim released: nothing spent, nothing mailed.
+        self.assertEqual(len(mail.outbox), 0)
+        self.assertIsNone(
+            RestockNotification.objects.get(user__isnull=True).notified_at
+        )
+
+
+@tag("restock")
+class RestockGuestThrottleTests(ApiTestCase):
+    """Abuse bounds for the guest path, one test per budget axis.
+
+    Two classes run on the endpoint: the pre-existing ScopedRateThrottle
+    on scope 'restock' (per-IP for anonymous — bounds one origin rotating
+    addresses) and GuestPairThrottle on 'restock-guest' (per-(IP + email)
+    — bounds repeat submissions of one pair). Each engagement test leaves
+    the OTHER budget looser than the traffic it sends, so a 429 can only
+    have come from the axis under test: a mutation that drops either
+    throttle class turns its pin red.
+    """
+
+    def setUp(self):
+        self.product = self.make_product(name="Rose Aurum", stock=0)
+
+    def _post(self, email, ip="127.0.0.1"):
+        return self.client.post(
+            f"/api/products/{self.product.slug}/restock-notifications/",
+            {"email": email},
+            format="json",
+            REMOTE_ADDR=ip,
+        )
+
+    def _rates(self, restock="5/min", guest="5/min"):
+        rates = dict(api_settings.DEFAULT_THROTTLE_RATES)
+        rates["restock"] = restock
+        rates["restock-guest"] = guest
+        return rates
+
+    def test_pair_budget_bounds_repeat_submissions_of_one_pair(self):
+        """Same (IP, email) pair, pair budget 2/min while the per-IP
+        budget is left at 10/min: the third attempt can only be the pair
+        class refusing. DRF binds rates at import, so they are patched on
+        the throttle class (the established repo pattern)."""
+        with mock.patch.object(
+            ScopedRateThrottle, "THROTTLE_RATES", self._rates("10/min", "2/min")
+        ):
+            cache.clear()
+            self.assertEqual(self._post("flood@example.org").status_code, 202)
+            self.assertEqual(self._post("flood@example.org").status_code, 202)
+            throttled = self._post("flood@example.org")
+        self.assertEqual(throttled.status_code, 429, throttled.data)
+        self.assertEqual(
+            RestockNotification.objects.filter(user__isnull=True).count(), 1
+        )
+
+    def test_ip_budget_bounds_one_client_rotating_addresses(self):
+        """One origin, distinct addresses: every request has its own pair
+        key, so only the per-IP budget (2/min here, pair budget left at
+        10/min) can stop the rotation."""
+        with mock.patch.object(
+            ScopedRateThrottle, "THROTTLE_RATES", self._rates("2/min", "10/min")
+        ):
+            cache.clear()
+            self.assertEqual(self._post("a1@example.org").status_code, 202)
+            self.assertEqual(self._post("a2@example.org").status_code, 202)
+            throttled = self._post("a3@example.org")
+        self.assertEqual(throttled.status_code, 429, throttled.data)
+
+    def test_pair_budget_is_keyed_on_the_normalized_pair(self):
+        """Case and padding variants of one address are ONE pair identity
+        (the view normalizes the same way before storage), so they share
+        one budget — a case-rotation cannot mint fresh pair budgets."""
+        with mock.patch.object(
+            ScopedRateThrottle, "THROTTLE_RATES", self._rates("10/min", "2/min")
+        ):
+            cache.clear()
+            self.assertEqual(self._post("Case@Example.org").status_code, 202)
+            self.assertEqual(self._post("case@example.org ").status_code, 202)
+            throttled = self._post("CASE@example.ORG")
+        self.assertEqual(throttled.status_code, 429, throttled.data)
+
+    def test_authed_budget_is_still_the_user_keyed_one(self):
+        """The guest classes add nothing to the authed path: GuestPairThrottle
+        returns no key for authenticated callers, so the pre-task user-keyed
+        'restock' budget is the bound, unchanged (2/min, third POST 429s)."""
+        self.make_user("floodacct")
+        self.api_login(username="floodacct")
+        with mock.patch.object(
+            ScopedRateThrottle, "THROTTLE_RATES", self._rates("2/min", "1/min")
+        ):
+            cache.clear()
+            for expected in (201, 200):  # create, then re-arm
+                res = self.client.post(
+                    f"/api/products/{self.product.slug}/restock-notifications/",
+                    format="json",
+                )
+                self.assertEqual(res.status_code, expected, res.data)
+            throttled = self.client.post(
+                f"/api/products/{self.product.slug}/restock-notifications/",
+                format="json",
+            )
+        self.assertEqual(throttled.status_code, 429, throttled.data)

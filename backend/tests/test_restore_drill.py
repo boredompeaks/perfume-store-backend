@@ -85,14 +85,45 @@ def without_temp_containment():
 class DrillHygieneAssertionsMixin:
     """After any run the scratch alias must be unresolvable again and the
     drill's temp directory gone: the drill is a rehearsal, never a second
-    restore waiting to happen."""
+    restore waiting to happen.
+
+    Both halves read THIS TEST's own workdir scope: the drill's `mkdtemp` is
+    redirected into a per-test directory for the duration of the test, and
+    the glob looks only there. The shared system temp root is mutable state a
+    concurrently running suite also writes ``restore-drill-*`` dirs into, and
+    a before/after comparison over it passes or fails according to what that
+    other process happened to do mid-test - the cross-process race this
+    scoping removes (measured pre-fix: five mixin assertions went red while a
+    second process churned such dirs). Observing only this scope still proves
+    the drill cleaned up, because the drill itself creates through the
+    redirected `mkdtemp`; a foreign process writing the shared root can no
+    longer be read as our own leak.
+    """
 
     def setUp(self):
         super().setUp()
+        # The scope's own prefix deliberately does NOT start with
+        # "restore-drill-": if some other process ever globs the shared root,
+        # this directory must not look like a drill workdir to it either.
+        self.workdir_scope = Path(mkdtemp(prefix="drill-hygiene-scope-"))
+        self.addCleanup(shutil.rmtree, self.workdir_scope, True)
+        real_mkdtemp = tempfile.mkdtemp
+
+        def scoped_mkdtemp(prefix=None, suffix=None, dir=None):
+            # Only the drill's own workdirs are relocated; every other
+            # mkdtemp call in the process keeps its default destination, so
+            # the patch changes nothing except where `restore-drill-*` lands.
+            if dir is None and (prefix or "").startswith("restore-drill-"):
+                dir = str(self.workdir_scope)
+            return real_mkdtemp(prefix=prefix, suffix=suffix, dir=dir)
+
+        patcher = patch.object(tempfile, "mkdtemp", side_effect=scoped_mkdtemp)
+        patcher.start()
+        self.addCleanup(patcher.stop)
         self.workdirs_before = self.drill_workdirs()
 
     def drill_workdirs(self):
-        return set(Path(tempfile.gettempdir()).glob("restore-drill-*"))
+        return set(Path(self.workdir_scope).glob("restore-drill-*"))
 
     def assert_scratch_unregistered(self):
         self.assertNotIn(RESTORE_ALIAS, connections.databases)

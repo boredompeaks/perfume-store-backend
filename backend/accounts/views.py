@@ -1,9 +1,12 @@
+from datetime import timedelta
+
 from django.conf import settings
 from django.contrib.auth import authenticate
 from django.contrib.auth.models import User
 from django.contrib.auth.password_validation import validate_password
 from django.contrib.auth.tokens import default_token_generator
 from django.core.exceptions import ValidationError
+from django.core.signing import BadSignature, TimestampSigner
 from django.db import transaction
 from django.utils import timezone
 from django.utils.encoding import force_bytes, force_str
@@ -16,6 +19,7 @@ from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
 from rest_framework.views import APIView
 from rest_framework_simplejwt.exceptions import TokenError
+from rest_framework_simplejwt.settings import api_settings as jwt_api_settings
 from rest_framework_simplejwt.token_blacklist.models import (
     BlacklistedToken,
     OutstandingToken,
@@ -147,29 +151,141 @@ def _clear_refresh_cookie(response):
     return response
 
 
+def _refresh_origin_is_trusted(request):
+    """Origin/CSRF gate for the refresh seam (SPEC-Q-P1).
+
+    The refresh credential rides a cookie, so a forged cross-origin POST is
+    the attack the gate exists for. SameSite=Lax already withholds the
+    cookie from cross-SITE requests, but SameSite is registered-domain
+    scoped: a hostile sibling subdomain (or a deployment that relaxes
+    SameSite through the env knob) is same-site, the browser attaches the
+    cookie, and only the Origin header still names the attacker. Django's
+    CSRF middleware cannot make this check - DRF APIViews are csrf_exempt
+    and this view authenticates no session - so it is made explicitly: an
+    Origin the deployment does not name is refused (403), the API's own
+    scheme://host plus the configured CSRF/CORS origin lists are allowed,
+    and an absent Origin is not a cross-site claim at all (non-browser API
+    clients send none and hold no ambient cookie jar to ride).
+    """
+    origin = request.META.get("HTTP_ORIGIN")
+    if origin is None:
+        return True
+    allowed = {entry.lower() for entry in settings.CSRF_TRUSTED_ORIGINS}
+    allowed.update(entry.lower() for entry in settings.CORS_ALLOWED_ORIGINS)
+    allowed.add(f"{request.scheme}://{request.get_host()}".lower())
+    return origin.lower() in allowed
+
+
+def _legacy_body_refresh_allowed():
+    """Is the legacy body carrier still inside its dual-accept window?
+
+    The window exists so Q-F3's frontend half can migrate at its own pace:
+    closing it early turns every browser still holding the token in
+    localStorage into a logged-out user (the bricking SPEC-Q-P1 forbids),
+    while leaving it open forever keeps an XSS-readable carrier alive.
+    ENABLED is the kill switch; otherwise the window closes START + DAYS,
+    all three env-driven (see settings). Settings are read per call, so a
+    deployment - or a test - can move the window without a restart.
+    """
+    if not settings.JWT_REFRESH_BODY_ACCEPT_ENABLED:
+        return False
+    deadline = settings.JWT_REFRESH_BODY_ACCEPT_START + timedelta(
+        days=settings.JWT_REFRESH_BODY_ACCEPT_DAYS
+    )
+    return timezone.now().date() < deadline
+
+
+def _resolve_refresh_carrier(request, body):
+    """Decide which carrier supplies the refresh token; return the raw token
+    the rotation will consume (None when neither carrier presented one).
+
+    Window OPEN: an explicit body token wins - byte for byte the legacy
+    behaviour, which is what "dual-accept" means - with the cookie filling
+    an empty body. Window CLOSED: the body carrier is retired, so a cookie
+    refill takes precedence over a stray body token (a transitional client
+    sending both keeps working), and a body-only presentation is refused by
+    name instead of the generic "field is required", which would tell a
+    legacy client nothing about why it stopped working. A non-dict body
+    (form-encoded, not the browser surface this seam is about) is never
+    merged with the cookie, exactly as before.
+    """
+    if body is None:
+        return None
+    cookie = request.COOKIES.get(settings.JWT_REFRESH_COOKIE_NAME)
+    presented = body.get("refresh")
+    if not presented:
+        if cookie and type(body) is dict:
+            body["refresh"] = cookie
+            return cookie
+        return None
+    if _legacy_body_refresh_allowed():
+        return presented
+    if cookie and type(body) is dict:
+        body["refresh"] = cookie
+        return cookie
+    raise DRFValidationError(
+        {"refresh": ["Legacy body refresh tokens are no longer accepted."]}
+    )
+
+
+def _lock_presented_refresh(raw):
+    """Serialize concurrent rotations of the SAME presented refresh token.
+
+    Rotation mutates two token-blacklist rows, and simplejwt's
+    check-then-blacklist is not atomic on its own: two simultaneous POSTs
+    carrying one token could both pass the blacklist check and both mint a
+    replacement - one token spent twice. The OutstandingToken row keyed by
+    the presented token's jti is the gate every rotation passes, so it is
+    locked FOR UPDATE inside the rotation's transaction; the loser blocks,
+    re-validates against the committed blacklist and dies 401 instead of
+    double-spending. Only a token that already verifies gets locked (a
+    forged jti would otherwise buy a lock on a stranger's row), and a token
+    that cannot verify mutates nothing, so its canonical rejection needs no
+    lock. SQLite serialises writes and no-ops FOR UPDATE, so the real
+    enforcement is the PostgreSQL leg of the floor pair.
+    """
+    if not raw:
+        return
+    try:
+        claims = RefreshToken(raw)
+    except TokenError:
+        return
+    jti = claims.get(jwt_api_settings.JTI_CLAIM)
+    if jti:
+        OutstandingToken.objects.select_for_update().filter(jti=jti).first()
+
+
 class RefreshView(TokenRefreshView):
     """JWT refresh behind the 'auth' throttle scope.
 
     Throttling here bounds refresh-token brute forcing (V-04 family). The
     refresh token is read from the HttpOnly cookie set at login [R-17.12];
-    an explicit body token still works for non-browser API clients. On
-    success the rotated token re-enters the cookie (never the body), and a
+    while the SPEC-Q-P1 dual-accept window is open an explicit body token
+    still works for legacy clients, and once it closes the cookie is the
+    only carrier (_resolve_refresh_carrier names the refusal). Every
+    response re-sets the rotated token into the cookie and never into the
+    body, a cross-origin POST is refused before any carrier is read
+    (_refresh_origin_is_trusted), the rotation runs in one transaction
+    under the presented token's row lock (_lock_presented_refresh), and a
     rejected refresh sweeps the cookie so a dead token cannot pin the
-    browser into retrying it."""
+    browser into retrying it - an origin refusal is not a verdict on the
+    token, so it never sweeps."""
 
     throttle_scope = "auth"
 
     def post(self, request, *args, **kwargs):
-        body = request.data if isinstance(request.data, dict) else None
-        if body is not None and not body.get("refresh"):
-            cookie = request.COOKIES.get(settings.JWT_REFRESH_COOKIE_NAME)
-            # JSON bodies parse to a plain mutable dict, so the cookie token
-            # merges in place — DRF 3.18 exposes no data setter. Form-encoded
-            # bodies (immutable QueryDict) are not a browser-client surface
-            # and stay untouched.
-            if cookie and type(body) is dict:
-                body["refresh"] = cookie
-        return _set_refresh_cookie(super().post(request, *args, **kwargs))
+        if not _refresh_origin_is_trusted(request):
+            # 403 before the body is even read: a cross-origin caller gets
+            # the same verdict whatever it presented, and a probe must never
+            # sweep (or mint from) the victim's cookie.
+            raise PermissionDenied("Cross-origin refresh requests are not allowed.")
+        raw = _resolve_refresh_carrier(
+            request, request.data if isinstance(request.data, dict) else None
+        )
+        with transaction.atomic():
+            _lock_presented_refresh(raw)
+            response = super().post(request, *args, **kwargs)
+        return _set_refresh_cookie(response)
 
     def handle_exception(self, exc):
         # super().post signals rejection by raising (InvalidToken -> 401
@@ -269,9 +385,78 @@ def _send_verification_email(user):
     )
 
 
+# Q-S3 [F3 ACCESS GATE]: domain separation and payload for the signed access
+# challenge. Literals on purpose, not settings: they are the minting contract
+# the owner-side edge gate must reproduce character-for-character, and a
+# constant in the source is what a non-Django minter can read (the env contract
+# that varies per deployment lives in ACCOUNT_CHALLENGE_* settings below).
+CHALLENGE_SALT = "accounts.access-challenge"
+CHALLENGE_VALUE = "accounts-access"
+CHALLENGE_REFUSAL = "Access challenge required."
+
+
+def _enforce_access_challenge(request):
+    """Q-S3 [F3 ACCESS GATE]: the optional signed-challenge hook.
+
+    Env contract (both keys are documented in ``.env.example``):
+
+    - ``ACCOUNT_CHALLENGE_SECRET`` unset — the zero-config default — the hook
+      is DISABLED: every request passes with no ``challenge`` parameter, which
+      is what keeps a deployment that has not wired an edge gate (and every
+      existing test) green.
+    - Set to the edge gate's shared secret, the request must carry
+      ``challenge=<token>`` in the JSON body or the query string: a Django
+      ``TimestampSigner`` token minted with that same secret, the
+      ``CHALLENGE_SALT`` domain and the ``CHALLENGE_VALUE`` payload —
+      ``TimestampSigner(key=secret, salt=CHALLENGE_SALT).sign(CHALLENGE_VALUE)``
+      is the exact mint — a one-liner beside any Python edge gate, or
+      reproduced byte-for-byte elsewhere from TimestampSigner's recipe (b62
+      timestamp, then base64 HMAC-SHA-256 keyed with the salt label mixed
+      into the secret). Missing, foreign-key, tampered, wrong-payload
+      and stale tokens are all refused with the SAME ``PermissionDenied``
+      detail, so the refusal distinguishes nothing.
+    - ``ACCOUNT_CHALLENGE_MAX_AGE`` freshness window in seconds (default 300);
+      a value below 1 disables only the age check — the signature stays
+      required.
+
+    Runs inside the view, i.e. AFTER DRF throttling has already gated the
+    request, so guessing at tokens is bounded by the endpoint's scope budget
+    too. Raises only ``PermissionDenied``, which the uniform error envelope
+    renders as the same 403 body on both endpoints.
+    """
+    secret = settings.ACCOUNT_CHALLENGE_SECRET
+    if not secret:
+        return
+    token = request.query_params.get("challenge")
+    if token is None and isinstance(request.data, dict):
+        token = request.data.get("challenge")
+    if not token or not isinstance(token, str):
+        raise PermissionDenied(CHALLENGE_REFUSAL)
+    max_age = settings.ACCOUNT_CHALLENGE_MAX_AGE
+    try:
+        # SignatureExpired subclasses BadSignature, so one catch covers both.
+        payload = TimestampSigner(key=secret, salt=CHALLENGE_SALT).unsign(
+            token, max_age=max_age if max_age > 0 else None
+        )
+    except BadSignature:
+        raise PermissionDenied(CHALLENGE_REFUSAL)
+    if payload != CHALLENGE_VALUE:
+        raise PermissionDenied(CHALLENGE_REFUSAL)
+
+
 @api_view(["POST"])
-@throttle_scope("auth")
+@throttle_scope("register")
 def register(request):
+    """POST /api/accounts/register/ — Q-S3 [F3 ACCESS GATE].
+
+    Throttled on its own ``register`` scope (tighter default than the shared
+    ``auth`` budget it left) and gated by the signed-challenge hook when
+    ``ACCOUNT_CHALLENGE_SECRET`` is configured — see
+    ``_enforce_access_challenge`` for the env contract. The response carries
+    no numeric ``user.id``: an auto-incrementing account id in an anonymous
+    response leaks sign-up ordering for free.
+    """
+    _enforce_access_challenge(request)
 
     serializer = RegisterSerializer(data=request.data)
 
@@ -300,7 +485,6 @@ def register(request):
             {
                 "message": "User registered. Check your email to verify the account.",
                 "user": {
-                    "id": user.id,
                     "username": user.username,
                     "email": user.email,
                 },
@@ -312,11 +496,20 @@ def register(request):
 
 
 @api_view(["GET"])
-@throttle_scope("auth")
+@throttle_scope("username-probe")
 def username_available(request):
-    """The scope also throttles GET (ScopedRateThrottle has no safe-method
-    exemption): this endpoint is a public username-existence oracle, so
-    without a rate limit it enables cheap username enumeration."""
+    """Q-S3 [F3 ACCESS GATE]: the public username-existence oracle.
+
+    The scope also throttles GET (ScopedRateThrottle has no safe-method
+    exemption): without a rate limit this endpoint enables cheap username
+    enumeration, and its own ``username-probe`` budget is tighter by default
+    than the shared ``auth`` budget it left. On top of that, the signed-
+    challenge hook refuses every probe once ``ACCOUNT_CHALLENGE_SECRET`` is
+    configured (see ``_enforce_access_challenge`` for the env contract); with
+    the zero-config default the endpoint stays open but bounded, by design —
+    the edge gate half is the owner's to switch on.
+    """
+    _enforce_access_challenge(request)
     username = request.query_params.get("username", "").strip()
 
     if len(username) < 3:

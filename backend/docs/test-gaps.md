@@ -1,16 +1,21 @@
-# Test gaps — FLAGGED → DELIVERED (measured 2026-09-30)
+# Test gaps — FLAGGED → DELIVERED (enumerated 2026-09-18; delivery measured 2026-09-30; floor cited 2026-10-16)
 
 The enumerated backlog below was written on 2026-09-18 as an open TODO list and
 was implemented in full the same day (see the Phase 5 entry in
-`docs/changes.md`). This revision re-measures the numbers from a real run and
-re-frames each backlog item as what it BECAME, so the file records shipped
-work instead of advertising an open list.
+`docs/changes.md`). The sections re-frame each backlog item as what it BECAME,
+so the file records shipped work instead of advertising an open list: every
+enumerated gap is marked DELIVERED or CLOSED against the shipped tree, and the
+coverage floor carries **0 missed statements**.
 
-**Measured this run** (`manage.py test`, `--verbosity 0`):
+**Current floor** — cited from the committed artifact
+`scripts/figures/SPEC-Q-RS1-C2.json` (printed by
+`scripts/changelog_figures.py floor --task SPEC-Q-RS1-C2`, measured
+2026-10-16 on both engines of the two-engine floor), not re-measured in this
+docs-only pass:
 
 ```text
-Ran 1021 tests
-OK (expected failures=4)
+sqlite:     Ran 2130 tests, OK (expected failures=2), cov 99.82% (10666 stmts, 0 missed, 1448 branches, 22 partial)
+postgresql: Ran 2130 tests, OK (expected failures=2), cov 99.82% (10666 stmts, 0 missed, 1448 branches, 22 partial)
 ```
 
 ```bash
@@ -20,12 +25,12 @@ venv\Scripts\python -m coverage report
 
 | Metric | Count |
 |---|---|
-| Tests | **1021 — 1017 pass + 4 expectedFailure (documented flip tests), 0 failures, 0 errors** |
-| Code under automated test | **100.00%** (3909 statements, 0 missed; gate `fail_under = 90`) |
-| API routes | **70** mounted under `/api/`: **34** in the legacy `/api/` family + **36** under `/api/v1/`. The v1 family re-mounts the same view objects rather than mirroring the legacy paths 1:1 — `products`/`cart`/`orders` move under `/api/v1/store/`, `accounts` under `/api/v1/account/`, the orders JSON seam under `/api/v1/admin/`, legacy `/api/settings/` reappears as `/api/v1/store/config/`, and v1 adds two admin seams (`dashboard`, `audit-log`) that the legacy family mounts outside `/api/` |
-| Unit tests (app `tests.py` + `test_*.py`) | **500** (accounts 68, products 124, cart 50, orders 213, ops 45) |
-| E2E / integration tests (`tests/` package) | **516** (cross-app, admin-surface, CSRF/audit/ops, checkout-refresh and restore-drill specs) |
-| Settings / security specs (`config/tests.py`) | **5** (V-02 fail-closed DEBUG + secret-key subprocess checks) |
+| Tests | **2130 on each engine, OK, 2 expectedFailure** — the two remaining flips are named where they live (the accounts missing-email pin and the F-18 checkout-guidance pin below); figure from the artifact cited above |
+| Code under automated test | **99.82%** (10666 statements, **0 missed**; gate `fail_under = 90`) — same artifact |
+| API routes | mounted in two families from one urlconf — the legacy `/api/...` paths and the `/api/v1/` namespace (`store`, `account`, `admin` sub-families re-mounting the same view objects); exact per-family counts were a 2026-09-30 measurement and were not re-derived in this docs-only pass |
+| Unit tests (app `tests.py` + `test_*.py`) | per-app counts in the section headings are the 2026-09-30 delivery measurement (historical) |
+| E2E / integration tests (`tests/` package) | as above — historical delivery measurement |
+| Settings / security specs (`config/tests.py`) | as above — historical delivery measurement |
 
 Unit tests live in each app's `tests.py`/`test_*.py`; e2e/integration tests in
 the top-level `tests/` package. Razorpay is always mocked; the shared base class
@@ -74,9 +79,12 @@ by `test_registration_gap_missing_email_currently_accepted`.
 22. Serializer explicit fields — DELIVERED (every serializer names its `fields`;
     `'__all__'` appears nowhere in the tree).
 
-Variant selection (SPEC-6-08) was added later on top of this list; its
-expectedFailure is the untruncated-slug pin
-(`test_slug_overflow_without_collision_currently_exceeds_max_length`).
+Variant selection (SPEC-6-08) was added later on top of this list and carries
+no expectedFailure of its own (products holds none — the untruncated-slug flip
+it once shipped was un-xfailed by PG-2b and survives as the plain pin
+`test_long_name_without_collision_truncated_to_slug_max_length`; the tree's
+two remaining flips are the accounts missing-email pin and the e2e F-18 pin
+named in the E2E section below).
 
 ### cart (7 enumerated) — DELIVERED in `cart/tests.py` (50 tests)
 
@@ -86,9 +94,11 @@ expectedFailure is the untruncated-slug pin
 26. Quantity > stock → 400 (new *and* accumulate paths) — DELIVERED.
 27. PATCH quantity: 0 / negative / non-numeric → 400; > stock → 400 — DELIVERED.
 28. Delete item: removed; response excludes `session_id` — DELIVERED for the
-    removal. The `session_id` half is **still open (V-09/F-15)** and is the
-    cart app's one expectedFailure
-    (`test_v09_cart_payload_excludes_session_id`).
+    removal, and the `session_id` half is closed too (V-09/F-15, Q-S1):
+    `CartSerializer` no longer carries the field, and
+    `test_v09_cart_payload_excludes_session_id` pins the real unauthenticated
+    `GET /api/cart/` body — no `session_id` key, and no raw session key
+    anywhere in the payload.
 29. Cross-session isolation: another session's item → 404 — DELIVERED.
 
 Coupon-as-cart-state (R-9.3.5/R-9.3.6, `POST`/`DELETE /api/cart/coupon/`) was
@@ -151,7 +161,8 @@ Idempotency-Key replay (SPEC-9-01) and checkout-refresh safety (SPEC-21-5).
 - Mock/fake the Razorpay client (`unittest.mock.patch('orders.views.razorpay.Client')`)
   — no test may hit the live API; the fixture keys in `common/testing.py` are
   recognizably non-credentials so an un-mocked client cannot use `.env` (V-01).
-- `coverage.py` gate: `.coveragerc` `fail_under = 90` (measured 100.00%).
+- `coverage.py` gate: `.coveragerc` `fail_under = 90` (measured 99.82% with 0
+  missed lines, per the floor artifact cited at the top).
 - CI (GitHub Actions, `.github/workflows/backend-tests.yml`): pinned reqs →
   `manage.py check` → `makemigrations --check` → `manage.py test` → coverage
   report.
