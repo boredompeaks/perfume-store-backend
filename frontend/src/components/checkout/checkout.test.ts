@@ -172,3 +172,105 @@ describe("checkout preservation pins (5.4)", () => {
     );
   });
 });
+
+/**
+ * Owner directive D2 (U-W10-T2): an unauthenticated visitor who reaches
+ * /checkout is immediately replaced with /register?next=/checkout — not a
+ * dead-end wall, not the guest flow. Source-level, like the rest of this
+ * file (vitest runs in the node environment). Every half of that sentence is
+ * load-bearing and separately pinned: the TARGET is exact, `replace` is what
+ * keeps Back from bounce-landing on checkout, and the guard is what keeps a
+ * state update (or StrictMode's double-invoke) from looping the redirect.
+ */
+describe("D2 anonymous redirect (U-W10-T2)", () => {
+  // The redirect effect, located structurally (guard ref → effect → replace
+  // → deps) so no comment quoting the target can make a pin pass.
+  const redirectBody = () => {
+    const guardAt = viewSource.indexOf("const redirected = useRef(false);");
+    const effectAt = viewSource.indexOf("useEffect(() => {", guardAt);
+    const replaceAt = viewSource.indexOf("router.replace(", effectAt);
+    const depsAt = viewSource.indexOf("}, [authStatus, router]);", replaceAt);
+    return { guardAt, effectAt, replaceAt, depsAt };
+  };
+
+  it("replaces to the exact target — replace, never push", () => {
+    const { guardAt, effectAt, replaceAt, depsAt } = redirectBody();
+    expect(guardAt).toBeGreaterThan(-1);
+    expect(effectAt).toBeGreaterThan(guardAt);
+    expect(replaceAt).toBeGreaterThan(effectAt);
+    expect(depsAt).toBeGreaterThan(replaceAt);
+    expect(
+      viewSource.slice(replaceAt, depsAt),
+    ).toContain('router.replace("/register?next=/checkout")');
+    // `push` would leave /checkout in the history, so Back from /register
+    // would land straight back on the route that just redirected.
+    expect(viewSource).not.toContain("router.push(");
+  });
+
+  it("fires once per mount, on a resolved anonymous signal only", () => {
+    const { effectAt, replaceAt, depsAt } = redirectBody();
+    expect(viewSource).toContain(
+      'if (authStatus !== "anonymous" || redirected.current) return;',
+    );
+    expect(viewSource).toContain("redirected.current = true;");
+    // The decision reads the auth context this component already has — the
+    // effect body itself must carry no request of any kind (no probe
+    // endpoint, no credential invented to decide with).
+    const effectBody = viewSource.slice(effectAt, depsAt);
+    expect(effectBody).not.toMatch(/fetch|apiFetch|queryKey|axios/);
+    expect(replaceAt).toBeGreaterThan(effectAt);
+  });
+
+  it("falls through to the existing loading state while auth is undetermined", () => {
+    // "loading" is not "anonymous": no signal, no guess, no redirect — the
+    // page keeps today's loading surface instead of looping or walling.
+    const anonymousReturn = viewSource.indexOf(
+      'if (gate === "loading" || authStatus === "anonymous" || cartLoading)',
+    );
+    expect(anonymousReturn).toBeGreaterThan(-1);
+    // And it returns BEFORE the wall branch can render: an anonymous view is
+    // the redirect in flight — neither the dead end nor the guest flow paints
+    // for a route the customer is already leaving.
+    expect(anonymousReturn).toBeLessThan(
+      viewSource.indexOf('if (gate === "wall")'),
+    );
+  });
+
+  it("keeps the flag-off wall contract intact behind the redirect", () => {
+    // checkoutGate is not rewritten by D2 — the pin below is the contract the
+    // wall branch still answers, even though the redirect now precedes it.
+    expect(checkoutGate("anonymous", false)).toBe("wall");
+    expect(checkoutGate("anonymous", true)).toBe("flow");
+  });
+});
+
+/**
+ * D2's round-trip, both sides. /checkout hands over `?next=/checkout`; both
+ * auth doors must take it through `safeNext` (the W8 source-verified chain),
+ * and the cart's sign-in escape must still point at the login door carrying
+ * the same target. The register door reads the param into `GuestOnly`, so an
+ * already-signed-in visitor is replaced straight back onto checkout.
+ */
+describe("the next=/checkout chain (D2, U-W10-T2)", () => {
+  const read = (rel: string) => readFileSync(join(here, rel), "utf8");
+  const registerPage = read(join("../../app/register", "page.tsx"));
+  const loginPage = read(join("../../app/login", "page.tsx"));
+  const loginForm = read(join("../auth", "LoginForm.tsx"));
+  const cartSource = read(join("../cart", "CartView.tsx"));
+
+  it("/register takes ?next= through safeNext into GuestOnly", () => {
+    expect(registerPage).toContain("safeNext(");
+    expect(registerPage).toContain("next={next}");
+    expect(registerPage).toContain("<RegisterForm />");
+  });
+
+  it("/login still takes ?next= and pushes it after a successful sign-in", () => {
+    expect(loginPage).toContain("safeNext(");
+    expect(loginPage).toContain("next={next}");
+    expect(loginForm).toContain('router.push(next ?? "/")');
+  });
+
+  it("the cart's sign-in escape still carries the checkout target", () => {
+    expect(cartSource).toContain('href="/login?next=/checkout"');
+  });
+});
