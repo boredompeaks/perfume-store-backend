@@ -1,8 +1,9 @@
 "use client";
 
 import Link from "next/link";
+import { useRouter } from "next/navigation";
 import { useQuery } from "@tanstack/react-query";
-import { useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { ApiError, apiFetch } from "@/lib/api";
 import { useAuth } from "@/lib/auth";
 import { getCart } from "@/lib/cart-api";
@@ -55,6 +56,13 @@ export function stepFraction(step: Step): number {
  * drops the wall and leaves every further decision — including the 403 the
  * server answers create-order with — to the backend. Nothing here mints,
  * guesses or stores a credential.
+ *
+ * Since owner directive D2 (U-W10-T2) the component short-circuits an
+ * anonymous signal to the register door (`/register?next=/checkout`) before
+ * any of these branches paints, so the function is now the gate CONTRACT
+ * (pinned by test) rather than a path every visitor walks. It is
+ * deliberately not rewritten: the flag's meaning, and the wall behind it,
+ * stay auditable.
  */
 export function checkoutGate(
   authStatus: "loading" | "authenticated" | "anonymous",
@@ -112,10 +120,22 @@ type CreatedOrder = Order & {
 };
 
 export default function CheckoutView() {
+  const router = useRouter();
   const { status: authStatus } = useAuth();
-  // featureFlags.guestCheckout gates the whole guest path (default true):
-  // off = the sign-in wall below, exactly as it was; on = the wall is down
-  // and the backend's own answer decides what a guest may do.
+  // The signal exactly as this render reads it. D2's early return below
+  // narrows `authStatus` to "loading" | "authenticated" for the rest of the
+  // render, so the two audited hand-off branches that still speak in the RAW
+  // signal — the 403 refusal hand-off and the guest pay hand-off, both pinned
+  // by testid — read this snapshot instead of fighting the narrowing. With
+  // the redirect armed they are unreachable at runtime; they stay because
+  // they are contract, not decoration (TIER1-GUEST-DEADEND).
+  const rawAuthStatus = authStatus;
+  // featureFlags.guestCheckout still gates the guest path (default true):
+  // off = the sign-in wall below; on = the wall is down and the backend's own
+  // answer decides what a guest may do. D2 (U-W10-T2) sits in front of both:
+  // an anonymous visitor is replaced to /register?next=/checkout, so the flag
+  // now only shapes the gate contract and any flow the redirect does not
+  // cover (an authenticated visitor is never gated at all).
   const guestCheckoutEnabled = templateConfig.featureFlags.guestCheckout;
   const gate = checkoutGate(authStatus, guestCheckoutEnabled);
 
@@ -151,7 +171,43 @@ export default function CheckoutView() {
   // replaced when they go Back and start a new one (5.4 step 2).
   const attemptKey = useRef<string>("");
 
-  if (gate === "loading" || cartLoading) {
+  // §7.2 — a step change replaces the panel, so without this the focus is
+  // left on the button that just disappeared (the gap the spec names as real
+  // and absent). Focus moves to the new step's `<h2 tabindex="-1">`: -1 is
+  // not a tab stop, so §7.2's "no tabindex above 0" still holds, and the
+  // heading is what a screen reader announces as the new location. The ref
+  // tracks the heading of whichever step is mounted; the guard keeps the
+  // first render from stealing focus from wherever the customer was.
+  const stepHeading = useRef<HTMLHeadingElement | null>(null);
+  const previousStep = useRef<Step>(step);
+
+  useEffect(() => {
+    if (previousStep.current === step) return;
+    previousStep.current = step;
+    stepHeading.current?.focus();
+  }, [step]);
+
+  // Owner directive D2 (U-W10-T2): an anonymous visitor never sees this
+  // route — /checkout hands them to /register?next=/checkout instead of the
+  // guest wall or the guest flow. `replace`, never `push`, so Back from
+  // /register cannot bounce-land on checkout. The ref makes it fire ONCE per
+  // mount: a state update (or StrictMode's double-invoke) cannot loop it.
+  // Only a RESOLVED "anonymous" is a decision — "loading" has no signal yet,
+  // so it falls through to the existing loading state below (no probe, no
+  // guessed credential, no new endpoint call: the auth context the page
+  // already reads is the whole signal). The target carries `next=/checkout`
+  // for both auth doors, which take it through `safeNext`.
+  const redirected = useRef(false);
+  useEffect(() => {
+    if (authStatus !== "anonymous" || redirected.current) return;
+    redirected.current = true;
+    router.replace("/register?next=/checkout");
+  }, [authStatus, router]);
+
+  // Anonymous is a redirect, not a render state (D2): the replace above is
+  // already in flight, so the wall and the guest flow must not paint for a
+  // route the customer is leaving. One loading frame, never a dead end.
+  if (gate === "loading" || authStatus === "anonymous" || cartLoading) {
     return (
       <div className="border border-hairline p-10 text-ink-secondary" role="status">
         Loading checkout…
@@ -159,11 +215,15 @@ export default function CheckoutView() {
     );
   }
 
-  // The sign-in wall: exactly the old behavior whenever guest checkout is
-  // off. With guestCheckout on, an anonymous visitor gets the real flow, and
-  // the backend's verified contract (TIER1-GUEST-DEADEND: one uniform 403
-  // that mints nothing) is surfaced at submit as a sign-in hand-off below —
-  // never faked as success, never pre-judged here.
+  // The sign-in wall (flag OFF, CHANGE-11 / TIER1-GUEST-DEADEND). D2
+  // (U-W10-T2) replaces every anonymous visitor with the register door above,
+  // so this branch no longer paints — it is kept, not deleted, because
+  // checkoutGate's flag-off decision is an audited contract
+  // (checkout.test.ts "guest wall flag gate") and the render must still
+  // answer that gate rather than silently diverge from it. The backend's
+  // verified refusal (one uniform 403 that mints nothing) still surfaces at
+  // submit as the sign-in hand-off below — never faked as success, never
+  // pre-judged here.
   if (gate === "wall") {
     return (
       <div className="border border-hairline p-10 text-center">
@@ -294,7 +354,7 @@ export default function CheckoutView() {
           // The backend's uniform guest refusal (403, one body for every
           // reason) becomes a sign-in hand-off rather than a retry loop; its
           // own message is the copy — nothing is invented on top of it.
-          setRefused(authStatus === "anonymous" && err.status === 403);
+          setRefused(rawAuthStatus === "anonymous" && err.status === 403);
           setCreationError(
             err.status === 404
               ? "Your cart session expired. Please add items again."
@@ -385,6 +445,8 @@ export default function CheckoutView() {
           <section aria-labelledby="step-details">
             <h2
               id="step-details"
+              ref={stepHeading}
+              tabIndex={-1}
               className="font-display text-2xl tracking-tight"
             >
               Delivery details
@@ -411,6 +473,8 @@ export default function CheckoutView() {
           <section aria-labelledby="step-review">
             <h2
               id="step-review"
+              ref={stepHeading}
+              tabIndex={-1}
               className="font-display text-2xl tracking-tight"
             >
               Review your order
@@ -501,7 +565,12 @@ export default function CheckoutView() {
 
         {step === "pay" && order && shipping && (
           <section aria-labelledby="step-pay">
-            <h2 id="step-pay" className="font-display text-2xl tracking-tight">
+            <h2
+              id="step-pay"
+              ref={stepHeading}
+              tabIndex={-1}
+              className="font-display text-2xl tracking-tight"
+            >
               Payment
             </h2>
             <p className="mt-3 text-sm text-ink-secondary">
@@ -528,7 +597,7 @@ export default function CheckoutView() {
             </p>
 
             <div className="mt-6">
-              {authStatus === "anonymous" ? (
+              {rawAuthStatus === "anonymous" ? (
                 /* Verified contract: create_payment and verify_payment are
                    IsAuthenticated, so a guest is never routed into the Razorpay
                    flow — no JWT is faked and no payment call is attempted.

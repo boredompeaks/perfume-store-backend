@@ -1,7 +1,13 @@
 "use client";
 
 import { useRouter, useSearchParams } from "next/navigation";
-import { useEffect, useRef, useState, type ReactNode } from "react";
+import {
+  useEffect,
+  useRef,
+  useState,
+  type KeyboardEvent as ReactKeyboardEvent,
+  type ReactNode,
+} from "react";
 import {
   DEFAULT_ORDERING,
   isInvalidPrice,
@@ -9,10 +15,15 @@ import {
 } from "@/lib/filters";
 import { inputClass } from "@/lib/ui";
 
+/**
+ * Real backend orderings only (lib/filters.ts ORDERINGS) — the screen's
+ * "Formulation density" option has no API behind it and is not shipped (P5).
+ * The first three labels follow the screen; name order is the API's own extra.
+ */
 const sortOptions: { value: Ordering; label: string }[] = [
-  { value: "-created_at", label: "Newest" },
-  { value: "price", label: "Price: low to high" },
-  { value: "-price", label: "Price: high to low" },
+  { value: "-created_at", label: "Chronological release" },
+  { value: "price", label: "Price: Low to high" },
+  { value: "-price", label: "Price: High to low" },
   { value: "name", label: "Name A–Z" },
   { value: "-name", label: "Name Z–A" },
 ];
@@ -59,10 +70,183 @@ export function CountFade({ children }: { children: ReactNode }) {
 }
 
 /**
+ * Sort control (U-W11-T5). The screen renders a native `<select>`; xias
+ * AGENTS.md is a non-negotiable against those ("Never a native `<select>`… Use
+ * a button trigger with an ARIA listbox or combobox"), so the screen's VISUAL
+ * treatment (label + field + chevron via inner padding) is rebuilt as the
+ * select-only combobox pattern: the trigger shows the current value, the panel
+ * is `role="listbox"` with `role="option"` rows, focus is a roving `-1` moved
+ * onto the active option, and the full keyboard set (arrows, Home/End,
+ * Enter/Space, Escape, outside-pointer dismiss) is wired here. Selection still
+ * commits through the caller's `update()`, so the ordering param behaviour is
+ * untouched.
+ */
+function SortControl({
+  ordering,
+  onSelect,
+}: {
+  ordering: Ordering;
+  onSelect: (value: Ordering) => void;
+}) {
+  const [open, setOpen] = useState(false);
+  const selectedIndex = Math.max(
+    0,
+    sortOptions.findIndex((option) => option.value === ordering),
+  );
+  const [activeIndex, setActiveIndex] = useState(selectedIndex);
+  const triggerRef = useRef<HTMLButtonElement>(null);
+  const listRef = useRef<HTMLUListElement>(null);
+  const optionRefs = useRef<Array<HTMLLIElement | null>>([]);
+  const selected = sortOptions[selectedIndex] ?? sortOptions[0];
+  const listId = "catalog-sort-listbox";
+
+  // Roving focus: the active option owns DOM focus while the panel is open.
+  useEffect(() => {
+    if (open) optionRefs.current[activeIndex]?.focus();
+  }, [open, activeIndex]);
+
+  // Dismiss on a pointer-down outside the control; focus stays where it was
+  // (the pointer already expressed intent — yanking focus would surprise).
+  useEffect(() => {
+    if (!open) return;
+    const onPointerDown = (event: PointerEvent) => {
+      const target = event.target as Node | null;
+      if (!target) return;
+      if (triggerRef.current?.contains(target)) return;
+      if (listRef.current?.contains(target)) return;
+      setOpen(false);
+    };
+    document.addEventListener("pointerdown", onPointerDown);
+    return () => document.removeEventListener("pointerdown", onPointerDown);
+  }, [open]);
+
+  const close = (restoreFocus: boolean) => {
+    setOpen(false);
+    if (restoreFocus) triggerRef.current?.focus();
+  };
+
+  const commit = (index: number) => {
+    const option = sortOptions[index];
+    if (!option) return;
+    onSelect(option.value);
+    close(true);
+  };
+
+  const onTriggerKeyDown = (event: ReactKeyboardEvent<HTMLButtonElement>) => {
+    if (event.key !== "ArrowDown" && event.key !== "ArrowUp") return;
+    event.preventDefault();
+    setActiveIndex(
+      event.key === "ArrowDown"
+        ? selectedIndex
+        : (selectedIndex - 1 + sortOptions.length) % sortOptions.length,
+    );
+    setOpen(true);
+  };
+
+  const onListKeyDown = (event: ReactKeyboardEvent<HTMLUListElement>) => {
+    if (event.key === "Escape") {
+      event.preventDefault();
+      close(true);
+    } else if (event.key === "ArrowDown") {
+      event.preventDefault();
+      setActiveIndex((activeIndex + 1) % sortOptions.length);
+    } else if (event.key === "ArrowUp") {
+      event.preventDefault();
+      setActiveIndex((activeIndex - 1 + sortOptions.length) % sortOptions.length);
+    } else if (event.key === "Home") {
+      event.preventDefault();
+      setActiveIndex(0);
+    } else if (event.key === "End") {
+      event.preventDefault();
+      setActiveIndex(sortOptions.length - 1);
+    } else if (event.key === "Enter" || event.key === " ") {
+      event.preventDefault();
+      commit(activeIndex);
+    } else if (event.key === "Tab") {
+      setOpen(false);
+    }
+  };
+
+  return (
+    <div className="flex shrink-0 items-center gap-2">
+      <span
+        id="sort-label"
+        className="whitespace-nowrap text-eyebrow uppercase text-ink-secondary"
+      >
+        Sort by
+      </span>
+      <div className="relative">
+        <button
+          ref={triggerRef}
+          id="sort-button"
+          type="button"
+          aria-labelledby="sort-label sort-button"
+          aria-haspopup="listbox"
+          aria-expanded={open}
+          aria-controls={listId}
+          onClick={() => {
+            setActiveIndex(selectedIndex);
+            setOpen(!open);
+          }}
+          onKeyDown={onTriggerKeyDown}
+          className={`${inputClass} flex cursor-pointer items-center pr-9 text-left`}
+        >
+          {selected.label}
+          {/* Chevron drawn with currentColor, placed by the trigger's inner
+              padding (AGENTS.md) — never the select's UA widget. */}
+          <svg
+            aria-hidden="true"
+            focusable="false"
+            viewBox="0 0 16 16"
+            className="pointer-events-none absolute right-3 top-1/2 size-4 -translate-y-1/2 text-ink-secondary"
+            fill="none"
+            stroke="currentColor"
+            strokeWidth="1.5"
+          >
+            <path d="M4 6l4 4 4-4" strokeLinecap="round" strokeLinejoin="round" />
+          </svg>
+        </button>
+        {open && (
+          <ul
+            ref={listRef}
+            id={listId}
+            role="listbox"
+            aria-labelledby="sort-label"
+            onKeyDown={onListKeyDown}
+            className="absolute right-0 top-full z-(--z-sticky) mt-1 min-w-full border border-field-border bg-surface py-1"
+          >
+            {sortOptions.map((option, index) => (
+              <li
+                key={option.value}
+                ref={(node) => {
+                  optionRefs.current[index] = node;
+                }}
+                role="option"
+                aria-selected={option.value === ordering}
+                tabIndex={-1}
+                onClick={() => commit(index)}
+                onMouseEnter={() => setActiveIndex(index)}
+                className={`min-h-10 cursor-pointer px-3 py-2 text-sm hover:bg-hairline ${
+                  option.value === ordering ? "bg-hairline font-medium" : ""
+                }`}
+              >
+                {option.label}
+              </li>
+            ))}
+          </ul>
+        )}
+      </div>
+    </div>
+  );
+}
+
+/**
  * Client filter bar writing to the URL (shareable, noindex when narrowed).
  * Search is debounced 400ms; price filters apply on Apply; any change resets
  * the page param. Category renders as a removable chip only — the backend has
  * no categories endpoint (BACKEND_REQUESTS), so there is no picker to render.
+ * Layout follows the /products screen (U-W11-T5): a hairline rule above, then
+ * search left, min/max + Apply middle, sort right; the row wraps at xs.
  */
 export default function FilterBar() {
   const router = useRouter();
@@ -107,11 +291,12 @@ export default function FilterBar() {
   const ordering = (searchParams.get("ordering") as Ordering) ?? DEFAULT_ORDERING;
 
   return (
-    <div className="mt-8 border-b border-hairline pb-5">
-      {/* §5.2: one row at md+ (search left, price + Apply middle, sort right),
-          wrapping at xs where the search takes its own full-width row. */}
+    <div className="mt-8 border-t border-hairline pt-4">
+      {/* Screen arrangement (U-W11-T5): one row at md+ — search left, price +
+          Apply middle, sort right — wrapping at xs where the search takes its
+          own full-width row. */}
       <div className="flex flex-wrap items-center gap-3 md:flex-nowrap">
-        <div className="w-full min-w-0 md:w-56">
+        <div className="w-full min-w-0 md:w-80 lg:w-96">
           <label htmlFor="product-search" className="sr-only">
             Search fragrances
           </label>
@@ -120,7 +305,7 @@ export default function FilterBar() {
             type="search"
             value={term}
             onChange={(e) => setTerm(e.target.value)}
-            placeholder="Search fragrances"
+            placeholder="Search formulations or notes…"
             className={`${inputClass} w-full`}
           />
         </div>
@@ -135,7 +320,7 @@ export default function FilterBar() {
             inputMode="decimal"
             value={minPrice}
             onChange={(e) => setMinPrice(e.target.value)}
-            placeholder="Min ₹"
+            placeholder="₹ Min"
             className={`${inputClass} w-24`}
           />
           <label htmlFor="price-max" className="sr-only">
@@ -147,39 +332,27 @@ export default function FilterBar() {
             inputMode="decimal"
             value={maxPrice}
             onChange={(e) => setMaxPrice(e.target.value)}
-            placeholder="Max ₹"
+            placeholder="₹ Max"
             className={`${inputClass} w-24`}
           />
           <button
             type="button"
             onClick={applyPrices}
-            className="border border-ink px-3 py-2 text-sm transition-colors hover:bg-ink hover:text-paper"
+            className="border border-ink px-4 py-2.5 text-eyebrow uppercase transition-colors hover:bg-ink hover:text-paper"
           >
             Apply
           </button>
         </div>
 
-        <div className="ml-auto flex shrink-0 items-center gap-2">
-          <label htmlFor="sort" className="text-sm text-ink-secondary">
-            Sort
-          </label>
-          <select
-            id="sort"
-            value={ordering}
-            onChange={(e) =>
+        <div className="ml-auto">
+          <SortControl
+            ordering={ordering}
+            onSelect={(value) =>
               update({
-                ordering:
-                  e.target.value === DEFAULT_ORDERING ? null : e.target.value,
+                ordering: value === DEFAULT_ORDERING ? null : value,
               })
             }
-            className={`${inputClass} cursor-pointer`}
-          >
-            {sortOptions.map((option) => (
-              <option key={option.value} value={option.value}>
-                {option.label}
-              </option>
-            ))}
-          </select>
+          />
         </div>
       </div>
 

@@ -77,9 +77,9 @@ export const templateConfig = {
     instagramUrl: env("NEXT_PUBLIC_INSTAGRAM_URL"),
   },
 
-  // Mirrors the links currently hardcoded in Header/Footer. Components keep
-  // their own copies until a later wave switches them over — this manifest
-  // must not churn call sites in wave 1.
+  // Rendered directly: Header reads `nav`, Footer reads `footer.shop/help/legal`
+  // and MenuOverlay spreads `footer.shop`. This manifest is the single source
+  // those components use - no component keeps its own copy of these links.
   nav: [
     { href: "/products", label: "Shop" },
     { href: "/products?ordering=-created_at", label: "New arrivals" },
@@ -103,8 +103,11 @@ export const templateConfig = {
     ],
   },
 
-  // White-label switches for later waves: checkout-adjacent flows ship on by
-  // default; reviews stay off until a tenant curates moderation.
+  // White-label switches. Consumed today: `guestCheckout` gates the guest
+  // cart/checkout path (CartView, CheckoutView) and `restockNotifications`
+  // gates the PDP's RestockForm replacement row (`!inStock &&`). Declared
+  // but not yet wired to a consumer: `orderTracking`, `returnsRequests`.
+  // Reviews stay off until a tenant curates moderation.
   featureFlags: {
     guestCheckout: true,
     restockNotifications: true,

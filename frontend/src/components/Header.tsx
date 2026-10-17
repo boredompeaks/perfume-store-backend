@@ -69,7 +69,7 @@ export default function Header() {
               aria-controls="site-menu"
               aria-label="Open menu"
               onClick={() => setMenuOpen(true)}
-              className="-ml-2 p-2 md:hidden"
+              className="-ml-2 flex h-11 min-w-11 items-center justify-center md:hidden"
             >
               <svg
                 width="20"
@@ -111,14 +111,14 @@ export default function Header() {
               <>
                 <Link
                   href="/orders"
-                  className="hidden transition-colors hover:text-bronze sm:inline"
+                  className="hidden inline-flex min-h-11 items-center transition-colors hover:text-bronze sm:inline"
                 >
                   Orders
                 </Link>
                 <button
                   type="button"
                   onClick={logout}
-                  className="hidden text-ink-secondary transition-colors hover:text-bronze sm:inline"
+                  className="hidden inline-flex min-h-11 items-center text-ink-secondary transition-colors hover:text-bronze sm:inline"
                 >
                   Sign out
                 </button>
@@ -126,7 +126,7 @@ export default function Header() {
             ) : status === "anonymous" ? (
               <Link
                 href="/login"
-                className="hidden transition-colors hover:text-bronze sm:inline"
+                className="hidden inline-flex min-h-11 items-center transition-colors hover:text-bronze sm:inline"
               >
                 Sign in
               </Link>
@@ -136,7 +136,7 @@ export default function Header() {
 
             <Link
               href="/cart"
-              className="relative flex items-center p-1 transition-colors hover:text-bronze"
+              className="relative flex items-center p-3 transition-colors hover:text-bronze"
               aria-label={`Cart, ${count} item${count === 1 ? "" : "s"}`}
             >
               <CartIcon />

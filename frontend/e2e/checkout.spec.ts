@@ -318,7 +318,12 @@ test.describe.serial("checkout → payment (Razorpay test mode)", () => {
     await page.goto("/orders");
 
     // Resume: open the pending order and complete the payment there.
-    await page.getByRole("link", { name: /Order #\d+/ }).first().click();
+    // §5.5: the list renders `Order #{order_number}` (ORD-YYYY-NNNNNN), not the
+    // sequential id — the old `/Order #\d+/` can never match that copy.
+    await page
+      .getByRole("link", { name: /Order #ORD-\d{4}-\d+/ })
+      .first()
+      .click();
     await expect(page.getByTestId("resume-payment-panel")).toBeVisible();
     await page.getByTestId("resume-payment").click();
     await expect(
