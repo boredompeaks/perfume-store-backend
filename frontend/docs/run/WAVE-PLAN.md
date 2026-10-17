@@ -123,7 +123,7 @@ locally, never push, never touch spec-ui directly.
 | **T5 products listing** (screen 2) | listing page + FilterBar/cards/pagination against screen (grid density, card anatomy, result count copy, ₹ tabular) — wired filters (search/category/min/max/ordering) PRESERVED | build 0 + vitest (wiring pins stay green); Playwright: filter + paginate live | ui-taste P1/P4; xias `design-taste.md`, `tokens-and-color.md`; uupm `styles.csv` grep "editorial" |
 | **T6 PDP** (screen 3) | PDP sections against screen: hero + volume selector + acquire panel, olfactory pyramid (Top/Heart/Base cards), philosophy of the scent, protocol/tenue/conservation trio, guarantee band — **≤5 files: may checkpoint PARTIAL** (pyramid+hero first; second slice in W13-T12 overflow if needed) | build 0 + vitest (restock, StickyPurchaseBar, 404 pins stay); Playwright full-page both viewports | ui-taste P4 (single image), ui-motion (settle); xias `design-taste.md` (display 2.5×, 18–24ch); DESIGN.md §Olfactory Pyramids |
 
-### W12 — design parity wave 2 (commerce; staging: screens 4–7) — **cutover #1 after this wave's SHIP+promotion**
+### W12 — design parity wave 2 (commerce; staging: screens 4–7) — **rides promotion #3 (fires at W11's 9/9; cutover #1 = waves 10–11 live)**
 
 | Task | Scope | Gate | Refs |
 |---|---|---|---|
