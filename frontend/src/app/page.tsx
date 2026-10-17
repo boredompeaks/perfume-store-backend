@@ -1,8 +1,7 @@
 import { Suspense } from "react";
 import Link from "next/link";
 import type { Metadata } from "next";
-import GridSkeleton from "@/components/GridSkeleton";
-import ProductCard from "@/components/ProductCard";
+import HomeCarousel from "@/components/home/HomeCarousel";
 import { fetchProductsPage } from "@/lib/products-api";
 import { toJsonLdScriptContent } from "@/lib/json-ld";
 import { getReturnWindow } from "@/lib/policies";
@@ -23,40 +22,61 @@ export const dynamic = "force-dynamic";
 // built from the same registry entry.
 export const metadata: Metadata = pageMetadata("/", { absoluteTitle: true });
 
-/** §5.1 §2 — new arrivals: newest four (the server's default page size). */
+/**
+ * §5.1 §2 — new arrivals: the newest four (the server's default page size),
+ * fetched on the server and handed to the D1 screen's carousel as props
+ * (`maison_ther_catalogue_accueil_carousel_edition`). The fetch therefore
+ * keeps its 60s revalidate cache and no client request runs before the
+ * section paints; the client island only holds the slide index.
+ *
+ * P5 honesty on both failure paths: an empty result set and an unreachable
+ * backend each omit the section outright. A carousel cannot exist without
+ * slides, and §5.1's discipline is that the home page still renders quietly
+ * — never with an error dump or an invented placeholder product.
+ */
 async function NewArrivals() {
   try {
     const page = await fetchProductsPage(
       new URLSearchParams({ ordering: "-created_at" }),
     );
-    if (page.results.length === 0) return null;
+    const products = page.results.slice(0, 4);
+    if (products.length === 0) return null;
 
     return (
       <section className="settle mx-auto max-w-6xl px-4 pt-16 sm:px-6 md:pt-24 lg:pt-32">
-        <div className="flex items-baseline gap-4 border-t border-hairline pt-8">
-          <h2 className="font-display text-h1">New arrivals</h2>
-          <Link
-            href="/products?ordering=-created_at"
-            className="link-underline ml-auto text-small text-ink transition-colors hover:text-bronze"
-          >
-            View all
-          </Link>
-        </div>
-        <div className="mt-6 grid grid-cols-2 gap-x-4 gap-y-8 sm:grid-cols-3 lg:grid-cols-4">
-          {page.results.map((product, index) => (
-            <ProductCard
-              key={product.id}
-              product={product}
-              priority={index < 2}
-            />
-          ))}
-        </div>
+        <HomeCarousel products={products} />
       </section>
     );
   } catch {
     // Backend unreachable — the home page must still render, quietly.
     return null;
   }
+}
+
+/**
+ * §6: the fallback mirrors the real slide's plate — same hairline frame,
+ * same 5/7 image-to-copy split, same padding — because a skeleton of a
+ * different shape causes the CLS it exists to prevent. Four shimmer blocks,
+ * well under §3's 12-instance page cap.
+ */
+function CarouselFallback() {
+  return (
+    <section
+      aria-hidden="true"
+      className="mx-auto max-w-6xl px-4 pt-16 sm:px-6 md:pt-24 lg:pt-32"
+    >
+      <div className="border border-hairline">
+        <div className="grid grid-cols-1 lg:grid-cols-12">
+          <div className="skeleton aspect-[3/4] lg:col-span-5" />
+          <div className="space-y-4 p-6 sm:p-8 lg:col-span-7 lg:p-16">
+            <div className="skeleton h-3 w-1/3" />
+            <div className="skeleton h-8 w-1/2" />
+            <div className="skeleton h-3 w-2/3" />
+          </div>
+        </div>
+      </div>
+    </section>
+  );
 }
 
 export default async function HomePage() {
@@ -84,7 +104,11 @@ export default async function HomePage() {
           Typographic on paper: there is no campaign photograph, so the KEEP
           paper grain and ghost "A" are the only imagery. Nothing in here
           animates — the hero is the first-screen content and the LCP
-          candidate (§10, §3: "Never on the hero"). */}
+          candidate (§10, §3: "Never on the hero"). The D1 screen shows an
+          atelier photograph behind this block; §5.1 bans the stock-photo
+          hero (one image per product, none of them a campaign asset) and
+          W6-T1 ruled this treatment compliant, so the photograph is not
+          adopted. */}
       <section className="noise relative overflow-hidden border-b border-hairline">
         <span
           aria-hidden="true"
@@ -128,21 +152,19 @@ export default async function HomePage() {
         </div>
       </section>
 
-      <Suspense
-        fallback={
-          <section className="mx-auto max-w-6xl px-4 pt-16 sm:px-6 md:pt-24 lg:pt-32">
-            <GridSkeleton count={4} />
-          </section>
-        }
-      >
+      <Suspense fallback={<CarouselFallback />}>
         <NewArrivals />
       </Suspense>
 
-      {/* §5.1 §3 — the house position. Two columns at md, copy KEEP verbatim:
-          it is the most honest text on the site. */}
+      {/* §5.1 §3 — the house position, composed against the D1 screen: the
+          screen's asymmetric 5/7 split (code.html:446-457) instead of the
+          even 2-column grid, applied from `md` so §5.1's "two columns at md"
+          still holds. Copy KEEP verbatim — it is the most honest text on the
+          site; the screen's own wording ("Philosophy of measure") is mockup
+          drift against that KEEP. */}
       <section className="settle mx-auto max-w-6xl px-4 pt-16 sm:px-6 md:pt-24 lg:pt-32">
-        <div className="grid gap-4 border-t border-hairline pt-8 md:grid-cols-2 md:gap-6 lg:gap-8">
-          <div>
+        <div className="grid gap-6 border-t border-hairline pt-8 md:grid-cols-12 md:gap-8">
+          <div className="md:col-span-5">
             <p className="text-label uppercase text-bronze">
               The house position
             </p>
@@ -150,7 +172,7 @@ export default async function HomePage() {
               Built around a single idea, worked until it holds.
             </h2>
           </div>
-          <div className="space-y-4 text-body text-ink-secondary md:pt-8">
+          <div className="space-y-4 text-body text-ink-secondary md:col-span-7 md:pt-8">
             <p className="max-w-(--measure)">
               Every fragrance is built around a single idea, worked until it
               holds. We would rather release three perfumes we stand behind
@@ -167,7 +189,10 @@ export default async function HomePage() {
 
       {/* §5.1 §4 — three verifiable facts about how the store behaves, not
           trust badges. The return window renders only when the API publishes
-          one (A-12.D.2); the `·` glyphs are decorative. */}
+          one (A-12.D.2); the `·` glyphs are decorative. The screen's band
+          ("Complimentary shipping … Razorpay & Stripe … returnable within
+          seven days") claims two things this store does not do (Stripe, a
+          blanket seven-day window), so §5.1's verified wording stays. */}
       <section className="settle mx-auto max-w-6xl px-4 py-16 sm:px-6 md:py-24 lg:py-32">
         <p className="flex flex-wrap items-center gap-x-6 gap-y-2 text-label uppercase text-ink-secondary">
           <span>Ships across India</span>
