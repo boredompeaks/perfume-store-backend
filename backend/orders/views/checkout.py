@@ -62,6 +62,22 @@ logger = logging.getLogger(__name__)
 IDEMPOTENCY_KEY_HEADER = "Idempotency-Key"
 IDEMPOTENCY_KEY_MAX_LENGTH = 128
 
+
+def _object_body(data):
+    """The write body as a dict, or ``{}`` when it is not a JSON object.
+
+    A JSON array / scalar / null body parses fine but has no ``.get`` to
+    call, so reading keys off it raised AttributeError — a 500 on a public
+    write endpoint (F7-B1). Reading it as the empty object routes every
+    such body into the endpoint's own missing-key 400 below
+    (first required shipping field / coupon code required), byte-identical
+    to posting ``{}``; form posts are QueryDict (a dict subclass) and are
+    unaffected. Same helper as ``cart.views._object_body``, inlined
+    because cart.views imports orders.views — importing it back here
+    would be an order-dependent circular import."""
+    return data if isinstance(data, dict) else {}
+
+
 # ==================================
 # Guest checkout refusal (TIER1-GUEST-DEADEND)
 # ==================================
@@ -426,6 +442,8 @@ def create_order(request):
     if not cart_items.exists():
         return Response({"error": "Cart is empty"}, status=status.HTTP_400_BAD_REQUEST)
 
+    body = _object_body(request.data)
+
     required_fields = [
         "full_name",
         "phone",
@@ -436,7 +454,7 @@ def create_order(request):
     ]
 
     for field in required_fields:
-        if not request.data.get(field):
+        if not body.get(field):
             return Response(
                 {"error": f"{field} is required"}, status=status.HTTP_400_BAD_REQUEST
             )
@@ -447,7 +465,7 @@ def create_order(request):
     # DataError on the production Postgres. Refused here, before the atomic
     # block opens and therefore before any row exists.
     for field in _SHIPPING_FIELDS:
-        length_rejection = _field_length_rejection(field, request.data[field])
+        length_rejection = _field_length_rejection(field, body[field])
 
         if length_rejection is not None:
             return length_rejection
@@ -536,7 +554,7 @@ def create_order(request):
     coupon = None
     discount_amount = Decimal("0.00")
 
-    coupon_code = request.data.get("coupon_code")
+    coupon_code = body.get("coupon_code")
 
     # [R-9.3.5/R-9.3.6] The coupon applied to the cart persists as cart
     # state: when the checkout payload posts no explicit code, the
@@ -630,9 +648,7 @@ def create_order(request):
             # new lock-order cycle is introduced.
             cart = Cart.objects.select_for_update().get(pk=cart.pk)
 
-            duplicate = _find_duplicate_pending_order(
-                owner, cart_items, coupon, request.data
-            )
+            duplicate = _find_duplicate_pending_order(owner, cart_items, coupon, body)
 
             if duplicate is not None:
                 # Benign double-submit retry, so INFO: a WARNING here would spam
@@ -706,10 +722,10 @@ def create_order(request):
             # committing mid-checkout cannot tear the amount the order is
             # charged.
             shipping_quote = quote_shipping(
-                region=request.data.get("state"),
-                postal_code=request.data.get("pincode"),
+                region=body.get("state"),
+                postal_code=body.get("pincode"),
                 merchandise_total=merchandise_total,
-                method_code=_requested_shipping_code(request.data),
+                method_code=_requested_shipping_code(body),
                 lock=True,
             )
 
@@ -767,12 +783,12 @@ def create_order(request):
                             # guest_token (TIER1-GUEST-DEADEND: no token is
                             # ever minted while the refusal stands).
                             guest_email=guest_email,
-                            full_name=request.data.get("full_name"),
-                            phone=request.data.get("phone"),
-                            address=request.data.get("address"),
-                            city=request.data.get("city"),
-                            state=request.data.get("state"),
-                            pincode=request.data.get("pincode"),
+                            full_name=body.get("full_name"),
+                            phone=body.get("phone"),
+                            address=body.get("address"),
+                            city=body.get("city"),
+                            state=body.get("state"),
+                            pincode=body.get("pincode"),
                             coupon=coupon,
                             discount_amount=discount_amount,
                             shipping_method_id=shipping_method_id,
@@ -1009,7 +1025,7 @@ def validate_redeemable_coupon(code, cart):
 @throttle_scope("coupon")
 def apply_coupon(request):
 
-    code = request.data.get("code")
+    code = _object_body(request.data).get("code")
 
     if not code:
         return Response(

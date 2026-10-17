@@ -45,6 +45,20 @@
 # Optional: DEPLOY_KNOWN_HOSTS (pinned host key; without it the first contact
 # is trusted via accept-new, which still refuses a CHANGED key).
 # Repository variables optional: DEPLOY_BRANCHES, DEPLOY_DIR, DEPLOY_URL.
+#
+# UNTRACKED-IN-TREE COLLISION (GATE-4, 2026-10-17): the first real release
+# attempt (run 38989889212, sha 636d06b) failed at the checkout line below -
+# the deploy host carries an owner-local UNTRACKED compose.uat.yml (the
+# pre-commit host copy SPEC-Q-OPS1's own message records), that path became
+# tracked in-tree at c36a3b5, and git refuses to overwrite an untracked file
+# with a tracked one. The remote command RETRIES the checkout after moving
+# aside exactly the untracked files the target tree tracks, each preserved as
+# <name>.predeploy-<epoch> - never deleted: an owner-local copy may carry
+# wiring the committed overlay does not. Any other checkout failure still
+# fails the step unchanged (the first attempt's error text stays in the log).
+# The retry was simulated end-to-end before wiring (clone + untracked
+# collision + POSIX-sh retry: collision reproduced, owner copy preserved,
+# second checkout landed on the tracked file, chain continued).
 
 name: deploy
 
@@ -185,6 +199,13 @@ jobs:
       # `set -e`: ssh reports the last status either way, the chain stops at
       # the first failure on any POSIX shell (the login shell is not ours to
       # assume), and release.sh carries its own `set -euo pipefail`.
+      #
+      # The remote command's ONLY complication is the checkout retry documented
+      # at the top of this file (untracked-in-tree collision): first attempt
+      # verbatim, then - and only then - move the colliding untracked files
+      # aside as *.predeploy-<epoch> and check out again. POSIX sh only, and
+      # backslash-dollar escapes keep $f / the date call for the REMOTE shell
+      # while $DEPLOY_DIR / $RELEASED_SHA are expanded here, locally.
       - name: Run the release sequence on the deploy host
         env:
           RELEASED_SHA: ${{ needs.gate.outputs.sha }}
@@ -213,4 +234,4 @@ jobs:
             -o "UserKnownHostsFile=$known_hosts" \
             -o BatchMode=yes \
             "$DEPLOY_USER@$DEPLOY_HOST" \
-            "cd '$DEPLOY_DIR' && git fetch --quiet --prune origin && git -c advice.detachedHead=false checkout --quiet --detach '$RELEASED_SHA' && if [ -x ./scripts/release-uat.sh ]; then exec ./scripts/release-uat.sh; else exec ./scripts/release.sh; fi"
+            "cd '$DEPLOY_DIR' && git fetch --quiet --prune origin && if ! git -c advice.detachedHead=false checkout --quiet --detach '$RELEASED_SHA'; then git ls-files --others --exclude-standard | while IFS= read -r f; do if git cat-file -e '$RELEASED_SHA:'\"\$f\" 2>/dev/null; then mv -- \"\$f\" \"\$f.predeploy-\$(date +%s)\"; fi; done; git -c advice.detachedHead=false checkout --quiet --detach '$RELEASED_SHA'; fi && if [ -x ./scripts/release-uat.sh ]; then exec ./scripts/release-uat.sh; else exec ./scripts/release.sh; fi"

@@ -31,6 +31,14 @@ one session's context dies with that session.
 4. **When an agent's fix is refused or narrowed, say so in the ledger.** A
    finding closed out-of-band by owner ruling is not precedent and must never
    be generalised by a later session that was not present.
+5. **NEVER read, cat, echo, list, or paste key/credential files — ROUTE
+   instead.** (Owner directive 2026-10-17, absolute, standing for the rest of
+   the run.) Key material is never opened or printed; not even key filenames
+   are repeated in chat, ledgers, or handoffs. Box access routes through the
+   `ssh uat` alias in `~/.ssh/config` (the config references a path; the
+   material is never touched). Serve/API auth credentials are used only by the
+   tooling that requires them, never echoed. A task that appears to need key
+   contents = STOP and ask the owner.
 
 ## Run pointers
 
@@ -46,7 +54,9 @@ one session's context dies with that session.
 
 - active section: BUILD-QUEUE — 7 tasks SHIPPED since PR #38 (Q-D7, Q-P1, Q-RS1, T0, Q-D2a, Q-D3, Q-D2b; lanes pushed lane/a `21f78e2`, lane/b `15ff0c6`) | phase: **GATE_PHASE** — volume train (7 >= 6) + time trigger | held audits: none
 - tasks since promotion: **7** (Q-D4, Q-D6, T1a, Q-OPS1, T1b, T2a, T1F1) — **GATE_PHASE (volume train 7>=6)** | last-promoted SHA: `63e2778` (PR #40). Lanes pushed: lane/a `74fa867`, lane/b `5ab76aa`. FO compact pending — serve down.
-- **GATE-3 (2026-10-16):** orchestrator lane-merge interim continues (owner: perms "later"). Certified range = the 7 tasks above; label PARTIAL-SECTION (Phase D remainder = Q-D1 mine/Q-D5 gate-sched; Phase T remainder = T1a-second-pass + T2-exec + T1F2 sibling sweep, all queued). Findings ledger: F7-B1 FIXED (T1F1); F3-C4 + throttle inflation = REDIS_URL owner-op; sibling same-class body 500s (refund/payment/checkout/products-adjust/restock/accounts) = Q-T1F2 queued. **0-BYTE CLEANER STRIKE #3 during T2a audit (contenttypes wiped in 3 venvs; lock-exact repair proven twice) — owner must find/stop the cleaner.**
+- **GATE-3 (2026-10-16, cycle 1):** orchestrator lane-merge interim continues (owner: perms "later"); reconcile = `d94b09f` (lane/a clean) + `ac366a5` (lane/b, changes.md 8-row concat). Certified range = Q-D4, Q-D6, T1a, Q-OPS1, T1b, T2a, T1F1; PARTIAL-SECTION label (Phase D remainder Q-D1 mine/Q-D5 gate-sched; Phase T remainder T1a-second-pass + T2-exec + Q-T1F2 sibling sweep queued). Findings ledger: F7-B1 FIXED (T1F1); F3-C4 + throttle inflation = REDIS_URL owner-op. **0-BYTE CLEANER: strike #3 (22 tracked init files mid-merge + venv contenttypes twice — lock-exact repairs proven; owner must find/stop the cleaner).**
+- tasks since promotion: **3** (T1F2a, Q-CORS1, T1F2b — all auditor-SHIPPED 2026-10-17) | last train: **PR #42 MERGED — merge SHA `636d06b`, gh-verified (7-task partial train: Q-D4, Q-D6, T1a, Q-OPS1, T1b, T2a, T1F1; pair 2154 OK both engines cov 99.81%; GG 38291408 owner-dismissed)** | last-promoted SHA: `636d06b`. Lanes pushed: lane/a `d5a0e20`, lane/b `a246245`. Escalated notes local (`dd624ed`, `8de9516`) ride the next gate. FO compact pending — serve down.
+- **BUILD (2026-10-17): Q-T1F2 sibling sweep + Q-CORS1 all SHIP, both lanes pushed.** CORS root cause proven from UAT box access logs (`ssh uat` route): browser sent OPTIONS x8 (all answered 200) and NEVER sent the POST — preflight `Access-Control-Allow-Headers` lacked `idempotency-key` (`X-Guest-Order-Token` same trap). **Q-CORS1 `d5a0e20`** (lane/a): settings `CORS_ALLOW_HEADERS` extends installed corsheaders defaults + both headers, pinned against the real constants. **T1F2a `2fcbe13`** shipped in the same lane/a FULL audit (2162 OK both engines, cov 99.81%, mutation-proven). **T1F2b `9e575e6`+`0a62275` + DOC-ONLY cycle-2 `a246245`** (BUG-1 P3 comment folded per P3-travels-with-next-build), lane/b delta re-audit SHIP (2165 sqlite re-measured; pg leg carried same-day pair with declared reason). Audits never ran suites concurrently (sequential-by-design in batch 1; parallel only with per-lane DB isolation in batch 2). **Standing rule 5** (never read/echo key files — route via `ssh uat` alias) committed `53d7a26`.
 - **OWNER ACTIONS PENDING (4):** (1) UAT env ops for T1a's 24 BLOCKED rows — seed_demo, RAZORPAY_WEBHOOK_SECRET, test account, shipping; (2) Q-G1 guest-mint decision (bridge BE-011, FO's top blocker); (3) serve restart via start-all.ps1 (FO compact); (4) permanent `git merge` allowance for release-engineer. OPEN: T1b (lane/a) + T2a prep (lane/b) dispatching; T1a-second-pass after (1).
 - Phase T OPENED 2026-10-16: T0 done; T1a (attack families 1-5, live UAT) on lane/a, Q-OPS1 (compose.uat gap from Q-D6 finding) on lane/b; T1b/T2 follow serialized (shared live DB — never two lanes attacking live at once). Q-G1 guest-mint still HELD for owner (BE-011).
 - **GATE-2 ESCALATED (owner action required, 2026-10-16):** PR #40 open, 8/9 checks GREEN (integrated pair 2150 OK both engines cov 99.81%, gates 0; fixture reshape shipped+audited `b21a153`+`5f7519a`, pushed), sole red = GitGuardian App on the SAME 2 pre-existing-triggered incidents — 38269594 + 38269595, occurrences only in pre-fix history inside the PR range; dashboard docs: only close/ignore clears the check while Triggered; force-push forbidden; RE refused a provably-unclearable builder cycle. **Remedy: owner → GG workspace 791682 → Ignore both as "test credential" (precedents 8b223fc, 03bccd0) → re-wake RE same session → watch → MERGE.** All other state: origin/spec-comp = 5f7519a, tree clean, gate cycle 2 of 3 unused.
@@ -133,6 +143,12 @@ Deferral policy: gaps whose detailed requirements live in a later spec section a
 Statuses: `PENDING -> IN-COMPLIANCE -> BUILDING -> IN-AUDIT -> BUGS-FOUND -> SHIPPED -> PR-OPENED | ESCALATED | NOT-APPLICABLE`. Max 3 builder→auditor fix cycles per task.
 
 ## Baseline
+
+**MEASURED 2026-10-17 (the two post-CORS auditor SHIP reports — quoted per lane as a pair, per the pairing rule; a merged integration figure is the release-engineer's to measure at the gate).**
+
+- **Lane A @ `d5a0e20` (FULL audit, both engines reproduced):** SQLite **2162 tests `OK (skipped=2, expected failures=2)`**; PostgreSQL (pg2a) **2162 `OK` (xf=2)**; coverage **99.81%** (10793 statements, 0 missed, 1472 branches, 23 partial), both legs exit 0. Floor 2154→2162 (+8 pins), xf flat. Mutation-proven: all 6 guard sites removed → 36 errors, restored byte-identical.
+- **Lane B @ `a246245` (RE-AUDIT cycle 2, delta):** SQLite **2165 tests `OK (skipped=2, expected failures=2)`** re-measured, coverage **99.81%** (10783 statements, 0 missed), exit 0. PostgreSQL (pg2b) leg **CARRIED, declared**: cycle 1's same-day pair measured 2165 OK / xf=2 / 99.81% on this executable surface; delta is one comment line + one doc cell (0 executable lines changed); integration gate re-runs both engines on the merged tree. Floor 2154→2165, xf flat.
+- Zero-regression holds on both lanes; `doc_claims.py` + `changelog_figures.py check` exit 0 on both lanes (lane/a 31+2 claims rows, lane/b 275 claims, 0 unbacked figures).
 
 **MEASURED 2026-10-15 (the four Phase-S auditor SHIP reports — quoted per lane, because each lane was audited at its own commit; a merged integration figure is the release-engineer's to measure at the gate, per the pairing rule below).**
 
