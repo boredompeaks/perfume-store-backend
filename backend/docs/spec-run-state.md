@@ -31,6 +31,14 @@ one session's context dies with that session.
 4. **When an agent's fix is refused or narrowed, say so in the ledger.** A
    finding closed out-of-band by owner ruling is not precedent and must never
    be generalised by a later session that was not present.
+5. **NEVER read, cat, echo, list, or paste key/credential files — ROUTE
+   instead.** (Owner directive 2026-10-17, absolute, standing for the rest of
+   the run.) Key material is never opened or printed; not even key filenames
+   are repeated in chat, ledgers, or handoffs. Box access routes through the
+   `ssh uat` alias in `~/.ssh/config` (the config references a path; the
+   material is never touched). Serve/API auth credentials are used only by the
+   tooling that requires them, never echoed. A task that appears to need key
+   contents = STOP and ask the owner.
 
 ## Run pointers
 
