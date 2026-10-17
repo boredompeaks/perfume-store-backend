@@ -603,3 +603,64 @@ describe("orders detail heading (U-W10-T3)", () => {
     expect(h2At).toBeGreaterThan(h1At);
   });
 });
+
+/**
+ * U-W11-T5 — /products screen-parity restyle. The screen (media/designs/
+ * maison_ther_all_fragrances_refined_cards_atmosphere) drives the visuals;
+ * these pins hold the behaviours the restyle must not drop: the native-select
+ * ban with its ARIA replacement, the ordering still committing through the
+ * URL `update` path, the card's server-money rendering on the tabular money
+ * step, the hairline plate frame, and the count sentence's live region with
+ * its filtered suffix. Comments are stripped first so a prose mention of a
+ * selector in a docblock cannot satisfy a pin.
+ */
+describe("products sort control (U-W11-T5)", () => {
+  const filterSource = stripComments(
+    readFileSync(join(srcDir, "components/FilterBar.tsx"), "utf8"),
+  );
+
+  it("never ships a native <select> (xias AGENTS.md non-negotiable)", () => {
+    expect(filterSource).not.toMatch(/<select[\s>]/);
+  });
+
+  it("replaces it with a button trigger + ARIA listbox, keyboard parity included", () => {
+    expect(filterSource).toContain('aria-haspopup="listbox"');
+    expect(filterSource).toContain('role="listbox"');
+    expect(filterSource).toContain('role="option"');
+    expect(filterSource).toContain("aria-expanded");
+    expect(filterSource).toContain("Escape");
+    expect(filterSource).toContain('aria-labelledby="sort-label sort-button"');
+  });
+
+  it("still writes the chosen ordering through the URL update path", () => {
+    expect(filterSource).toMatch(/update\(\{\s*ordering:/);
+  });
+});
+
+describe("products listing anatomy (U-W11-T5)", () => {
+  const cardSource = stripComments(
+    readFileSync(join(srcDir, "components/ProductCard.tsx"), "utf8"),
+  );
+  const pageSource = stripComments(
+    readFileSync(join(srcDir, "app/products/page.tsx"), "utf8"),
+  );
+
+  it("renders the price through the server-money formatter on the tabular money step", () => {
+    expect(cardSource).toContain("formatINR(product.price)");
+    expect(cardSource).toContain(
+      'className="money shrink-0 tabular-nums lining-nums"',
+    );
+  });
+
+  it("frames the card as the screen's hairline plate with a 3:4 image", () => {
+    expect(cardSource).toContain("aspect-[3/4]");
+    expect(cardSource).toContain("border border-hairline");
+    expect(cardSource).toContain("hover:border-hairline-hover");
+  });
+
+  it("keeps the count sentence on the live region with its filtered suffix", () => {
+    expect(pageSource).toContain('aria-live="polite"');
+    expect(pageSource).toContain("matching your filters");
+    expect(pageSource).toContain("creations");
+  });
+});
