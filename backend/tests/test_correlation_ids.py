@@ -13,6 +13,7 @@
 
 import logging
 
+from corsheaders.defaults import default_headers as cors_default_headers
 from django.http import HttpResponse
 from django.test import RequestFactory, SimpleTestCase
 
@@ -27,6 +28,7 @@ from common.middleware import (
 )
 from common.models import AuditEvent
 from common.testing import ApiTestCase
+from orders.views import GUEST_TOKEN_HEADER, IDEMPOTENCY_KEY_HEADER
 
 TRACED = "abc123def456"
 
@@ -236,6 +238,36 @@ class LogFormatterWiringTests(SimpleTestCase):
         self.assertEqual(
             config_settings.MIDDLEWARE[0], "common.middleware.RequestIDMiddleware"
         )
+
+
+class CorsAllowHeadersTests(SimpleTestCase):
+    """Q-CORS1: preflights must allow the headers the browser sends.
+
+    A preflight 200 whose Access-Control-Allow-Headers omits a header makes
+    the BROWSER refuse to send the request — the server then logs OPTIONS
+    only and never sees the POST, which is how checkout (Idempotency-Key)
+    and guest order reads (X-Guest-Order-Token) died while every backend
+    test stayed green.
+    """
+
+    def test_checkout_and_guest_headers_are_allowed(self):
+        # Literal pins: a wrong constant would agree with a wrong CORS list
+        # under a membership check alone.
+        self.assertEqual(IDEMPOTENCY_KEY_HEADER, "Idempotency-Key")
+        self.assertEqual(GUEST_TOKEN_HEADER, "X-Guest-Order-Token")
+        # Header names are case-insensitive (HTTP) and the middleware
+        # echoes the list verbatim, so membership is compared lowercased
+        # on both sides.
+        allowed = {h.lower() for h in config_settings.CORS_ALLOW_HEADERS}
+        self.assertIn(IDEMPOTENCY_KEY_HEADER.lower(), allowed)
+        self.assertIn(GUEST_TOKEN_HEADER.lower(), allowed)
+
+    def test_corsheaders_defaults_are_still_allowed(self):
+        # Extending the default allow-list must not drop a default
+        # (authorization, x-csrftoken, ...).
+        allowed = {h.lower() for h in config_settings.CORS_ALLOW_HEADERS}
+        for header in cors_default_headers:
+            self.assertIn(header, allowed)
 
 
 class RequestIdIsNotLeakedBetweenRequestsTests(ApiTestCase):

@@ -19,6 +19,7 @@ from pathlib import Path
 from urllib.parse import unquote, urlparse
 
 from celery.schedules import crontab, schedule
+from corsheaders.defaults import default_headers as _cors_default_headers
 from django.core.exceptions import ImproperlyConfigured
 from dotenv import load_dotenv
 
@@ -1308,6 +1309,22 @@ CORS_ALLOW_CREDENTIALS = True
 # verbatim) and a test pins it to the middleware's constant, so the two
 # cannot drift.
 CORS_EXPOSE_HEADERS = ["X-Request-ID"]
+
+# Q-CORS1 [R-9.3.14] (checkout idempotency) / [R-1.13] (guest order
+# read): django-cors-headers answers a
+# preflight 200 whose Access-Control-Allow-Headers comes from THIS setting
+# (defaulting to the package's default_headers). The BROWSER — not the
+# server — refuses to send a request carrying a header missing from that
+# list, so with only the defaults every checkout POST (Idempotency-Key) and
+# guest order read (X-Guest-Order-Token) was blocked client-side while the
+# backend logged OPTIONS only and its own tests stayed green. Extend the
+# real defaults rather than retyping them, so a django-cors-headers default
+# change is inherited; a test pins both header names (to the constants the
+# views actually read) and the surviving defaults.
+CORS_ALLOW_HEADERS = list(_cors_default_headers) + [
+    "idempotency-key",
+    "x-guest-order-token",
+]
 
 
 # Logging (SPEC-7-02): an env-driven dictConfig baseline. No external
