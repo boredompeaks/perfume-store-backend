@@ -52,6 +52,18 @@ TIMEOUT = 25
 SNIP = 170
 UNSET = object()
 
+# Fixture credential for the step-zero register/login probes. Low password
+# shape on purpose (single-case words, spaces, no digits or symbols): the
+# previous mixed-case+digit+symbol literal tripped GitGuardian incident
+# 38291408 (Username+Password) on PR #42, and this repo reshapes such
+# committed fixtures rather than allowlisting them (reshape-over-allow
+# precedent 29ce70a / GATE-FIX-CYCLE1). Same value T1b's fixture proved
+# clears register's validate_password policy - it is neither similar to the
+# probed usernames nor short nor common - and the observed responses are
+# unchanged: register answers 201, the inactive-account login stays the
+# uniform 401 whatever the password.
+FIXTURE_PASS = "quiet harbor lane"
+
 # Every response body the run observed, kept for the POST-F1 payload scan
 # (session material must never appear in any body, so nothing is filtered).
 CAPTURED = []
@@ -244,7 +256,7 @@ def phase_env(H: Http, F: Ledger, base):
             {
                 "username": f"rt_t1a_{uuid.uuid4().hex[:8]}",
                 "email": "rt_t1a@redteam.invalid",
-                "password": "Xk9#vmQ2pLw7z",
+                "password": FIXTURE_PASS,
             },
             {},
         ),
@@ -252,7 +264,7 @@ def phase_env(H: Http, F: Ledger, base):
             "login-unverified-account",
             "POST",
             "/api/v1/account/storefront/login/",
-            {"username": "rt_t1a_c1", "password": "Xk9#vmQ2pLw7z"},
+            {"username": "rt_t1a_c1", "password": FIXTURE_PASS},
             {},
         ),
         (
