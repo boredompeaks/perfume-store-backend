@@ -232,6 +232,45 @@ compliance pass strikes (✅) items the waves already fixed, then the owner
 rules on the remainder. GATE-U still RUNS at every gate and appends its
 rating + critiques; it just never diverts the wave queue.
 
+## 6c. Command discipline — NO blocking waits (owner directive, standing)
+
+Recurring failure: agents hang because they run long-lived commands (dev
+servers, builds, watchers) in the foreground and block until timeout. **Every
+handoff carries this contract; auditors enforce it on themselves:**
+
+1. **Every long-running command starts detached and returns immediately.**
+   Never `npm run dev` / `npx next dev` / `npm start` in a blocking call.
+   Pattern (Windows):
+   ```powershell
+   $p = Start-Process -FilePath cmd -ArgumentList '/c','npm run dev > .run\dev.log 2>&1' `
+        -WorkingDirectory <appdir> -PassThru -WindowStyle Hidden
+   Set-Content .run\dev.pid $p.Id     # record PID for teardown
+   ```
+   Redirect output to a log FILE; the Start-Process call itself returns in ms.
+2. **Then PING until ready — never wait on the process.** Poll with short
+   timeouts, cap the budget, fail loud with the log tail if never ready:
+   ```powershell
+   $deadline = (Get-Date).AddSeconds(60)
+   while ((Get-Date) -lt $deadline) {
+     try { Invoke-WebRequest http://localhost:3000 -UseBasicParsing -TimeoutSec 2
+           break } catch { Start-Sleep 2 }
+   }
+   # not ready → Get-Content .run\dev.log -Tail 40 → report FAIL + log, do not hang
+   ```
+3. **Every wait has a cap + a failure path.** A command that can block
+   >30s must be detached-or-polling. If a tool call has no timeout control,
+   split: start (detached) → poll (short) → read log (short).
+4. **Teardown before return:** kill recorded PIDs (`Stop-Process -Id (Get-Content .run\dev.pid)`),
+   confirm ports free (a leaked :3000 poisons the next agent).
+5. **Build/test inside the gate stay synchronous but bounded** — `npm run build`
+   (~60–90s) and `npx vitest run` are allowed to block IF the call carries a
+   timeout ≥180000ms and are run as at most ONE blocking call per message
+   (issue two parallel calls, never chain N long calls in one). If either
+   exceeds its budget, read `.run\*.log` / rerun with redirect — never retry
+   blind in a loop.
+6. **Never watch, tail -f, `gh run watch`, or loop on a live process in the
+   foreground.** Use the ping pattern or a bounded poll loop with a deadline.
+
 ## 7. Merge/sync protocol (unchanged)
 
 Lane prep → reverse-merge tip into lane → forward-merge t1→t2→t3 →
