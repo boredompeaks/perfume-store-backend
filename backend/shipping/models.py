@@ -513,3 +513,43 @@ class ShipmentEvent(models.Model):
 
     def __str__(self):
         return f"{self.shipment_id}: {self.from_status}->{self.to_status}"
+
+
+class ShippingProvider(models.Model):
+    """A carrier / shipping provider admin can add, linkable to shipments.
+
+    ``code`` is the slug identifier (unique). ``tracking_url_template`` is a
+    URL template containing a ``{tracking_number}`` placeholder that renders
+    the carrier's tracking page for a given parcel.
+    """
+
+    name = models.CharField(
+        max_length=100,
+    )
+
+    code = models.SlugField(
+        max_length=40,
+        unique=True,
+    )
+
+    tracking_url_template = models.CharField(
+        max_length=500,
+        blank=True,
+        default="",
+    )
+
+    is_active = models.BooleanField(default=True)
+
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ("code",)
+
+    def __str__(self):
+        return self.name
+
+
+# Alias for the carrier wording used in the spec/task.
+Carrier = ShippingProvider

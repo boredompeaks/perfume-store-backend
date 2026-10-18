@@ -30,6 +30,7 @@ from .models import (
     Shipment,
     ShipmentEvent,
     ShippingMethod,
+    ShippingProvider,
     ShippingRate,
 )
 
@@ -202,3 +203,11 @@ class ShipmentEventAdmin(RoleAwareModelAdmin):
 
     def has_delete_permission(self, request, obj=None):
         return False  # audit history is never deletable
+
+
+@admin.register(ShippingProvider)
+class ShippingProviderAdmin(admin.ModelAdmin):
+    list_display = ("code", "name", "is_active", "updated_at")
+    list_filter = ("is_active",)
+    search_fields = ("code", "name")
+    ordering = ("code",)
