@@ -25,6 +25,10 @@ const pyramidSource = readFileSync(
   join(srcDir, "components/OlfactoryPyramid.tsx"),
   "utf8",
 );
+const protocolSource = readFileSync(
+  join(srcDir, "components/ProtocolTrio.tsx"),
+  "utf8",
+);
 const productsApiSource = readFileSync(
   join(srcDir, "lib/products-api.ts"),
   "utf8",
@@ -279,5 +283,107 @@ describe("purchase panel (U-W11-T6 hero slice, design screen hero_flow)", () => 
     expect(pageSource).toContain(
       'className="flex items-center gap-3 text-eyebrow uppercase text-bronze"',
     );
+  });
+});
+
+/* ==========================================================================
+   U-W15-T18 slice 2 — philosophy section, protocol trio, and the
+   guarantee-band omission. Same screen; every claim source-level.
+   ======================================================================== */
+
+/** The philosophy <section>…</section> block, for scoped assertions. */
+function philosophyBlock(): string {
+  const block = pageSource.match(
+    /<section\s+aria-labelledby="pdp-philosophy-heading"[\s\S]*?<\/section>/,
+  )?.[0];
+  expect(block).toBeDefined();
+  return block ?? "";
+}
+
+describe("philosophy section (U-W15-T18, screen 'The Philosophy of the Scent')", () => {
+  it("renders only when the server publishes a non-empty description", () => {
+    // The fallback pin: the whole section, heading and figure included,
+    // sits behind the same `hasDescription` derivation as the prose. With
+    // an empty/None description the section renders nothing at all —
+    // no shell, no border, no empty heading (P5; the designed fallback
+    // chosen over a placeholder, cited in the page comment).
+    expect(pageSource).toMatch(
+      /\{hasDescription && \(\s*<section\s+aria-labelledby="pdp-philosophy-heading"/,
+    );
+    expect(pageSource).toContain('id="pdp-philosophy-heading"');
+    expect(pageSource).toContain("The Philosophy of the Scent");
+  });
+
+  it("typesets the product's own description field as prose, exactly once", () => {
+    // Prose source is the real field, repositioned here from T6's notes
+    // band (the screen places it in the editorial split). It appears as
+    // this section's prose and nowhere else on the page.
+    expect(philosophyBlock()).toContain("{product.description}");
+    expect(pageSource.match(/\{product\.description\}/g)).toHaveLength(1);
+  });
+
+  it("keeps the story-drift accent on the philosophy figure", () => {
+    // The page's one accent moment (P2) moved with the prose it serves;
+    // the existing accent contract in globals.css is untouched.
+    expect(philosophyBlock()).toContain('className="story-drift');
+  });
+
+  it("captions the figure with real product data, never the screen's material claims", () => {
+    expect(philosophyBlock()).toContain("{product.name} · {product.size} ml");
+    expect(stripComments(pageSource)).not.toMatch(
+      /Matières Premières|Fig\. 04|Grasse|Formulateur/,
+    );
+  });
+});
+
+describe("protocol trio (U-W15-T18, screen 'WEAR GUIDANCE & TECHNICAL PROTOCOLS')", () => {
+  it("ships the three cards, wired after the philosophy section", () => {
+    expect(pageSource).toContain("<ProtocolTrio");
+    const philosophyAt = pageSource.indexOf(
+      'aria-labelledby="pdp-philosophy-heading"',
+    );
+    const trioAt = pageSource.indexOf("<ProtocolTrio");
+    expect(philosophyAt).toBeGreaterThan(-1);
+    expect(trioAt).toBeGreaterThan(philosophyAt);
+  });
+
+  it("holds every body string to universal copy: no digits, no em-dash", () => {
+    // The screen's product-specific numbers and places (14–18 hours,
+    // four-month maceration, the Grasse atelier, 15°C–21°C) have no field
+    // behind them (P5 / spec §12.D). A digit in any body string would be
+    // one of them smuggling back in.
+    const bodies = [...protocolSource.matchAll(/body: "([^"]+)"/g)].map(
+      (m) => m[1],
+    );
+    expect(bodies).toHaveLength(3);
+    for (const body of bodies) {
+      expect(body).not.toMatch(/\d/);
+      expect(body).not.toContain("—");
+    }
+    const titles = [...protocolSource.matchAll(/title: "([^"]+)"/g)].map(
+      (m) => m[1],
+    );
+    expect(titles).toEqual([
+      "Application",
+      "Longevity & Sillage",
+      "Maceration & Care",
+    ]);
+  });
+});
+
+describe("guarantee-band omission (U-W15-T18, P5 / spec §12.D removals)", () => {
+  it("ships none of the screen's unsourced guarantee claims", () => {
+    // The screen's "Garantie d'Intégrité" paragraph is entirely recorded
+    // P5 removals (carbon-neutral Europe dispatch, the 2ml vial, the
+    // 30-day window, wax wrapping, door-side pickup, the concierge CTA).
+    // The one true pair it would have repeated is already stated once,
+    // in the purchase panel's §5.2 item 6 line.
+    const code = stripComments(pageSource);
+    expect(code).not.toMatch(
+      /carbon-neutral|Conciergerie|Garantie|miniature|wax seal/i,
+    );
+    expect(code).not.toMatch(/30[-\s]day|14[-\s]day/);
+    expect(pageSource).toContain("shippingPolicy.dispatchWindow");
+    expect(pageSource).toContain("getReturnWindow()");
   });
 });
