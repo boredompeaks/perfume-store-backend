@@ -8,10 +8,11 @@ applied inside the checkout's atomic block.
 """
 
 from decimal import Decimal
+from importlib import import_module
 from io import StringIO
 
 from django.core.management.base import CommandError
-from django.db import connection
+from django.db import IntegrityError, connection, migrations, models
 from django.test import override_settings
 
 from common.models import AuditEvent
@@ -26,7 +27,7 @@ from common.roles import (
 from common.testing import ApiTestCase
 from orders.models import Order, OrderItem, OrderStatusEvent
 from products.models import StockReservation
-from shipping.models import ShippingMethod, ShippingRate
+from shipping.models import ShippingMethod, ShippingProvider, ShippingRate
 from shipping.pricing import (
     ShippingUnavailable,
     quote_shipping,
@@ -1052,6 +1053,58 @@ class ShippingAdminCapabilityTests(ApiTestCase):
             True,
         )
 
+    def test_a_role_without_the_capability_is_refused_at_the_provider_admin(self):
+        from django.contrib import admin
+
+        operator = self.users[ROLE_INVENTORY]
+        self.client.force_login(operator)
+        self.assertEqual(
+            self.client.get("/admin/shipping/shippingprovider/").status_code,
+            403,
+        )
+        # The provider surface is the same single RBAC gate as its siblings: a
+        # role holding no capability gets none of the four model permissions,
+        # not merely a hidden changelist.
+        provider_admin = admin.site._registry[ShippingProvider]
+        request = _request_for(operator)
+        self.assertFalse(provider_admin.has_view_permission(request))
+        self.assertFalse(provider_admin.has_add_permission(request))
+        self.assertFalse(provider_admin.has_change_permission(request))
+        self.assertFalse(provider_admin.has_delete_permission(request))
+
+    def test_a_money_role_may_reach_and_manage_the_provider_table(self):
+        from django.contrib import admin
+
+        finance = self.users[ROLE_FINANCE]
+        self.client.force_login(finance)
+        self.assertEqual(
+            self.client.get("/admin/shipping/shippingprovider/").status_code,
+            200,
+        )
+        provider_admin = admin.site._registry[ShippingProvider]
+        request = _request_for(finance)
+        self.assertTrue(provider_admin.has_view_permission(request))
+        self.assertTrue(provider_admin.has_add_permission(request))
+        self.assertTrue(provider_admin.has_change_permission(request))
+        self.assertTrue(provider_admin.has_delete_permission(request))
+
+    def test_a_money_role_may_add_a_provider_through_the_change_form(self):
+        finance = self.users[ROLE_FINANCE]
+        self.client.force_login(finance)
+        res = self.client.post(
+            "/admin/shipping/shippingprovider/add/",
+            {
+                "name": "Delhivery",
+                "code": "delhivery",
+                "tracking_url_template": "https://track.delhivery.com/{tracking_number}",
+                "is_active": "on",
+                "_save": "Save",
+            },
+        )
+        self.assertEqual(res.status_code, 302, getattr(res, "context", None))
+        provider = ShippingProvider.objects.get(code="delhivery")
+        self.assertEqual(provider.name, "Delhivery")
+
     def test_the_change_form_saves_a_rate_the_staff_entered(self):
         finance = self.users[ROLE_FINANCE]
         self.client.force_login(finance)
@@ -1114,6 +1167,85 @@ class ShippingAdminCapabilityTests(ApiTestCase):
         self.assertEqual(order.shipping_amount, Decimal("49.00"))
         self.assertEqual(order.total_amount, Decimal("1048.99"))
         self.assertEqual(ShippingRate.objects.count(), 0)
+
+
+class ShippingProviderModelTests(ApiTestCase):
+    """[SPEC-B-01] The ShippingProvider model's own contract.
+
+    BUG-3: the model shipped with zero tests referencing it, so its ``__str__``
+    was the one uncovered statement. These pin creation, the unique slug, the
+    default flag, the ordering and the field shape the migration declares.
+    """
+
+    def test_a_provider_reads_as_its_name(self):
+        provider = ShippingProvider.objects.create(name="Delhivery", code="delhivery")
+        self.assertEqual(str(provider), "Delhivery")
+
+    def test_the_code_can_never_answer_for_two_providers(self):
+        ShippingProvider.objects.create(name="Delhivery", code="delhivery")
+        with self.assertRaises(IntegrityError):
+            ShippingProvider.objects.create(name="Blue Dart", code="delhivery")
+
+    def test_a_provider_is_active_by_default(self):
+        provider = ShippingProvider.objects.create(name="Delhivery", code="delhivery")
+        self.assertTrue(provider.is_active)
+
+    def test_the_tracking_template_defaults_to_empty(self):
+        provider = ShippingProvider.objects.create(name="Delhivery", code="delhivery")
+        self.assertEqual(provider.tracking_url_template, "")
+
+    def test_providers_are_ordered_by_code(self):
+        ShippingProvider.objects.create(name="Delhivery", code="delhivery")
+        ShippingProvider.objects.create(name="Blue Dart", code="bluedart")
+        self.assertEqual(
+            list(ShippingProvider.objects.values_list("code", flat=True)),
+            ["bluedart", "delhivery"],
+        )
+
+    def test_the_model_field_types_are_the_spec_shape(self):
+        fields = {field.name: field for field in ShippingProvider._meta.get_fields()}
+        self.assertIsInstance(fields["name"], models.CharField)
+        self.assertEqual(fields["name"].max_length, 100)
+        self.assertIsInstance(fields["code"], models.SlugField)
+        self.assertEqual(fields["code"].max_length, 40)
+        self.assertTrue(fields["code"].unique)
+        template = fields["tracking_url_template"]
+        self.assertIsInstance(template, models.CharField)
+        self.assertEqual(template.max_length, 500)
+        self.assertTrue(template.blank)
+        self.assertEqual(template.default, "")
+        self.assertIsInstance(fields["is_active"], models.BooleanField)
+        self.assertTrue(fields["is_active"].default)
+        self.assertIsInstance(fields["created_at"], models.DateTimeField)
+        self.assertTrue(fields["created_at"].auto_now_add)
+        self.assertIsInstance(fields["updated_at"], models.DateTimeField)
+        self.assertTrue(fields["updated_at"].auto_now)
+
+    def test_the_migration_declares_the_same_field_types(self):
+        module = import_module("shipping.migrations.0003_shippingprovider")
+        created = [
+            operation
+            for operation in module.Migration.operations
+            if isinstance(operation, migrations.CreateModel)
+        ]
+        self.assertEqual(len(created), 1)
+        operation = created[0]
+        self.assertEqual(operation.name, "ShippingProvider")
+        self.assertEqual(operation.options.get("ordering"), ("code",))
+        declared = dict(operation.fields)
+        self.assertIsInstance(declared["name"], models.CharField)
+        self.assertEqual(declared["name"].max_length, 100)
+        self.assertIsInstance(declared["code"], models.SlugField)
+        self.assertEqual(declared["code"].max_length, 40)
+        self.assertTrue(declared["code"].unique)
+        self.assertIsInstance(declared["tracking_url_template"], models.CharField)
+        self.assertEqual(declared["tracking_url_template"].max_length, 500)
+        self.assertIsInstance(declared["is_active"], models.BooleanField)
+        self.assertTrue(declared["is_active"].default)
+        self.assertIsInstance(declared["created_at"], models.DateTimeField)
+        self.assertTrue(declared["created_at"].auto_now_add)
+        self.assertIsInstance(declared["updated_at"], models.DateTimeField)
+        self.assertTrue(declared["updated_at"].auto_now)
 
 
 def _request_for(user):

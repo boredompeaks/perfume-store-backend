@@ -549,7 +549,3 @@ class ShippingProvider(models.Model):
 
     def __str__(self):
         return self.name
-
-
-# Alias for the carrier wording used in the spec/task.
-Carrier = ShippingProvider

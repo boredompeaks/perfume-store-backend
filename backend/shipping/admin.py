@@ -206,7 +206,8 @@ class ShipmentEventAdmin(RoleAwareModelAdmin):
 
 
 @admin.register(ShippingProvider)
-class ShippingProviderAdmin(admin.ModelAdmin):
+class ShippingProviderAdmin(RoleAwareModelAdmin):
+    capability_map = SHIPPING_CAPABILITY_MAP
     list_display = ("code", "name", "is_active", "updated_at")
     list_filter = ("is_active",)
     search_fields = ("code", "name")
