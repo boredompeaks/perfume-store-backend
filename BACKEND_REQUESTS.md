@@ -206,3 +206,11 @@ Format per entry: priority, where needed, what's missing, why, suggested contrac
 - **Why:** a fresh database cannot run the storefront e2e suite at all (login 401 / product 404 / coupon 400), so the suite's reproducibility depends on undocumented manual state — a silent trap for the next owner who tries to close BUG-4.
 - **Suggested contract:** a `seed_e2e` management command (or documented fixture set) creating exactly: one active non-privileged customer, one staff user, one in-stock product at a known price, and one long-window percentage coupon — idempotent and marked like `seed_demo` (`e2e-`/`E2E-` prefixes) so `--cleanup` semantics stay consistent.
 - **Current workaround (if any):** the specs derive every money expectation from whatever the API serves (U-W15-T16), so price drift no longer breaks them — but the rows themselves must still exist; the operator runbook for a backend-up e2e pass is to seed them by hand as the E2E-1 pass did.
+
+## [P1] `POST /api/accounts/logout/` - refresh-token revocation (GATE-U U1-04, compliance pass 2026-10-18)
+- **Where it's needed:** header sign-out (rontend/src/app auth context - `frontend/src/lib/auth.tsx:95` best-effort POSTs the endpoint today).
+- **What's missing:** any logout route. Verified read-only 2026-10-18 against `backend/accounts/urls.py:21-52`: login/refresh/register/recovery exist; NO logout. The HttpOnly refresh cookie set by Q-P1 is never revoked server-side; U1-04 measured the live 404 + Sign-out header persisting until reload.
+- **Why:** SPEC-17.12/R-17.12 refresh-cookie contract is half-built without revocation - a signed-out session's refresh token stays valid until expiry (90d default), so sign-out cannot actually end the session server-side.
+- **Suggested contract:** `POST /api/accounts/logout/` (authenticated + CSRF) -> blacklist the refresh token from the cookie, clear the cookie (path=/api/, matching Q-P1's set), return 204 with no body oracle. Client already clears local state regardless, so the endpoint is purely the server half.
+- **Current workaround:** frontend clears local state + cookie hint; refresh cookie lives until max-age expiry. BACKEND_REQUESTS P1.
+
