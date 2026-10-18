@@ -1523,9 +1523,15 @@ addition this redesign makes.**
 
 ### 5.7 `/returns` and `/shipping` — policy
 
-- **Both** use `LegalShell` (KEEP): `max-w-3xl`, eyebrow, `h1`, "Last updated:
-  September 2026", then `space-y-10` of `LegalSection`s, then a footer with the
-  support address and cross-links to `/terms` and `/privacy`.
+- **Shipped shape (amended U-W14-T15, BUG-W13-3):** `/returns` and
+  `/shipping` do **not** use `LegalShell` — they use the editorial
+  policy page-spread sanctioned as design override **D1** by AUDIT-W13
+  (built U-W13-T11/T12; screens `maison_ther_politique_de_retour` /
+  `..._de_livraison`): bronze eyebrow, serif display `h1`, the same "Last
+  updated: September 2026" line, a scannable fact matrix, then measure prose
+  with hairline seams — while keeping LegalShell's footer duties (support
+  address, cross-links to `/terms` and `/privacy`). `LegalShell` itself
+  remains KEEP for `/terms` and `/privacy` (§5.11).
 - **`/returns` is a policy page, not a request form.** The coverage contract's
   one-liner — "Return request and status" — is aspirational: there is **no
   customer-facing returns endpoint** (§12-G13; the only returns machinery is
@@ -2239,22 +2245,54 @@ Lighthouse, mobile-emulated, on the production build:
 
 ### 10.2 Per-route JS budget
 
-Baseline first-load JS on `/`, `/products`, `/products/[slug]` is **≤ 120 KB
-gzipped** — the figure `PLAN.md` §6 already committed to, and it is the number
-this redesign is measured against. The redesign's contribution is stated as an
-increment on top of that baseline, because the baseline itself was never measured
-by me (see §13).
+**Re-baselined 2026-10-18 (U-W14-T15) from a fresh production build on ui/t3
+@ 479ada5.** The previous targets (112–132 KB gz per route) inherited from
+`PLAN.md` §6 were measured impossible by U-W9-T3 — the Next/React shared floor
+alone exceeds them — so the floor is now stated as measured and the budgets
+hang off it.
 
-| Route | Budget (gz) | What it adds above the baseline |
-|---|---|---|
-| `/` | ≤ 120 KB | + the View Transitions wrapper, **only if it is on this route** — it is not (the add-to-cart button is on the PDP). **+0 KB** |
-| `/products` | ≤ 120 KB | +0 KB. No accent moment, no stagger (R7). The `FilterBar` client island already ships |
-| `/products/[slug]` | ≤ 124 KB | **+ ~0.4 KB** — the `startViewTransition` wrapper, loaded **only** when an add-to-cart mutation resolves |
-| `/cart` | ≤ 126 KB | + ~0.4 KB (the same wrapper, for line removal) |
-| `/checkout` | ≤ 132 KB | + ~0.4 KB wrapper. **Razorpay's ~50 KB is NOT in this figure** — it is injected at the pay step only |
-| `/orders`, `/orders/[id]` | ≤ 128 KB | + ~0.4 KB for the tracking marker animation. Bounded by shipment count |
-| `/track-order` | ≤ 112 KB | the *smallest* authenticated-free page. No `Header` cart query beyond the existing one, no order list |
-| `/login`, `/register`, recovery ×5, `/terms`, `/privacy`, `/shipping`, `/returns`, `/contact` | ≤ 118 KB | +0 KB. **No motion on any of them** |
+**How every number below was measured** (no server, no runtime trace):
+1. `cd frontend && npm run build` — exit 0, 26 route rows printed.
+2. For each prerendered route, the union of
+   `<script src="/_next/static/chunks/*.js">` tags in
+   `.next/server/app/<route>.html`; per-file raw bytes from `fs.stat`,
+   gzipped bytes from `zlib.gzipSync` (one node script, run this session).
+3. The eight routes without prerendered HTML in this build (`/`, `/login`,
+   `/register`, `/products`, `/products/[slug]`, `/orders/[id]`,
+   `/reset-password`, `/verify-email`) were measured from their
+   `page_client-reference-manifest.js` files instead: every chunk they
+   reference is already inside the shared floor, so their first-load JS
+   equals the floor (their per-interaction chunks load on demand, not at
+   first paint).
+
+**The shared floor — what every storefront route pays before a line of its own
+code:** 10 chunks = **625,459 B raw (610.8 KB) / 194,453 B gzipped (189.9 KB)**.
+That total includes the `noModule` polyfill chunk (`0cz1d0mv5g_q7.js`,
+112,594 B raw / 39,627 B gz) which evergreen browsers skip: **the
+modern-browser floor is 512,865 B raw (500.8 KB) / 154,826 B gzipped
+(151.2 KB)**. Call it **~190 KB gzipped with the legacy polyfill, ~151 KB
+without**. U-W9-T3's "194.8 KB floor" and this build's 194,453 B are the same
+floor measured by the same method. None of it is redesign code.
+
+**Measured per-route first-load JS, and the budget it sets** (gzipped;
+budget = measured + ~5 KB headroom; each figure from the commands above):
+
+| Route | Measured gz | Budget gz | What sits above the floor |
+|---|---|---|---|
+| `/`, `/contact`, `/login`, `/orders/[id]`, `/privacy`, `/products`, `/products/[slug]`, `/register`, `/reset-password`, `/returns`, `/shipping`, `/terms`, `/verify-email` | 194,453 B (189.9 KB) | ≤ 195 KB | the floor, exactly |
+| `/forgot-password`, `/forgot-username`, `/resend-verification` | 195,468 B (190.9 KB) | ≤ 195 KB | +1,015 B |
+| `/orders` | 196,642 B (192.0 KB) | ≤ 197 KB | +2,189 B |
+| `/track-order` | 197,092 B (192.5 KB) | ≤ 197 KB | +2,639 B |
+| `/cart` | 205,355 B (200.5 KB) | ≤ 205 KB | +10,902 B |
+| `/checkout` | 209,139 B (204.2 KB) | ≤ 210 KB | +14,686 B — the heaviest storefront route. **Razorpay's ~50 KB is NOT in this figure** (injected at the pay step only, below) |
+
+**Redesign increment cap — kept, not re-derived.** The redesign's own client
+code is still only the two View Transitions wrappers (~12 lines each,
+dynamically imported at the call site); U-W9-T3 measured the total redesign
+increment at ≤ 9.9 KB against a pre-redesign build. This DOC-ONLY task did not
+rebuild that baseline, so the cap is **kept at ≤ 10 KB gz per route over the
+floor**; the per-route budgets above are the enforceable ceiling until someone
+re-runs the two-build comparison.
 
 **The rule that makes the budget real:** the two View Transitions are the only new
 client code, they are **~12 lines each**, and they are imported **dynamically** at

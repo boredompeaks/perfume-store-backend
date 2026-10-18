@@ -19,8 +19,12 @@ export const metadata: Metadata = {
  * The return window is the API's number or no number (A-12.D.2,
  * getReturnWindow): when `GET /api/settings/` publishes a positive
  * `return_window_days` it renders in the fact matrix AND the short
- * version; when it does not, both ship without a figure. No day count
- * is typed in this file. Motion: none (P2, §5.7). Server component.
+ * version; when it does not, both ship without a figure. What the
+ * guard actually enforces: no RETURN-WINDOW count is typed in this
+ * file; the API window never falls back to a hardcoded number. The
+ * operational figures below (bank refund timing, damage-notice
+ * deadline) are copy, not the window. Motion: none (P2, §5.7).
+ * Server component.
  */
 
 const sections = [
