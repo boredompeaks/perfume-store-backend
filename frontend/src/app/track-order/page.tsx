@@ -1,32 +1,40 @@
 "use client";
 
 /**
- * /track-order — public shipment tracking (UI-UX-SPEC §5.6).
+ * /track-order — public shipment tracking (UI-UX-SPEC §5.6), dressed to
+ * the D1 screen (maison_ther_suivi_public_de_commande): a bronze
+ * registry eyebrow, serif display h1, one ledger-column form, then the
+ * lookup result below a hairline seam as a registry record.
  *
- * One centred column on bg-paper: h1, one form (order number + optional
- * guest token), then the parcels the API returns. The lookup is explicit —
- * nothing fetches without a submit — and the credential is never held in
- * React state or rendered back: the token field is uncontrolled and is
- * cleared the instant its value has been read into the request.
+ * The lookup contract is unchanged and is pinned by page.test.ts: the
+ * request fires only on explicit submit (`GET /api/shipping/track/
+ * {order_number}/` with `X-Guest-Order-Token` when a token was given),
+ * the credential never enters React state and the field is cleared the
+ * instant its value has been read, and a miss renders the backend's
+ * message VERBATIM in one panel. A 404 there is byte-identical for "no
+ * credential", "wrong token", "no such order", "someone else's order"
+ * and "no shipment yet" (_tracking_lookup_miss); any UI that told those
+ * cases apart would reopen the order-existence oracle the backend
+ * closed. A network failure is the only outcome with its own copy and
+ * a retry affordance.
  *
- * The miss is ONE box with the backend's message verbatim: a 404 there is
- * byte-identical for "no credential", "wrong token", "no such order",
- * "someone else's order" and "no shipment yet" (_tracking_lookup_miss), and
- * any UI that tried to tell those cases apart would reopen the order-
- * existence oracle the backend closed. A network failure is the only outcome
- * that gets its own copy and a "Try again" affordance.
+ * The result panel speaks the same vocabulary as the order detail
+ * page's ShipmentTracking (W12-T9): backend statuses humanised, events
+ * oldest-first in the API's append order with the latest emphasised,
+ * a waybill plate (select-all + copy), and the checkpoint rail. Where
+ * this page departs from the screen: the token field stays masked (the
+ * screen shows it in clear; it is a credential), the screen's
+ * "simulate not found" button is mockup chrome and does not ship, the
+ * staggered per-node timeline cascade is replaced by the one
+ * token-driven settle the result container already had, and the
+ * archival certification stamp is omitted (the claim would be
+ * fictional).
  *
- * Head tags: a "use client" page cannot export `metadata` (Next.js build
- * error — confirmed again in this wave), and the manual <title>/<meta>/<link>
- * tags this page used to render were SHADOWED: the root layout's default
- * title sat first in the document, so the browser (and a crawler) read
- * "Maison Aurel — Perfumes composed with restraint" as this route's title and
- * the site-default description as its meta — §8.1's /track-order row was not
- * actually conformed. The route's head tags now live on the server segment
- * layout (./layout.tsx), which merges over the root defaults, all four values
- * coming from the page registry (pages.ts) so this page, robots.txt and the
- * sitemap share one source: title "Track your order" (bare — §8.1 line 2010),
- * canonical /track-order, robots `noindex, follow`, OG cleared.
+ * Head tags live on the server segment layout (./layout.tsx): a
+ * "use client" page cannot export `metadata`, and the manual tags a
+ * client page renders are shadowed by the root layout's defaults.
+ * Title "Track your order", canonical /track-order, `noindex, follow`
+ * (§8.1; robots.txt + sitemap exclusion ride the same pages.ts row).
  */
 import { useState } from "react";
 import { inputClass } from "@/lib/ui";
@@ -78,62 +86,96 @@ function ParcelBlock({
   total: number;
 }) {
   const last = parcel.events.length - 1;
+  const [copied, setCopied] = useState(false);
+
+  // Convenience over the plate's select-all; the selection fallback stands
+  // when the clipboard API is unavailable (insecure context, denial).
+  const copyWaybill = async () => {
+    if (!navigator.clipboard) return;
+    try {
+      await navigator.clipboard.writeText(parcel.tracking_number);
+      setCopied(true);
+      setTimeout(() => setCopied(false), 1600);
+    } catch {
+      // select-all on the number still lets the customer copy by hand.
+    }
+  };
+
   return (
-    <article className="border border-hairline p-6">
-      {total > 1 && (
-        <p className="text-xs font-semibold uppercase tracking-widest text-ink-secondary">
-          Parcel {index + 1} of {total}
+    <article className="space-y-6">
+      <div>
+        <p className="text-eyebrow uppercase text-bronze">
+          {total > 1
+            ? `Order ${parcel.order_number} · Parcel ${index + 1} of ${total}`
+            : `Order ${parcel.order_number}`}
         </p>
-      )}
-      <div className="flex items-baseline justify-between gap-4">
-        <p className="font-display text-xl text-ink">
+        <h2 className="mt-2 font-display text-h2 tracking-tight">
+          {total > 1 ? `Parcel ${index + 1} of ${total}: ` : ""}
           {humanizeStatus(parcel.status)}
-        </p>
-        <p className="text-xs tabular-nums text-ink-secondary">
-          Order {parcel.order_number}
+        </h2>
+        <p className="mt-2 text-small text-ink-secondary">
+          Carrier: {parcel.carrier}
         </p>
       </div>
-      <dl className="mt-4 space-y-2 text-sm">
-        <div className="flex gap-2">
-          <dt className="text-ink-secondary">Carrier</dt>
-          <dd className="text-ink">{parcel.carrier}</dd>
-        </div>
-        <div className="flex gap-2">
-          <dt className="text-ink-secondary">Tracking number</dt>
-          <dd className="select-all text-sm font-semibold tabular-nums text-ink">
+
+      {/* Waybill plate: hairline frame, select-all tabular digits, copy. */}
+      <div className="flex flex-wrap items-center justify-between gap-3 border border-hairline px-4 py-3">
+        <p className="text-small">
+          <span className="uppercase text-ink-secondary">Waybill</span>{" "}
+          <span className="select-all text-label tabular-nums lining-nums text-ink">
             {parcel.tracking_number}
-          </dd>
+          </span>
+        </p>
+        <button
+          type="button"
+          onClick={copyWaybill}
+          className="border border-field-border px-3 py-1 text-label-sm uppercase text-ink-secondary transition-colors hover:border-ink hover:text-ink"
+        >
+          {copied ? "Copied" : "Copy"}
+        </button>
+      </div>
+
+      {/* The one bronze accent on this page: the arrival horizon. */}
+      {parcel.estimated_delivery && (
+        <div className="border-l-2 border-bronze py-1 pl-4">
+          <p className="text-eyebrow uppercase text-ink-secondary">
+            Estimated delivery
+          </p>
+          <p className="mt-1 text-body tabular-nums lining-nums text-ink">
+            {formatDate(parcel.estimated_delivery)}
+          </p>
         </div>
-        {parcel.estimated_delivery && (
-          <div className="flex gap-2">
-            <dt className="text-ink-secondary">Estimated delivery</dt>
-            <dd className="tabular-nums text-ink">
-              {formatDate(parcel.estimated_delivery)}
-            </dd>
-          </div>
-        )}
-      </dl>
+      )}
+
+      {/* Checkpoint rail, the order-detail vocabulary (W12-T9): the API's
+          append order is oldest-first, and the latest scan is emphasised. */}
       {parcel.events.length > 0 && (
-        <ol className="mt-6 space-y-4">
-          {parcel.events.map((event, i) => (
-            <li key={`${event.status}-${event.occurred_at}-${i}`} className="flex items-start gap-3">
-              <span
-                aria-hidden="true"
-                className={
-                  i === last
-                    ? "mt-1.5 size-2 shrink-0 rounded-full border border-bronze bg-bronze"
-                    : "mt-1.5 size-2 shrink-0 rounded-full border border-hairline"
-                }
-              />
-              <div>
-                <p className="text-sm text-ink">{humanizeStatus(event.status)}</p>
-                <p className="text-xs tabular-nums text-ink-secondary">
+        <div>
+          <div className="border-b border-hairline pb-2">
+            <h3 className="text-eyebrow uppercase text-ink">Checkpoints</h3>
+          </div>
+          <ol className="mt-4 space-y-6 border-l border-hairline pl-4">
+            {parcel.events.map((event, i) => (
+              <li
+                key={`${event.status}-${event.occurred_at}-${i}`}
+                className="flex flex-col gap-0.5 sm:flex-row sm:items-baseline sm:gap-4"
+              >
+                <span className="w-36 shrink-0 text-small tabular-nums lining-nums text-ink-secondary">
                   {formatInstant(event.occurred_at)}
-                </p>
-              </div>
-            </li>
-          ))}
-        </ol>
+                </span>
+                <span
+                  className={
+                    i === last
+                      ? "text-body font-medium text-ink"
+                      : "text-body text-ink-secondary"
+                  }
+                >
+                  {humanizeStatus(event.status)}
+                </span>
+              </li>
+            ))}
+          </ol>
+        </div>
       )}
     </article>
   );
@@ -181,17 +223,26 @@ export default function TrackOrderPage() {
     <>
       {/* Plain container, not <main>: the layout already renders the page's
           single <main id="main"> (layout.tsx) and every other page nests
-          inside it — a page-level <main> made this the only page with
-          landmark-within-landmark nesting. Same classes → same rendering. */}
-      <div className="mx-auto w-full max-w-[calc(var(--measure)_+_4rem)] px-4 py-16 sm:px-6">
-        <h1 className="font-display text-4xl tracking-tight">Track your order</h1>
-        <p className="mt-4 max-w-[var(--measure)] text-sm text-ink-secondary">
-          See where your parcel is. You need your order number and the order
-          token from your confirmation. Signed in? The token is optional.
+          inside it. max-w-2xl is the screen's ledger column (code.html
+          line 24), wider than the old measure-bound form. */}
+      <div className="mx-auto w-full max-w-2xl px-4 py-16 sm:px-6">
+        <p className="text-eyebrow uppercase text-bronze">
+          Public shipping registry
         </p>
-        <form onSubmit={onSubmit} className="mt-8 space-y-4" noValidate>
+        <h1 className="mt-3 font-display text-display tracking-tight">
+          Track your order
+        </h1>
+        <p className="mt-4 text-body text-ink-secondary">
+          See where your parcel is. You need your order number, plus the
+          order token from your confirmation if you checked out without an
+          account. Signed in? The token is optional.
+        </p>
+        <form onSubmit={onSubmit} className="mt-8 space-y-6" noValidate>
           <div>
-            <label htmlFor="track-order-number" className="mb-1 block text-sm">
+            <label
+              htmlFor="track-order-number"
+              className="mb-2 block text-label-sm uppercase text-ink-secondary"
+            >
               Order number
             </label>
             <input
@@ -207,9 +258,14 @@ export default function TrackOrderPage() {
             />
           </div>
           <div>
-            <label htmlFor="track-token" className="mb-1 block text-sm">
+            <label
+              htmlFor="track-token"
+              className="mb-2 block text-label-sm uppercase text-ink-secondary"
+            >
               Order token (optional)
             </label>
+            {/* Masked, unlike the screen's clear fixture: the token is a
+                credential (see docblock). Uncontrolled by design. */}
             <input
               id="track-token"
               name="track-token"
@@ -217,36 +273,38 @@ export default function TrackOrderPage() {
               autoComplete="off"
               className={`${inputClass} w-full`}
             />
-            <p className="mt-1 text-xs text-ink-secondary">
+            <p className="mt-2 text-small text-ink-secondary">
               Shown on your order confirmation. If you are signed in, you can
               leave this blank.
             </p>
           </div>
-          <button
-            type="submit"
-            disabled={state.kind === "pending" || !orderNumber.trim()}
-            className="w-full bg-ink px-6 py-3 text-sm text-paper transition-colors hover:bg-bronze disabled:opacity-60"
-          >
-            {state.kind === "pending" ? "Tracking…" : "Track order"}
-          </button>
+          <div className="pt-1">
+            <button
+              type="submit"
+              disabled={state.kind === "pending" || !orderNumber.trim()}
+              className="w-full bg-ink px-8 py-4 text-label uppercase text-paper transition-colors hover:bg-bronze disabled:opacity-60"
+            >
+              {state.kind === "pending" ? "Looking up…" : "Track order"}
+            </button>
+          </div>
         </form>
         <div aria-live="polite">
           {state.kind === "pending" && (
-            <p role="status" className="mt-8 text-sm text-ink-secondary">
+            <p role="status" className="mt-10 text-body text-ink-secondary">
               Looking up your parcel…
             </p>
           )}
           {state.kind === "miss" && (
             <div
               role="alert"
-              className="mt-8 border border-hairline p-6 text-sm text-ink"
+              className="mt-10 border border-hairline p-6 text-body text-ink"
             >
               {state.message}
             </div>
           )}
           {state.kind === "network" && (
-            <div role="alert" className="mt-8 border border-hairline p-6">
-              <p className="text-sm text-ink">
+            <div role="alert" className="mt-10 border border-hairline p-6">
+              <p className="text-body text-ink">
                 We could not reach the store. Check your connection and try
                 again.
               </p>
@@ -260,7 +318,7 @@ export default function TrackOrderPage() {
             </div>
           )}
           {state.kind === "found" && (
-            <div className="mt-8 space-y-6 transition-[opacity,transform] duration-(--motion-enter-dur) ease-(--motion-ease) starting:translate-y-2 starting:opacity-0">
+            <div className="mt-10 space-y-10 border-t border-hairline pt-10 transition-[opacity,transform] duration-(--motion-enter-dur) ease-(--motion-ease) starting:translate-y-2 starting:opacity-0">
               {state.shipments.map((parcel, i) => (
                 <ParcelBlock
                   key={`${parcel.order_number}-${parcel.tracking_number}-${i}`}
