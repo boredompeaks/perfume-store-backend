@@ -301,7 +301,7 @@ ORDER_NUMBER_ATTEMPTS = 5
 
 
 def _current_year():
-    """The order-number year bucket: the sequence restarts each January 1st
+    """The order-number year bucket: the prefix year changes each January 1st
     (R-8.4), so this is the only clock the format depends on."""
     return timezone.now().year
 
@@ -927,7 +927,7 @@ def guest_order_detail(request, order_number=None):
     identifies exactly one order, and the order number is an optional
     cross-check on top of it. A caller who has the token can always find the
     order; a caller who has only the order number cannot, because the number
-    is a guessable per-year sequence and is never the credential.
+    carries a random suffix and is never the credential.
 
     The failure is one answer for every miss - no token, a wrong token, an
     unknown number, or somebody else's number with a valid token - so the

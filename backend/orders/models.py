@@ -105,7 +105,7 @@ class Order(models.Model):
     # authority for generation (IntegrityError retry) and as the spec 8.3
     # "order number" index.
     order_number = models.CharField(
-        max_length=20,  # 15 for ORD-YYYY-NNNNNN + headroom for format drift
+        max_length=20,  # 17 for ORD-YYYY-XXXXXXXX + headroom for format drift
         null=True,
         blank=True,
         unique=True,
