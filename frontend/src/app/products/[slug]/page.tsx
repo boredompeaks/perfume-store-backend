@@ -4,6 +4,7 @@ import { notFound } from "next/navigation";
 import AddToCartButton from "@/components/AddToCartButton";
 import OlfactoryPyramid from "@/components/OlfactoryPyramid";
 import ProductImage from "@/components/ProductImage";
+import ProtocolTrio from "@/components/ProtocolTrio";
 import RestockForm from "@/components/RestockForm";
 import StickyPurchaseBar from "@/components/StickyPurchaseBar";
 import { ApiError } from "@/lib/api";
@@ -87,7 +88,10 @@ export default async function ProductPage({ params }: Props) {
   // structured pyramid (design screen "Olfactory Architecture") renders
   // only when the server publishes `notes` (U-W11-T6; contract gap logged
   // in BACKEND_REQUESTS.md) — with none published the section is absent
-  // rather than invented (the banned three-column grid in different clothes).
+  // rather than invented (the banned three-column grid in different
+  // clothes). U-W15-T18 repositions the prose itself into the screen's
+  // philosophy split (see the section below); `hasDescription` gates that
+  // section exactly as it once gated the notes band.
   const pyramidTiers = toOlfactoryTiers(product.notes);
 
   const hasDescription = product.description.trim().length > 0;
@@ -297,45 +301,102 @@ export default async function ProductPage({ params }: Props) {
       <OlfactoryPyramid tiers={pyramidTiers} />
 
       {/*
-        §5.2 items 5 and 7 — the notes prose and the still-life plate that
-        carries this page's one accent moment (P2); item 6's delivery line
-        now sits in the purchase panel above, next to the add-to-cart row.
-        Two `--measure` columns with a `--space-8` gutter (P1's
-        inside-section cap), so the band sits left under the bottle instead
-        of stretching: the prose is 36ch (§2.2.4) and the plate is
-        `--measure` wide (§5.2 item 7), which is exactly what "the story
-        image drifting as the notes beside it are read" (STITCH §2 row 3)
-        needs to sit beside.
+        §5.2 items 5 and 7 at the design screen's deferred slice
+        (U-W15-T18; screen block "EDITORIAL ESSENCE & SUPPORTING STILL
+        LIFE"). The description prose T6 carried in a plain notes band
+        repositions here, into the screen's asymmetric editorial split:
+        the narrow story measure left, the product's single real image
+        framed as the figure right (P4: no stock photography and no
+        invented still life — the bottle is the only image the store
+        owns; the screen's amber-resin photograph is mockup content).
+        The section is data-gated on the free-text field itself: with no
+        description it renders nothing at all, exactly like the pyramid
+        above (P5 / §12-G10), pinned in lib/pdp.test.ts.
 
-        Plate colour: §5.2 item 7 still names the retired bronze-soft tint,
-        but §2.1.1 dropped that token — hairline is its canonical plate and
-        the one the 4:5 product plate already ships (ProductCard.tsx:8
-        records the succession); referencing the retired name would fail the
-        colour-token guard in lib/ui.test.ts.
+        Plate colour: §5.2 item 7 still names the retired bronze-soft
+        tint, but §2.1.1 dropped that token — hairline is its canonical
+        plate and the one the 4:5 product plate already ships
+        (ProductCard.tsx records the succession); referencing the
+        retired name would fail the colour-token guard in lib/ui.test.ts.
       */}
-      <section className="mt-16 border-t border-hairline pt-8 md:mt-24 lg:mt-32 lg:grid lg:grid-cols-[var(--measure)_var(--measure)] lg:gap-8">
-        <div>
-          {hasDescription && (
-            <>
-              <h2 className="font-display text-h2">Fragrance notes</h2>
-              {/* §5.2 item 5's default: the description as prose at measure. */}
-              <p className="mt-6 max-w-(--measure) text-body-lg text-ink-secondary">
-                {product.description}
-              </p>
-            </>
-          )}
-        </div>
-
-        {hasDescription && (
-          <div className="story-drift relative mt-8 aspect-square max-w-(--measure) overflow-hidden bg-hairline lg:mt-0 lg:sticky lg:top-24 lg:self-start">
-            <ProductImage
-              src={product.image}
-              alt={product.name}
-              sizes="(min-width: 1024px) 36ch, 100vw"
-            />
+      {hasDescription && (
+        <section
+          aria-labelledby="pdp-philosophy-heading"
+          className="mt-16 border-t border-hairline pt-8 md:mt-24 lg:mt-32 lg:grid lg:grid-cols-12 lg:items-center lg:gap-12"
+        >
+          {/*
+            Story measure: eyebrow + heading + the product's own prose at
+            36ch (§2.2.4). The eyebrow reuses the spec's own name for this
+            content (§5.2 item 5, "Fragrance notes"); the screen's
+            formulation micro-label ("Notes du Formulateur • Grasse,
+            Automne") is product-specific mockup copy with no field behind
+            it, so it is omitted (P5).
+          */}
+          <div className="lg:col-span-5">
+            <p className="text-eyebrow uppercase text-bronze">
+              Fragrance notes
+            </p>
+            <h2
+              id="pdp-philosophy-heading"
+              className="mt-4 font-display text-h2"
+            >
+              The Philosophy of the Scent
+            </h2>
+            <p className="mt-6 max-w-(--measure) text-body-lg text-ink-secondary">
+              {product.description}
+            </p>
           </div>
-        )}
-      </section>
+
+          {/*
+            The figure: the same single product image, re-framed at the
+            screen's aspect and captioned with the product's own name and
+            volume (real data; the screen's "Fig. 04 — Matières
+            Premières" material caption has no field behind it, so the
+            caption slot ships the truth or nothing). It carries this
+            page's one accent moment (P2): the story drift, the only
+            element that keeps pace with the prose beside it (§7,
+            STITCH §2 row 3), moved here with the prose it serves.
+          */}
+          <div className="lg:col-span-7">
+            <div className="story-drift relative aspect-[4/3] overflow-hidden bg-hairline">
+              <ProductImage
+                src={product.image}
+                alt={product.name}
+                sizes="(min-width: 1024px) 58vw, 100vw"
+              />
+            </div>
+            <p className="mt-4 text-small text-ink-secondary">
+              {product.name} · {product.size} ml
+            </p>
+          </div>
+        </section>
+      )}
+
+      {/*
+        Wear & care trio (screen block "WEAR GUIDANCE & TECHNICAL
+        PROTOCOLS", U-W15-T18): layout from the screen, copy universal
+        fragrance-knowledge guidance only — see the component's own
+        header comment for the removed product-specific claims.
+      */}
+      <ProtocolTrio />
+
+      {/*
+        The screen's "GARANTIE D'INTÉGRITÉ" band is deliberately NOT
+        shipped (U-W15-T18). Every claim in its paragraph is a recorded
+        P5 removal (spec §0b.3 placeholder table and the §12.D removal
+        rows): carbon-neutral dispatch "across Europe" — the store ships
+        across India; the complimentary 2ml vial — no gift mechanism
+        exists on OrderItem; the 30-day window — the store's window is
+        settings-driven (A-12.D.2) and its number is already stated once,
+        in the §5.2 item 6 delivery line inside the purchase panel above;
+        wax wrapping and door-side pickup have no field and no policy
+        page behind either. What remains true is already said once; a
+        band repeating it would trade P2 (one accent, stillness) for a
+        second copy of the same sentence. The screen's "Conciergerie
+        Particulière" CTA names a service this store does not operate —
+        /contact renders the real, settings-driven channels and the footer
+        already links it, so no dead concierge control is rendered.
+      */}
 
       {/* §5.2 sticky bottom bar — xs/sm only; `lg:hidden` keeps it and the sticky purchase column from ever being two live buttons at once. */}
       {inStock && (

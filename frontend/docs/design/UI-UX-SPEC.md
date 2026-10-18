@@ -2331,24 +2331,44 @@ its ancestor, or the noise will not paint. **Do not nest these two techniques.**
 
 ### 10.4 Fonts
 
-Per §2.2: two self-hosted **variable** `woff2` files — **Playfair Display** (`ital`
+Per §2.2: two self-hosted **variable** families — **Playfair Display** (`ital`
 + `wght`) and **Plus Jakarta Sans** (`wght`) — `subsets: ["latin"]`,
-`display: "swap"`, metric-adjusted fallbacks, preloaded on every route because both
-are used in `layout.tsx`. **This replaces the Fraunces + Source Sans 3 figures
-below, which are void.**
+`display: "swap"`, metric-adjusted fallbacks, loaded by `next/font/google`
+in `layout.tsx`. **This replaces the Fraunces + Source Sans 3 figures an
+earlier draft carried, which are void.** The "unmeasured (A-31)" table this
+section used to carry is also void: the numbers below are measured on this
+tree.
 
-| | Family | Axes | Payload |
-|---|---|---|---|
-| Display | Playfair Display | `wght` 400–900, `ital` | **unmeasured** (A-31) |
-| Body/UI | Plus Jakarta Sans | `wght` 200–800 | **unmeasured** (A-31) |
-| **Total** | | | **not measured; carried as an estimate only** |
+**Measured 2026-10-18 on `ui/t2 @ f36255c`, fresh `cd frontend && npm run
+build` (exit 0):**
 
-**The honest state of this figure.** I have no build and therefore no measured
-`woff2` payload. The previous spec carried **35–55 KB gz each (~70–110 KB total)**
-for variable latin subsets; Playfair and Plus Jakarta are of comparable class, so
-that is the order of magnitude — **but it is an estimate and it is now labelled as
-one rather than restated as a number.** Fonts are a **separate budget from JS** and
-do not count against 120 KB.
+| Figure | Value | How it was measured |
+|---|---|---|
+| `woff2` files emitted | **12** | `Get-ChildItem .next\static\media\*.woff2` after the build |
+| On-disk total | **243,728 B** | `(... \| Measure-Object Length -Sum).Sum` over those 12 files |
+| Preloaded | **2 files = 77,348 B** — Playfair normal 38,460 B + Playfair italic 38,888 B | the two filenames carry next/font's `-s.p.` marker; `Select-String .next\server\app\terms.html 'as="font"'` → exactly 2 matches, both `-s.p.` files |
+| Jakarta latin, not preloaded | 27,272 B | `preload: false` on Jakarta in `layout.tsx` — the lever below, applied |
+| `@font-face` rules | 14 (12 woff2 + 2 metric-adjusted `local()` fallback faces) | regex over the production stylesheet `.next/static/chunks/*.css` |
+
+The 12 files are all referenced, none orphaned: `next/font` emits one
+`@font-face` per unicode-range block per family/style (latin, latin-ext,
+vietnamese, cyrillic), and a browser fetches only the ranges the page's
+glyphs need. An English page needs the three latin faces — 77,348 B
+preloaded + Jakarta's 27,272 B on swap ≈ **104,620 B on the wire**. The
+other 9 files (139,108 B) sit in the deploy payload and cost nothing at
+runtime unless a glyph outside latin demands them.
+
+**The lever, as applied.** §10.4's rule: if the on-disk total exceeds
+~110 KB, de-prioritise Plus Jakarta with `preload: false` and keep the
+Playfair headline preloaded. The total is 243,728 B — 2.2× the threshold —
+so `layout.tsx` carries `preload: false` on Jakarta, whose metric-adjusted
+fallback (`src: local(Arial)` + size-adjust/ascent/descent overrides, in
+the emitted `@font-face`) holds CLS near 0 while the body face swaps in.
+The Playfair pair stays preloaded on every route: both are used in
+`layout.tsx`, and the display face is the nearest thing the type system has
+to an LCP-adjacent paint.
+
+Fonts are a **separate budget from JS** and do not count against §10.2.
 
 **What must not be adopted from the refs.** All 17 designs load fonts from
 `fonts.googleapis.com` and a **Material Symbols webfont** from the same origin.
@@ -2356,12 +2376,6 @@ Neither is permitted: `font-src 'self'` in the CSP (`next.config.ts:24`) forbids
 them, and a render-blocking third-party stylesheet is a §10.2 budget failure on
 every route. **No `preconnect`** is added, because after `next/font` there is no
 third-party font request to preconnect to.
-
-**The measured decision when a build exists:** inspect
-`_next/static/media/*.woff2`. If the total exceeds ~110 KB, the lever is
-`preload: false` on Plus Jakarta with a `swap` fallback — protecting the Playfair
-headline — **not** a smaller typeface and **not** a third family. Record the
-number here when it exists.
 
 ### 10.5 The CSP is a performance control
 
