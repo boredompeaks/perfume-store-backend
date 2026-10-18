@@ -37,6 +37,28 @@ net/console 6 · taste 7). Report: `frontend/test-results/gate-u-baseline/REPORT
 | U0-15 | PARITY | P2 | /products/[slug] | Backend placeholders rendered as content ("Fragrance notes: None", `image:null` → grey letter panels) | `step-2_pdp_oud_1280.png` | OPEN |
 | U0-16 | TASTE | P3 | /shipping /cart /checkout | Three conflicting delivery-cost sentences | copy diff | OPEN |
 
+---
+
+## Run GATE-U-1 — deployed storefront test.boredompeaks.me (cutover #1, merge 4c7b205) — 2026-10-18
+**Rating: overall 4/10** (pristine 8 · price 9 · cart 1 · checkout-auth 5 · net/console 2 · taste 7).
+Delta vs U-0: 6→4 — UI craft up (D2 wall, ARIA listbox, danger-token errors), live service down
+(mock-origin incident on browser/h3 path, missing NEXT_PUBLIC_SITE_URL, logout endpoint 404,
+legal-notice product photo). Report: `frontend/test-results/gate-u-1/REPORT.md` (24 screenshots).
+**Strike-off EVIDENCE for plan-end compliance pass** (not yet struck): U0-01 FIXED · 02 FIXED ·
+03 NT · 04 PARTIAL · 05 FIXED · 06 STILL · 07 FIXED · 08 PARTIAL · 09 PARTIAL · 10 STILL(worse) ·
+11 FIXED · 12 STILL · 13 STILL · 14 FIXED · 15 PARTIAL · 16 NT. Blocked steps =
+BLOCKED-INCIDENT (browser API → `404 {"detail":"mock"}`, no CORS; same URLs WinHTTP 200 REAL+CORS).
+
+| ID | Tag | Sev | Page | Critique | Evidence | Status |
+|---|---|---|---|---|---|---|
+| U1-01 | BUG | P1 | api (all) | Live API serves mock origin to browsers (h3): 14/14 in-browser calls 404 `{"detail":"mock"}` no-CORS in 4–5ms; WinHTTP same URLs 200 REAL+CORS 4/4; refresh canned eternal JWT — cart/login/orders dead for browser users | REPORT.md §4 probe loops 01:56–02:11Z; cf-ray a4c3f2bff86d002d-BOM | OPEN |
+| U1-02 | BUG | P1 | deploy | NEXT_PUBLIC_SITE_URL missing: og:url/sitemap/JSON-LD emit http://localhost:3000 in live HTML; bundle falls back to localhost | live /orders head probe; chunk 1f0atqo5wzp0y.js | OPEN |
+| U1-03 | BUG | P1 | /orders | Tab observed autonomously navigating to http://localhost:3000/orders ×2 (~30s idle; post-Sign-out); dead end for real shoppers; trigger not isolated in deployed chunks | run log 01:50Z/02:06Z | OPEN |
+| U1-04 | BUG | P2 | auth/header | POST /api/accounts/logout/ → 404 (endpoint absent; HttpOnly refresh never revoked though auth.tsx assumes revocation); header kept "Sign out" until reload | network idx 39 | OPEN |
+| U1-05 | TASTE | P1 | /, products, PDP | Product photo /media/products/6651.jpg is a scanned municipal demolition notice rendered as hero image; live catalog = this 1 product | gate-u-1 products/pdp/home screenshots | OPEN |
+| U1-06 | BUG | P2 | /login | Failed sign-in renders raw backend detail verbatim ("mock") in role=alert — technical strings leak to shoppers | post-submit DOM 02:16Z | OPEN |
+| U1-07 | PERF | P3 | cart/checkout/orders | Pre-W12 live state noted (W12 shipped on spec-ui, not yet deployed) — recorded, not a defect | cart-1280-error-state.png | OPEN (noted) |
+
 Run-block template for future runs:
 
 ```
