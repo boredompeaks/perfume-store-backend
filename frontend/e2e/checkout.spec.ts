@@ -1,27 +1,42 @@
 import { expect, test, type Page } from "@playwright/test";
+import {
+  API,
+  CUSTOMER,
+  E2ECHECK10,
+  ORDER_NUMBER,
+  RAZORPAY_LIVE,
+  RAZORPAY_SKIP_REASON,
+  STAFF,
+  apiLogin,
+  couponPreview,
+  fetchLatestOrder,
+  fetchProduct,
+  formatINR,
+  loginCustomer,
+  type ApiOrder,
+} from "./helpers";
 
-const API = "http://localhost:8000";
-const CUSTOMER = { username: "e2e_customer", password: "e2e-Customer-9" };
-const STAFF = { username: "e2e_staff", password: "e2e-Staff-9" };
+/**
+ * E2E-4 alignment. Two honesty rules bind this file:
+ *
+ * 1. MONEY IS DERIVED, NEVER LITERAL. The WP0 specs assumed ~₹6–7k products
+ *    (₹14,000/₹11,800 orders, a ₹1,200 coupon) that drifted from the seeded
+ *    catalogue (marj = ₹2,000). Every expected figure is now computed from
+ *    (a) the product the test itself fetches from the API and (b) the
+ *    server's own coupon-preview / checkout responses — so seed drift can
+ *    never stale the spec, while a UI that renders the wrong number still
+ *    fails. No assertion here is vacuous: the reconciliation below is
+ *    price × qty − server discount + server shipping = server total.
+ *
+ * 2. THE IN-WIDGET PAYMENT IS ENV-GATED (§A-9.2 / §A-12-G8). Driving
+ *    Razorpay's live test-mode checkout needs network, a working test
+ *    account and backend Razorpay keys, so the payment legs live in a
+ *    describe group skipped unless RAZORPAY_TEST=1 — with a visible skip
+ *    reason. The pre-payment flow (coupon → ?next= login → address →
+ *    review → order creation) runs unconditionally.
+ */
 
 type PaymentCall = { url: string; razorpayOrderId?: string; keyId?: string };
-
-async function apiLogin(page: Page, creds: { username: string; password: string }) {
-  const res = await page.request.post(`${API}/api/accounts/login/`, {
-    data: creds,
-  });
-  expect(res.ok()).toBeTruthy();
-  return (await res.json()) as { access: string; refresh: string };
-}
-
-/** Establishes the Django session cookie + JWT so the app is fully authed. */
-async function loginCustomer(page: Page) {
-  await page.request.get(`${API}/api/cart/`);
-  const { refresh } = await apiLogin(page, CUSTOMER);
-  await page.addInitScript(({ token }) => {
-    localStorage.setItem("aurel.refresh", token);
-  }, { token: refresh });
-}
 
 async function trackPaymentCalls(page: Page): Promise<PaymentCall[]> {
   const calls: PaymentCall[] = [];
@@ -70,31 +85,86 @@ async function fillAddress(page: Page) {
   await page.getByLabel("Pincode", { exact: true }).fill("400001");
 }
 
-async function createOrderAndOpenPay(page: Page) {
-  await page.getByTestId("address-submit").click();
+/**
+ * Review → order creation, capturing the checkout response — the server's
+ * own order body (totals, coupon, order_number). Every money expectation
+ * after this point derives from THAT response, never from a literal (E2E-4).
+ */
+async function createOrderViaUi(page: Page): Promise<ApiOrder> {
+  const checkoutRes = page.waitForResponse(
+    (res) =>
+      res.url().endsWith("/api/orders/checkout/") &&
+      res.request().method() === "POST",
+    { timeout: 30_000 },
+  );
   await page.getByTestId("create-order").click();
-  await page.getByTestId("pay-button").click();
+  const res = await checkoutRes;
+  expect(res.status()).toBe(201);
+  return (await res.json()) as ApiOrder;
 }
 
-/** Waits for the Razorpay widget and clears the contact sheet if shown.
- *  All interaction is focus/keyboard-based: the widget's stack overlay
- *  intercepts pointer events nondeterministically, but focus() bypasses it. */
-async function openWidgetReady(page: Page) {
-  const widget = page.frameLocator("iframe");
-  await widget
-    .getByText("Payment Options")
-    .waitFor({ state: "visible", timeout: 30_000 });
+/**
+ * Applies the coupon through the cart UI, then reads the same server preview
+ * the UI renders its numbers from. Returns the preview so downstream
+ * expectations can derive from it. `merchandise` is the catalogue total the
+ * test computed from the product it fetched (price × qty).
+ */
+async function applyCouponDerived(page: Page, merchandise: number) {
+  await page.goto("/cart");
+  await page.getByLabel("Coupon code").fill(E2ECHECK10);
+  await page.getByRole("button", { name: "Apply" }).click();
+  await expect(page.getByText(`${E2ECHECK10} applied`)).toBeVisible();
 
-  // Contact sheet — left alone: it doesn't block the card form (its Continue
-  // stays enabled; verified live).Attempting to satisfy it re-activates its
-  // blocking overlay.
-  return widget;
+  const preview = await couponPreview(page, E2ECHECK10);
+  // Non-vacuous server-truth checks: the preview's subtotal IS the catalogue
+  // price the test fetched; the preview is closed arithmetic; and the coupon
+  // actually discounts something — an expired or zeroed coupon renders
+  // ₹0.00, the exact failure mode the E2E-1 run hit.
+  expect(Number(preview.subtotal)).toBe(merchandise);
+  expect(Number(preview.final_total)).toBe(
+    Number(preview.subtotal) - Number(preview.discount),
+  );
+  expect(Number(preview.discount)).toBeGreaterThan(0);
+
+  // The cart form must render exactly these server numbers (via the app's
+  // own formatter).
+  await expect(
+    page.getByText(`Discount: −${formatINR(preview.discount)}`),
+  ).toBeVisible();
+  await expect(
+    page.getByText(`Total after coupon: ${formatINR(preview.final_total)}`),
+  ).toBeVisible();
+  return preview;
+}
+
+/** Cart CTA → the ?next= login contract → back on /checkout, signed in. */
+async function loginViaCheckoutCta(page: Page) {
+  await page.getByRole("link", { name: "Sign in to checkout" }).click();
+  await expect(page).toHaveURL(/\/login\?next=(%2F|\/)checkout/);
+  await page.getByLabel("Username").fill(CUSTOMER.username);
+  await page.getByLabel("Password").fill(CUSTOMER.password);
+  await page.getByRole("button", { name: "Sign in" }).click();
+  await expect(page).toHaveURL(/\/checkout$/);
+}
+
+/**
+ * The reconciliation every created order must satisfy: merchandise (the
+ * catalogue price the test fetched × qty) − the server discount + the
+ * server-priced shipping equals the server total, and the customer-facing
+ * identifier is an ORD-YYYY-NNNNNN order_number (§5.5).
+ */
+function expectOrderMoney(order: ApiOrder, merchandise: number) {
+  expect(order.order_number).toMatch(ORDER_NUMBER);
+  expect(Number(order.total_amount)).toBe(
+    merchandise - Number(order.discount_amount) + Number(order.shipping_amount),
+  );
 }
 
 /** Pays inside the real widget via a test-mode wallet. Wallet flows use the
  *  mock Success/Failure page and avoid the card-contact verification that
  *  hard-blocks the card route under automation (verified live:
- *  "The contact field is required."). */
+ *  "The contact field is required."). RAZORPAY_TEST=1 only — the callers
+ *  below sit inside the gated describe. */
 async function payViaWallet(
   page: Page,
   opts: { abandonAtOtp?: boolean } = {},
@@ -202,90 +272,27 @@ async function payViaWallet(
   return widget;
 }
 
-test.describe.serial("checkout → payment (Razorpay test mode)", () => {
-  let stockBefore: number;
+test.describe.serial("checkout → payment (payment legs gated on RAZORPAY_TEST=1, E2E-4)", () => {
+  test("PII: saved checkout details prefill on return; forget removes them", async ({ page }) => {
+    const prod = await fetchProduct(page, "marj");
 
-  test("happy path: coupon → login via ?next= → order → test-mode payment → confirmed", async ({ page }) => {
-    const prod = await (await page.request.get(`${API}/api/products/marj/`)).json();
-    stockBefore = Number(prod.stock);
-
-    // Deliberately anonymous: the session cookie comes from the browser's
-    // own cart interactions, and the ?next= login contract is exercised for real.
+    await loginCustomer(page);
     await addMarjToCart(page);
-
-    // Cart: coupon preview (server truth).
-    await page.goto("/cart");
-    await page.getByLabel("Coupon code").fill("E2ECHECK10");
-    await page.getByRole("button", { name: "Apply" }).click();
-    await expect(page.getByText("E2ECHECK10 applied")).toBeVisible();
-    await expect(page.getByText(/Discount: −₹200\.00/)).toBeVisible();
-    await expect(page.getByText(/Total after coupon: ₹1,800\.00/)).toBeVisible();
-
-    // Cart CTA → login → must land back on /checkout (the ?next= contract).
-    await page.getByRole("link", { name: "Sign in to checkout" }).click();
-    await expect(page).toHaveURL(/\/login\?next=(%2F|\/)checkout/);
-    await page.getByLabel("Username").fill(CUSTOMER.username);
-    await page.getByLabel("Password").fill(CUSTOMER.password);
-    await page.getByRole("button", { name: "Sign in" }).click();
-    await expect(page).toHaveURL(/\/checkout$/);
-
-    // Address form: PII disclosure visible at the point of first save.
+    await fillAddress(page);
     await expect(page.getByTestId("pii-disclosure")).toBeVisible();
     await expect(page.getByText(/saved on this device only/i)).toBeVisible();
-    await fillAddress(page);
-
-    // Review → order creation (server truth total).
     await page.getByTestId("address-submit").click();
-    await expect(page.getByText(/Subtotal ₹2,000\.00/)).toBeVisible();
-    await expect(page.getByText(/coupon E2ECHECK10/)).toBeVisible();
-    await page.getByTestId("create-order").click();
-    await expect(page.getByTestId("pay-button")).toHaveText(/Pay ₹1,800\.00/);
 
-    // Real Razorpay test-mode payment.
-    const calls = await trackPaymentCalls(page);
-    await page.getByTestId("pay-button").click();
-    await expect(
-      page.getByText("Complete the payment in the secure window."),
-    ).toBeVisible();
-    await payViaWallet(page);
+    // The details persist the moment a working order exists (CheckoutView's
+    // saveShipping on order creation) — no payment needed, so this PII
+    // contract runs without RAZORPAY_TEST.
+    const created = await createOrderViaUi(page);
+    expect(created.status).toBe("pending");
+    expect(Number(created.discount_amount)).toBe(0); // no coupon in this flow
+    expectOrderMoney(created, Number(prod.price));
 
-    // Verify → confirmation landing.
-    await expect(page).toHaveURL(/\/orders\/\d+\?payment=success/, { timeout: 40_000 });
-    await expect(page.getByTestId("payment-success-banner")).toBeVisible();
-    await expect(page.getByText("Confirmed").first()).toBeVisible();
-
-    // Backend truth: order confirmed with server-computed money.
-    const { access } = await apiLogin(page, CUSTOMER);
-    const ordersRes = await page.request.get(`${API}/api/orders/`, {
-      headers: { Authorization: `Bearer ${access}` },
-    });
-    const orders = (await ordersRes.json()) as {
-      id: number;
-      status: string;
-      total_amount: string;
-      discount_amount: string;
-      coupon: string | null;
-    }[];
-    const order = orders[0];
-    expect(order.status).toBe("confirmed");
-    expect(order.total_amount).toBe("1800.00");
-    expect(order.discount_amount).toBe("200.00");
-    expect(order.coupon).toBe("E2ECHECK10");
-
-    // Stock decremented exactly once; cart cleaned.
-    const prodAfter = await (await page.request.get(`${API}/api/products/marj/`)).json();
-    expect(Number(prodAfter.stock)).toBe(stockBefore - 1);
-    const cart = await (await page.request.get(`${API}/api/cart/`)).json();
-    expect(cart.items).toHaveLength(0);
-
-    // Payment gateway used the TEST key (no real money involved).
-    expect(calls.length).toBeGreaterThanOrEqual(1);
-    expect(calls[0].keyId).toMatch(/^rzp_test_/);
-
-    // PII: second visit must prefill with the visible note + forget control.
-    // The cart was emptied by the successful payment, so add an item again
-    // to reach the address form.
-    await addMarjToCart(page);
+    // Second visit: /checkout remounts at the address step with the saved
+    // details prefilled, plus the visible note and the forget control.
     await page.goto("/checkout");
     await expect(
       page.getByText("Prefilled from details saved on this device."),
@@ -299,110 +306,215 @@ test.describe.serial("checkout → payment (Razorpay test mode)", () => {
     await expect(page.getByText("Saved details were removed.")).toBeVisible();
   });
 
-  test("abandoned payment → resume from order detail → fresh idempotent payment/ call", async ({ page }) => {
-    await loginCustomer(page);
+  test("pre-payment: coupon → login via ?next= → address → order creation (server money)", async ({ page }) => {
+    const prod = await fetchProduct(page, "marj");
+    // One flacon added below — the merchandise total is the catalogue price
+    // the test itself read, never a literal (E2E-4).
+    const merchandise = Number(prod.price);
+
+    // Deliberately anonymous: the session cookie comes from the browser's
+    // own cart interactions, and the ?next= login contract is exercised for real.
     await addMarjToCart(page);
+
+    // Cart: coupon preview — UI figures derived from the server preview.
+    const preview = await applyCouponDerived(page, merchandise);
+    await loginViaCheckoutCta(page);
+
+    // Address form: PII disclosure visible at the point of first save.
+    await expect(page.getByTestId("pii-disclosure")).toBeVisible();
+    await expect(page.getByText(/saved on this device only/i)).toBeVisible();
     await fillAddress(page);
 
-    const calls = await trackPaymentCalls(page);
+    // Review step: client subtotal (server cart prices) + coupon echo.
     await page.getByTestId("address-submit").click();
-    await page.getByTestId("create-order").click();
-    await page.getByTestId("pay-button").click();
-    // Widget is open at the contact/OTP stage — the user navigates away
-    // (refresh/navigation destroys the widget; the order stays pending).
-    await page
-      .getByText(/Enter mobile/i)
-      .first()
-      .waitFor({ state: "visible", timeout: 30_000 })
-      .catch(() => {});
-    await page.goto("/orders");
-
-    // Resume: open the pending order and complete the payment there.
-    // §5.5: the list renders `Order #{order_number}` (ORD-YYYY-NNNNNN), not the
-    // sequential id — the old `/Order #\d+/` can never match that copy.
-    await page
-      .getByRole("link", { name: /Order #ORD-\d{4}-\d+/ })
-      .first()
-      .click();
-    await expect(page.getByTestId("resume-payment-panel")).toBeVisible();
-    await page.getByTestId("resume-payment").click();
     await expect(
-      page.getByText("Complete the payment in the secure window."),
+      page.getByText(`Subtotal ${formatINR(merchandise)} · coupon ${E2ECHECK10}`),
     ).toBeVisible();
-    await payViaWallet(page);
 
-    // Two payment/ calls for the SAME order — same razorpay_order_id.
-    const paymentCalls = calls.filter((c) =>
-      c.url.endsWith("/api/orders/payment/"),
+    // Order creation — server truth reconciles against the catalogue price
+    // the test fetched: price × qty − discount + shipping (E2E-4).
+    const created = await createOrderViaUi(page);
+    expect(created.status).toBe("pending");
+    expect(created.coupon).toBe(E2ECHECK10);
+    expect(Number(created.discount_amount)).toBe(Number(preview.discount));
+    expectOrderMoney(created, merchandise);
+    await expect(page.getByTestId("pay-button")).toHaveText(
+      `Pay ${formatINR(created.total_amount)}`,
     );
-    expect(paymentCalls.length).toBe(2);
-    expect(paymentCalls[1].razorpayOrderId).toBe(paymentCalls[0].razorpayOrderId);
-    expect(paymentCalls[0].razorpayOrderId).toBeTruthy();
-
-    // The resumed session completes → confirmed.
-    await expect(page).toHaveURL(/\/orders\/\d+\?payment=success/, { timeout: 40_000 });
-    await expect(page.getByTestId("payment-success-banner")).toBeVisible();
   });
 
-  test("409 captured-but-unfulfillable → dead end, no retry path exists", async ({ page }) => {
-    const prod = await (await page.request.get(`${API}/api/products/marj/`)).json();
-    const originalStock = Number(prod.stock);
+  // ---------------------------------------------------------------------
+  // Razorpay test-mode payment legs (E2E-4 / §A-9.2 / §A-12-G8). Everything
+  // in this group drives (or depends on) a REAL live-widget payment: the
+  // checkout widget iframe, the payment/ + payment/verify/ round-trips,
+  // stock decrement at verify, the captured-but-unfulfillable 409. Without
+  // RAZORPAY_TEST=1 the whole group skips (before any browser or backend
+  // work) with the visible reason below; the pre-payment tests still run.
+  // ---------------------------------------------------------------------
+  test.describe("payment legs (RAZORPAY_TEST=1)", () => {
+    test.skip(!RAZORPAY_LIVE, RAZORPAY_SKIP_REASON);
 
-    await loginCustomer(page);
-    await addMarjToCart(page);
-    await fillAddress(page);
+    test("happy path: coupon → login → test-mode payment → confirmed", async ({ page }) => {
+      const prod = await fetchProduct(page, "marj");
+      const merchandise = Number(prod.price);
+      const stockBefore = prod.stock;
 
-    const calls = await trackPaymentCalls(page);
-    await page.getByTestId("address-submit").click();
-    await page.getByTestId("create-order").click();
+      await addMarjToCart(page);
+      const preview = await applyCouponDerived(page, merchandise);
+      await loginViaCheckoutCta(page);
+      await fillAddress(page);
+      await page.getByTestId("address-submit").click();
+      const created = await createOrderViaUi(page);
+      expect(created.coupon).toBe(E2ECHECK10);
+      expect(Number(created.discount_amount)).toBe(Number(preview.discount));
+      expectOrderMoney(created, merchandise);
 
-    // Force the oversell condition between order creation and payment:
-    // staff zeroes the stock while the customer's order is pending.
-    const staff = await apiLogin(page, STAFF);
-    await page.request.patch(`${API}/api/products/marj/`, {
-      headers: { Authorization: `Bearer ${staff.access}` },
-      data: { stock: 0 },
+      // Real Razorpay test-mode payment.
+      const calls = await trackPaymentCalls(page);
+      await page.getByTestId("pay-button").click();
+      await expect(
+        page.getByText("Complete the payment in the secure window."),
+      ).toBeVisible();
+      await payViaWallet(page);
+
+      // Verify → confirmation landing.
+      await expect(page).toHaveURL(/\/orders\/\d+\?payment=success/, { timeout: 40_000 });
+      await expect(page.getByTestId("payment-success-banner")).toBeVisible();
+      await expect(page.getByText("Confirmed").first()).toBeVisible();
+
+      // Backend truth: THIS order confirmed with the same server money the
+      // pre-payment leg reconciled — derived, never a literal (E2E-4).
+      const { access } = await apiLogin(page, CUSTOMER);
+      const paid = await fetchLatestOrder(page, access);
+      expect(paid.id).toBe(created.id);
+      expect(paid.status).toBe("confirmed");
+      expect(paid.total_amount).toBe(created.total_amount);
+      expect(paid.discount_amount).toBe(created.discount_amount);
+      expect(paid.coupon).toBe(E2ECHECK10);
+
+      // Stock decremented exactly once; cart cleaned.
+      const prodAfter = await fetchProduct(page, "marj");
+      expect(prodAfter.stock).toBe(stockBefore - 1);
+      const cart = await (await page.request.get(`${API}/api/cart/`)).json();
+      expect(cart.items).toHaveLength(0);
+
+      // Payment gateway used the TEST key (no real money involved).
+      expect(calls.length).toBeGreaterThanOrEqual(1);
+      expect(calls[0].keyId).toMatch(/^rzp_test_/);
     });
 
-    await page.getByTestId("pay-button").click();
-    await payViaWallet(page);
+    test("abandoned payment → resume from order detail → fresh idempotent payment/ call", async ({ page }) => {
+      await loginCustomer(page);
+      await addMarjToCart(page);
+      await fillAddress(page);
 
-    // Money captured, stock unavailable → 409 → the dead end.
-    await expect(page.getByTestId("captured-dead-end")).toBeVisible({ timeout: 40_000 });
-    await expect(page.getByText(/Payment received — order not completed\./)).toBeVisible();
-    await expect(page.getByText(/contact support/i)).toBeVisible();
-    await expect(page.getByText(/Do not retry this payment/)).toBeVisible();
+      const calls = await trackPaymentCalls(page);
+      await page.getByTestId("address-submit").click();
+      const created = await createOrderViaUi(page);
+      expect(created.status).toBe("pending");
+      await page.getByTestId("pay-button").click();
+      // Widget is open at the contact/OTP stage — the user navigates away
+      // (refresh/navigation destroys the widget; the order stays pending).
+      await page
+        .getByText(/Enter mobile/i)
+        .first()
+        .waitFor({ state: "visible", timeout: 30_000 })
+        .catch(() => {});
+      await page.goto("/orders");
 
-    // Structural dead end: no retry affordance, and no further gateway calls.
-    await expect(page.getByTestId("retry-payment")).toHaveCount(0);
-    // Exactly one payment/ and one verify/ (the 409 one) — zero retries.
-    const paymentCalls = calls.filter((c) => c.url.endsWith("/api/orders/payment/"));
-    const verifyCalls = calls.filter((c) => c.url.endsWith("/api/orders/payment/verify/"));
-    expect(paymentCalls.length).toBe(1);
-    expect(verifyCalls.length).toBe(1);
-    await page.waitForTimeout(3_000);
-    expect(calls.length).toBe(2);
+      // Resume: open the pending order by its customer-facing reference —
+      // §5.5 renders `Order #{order_number}` (ORD-YYYY-NNNNNN), not the
+      // sequential id, so the old `/Order #\d+/` can never match that copy.
+      await page
+        .getByRole("link", { name: `Order #${created.order_number}` })
+        .first()
+        .click();
+      await expect(page.getByTestId("resume-payment-panel")).toBeVisible();
+      await page.getByTestId("resume-payment").click();
+      await expect(
+        page.getByText("Complete the payment in the secure window."),
+      ).toBeVisible();
+      await payViaWallet(page);
 
-    // Backend truth: order still pending, stock NOT decremented.
-    const { access } = await apiLogin(page, CUSTOMER);
-    const orders = (await (
-      await page.request.get(`${API}/api/orders/`, {
-        headers: { Authorization: `Bearer ${access}` },
-      })
-    ).json()) as { status: string }[];
-    expect(orders[0].status).toBe("pending");
-    const prodAfter = await (await page.request.get(`${API}/api/products/marj/`)).json();
-    expect(Number(prodAfter.stock)).toBe(0);
+      // Two payment/ calls for the SAME order — same razorpay_order_id.
+      const paymentCalls = calls.filter((c) =>
+        c.url.endsWith("/api/orders/payment/"),
+      );
+      expect(paymentCalls.length).toBe(2);
+      expect(paymentCalls[1].razorpayOrderId).toBe(paymentCalls[0].razorpayOrderId);
+      expect(paymentCalls[0].razorpayOrderId).toBeTruthy();
 
-    // Restore stock for cleanup (the test-mode capture is not undone — V-03).
-    await page.request.patch(`${API}/api/products/marj/`, {
-      headers: { Authorization: `Bearer ${staff.access}` },
-      data: { stock: originalStock },
+      // The resumed session completes → confirmed.
+      await expect(page).toHaveURL(/\/orders\/\d+\?payment=success/, { timeout: 40_000 });
+      await expect(page.getByTestId("payment-success-banner")).toBeVisible();
     });
 
-    await page.screenshot({
-      path: "e2e/artifacts/checkout-409-dead-end.png",
-      fullPage: true,
+    test("409 captured-but-unfulfillable → dead end, no retry path exists", async ({ page }) => {
+      const prod = await fetchProduct(page, "marj");
+      const originalStock = prod.stock;
+
+      await loginCustomer(page);
+      await addMarjToCart(page);
+      await fillAddress(page);
+
+      const calls = await trackPaymentCalls(page);
+      await page.getByTestId("address-submit").click();
+      const created = await createOrderViaUi(page);
+      expect(created.status).toBe("pending");
+
+      // Force the oversell condition between order creation and payment:
+      // staff zeroes the stock while the customer's order is pending.
+      //
+      // KNOWN ASPIRATIONAL SEAM (E2E-4 residual, documented not hidden):
+      // since SPEC-6-02 `stock` is read-only on REST product updates — this
+      // PATCH is accepted but does not mutate stock — so the 409 cannot
+      // trigger until the backend exposes an e2e-reachable inventory adjust
+      // (logged in BACKEND_REQUESTS.md). The test stays gated on
+      // RAZORPAY_TEST=1 and fails loudly in a full run rather than faking a
+      // green it cannot prove.
+      const staff = await apiLogin(page, STAFF, "staff");
+      await page.request.patch(`${API}/api/products/marj/`, {
+        headers: { Authorization: `Bearer ${staff.access}` },
+        data: { stock: 0 },
+      });
+
+      await page.getByTestId("pay-button").click();
+      await payViaWallet(page);
+
+      // Money captured, stock unavailable → 409 → the dead end.
+      await expect(page.getByTestId("captured-dead-end")).toBeVisible({ timeout: 40_000 });
+      await expect(page.getByText(/Payment received — order not completed\./)).toBeVisible();
+      await expect(page.getByText(/contact support/i)).toBeVisible();
+      await expect(page.getByText(/Do not retry this payment/)).toBeVisible();
+
+      // Structural dead end: no retry affordance, and no further gateway calls.
+      await expect(page.getByTestId("retry-payment")).toHaveCount(0);
+      // Exactly one payment/ and one verify/ (the 409 one) — zero retries.
+      const paymentCalls = calls.filter((c) => c.url.endsWith("/api/orders/payment/"));
+      const verifyCalls = calls.filter((c) => c.url.endsWith("/api/orders/payment/verify/"));
+      expect(paymentCalls.length).toBe(1);
+      expect(verifyCalls.length).toBe(1);
+      await page.waitForTimeout(3_000);
+      expect(calls.length).toBe(2);
+
+      // Backend truth: order still pending, stock NOT decremented by verify.
+      const { access } = await apiLogin(page, CUSTOMER);
+      const latest = await fetchLatestOrder(page, access);
+      expect(latest.id).toBe(created.id);
+      expect(latest.status).toBe("pending");
+      const prodAfter = await fetchProduct(page, "marj");
+      expect(prodAfter.stock).toBe(0);
+
+      // Restore stock for cleanup (the test-mode capture is not undone — V-03).
+      await page.request.patch(`${API}/api/products/marj/`, {
+        headers: { Authorization: `Bearer ${staff.access}` },
+        data: { stock: originalStock },
+      });
+
+      await page.screenshot({
+        path: "e2e/artifacts/checkout-409-dead-end.png",
+        fullPage: true,
+      });
     });
   });
 });
