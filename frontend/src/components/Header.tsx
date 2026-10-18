@@ -107,18 +107,26 @@ export default function Header() {
           </Link>
 
           <div className="flex items-center gap-4 text-sm">
+            {/* OBS-1 (U-W13-T10): the account links used `hidden inline-flex`,
+                but Tailwind v4 emits `.inline-flex` AFTER `.hidden`, so the
+                pair computed to inline-flex at EVERY viewport — at 390 the
+                always-visible "Orders" link overlapped the centred wordmark.
+                The display utility now rides the `sm:` variant alone:
+                display:none below 640, inline-flex (44px floor intact) at
+                sm and up. Desktop geometry is unchanged — the links were
+                already rendered there. */}
             {status === "authenticated" ? (
               <>
                 <Link
                   href="/orders"
-                  className="hidden inline-flex min-h-11 items-center transition-colors hover:text-bronze sm:inline"
+                  className="hidden sm:inline-flex min-h-11 items-center transition-colors hover:text-bronze"
                 >
                   Orders
                 </Link>
                 <button
                   type="button"
                   onClick={logout}
-                  className="hidden inline-flex min-h-11 items-center text-ink-secondary transition-colors hover:text-bronze sm:inline"
+                  className="hidden sm:inline-flex min-h-11 items-center text-ink-secondary transition-colors hover:text-bronze"
                 >
                   Sign out
                 </button>
@@ -126,7 +134,7 @@ export default function Header() {
             ) : status === "anonymous" ? (
               <Link
                 href="/login"
-                className="hidden inline-flex min-h-11 items-center transition-colors hover:text-bronze sm:inline"
+                className="hidden sm:inline-flex min-h-11 items-center transition-colors hover:text-bronze"
               >
                 Sign in
               </Link>
