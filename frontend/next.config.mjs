@@ -5,7 +5,7 @@ const { protocol, hostname, port } = new URL(apiOrigin);
 // Razorpay Checkout loads from checkout.razorpay.com and talks to
 // api.razorpay.com; the payment modal is a frame. Without these hosts the
 // SPA reports "Could not load the payment gateway" (script blocked by CSP).
-const scriptSrc = ["'self'", "'unsafe-inline'", "https://checkout.razorpay.com"];
+const scriptSrc = ["'self'", "'unsafe-inline'", "https://checkout.razorpay.com", "https://static.cloudflareinsights.com"];
 const connectSrc = [
   "'self'",
   apiOrigin,
@@ -36,6 +36,7 @@ const securityHeaders = [
   { key: "Permissions-Policy", value: "camera=(), microphone=(), geolocation=()" },
 ];
 const nextConfig = {
+  poweredByHeader: false,
   async headers() { return [{ source: "/:path*", headers: securityHeaders }]; },
   images: {
     remotePatterns: [{ protocol: protocol.replace(":", ""), hostname, ...(port ? { port } : {}) }],
