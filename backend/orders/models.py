@@ -78,7 +78,7 @@ class Order(models.Model):
 
     [R-8.4]/[R-8.5] Identifier-exposure strategy: the sequential ``id`` stays
     the internal key (URL/admin primary key, no URL changes); ``order_number``
-    (ORD-YYYY-NNNNNN, per-year sequence) is the customer-facing reference the
+    (ORD-YYYY-XXXXXXXX, random suffix) is the customer-facing reference the
     serializer exposes read-only. Guest checkout (SPEC-1-B04) keys on
     ``order_number`` plus the ``guest_token`` below -- the pk never leaves
     server-side routing.

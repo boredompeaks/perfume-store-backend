@@ -20,6 +20,7 @@ around a real checkout session (spec route rule 3) will decide their fate.
 """
 
 import logging
+import secrets
 from datetime import timedelta
 from decimal import Decimal
 
@@ -305,29 +306,15 @@ def _current_year():
     return timezone.now().year
 
 
-def _next_order_sequence(year):
-    """Next sequence for the year's ORD-YYYY- prefix: the highest committed
-    number's sequence plus one. Fixed-width zero padding keeps lexicographic
-    order equal to numeric order. This lookup is check-then-act and
-    deliberately NOT the concurrency authority -- two connections can read
-    the same max before either commits -- the unique constraint on
-    Order.order_number is, and the caller retries on the IntegrityError
-    (conventions.md:17)."""
-    prefix = f"ORD-{year}-"
-    latest = (
-        Order.objects.filter(order_number__startswith=prefix)
-        .order_by("-order_number")
-        .values_list("order_number", flat=True)
-        .first()
-    )
-    if latest is None:
-        return 1
-    return int(latest.rsplit("-", 1)[1]) + 1
-
-
 def _generate_order_number():
+    """Mint a customer-facing order number with a random component.
+
+    The year bucket keeps the display stable (ORD-YYYY-XXXXXXXX); the random
+    suffix comes from ``secrets`` (never ``random``) so it is not
+    predictable. The unique constraint on ``Order.order_number`` remains the
+    concurrency authority and the caller retries on IntegrityError."""
     year = _current_year()
-    return f"ORD-{year}-{_next_order_sequence(year):06d}"
+    return f"ORD-{year}-{secrets.token_hex(4).upper()}"
 
 
 def _mint_order_reservations(order, lines, user):

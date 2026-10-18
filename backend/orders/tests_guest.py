@@ -499,7 +499,8 @@ class AuthenticatedCheckoutRegressionTests(GuestRefusalTestBase):
         )
 
         self.assertEqual(res.status_code, 201, res.data)
-        self.assertEqual(res.data["order_number"], f"ORD-{timezone.now().year}-000001")
+        import re
+        self.assertRegex(res.data["order_number"], rf"ORD-{timezone.now().year}-[0-9A-F]{{8}}")
 
     def test_an_account_submission_ignores_a_body_supplied_guest_email(self):
         self.make_user("buyer")

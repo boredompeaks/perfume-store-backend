@@ -76,21 +76,22 @@ class OrderNumberFormatTests(OrderNumberTestBase):
 
         self.assertEqual(res.status_code, 201, res.data)
         order = Order.objects.get(id=res.data["id"])
-        match = re.fullmatch(r"ORD-(\d{4})-(\d{6})", order.order_number)
+        match = re.fullmatch(r"ORD-(\d{4})-([0-9A-F]{8})", order.order_number)
         self.assertIsNotNone(match, order.order_number)
         self.assertEqual(int(match.group(1)), timezone.now().year)
         # the customer-facing reference is exposed at creation time
         self.assertEqual(res.data["order_number"], order.order_number)
 
-    def test_sequence_increments_within_a_year(self):
+    def test_order_numbers_are_unique_within_a_year(self):
         first_res = self.checkout()
         second_res = self.second_buyer_checkout()
 
         year = timezone.now().year
         first = Order.objects.get(id=first_res.data["id"])
         second = Order.objects.get(id=second_res.data["id"])
-        self.assertEqual(first.order_number, f"ORD-{year}-000001")
-        self.assertEqual(second.order_number, f"ORD-{year}-000002")
+        self.assertRegex(first.order_number, rf"ORD-{year}-[0-9A-F]{{8}}")
+        self.assertRegex(second.order_number, rf"ORD-{year}-[0-9A-F]{{8}}")
+        self.assertNotEqual(first.order_number, second.order_number)
 
     def test_sequence_restarts_each_year(self):
         """The sequence bucket is the creation year: next year's first order
@@ -109,7 +110,7 @@ class OrderNumberFormatTests(OrderNumberTestBase):
 
         self.assertEqual(res.status_code, 201, res.data)
         second = Order.objects.get(id=res.data["id"])
-        self.assertEqual(second.order_number, f"ORD-{next_year}-000001")
+        self.assertRegex(second.order_number, rf"ORD-{next_year}-[0-9A-F]{{8}}")
         self.assertEqual(Order.objects.count(), 2)
 
 

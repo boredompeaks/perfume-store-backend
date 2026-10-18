@@ -855,7 +855,8 @@ class ShippingCostAtomicityTests(ApiTestCase):
         AuditEvent.record = original
         res = self.checkout()
         self.assertEqual(res.status_code, 201, res.data)
-        self.assertEqual(res.data["order_number"], "ORD-2026-000001")
+        import re
+        self.assertRegex(res.data["order_number"], r"ORD-2026-[0-9A-F]{8}")
         self.assertEqual(Order.objects.get().total_amount, Decimal("1048.99"))
 
 
