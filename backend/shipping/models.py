@@ -360,6 +360,26 @@ class Shipment(models.Model):
         default="",
     )
 
+    # [SPEC-B-02] The provider whose tracking page the customer follows.
+    # NULLABLE so a parcel can exist before an operator links it, and PROTECT
+    # rather than SET_NULL because the link is part of what an already-shipped
+    # customer was given: a careless delete must be REFUSED, not silently turn
+    # a live tracking page into a dead end. `is_active` on the provider is the
+    # supported retirement path - the same answer ``ShippingMethod`` gives
+    # above - so retiring one hides it from future picks without rewriting the
+    # history of a parcel already on its way. `carrier` stays for back-compat
+    # and as the human display name; this FK is what makes ``tracking_url``
+    # resolvable rather than a string the storefront has to build itself.
+    provider = models.ForeignKey(
+        # A string reference, not an import: ``ShippingProvider`` is declared
+        # later in this module, and Django resolves an app-local label lazily.
+        "ShippingProvider",
+        on_delete=models.PROTECT,
+        null=True,
+        blank=True,
+        related_name="shipments",
+    )
+
     status = models.CharField(
         max_length=20,
         choices=Status.choices,
@@ -400,6 +420,30 @@ class Shipment(models.Model):
         # export and LogEntry render per row, and an order can be a guest row
         # whose own __str__ already has to be null-safe (SPEC-1-B04).
         return f"Shipment {self.tracking_number} ({self.status})"
+
+    @property
+    def tracking_url(self):
+        """The customer's tracking page for this parcel, or ``None``.
+
+        Renders ``ShippingProvider.tracking_url_template`` with this parcel's
+        own ``tracking_number``. The three absences a caller must not have to
+        guard are answered with ``None`` rather than a broken string: no
+        provider linked, a provider whose template is empty, and a parcel with
+        no reference. No network call is made - rendering a URL is not fetching
+        it, and this module has no business reaching the carrier; the browser
+        the customer already has follows the link.
+
+        ``str.replace`` rather than ``str.format`` on purpose: the template is
+        operator-entered text, and a ``{`` the format mini-language would read
+        as a field is URL text here. Only the one documented placeholder is
+        substituted, so every other character survives exactly as typed.
+        """
+        if not self.provider_id or not self.tracking_number:
+            return None
+        template = self.provider.tracking_url_template
+        if not template:
+            return None
+        return template.replace("{tracking_number}", self.tracking_number)
 
     def save(self, *args, **kwargs):
         """Refuse a value wider than the column, then write.

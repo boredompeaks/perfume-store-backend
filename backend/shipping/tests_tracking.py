@@ -39,6 +39,7 @@ Every probe here answers one of the questions the task is graded on:
   update (``MoneyIsUntouchedTests``).
 """
 
+import json
 from datetime import timedelta
 from decimal import Decimal
 from unittest.mock import patch
@@ -66,7 +67,7 @@ from common.testing import ApiTestCase
 from orders.models import Order
 from orders.views import GUEST_TOKEN_HEADER
 from orders.views import GUEST_TOKEN_MAX_LENGTH as ORDERS_TOKEN_MAX_LENGTH
-from shipping.models import Shipment, ShipmentEvent, ShippingMethod
+from shipping.models import Shipment, ShipmentEvent, ShippingMethod, ShippingProvider
 from shipping.serializers import ShipmentTrackingSerializer
 from shipping.views import (
     GUEST_ORDER_TOKEN_HEADER,
@@ -318,7 +319,9 @@ class SerializerContractTests(ShipmentTestCase):
                 "order_number",
                 "status",
                 "carrier",
+                "provider",
                 "tracking_number",
+                "tracking_url",
                 "estimated_delivery",
                 "events",
             },
@@ -326,7 +329,7 @@ class SerializerContractTests(ShipmentTestCase):
         for absent in ("internal_note", "address", "pincode", "city", "full_name"):
             self.assertNotIn(absent, body)
 
-    def test_the_parcel_body_keeps_its_six_keys_in_a_split_response(self):
+    def test_the_parcel_body_keeps_its_eight_keys_in_a_split_response(self):
         # The envelope changed for split shipments; the parcel body did not.
         # This is what keeps every key's sensitivity unchanged by the nesting.
         self._shipment(self.order, "TRK-SPLIT-C")
@@ -342,7 +345,9 @@ class SerializerContractTests(ShipmentTestCase):
                         "order_number",
                         "status",
                         "carrier",
+                        "provider",
                         "tracking_number",
+                        "tracking_url",
                         "estimated_delivery",
                         "events",
                     },
@@ -1569,3 +1574,223 @@ class WidthGateTests(ShipmentTestCase):
         self.assertEqual(res.status_code, 200)
         self.shipment.refresh_from_db()
         self.assertEqual(self.shipment.tracking_number, "TRK-401")
+
+
+# ==================================
+# [SPEC-B-02] The provider link and the tracking URL it renders
+# ==================================
+
+
+class ProviderTrackingUrlTests(ShipmentTestCase):
+    """A parcel is tied to a provider so the customer can follow it THERE.
+
+    The link is rendered from the provider's own template and this parcel's own
+    reference, so the storefront never has to know a carrier's URL shape and
+    the backend never has to reach the carrier.
+    """
+
+    def provider(self, template="https://track.delhivery.com/{tracking_number}"):
+        return ShippingProvider.objects.create(
+            name="Delhivery",
+            code="delhivery",
+            tracking_url_template=template,
+        )
+
+    def linked(self, provider=None):
+        self.shipment.provider = provider or self.provider()
+        self.shipment.save(update_fields=["provider"])
+        return self.shipment
+
+    def test_the_tracking_url_renders_the_providers_template(self):
+        self.linked()
+        self.assertEqual(
+            self.shipment.tracking_url,
+            "https://track.delhivery.com/TRK-401",
+        )
+
+    def test_an_unlinked_parcel_has_no_tracking_url(self):
+        self.assertIsNone(self.shipment.tracking_url)
+
+    def test_a_provider_with_no_template_has_no_tracking_url(self):
+        self.linked(self.provider(template=""))
+        self.assertIsNone(self.shipment.tracking_url)
+
+    def test_a_parcel_with_no_reference_has_no_tracking_url(self):
+        # Every parcel the admin mints carries a reference; the guard is for
+        # the empty string a direct ORM write could still leave behind. The
+        # provider link is real here, so only the reference is absent.
+        self.linked()
+        self.shipment.tracking_number = ""
+        self.assertIsNone(self.shipment.tracking_url)
+
+    def test_a_template_without_the_placeholder_is_left_verbatim(self):
+        self.linked(self.provider(template="https://track.example.com/status"))
+        self.assertEqual(
+            self.shipment.tracking_url,
+            "https://track.example.com/status",
+        )
+
+    def test_a_brace_in_the_template_is_url_text_not_a_format_field(self):
+        # str.replace, not str.format: an operator's brace is part of the URL,
+        # and a format string here would raise on the ``{lang}`` query token.
+        self.linked(
+            self.provider(template="https://t.example/{tracking_number}?lang={lang}")
+        )
+        self.assertEqual(
+            self.shipment.tracking_url,
+            "https://t.example/TRK-401?lang={lang}",
+        )
+
+    def test_rendering_the_link_makes_no_network_call(self):
+        # Rendering a URL is not fetching it: the browser the customer already
+        # has follows the link, and this property stays pure string work.
+        self.linked()
+        with patch("urllib.request.urlopen") as urlopen:
+            self.assertEqual(
+                self.shipment.tracking_url,
+                "https://track.delhivery.com/TRK-401",
+            )
+        urlopen.assert_not_called()
+
+
+class ProviderLinkDeletionTests(ShipmentTestCase):
+    """The FK is PROTECT, and that is the recorded decision, not an accident.
+
+    A tracking link is part of what an already-shipped customer was given, so a
+    careless provider delete must be REFUSED rather than quietly orphan the
+    link. ``is_active`` on the provider is the supported retirement path.
+    """
+
+    def test_a_new_parcel_may_have_no_provider(self):
+        self.assertIsNone(self.shipment.provider_id)
+
+    def test_the_provider_field_is_a_nullable_protected_fk(self):
+        field = Shipment._meta.get_field("provider")
+        self.assertIs(field.remote_field.on_delete, models.PROTECT)
+        self.assertTrue(field.null)
+        self.assertTrue(field.blank)
+        self.assertEqual(field.remote_field.related_name, "shipments")
+
+    def test_deleting_a_linked_provider_is_refused(self):
+        provider = ShippingProvider.objects.create(name="Delhivery", code="delhivery")
+        self.shipment.provider = provider
+        self.shipment.save(update_fields=["provider"])
+
+        with self.assertRaises(models.ProtectedError):
+            provider.delete()
+
+        self.shipment.refresh_from_db()
+        self.assertEqual(self.shipment.provider_id, provider.pk)
+
+    def test_deleting_a_provider_no_parcel_points_at_is_still_allowed(self):
+        # PROTECT refuses the delete that would orphan a parcel, and only that
+        # one: a provider nothing references stays removable.
+        provider = ShippingProvider.objects.create(name="Unused", code="unused")
+
+        provider.delete()
+
+        self.assertFalse(ShippingProvider.objects.filter(code="unused").exists())
+
+
+class TrackingLinkSerializerTests(ShipmentTestCase):
+    """[SPEC-B-02] The storefront gets the link, never the provider's insides."""
+
+    def linked_body(self, template="https://track.delhivery.com/{tracking_number}"):
+        provider = ShippingProvider.objects.create(
+            name="Delhivery",
+            code="delhivery",
+            tracking_url_template=template,
+        )
+        self.shipment.provider = provider
+        self.shipment.save(update_fields=["provider"])
+        return ShipmentTrackingSerializer(self.shipment).data
+
+    def test_the_customer_body_carries_the_provider_code_and_the_link(self):
+        body = self.linked_body()
+        self.assertEqual(body["provider"], "delhivery")
+        self.assertEqual(
+            body["tracking_url"],
+            "https://track.delhivery.com/TRK-401",
+        )
+
+    def test_an_unlinked_parcel_reports_null_not_a_placeholder(self):
+        body = ShipmentTrackingSerializer(self.shipment).data
+        self.assertIsNone(body["provider"])
+        self.assertIsNone(body["tracking_url"])
+
+    def test_the_body_exposes_no_provider_internal_and_no_row_id(self):
+        rendered = json.dumps(self.linked_body())
+        for hidden in ("tracking_url_template", "is_active", "internal_note"):
+            with self.subTest(hidden=hidden):
+                self.assertNotIn(hidden, rendered)
+        # The provider is named by its code, never by a row id.
+        self.assertNotIn('"id"', rendered)
+
+    def test_the_two_new_fields_are_read_only(self):
+        fields = ShipmentTrackingSerializer().fields
+        for name in ("provider", "tracking_url"):
+            with self.subTest(field=name):
+                self.assertTrue(fields[name].read_only)
+
+
+class ProviderLinkAdminTests(ShipmentTestCase):
+    """[SPEC-B-02] The operator links a parcel to an order and a provider, and
+    a parcel is discoverable afterwards."""
+
+    def test_the_provider_is_an_autocomplete_field(self):
+        model_admin = admin.site._registry[Shipment]
+        self.assertIn("provider", model_admin.autocomplete_fields)
+
+    def test_the_admin_links_a_new_parcel_to_its_order_and_provider(self):
+        provider = ShippingProvider.objects.create(name="Delhivery", code="delhivery")
+        self.client.force_login(self.chief)
+
+        res = self.staff_post(
+            f"{CHANGELIST}add/",
+            order=self.guest_order.pk,
+            tracking_number="TRK-LINK-1",
+            carrier="Delhivery",
+            provider=provider.pk,
+            status=Shipment.Status.LABEL_CREATED,
+        )
+
+        self.assertEqual(res.status_code, 302, getattr(res, "context", None))
+        created = Shipment.objects.get(tracking_number="TRK-LINK-1")
+        self.assertEqual(created.order_id, self.guest_order.pk)
+        self.assertEqual(created.provider_id, provider.pk)
+
+    def test_the_provider_autocomplete_endpoint_answers_for_a_capability_holder(self):
+        ShippingProvider.objects.create(name="Delhivery", code="delhivery")
+        self.client.force_login(self.chief)
+
+        res = self.client.get(
+            "/admin/autocomplete/",
+            {
+                "app_label": "shipping",
+                "model_name": "shipment",
+                "field_name": "provider",
+                "term": "del",
+            },
+        )
+
+        self.assertEqual(res.status_code, 200, res.content[:400])
+        self.assertIn("Delhivery", res.content.decode())
+
+    def test_a_parcel_is_discoverable_by_its_reference_and_its_order(self):
+        self.client.force_login(self.chief)
+
+        for term in ("TRK-401", self.order.order_number):
+            with self.subTest(term=term):
+                res = self.client.get(CHANGELIST, {"q": term})
+                self.assertEqual(res.status_code, 200)
+                self.assertContains(res, "TRK-401")
+
+    def test_a_parcel_is_discoverable_by_its_providers_name(self):
+        provider = ShippingProvider.objects.create(name="Delhivery", code="delhivery")
+        self.shipment.provider = provider
+        self.shipment.save(update_fields=["provider"])
+        self.client.force_login(self.chief)
+
+        res = self.client.get(CHANGELIST, {"q": "Delhivery"})
+
+        self.assertContains(res, "TRK-401")

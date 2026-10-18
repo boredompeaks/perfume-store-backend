@@ -69,13 +69,36 @@ class ShipmentTrackingSerializer(serializers.ModelSerializer):
     which is why hoisting any of them to the envelope would have changed what
     the body says.
 
+    [SPEC-B-02] ``provider`` (its slug code) and ``tracking_url`` are the
+    customer-appropriate half of the provider link: the storefront renders the
+    link it is handed and the customer follows it on the provider's own site.
+    The provider's template and its active flag are not exposed - the rendered
+    URL is the customer's whole use for them.
+
     Every field is read-only, which is the structural half of "a client can
     never post a tracking number": a ModelSerializer is writable by default,
     so this one says so explicitly rather than relying on the view being GET.
     """
 
     order_number = serializers.CharField(source="order.order_number", read_only=True)
+    provider = serializers.SerializerMethodField()
+    tracking_url = serializers.CharField(read_only=True, allow_null=True)
     events = ShipmentEventSerializer(many=True, read_only=True)
+
+    def get_provider(self, obj):
+        """The provider's slug code, or ``None`` when the parcel is unlinked.
+
+        A code, not the row id: ``ShippingOptionSerializer`` already names a
+        delivery method by its slug, and an id here would be a second, staler
+        identifier for the same idea. The provider's own columns (its template,
+        its active flag) are staff configuration and stay out of the customer
+        body - ``tracking_url`` below is the customer's whole use for them.
+
+        A method field rather than ``source="provider.code"`` because DRF
+        resolves a dotted source eagerly and would raise ``AttributeError`` on
+        the None an unlinked parcel legitimately holds.
+        """
+        return obj.provider.code if obj.provider_id else None
 
     class Meta:
         model = Shipment
@@ -83,7 +106,9 @@ class ShipmentTrackingSerializer(serializers.ModelSerializer):
             "order_number",
             "status",
             "carrier",
+            "provider",
             "tracking_number",
+            "tracking_url",
             "estimated_delivery",
             "events",
         ]
