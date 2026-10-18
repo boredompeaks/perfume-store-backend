@@ -89,11 +89,14 @@ export default function RegisterForm() {
 
   if (registered) {
     return (
-      <div className="border border-hairline p-8" role="status" aria-live="polite">
-        <p className="text-ink">{registered.message}</p>
+      <div
+        className="border border-hairline bg-surface p-8"
+        role="status" aria-live="polite"
+      >
+        <p className="text-sm text-ink">{registered.message}</p>
         <Link
           href="/resend-verification"
-          className="mt-6 inline-block bg-ink px-6 py-3 text-sm text-paper transition-colors hover:bg-bronze"
+          className="mt-6 inline-block w-full bg-ink px-8 py-4 text-center text-label uppercase text-paper transition-colors hover:bg-bronze"
         >
           Resend verification email
         </Link>
@@ -106,15 +109,22 @@ export default function RegisterForm() {
   const hasPasswordError = Boolean(fieldErrors.password?.length);
 
   return (
-    <form onSubmit={onSubmit} className="space-y-4" noValidate>
+    <form onSubmit={onSubmit} className="space-y-5" noValidate>
       <div>
-        <label htmlFor="reg-username" className="mb-1 block text-sm">
+        {/* W13-T10 (design parity): uppercase `--text-label-sm` labels
+            outside the field, per the create-account screen; colour is
+            `--color-ink-secondary`, never bronze (one accent moment). */}
+        <label
+          htmlFor="reg-username"
+          className="mb-2 block text-label-sm uppercase text-ink-secondary"
+        >
           Username
         </label>
         <input
           id="reg-username"
           type="text"
           autoComplete="username"
+          placeholder="e.g. c_baudelaire"
           value={username}
           onChange={(e) => setUsername(e.target.value)}
           aria-invalid={hasUsernameError ? true : undefined}
@@ -147,13 +157,17 @@ export default function RegisterForm() {
       </div>
 
       <div>
-        <label htmlFor="reg-email" className="mb-1 block text-sm">
-          Email
+        <label
+          htmlFor="reg-email"
+          className="mb-2 block text-label-sm uppercase text-ink-secondary"
+        >
+          Email address
         </label>
         <input
           id="reg-email"
           type="email"
           autoComplete="email"
+          placeholder="name@domain.com"
           value={email}
           onChange={(e) => setEmail(e.target.value)}
           aria-invalid={hasEmailError ? true : undefined}
@@ -173,7 +187,10 @@ export default function RegisterForm() {
       </div>
 
       <div>
-        <label htmlFor="reg-password" className="mb-1 block text-sm">
+        <label
+          htmlFor="reg-password"
+          className="mb-2 block text-label-sm uppercase text-ink-secondary"
+        >
           Password
         </label>
         <input
@@ -212,17 +229,44 @@ export default function RegisterForm() {
       <button
         type="submit"
         disabled={pending}
-        className="w-full bg-ink px-6 py-3 text-sm text-paper transition-colors hover:bg-bronze disabled:opacity-60"
+        className="w-full bg-ink px-8 py-4 text-label uppercase text-paper transition-colors hover:bg-bronze disabled:opacity-60"
       >
         {pending ? "Creating account…" : "Create account"}
       </button>
 
-      <p className="text-sm text-ink-secondary">
-        Already have an account?{" "}
-        <Link href="/login" className="underline underline-offset-4 transition-colors hover:text-bronze">
-          Sign in
+      {/* W13-T10 (design parity): centred underlined stack under a hairline
+          rule, per the create-account screen. "Already have an account?"
+          keeps the shipped honest English ("Already registered?" on the
+          screen); the resend and staff lines follow the screen's stack. */}
+      <nav
+        aria-label="Account access"
+        className="flex flex-col items-center gap-3 border-t border-hairline pt-6 text-center text-sm text-ink-secondary"
+      >
+        <p>
+          Already have an account?{" "}
+          <Link
+            href="/login"
+            className="underline underline-offset-4 transition-colors hover:text-bronze"
+          >
+            Sign in
+          </Link>
+        </p>
+        <Link
+          href="/resend-verification"
+          className="underline underline-offset-4 transition-colors hover:text-bronze"
+        >
+          Resend verification email
         </Link>
-      </p>
+        <p>
+          Staff member?{" "}
+          <Link
+            href="/staff/login"
+            className="underline underline-offset-4 transition-colors hover:text-bronze"
+          >
+            Staff sign in
+          </Link>
+        </p>
+      </nav>
     </form>
   );
 }
