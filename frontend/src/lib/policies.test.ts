@@ -200,8 +200,10 @@ describe("shippingPolicy", () => {
 /**
  * /returns (D1 screens, U-W13-T12): the API window renders in the top
  * fact matrix AND the short-version prose when `GET /api/settings/`
- * publishes one, and the page ships NO day count when it does not —
- * A-12.D.2's single-source rule extended to the new fact-matrix surface.
+ * publishes one, and the page ships NO return-window count when it does
+ * not: A-12.D.2's single-source rule extended to the new fact-matrix
+ * surface. (Operational copy, i.e. refund timing and the damage-notice
+ * deadline, carries its own figures by design and is not the window.)
  */
 describe("returns page window claims (A-12.D.2)", () => {
   async function renderReturns() {
@@ -219,7 +221,7 @@ describe("returns page window claims (A-12.D.2)", () => {
     expect(text.split("14 days from delivery").length - 1).toBe(1);
   });
 
-  it("with no published window: no day count anywhere on the page", async () => {
+  it("with no published window: no return-window count typed into the page", async () => {
     stubFetch(async () => jsonResponse({ support_email: "" }));
 
     const text = await renderReturns();
