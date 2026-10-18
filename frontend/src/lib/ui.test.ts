@@ -552,6 +552,20 @@ describe("7.5 target sizes", () => {
     expect(cleaned).not.toContain("p-2 md:hidden");
     expect(cleaned).not.toContain("p-1 transition-colors");
   });
+
+  it("gates the account links with a breakpoint display, never hidden+inline-flex (OBS-1)", () => {
+    // U-W13-T10: Tailwind v4 emits `.inline-flex` AFTER `.hidden`, so
+    // `hidden inline-flex` computes to inline-flex at EVERY viewport — the
+    // always-visible "Orders" link overlapped the centred wordmark at 390.
+    // The display utility must ride the `sm:` variant alone; `hidden` keeps
+    // a free cascade slot at the base layer.
+    const cleaned = stripComments(headerSource);
+    expect(cleaned).not.toContain("hidden inline-flex");
+    expect(
+      (cleaned.match(/hidden sm:inline-flex/g) ?? []).length,
+      "header: account links are display-gated to sm (OBS-1)",
+    ).toBeGreaterThanOrEqual(3);
+  });
 });
 
 /**
