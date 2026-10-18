@@ -8,5 +8,6 @@
   "services": [{ "binding": "WORKER_SELF_REFERENCE", "service": "perfume-storefront" }],
   "images": { "binding": "IMAGES" },
   "routes": [{ "pattern": "test.boredompeaks.me", "custom_domain": true, "zone_name": "boredompeaks.me" }],
-  "observability": { "enabled": true }
+  "observability": { "enabled": true },
+  "vars": { "NEXT_PUBLIC_SITE_URL": "https://test.boredompeaks.me" }
 }

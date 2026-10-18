@@ -64,7 +64,7 @@ export const templateConfig = {
     description:
       env("NEXT_PUBLIC_SITE_DESCRIPTION") ||
       "Maison Aurel is a small perfume house. Explore eau de parfum, browse new arrivals, and order with secure checkout.",
-    url: env("NEXT_PUBLIC_SITE_URL") || "http://localhost:3000",
+     url: env("NEXT_PUBLIC_SITE_URL") || "https://test.boredompeaks.me",
   },
 
   contact: {
