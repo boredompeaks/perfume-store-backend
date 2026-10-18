@@ -95,28 +95,52 @@ export default function CartLineItem({
   const busy = patch.isPending || remove.isPending;
 
   return (
+    // Screen row anatomy (U-W12-T7, design override D1: maison_ther_votre_
+    // panier): thumbnail plate left, serif name + variant line + money
+    // right, then the stepper/Remove row beneath - stacked on phones and
+    // side-by-side from sm, exactly as the screen's flex-col/sm:flex-row
+    // does. py-8 matches the screen's line rhythm; the ledger's top rule
+    // comes from the list container (CartView), so no first-row exception
+    // is needed. Equal-height defence per xias components.md "Form rows:
+    // equal controls, unequal content": the stepper group's cells share the
+    // h-11 floor, and the money figure is shrink-0 so a long name cannot
+    // stretch the row past its neighbour's height.
     <div
-      className="flex gap-4 py-6 first:pt-0"
+      className="flex flex-col gap-4 py-8 sm:flex-row sm:items-center"
       style={vtName ? { viewTransitionName: vtName } : undefined}
     >
+      {/* Screen plate: 96x128 mobile, 112x144 at sm (D1 overrides §5.3's
+          96x120 - "thumbnail plate" is an enumerated parity target), with
+          the screen's hairline frame on the canonical --color-hairline
+          plate. No hover zoom: the screen's scale-1.04/500ms exceeds the
+          system's hover cap (<=240ms, <=1.03 - ui-motion), so it is cut as
+          decoration rather than shipped. */}
       <Link
         href={`/products/${item.product.slug}`}
-        className="relative h-30 w-24 shrink-0 bg-hairline"
+        className="relative h-32 w-24 shrink-0 border border-hairline bg-hairline sm:h-36 sm:w-28"
         aria-label={item.product.name}
       >
         <ProductImage
           src={item.product.image}
           alt={item.product.name}
-          sizes="96px"
+          sizes="112px"
         />
       </Link>
 
       <div className="flex min-w-0 flex-1 flex-col">
         <div className="flex items-start justify-between gap-3">
           <div className="min-w-0">
+            {/* Screen headline-sm is 20px Playfair = the --text-h3 step;
+                the screen's hover-to-secondary is our bronze. The variant
+                line keeps §5.3's KEEP'd "{size} ml · ₹x each" - the
+                screen's concentration word ("Extrait de Parfum") has no API
+                field (ProductSerializer exposes category, a scent family,
+                not a concentration), the same degrade ProductCard made in
+                U-W11-T5, already logged as BACKEND_REQUESTS P2 "Product lot
+                code + concentration". */}
             <Link
               href={`/products/${item.product.slug}`}
-              className="font-display text-lg tracking-tight transition-colors hover:text-bronze"
+              className="font-display text-h3 tracking-tight transition-colors hover:text-bronze"
             >
               {item.product.name}
             </Link>
