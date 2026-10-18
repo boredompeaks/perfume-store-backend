@@ -1,6 +1,7 @@
 "use client";
 
-import { useState } from "react";
+import Link from "next/link";
+import { useState, type ReactNode } from "react";
 import { ApiError } from "@/lib/api";
 import { resetPassword } from "@/lib/accounts-api";
 import { inputClass } from "@/lib/ui";
@@ -71,29 +72,31 @@ export default function ResetPasswordClient({
     }
   };
 
+  let body: ReactNode;
+
   if (state.kind === "incomplete") {
-    return (
-      <div className="border border-hairline p-8">
+    body = (
+      // Screen nouveau_mot_de_passe state panel: white plate on paper, message
+      // line, full-width ink CTA inside the panel.
+      <div className="border border-hairline bg-surface p-8">
         <h2 className="font-display text-2xl tracking-tight">
           This reset link is incomplete.
         </h2>
         <p className="mt-3 text-ink-secondary">
-          Open the link from your most recent reset email — it carries the
+          Open the link from your most recent reset email. It carries the
           pieces this page needs. If it still fails, request a fresh one.
         </p>
         <a
           href="/forgot-password"
-          className="mt-6 inline-block bg-ink px-6 py-3 text-sm text-paper transition-colors hover:bg-bronze"
+          className="mt-6 block w-full bg-ink px-6 py-3 text-center text-sm text-paper transition-colors hover:bg-bronze"
         >
           Request a new link
         </a>
       </div>
     );
-  }
-
-  if (state.kind === "rejected") {
-    return (
-      <div className="border border-hairline p-8">
+  } else if (state.kind === "rejected") {
+    body = (
+      <div className="border border-hairline bg-surface p-8">
         {/* Server copy, verbatim — never rewritten client-side. */}
         <p role="alert" className="font-display text-2xl tracking-tight">
           {state.message}
@@ -103,92 +106,123 @@ export default function ResetPasswordClient({
         </p>
         <a
           href="/forgot-password"
-          className="mt-6 inline-block bg-ink px-6 py-3 text-sm text-paper transition-colors hover:bg-bronze"
+          className="mt-6 block w-full bg-ink px-6 py-3 text-center text-sm text-paper transition-colors hover:bg-bronze"
         >
           Request a new link
         </a>
       </div>
     );
-  }
-
-  if (state.kind === "done") {
-    return (
-      <div className="border border-hairline p-8">
+  } else if (state.kind === "done") {
+    body = (
+      <div className="border border-hairline bg-surface p-8">
         {/* Server copy, verbatim. */}
         <p role="status" aria-live="polite" className="font-display text-2xl tracking-tight">
           {state.message}
         </p>
         <a
           href="/login"
-          className="mt-6 inline-block bg-ink px-6 py-3 text-sm text-paper transition-colors hover:bg-bronze"
+          className="mt-6 block w-full bg-ink px-6 py-3 text-center text-sm text-paper transition-colors hover:bg-bronze"
         >
           Go to sign in
         </a>
       </div>
     );
+  } else {
+    body = (
+      <div>
+        {/* Screen nouveau_mot_de_passe: one line of subcopy under the heading,
+            then labels-outside fields and the full-width ink CTA. */}
+        <p className="text-ink-secondary">
+          Choose a new password for your account.
+        </p>
+        <form onSubmit={onSubmit} className="mt-6 space-y-4" noValidate>
+          <div>
+            <label htmlFor="reset-password" className="mb-1 block text-sm">
+              New password
+            </label>
+            <input
+              id="reset-password"
+              type="password"
+              autoComplete="new-password"
+              value={password}
+              onChange={(e) => setPassword(e.target.value)}
+              className={`${inputClass} w-full`}
+              required
+              minLength={8}
+              aria-invalid={fieldErrors.length > 0 ? true : undefined}
+              aria-describedby={fieldErrors.length > 0 ? "reset-password-err" : undefined}
+            />
+            {fieldErrors.length > 0 && (
+              <div id="reset-password-err">
+                {fieldErrors.map((msg) => (
+                  <p key={msg} role="alert" className="mt-1 text-sm text-danger">
+                    {msg}
+                  </p>
+                ))}
+              </div>
+            )}
+          </div>
+          <div>
+            <label htmlFor="reset-confirm" className="mb-1 block text-sm">
+              Confirm new password
+            </label>
+            <input
+              id="reset-confirm"
+              type="password"
+              autoComplete="new-password"
+              value={confirm}
+              onChange={(e) => setConfirm(e.target.value)}
+              className={`${inputClass} w-full`}
+              required
+              aria-invalid={mismatch ? true : undefined}
+              aria-describedby={mismatch ? "reset-confirm-err" : undefined}
+            />
+            {mismatch && (
+              <p id="reset-confirm-err" role="alert" className="mt-1 text-sm text-danger">
+                Passwords don&apos;t match.
+              </p>
+            )}
+          </div>
+          {formError && (
+            <p role="alert" className="text-sm text-danger">
+              {formError}
+            </p>
+          )}
+          <button
+            type="submit"
+            disabled={pending}
+            className="w-full bg-ink px-6 py-3 text-sm text-paper transition-colors hover:bg-bronze disabled:opacity-60"
+          >
+            {pending ? "Updating…" : "Set new password"}
+          </button>
+        </form>
+      </div>
+    );
   }
 
   return (
-    <form onSubmit={onSubmit} className="space-y-4" noValidate>
-      <div>
-        <label htmlFor="reset-password" className="mb-1 block text-sm">
-          New password
-        </label>
-        <input
-          id="reset-password"
-          type="password"
-          autoComplete="new-password"
-          value={password}
-          onChange={(e) => setPassword(e.target.value)}
-          className={`${inputClass} w-full`}
-          required
-          minLength={8}
-          aria-invalid={fieldErrors.length > 0 ? true : undefined}
-          aria-describedby={fieldErrors.length > 0 ? "reset-password-err" : undefined}
-        />
-        {fieldErrors.length > 0 && (
-          <div id="reset-password-err">
-            {fieldErrors.map((msg) => (
-              <p key={msg} role="alert" className="mt-1 text-sm text-danger">
-                {msg}
-              </p>
-            ))}
-          </div>
-        )}
-      </div>
-      <div>
-        <label htmlFor="reset-confirm" className="mb-1 block text-sm">
-          Confirm new password
-        </label>
-        <input
-          id="reset-confirm"
-          type="password"
-          autoComplete="new-password"
-          value={confirm}
-          onChange={(e) => setConfirm(e.target.value)}
-          className={`${inputClass} w-full`}
-          required
-          aria-invalid={mismatch ? true : undefined}
-          aria-describedby={mismatch ? "reset-confirm-err" : undefined}
-        />
-        {mismatch && (
-          <p id="reset-confirm-err" role="alert" className="mt-1 text-sm text-danger">
-            Passwords don&apos;t match.
-          </p>
-        )}
-      </div>
-      {formError && (
-        <p role="alert" className="text-sm text-danger">
-          {formError}
+    <div>
+      {body}
+      {/* Both screens close the column the same way: hairline rule, then the
+          underlined link stack. */}
+      <div className="mt-8 border-t border-hairline pt-6 text-center text-sm text-ink-secondary">
+        <p>
+          <Link
+            href="/login"
+            className="underline underline-offset-4 transition-colors hover:text-bronze"
+          >
+            Return to sign in
+          </Link>
         </p>
-      )}
-      <button
-        type="submit"
-        disabled={pending}
-        className="w-full bg-ink px-6 py-3 text-sm text-paper transition-colors hover:bg-bronze disabled:opacity-60"
-      >
-        {pending ? "Updating…" : "Set new password"}
-      </button>
-    </form>
+        <p className="mt-2">
+          <Link
+            href="/contact"
+            className="underline underline-offset-4 transition-colors hover:text-bronze"
+          >
+            Contact support
+          </Link>
+        </p>
+      </div>
+    </div>
   );
 }
