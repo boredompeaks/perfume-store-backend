@@ -98,10 +98,14 @@ export default function RootLayout({
     <html
       lang="en"
       className={`${playfair.variable} ${jakarta.variable}`}
-      // U-W1-T2: the white-label seed layer. DEFAULT_SEED re-states the
-      // canonical globals.css token values (#8c5338 / #885035 and the
-      // Playfair/Jakarta stacks), so this inline style is a zero visual
-      // delta — it only wires the mechanism a merchant theme overrides.
+      // U-W1-T2 / U-W14-T13: the white-label seed layer. DEFAULT_SEED
+      // re-states the canonical globals.css token values (the two bronze
+      // accents, the paper/surface/ink/ink-secondary/hairline/danger/
+      // success palette, and the Playfair/Jakarta stacks), so this inline
+      // style is a zero visual delta — it only wires the mechanism a
+      // merchant theme overrides. The palette slots are seedable because
+      // theme.test.ts now guards them: any seed that breaks a §2.1.2/§7.3
+      // contrast floor fails the suite with the measured ratio printed.
       // The values ride on the root element, where the stylesheet's
       // :root/@theme declarations would resolve, so specificity matches
       // and a seed swap needs no other code. The cast: React's
