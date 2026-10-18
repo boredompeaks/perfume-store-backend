@@ -245,3 +245,123 @@ truth):
 - **`NEXT_PUBLIC_ADMIN_ORIGIN` is the exception:** it has **no** default (no
   localhost fallback), and a missing value fails `next build`; seed it in
   `.env.local` from `.env.local.example`.
+
+---
+
+## 8. Rebrand checklist — the 1-hour runbook
+
+The claim this runbook makes real: **identity, palette, fonts, contact
+channels, return policy and nav/footer in about one hour.** It is NOT a
+catalogue migration and NOT an arbitrary redesign — the boundary is stated at
+the end of this section. §2 remains the reference for the config seams; this
+section is the procedure over them. Enforcement lives in
+`src/lib/rebrand.test.ts`: a brand-literal lint over the component/app tree
+plus a seed-wiring smoke, so a skipped step fails a gate instead of shipping
+a half-rebrand. Time budget: steps 1–4 ≈ 15–30 min, step 5 ≈ 15 min.
+
+### 1. Set the brand env vars (≈5 min)
+
+Copy `.env.local.example` to `.env.local` (one env file per merchant) and
+fill in:
+
+| Variable | What it drives |
+| --- | --- |
+| `NEXT_PUBLIC_SITE_NAME` | brand name — header, footer, metadata, JSON-LD |
+| `NEXT_PUBLIC_SITE_TAGLINE` | tagline — footer, metadata |
+| `NEXT_PUBLIC_SITE_DESCRIPTION` | meta/OG description |
+| `NEXT_PUBLIC_SITE_URL` | canonical origin (e.g. `https://shop.example.com`) |
+| `NEXT_PUBLIC_SUPPORT_EMAIL` | support inbox (also the SMTP sender) |
+| `NEXT_PUBLIC_API_BASE_URL` | this merchant's Django API origin |
+| `NEXT_PUBLIC_ADMIN_ORIGIN` | this merchant's Django admin origin — **no default; the build fails if unset** |
+
+Contact channels left empty (`NEXT_PUBLIC_SUPPORT_PHONE`,
+`NEXT_PUBLIC_WHATSAPP_*`, `NEXT_PUBLIC_INSTAGRAM_URL`) are hidden in the UI —
+that is the designed state, not an omission. The full variable table is §2c.
+Nav/footer links are a manifest edit: change the `nav` / `footer` groups in
+`src/lib/template.config.ts` and Header, MenuOverlay and Footer follow (§7).
+
+### 2. Edit the theme seed (≈5 min)
+
+In `src/lib/theme.ts`, edit `DEFAULT_SEED` (the seam is documented in §2b):
+
+- `brand` → `--color-bronze` (the single chromatic accent), `accent` →
+  `--color-bronze-alt`; both must be 6-digit hex (`#rrggbb`).
+- `displayFont` / `bodyFont` → **allowlisted keys only** — see step 4.
+- Derived colours (focus ring, danger/success, ink family) stay
+  stylesheet-owned and are not seedable; they are contrast-audited as a set
+  in `globals.css`.
+
+**After every seed edit, run the contrast guard:**
+
+```powershell
+npx vitest run src/lib/theme.test.ts
+```
+
+The guard recomputes the WCAG ratio from the hex literals for every pair the
+seed moves; a failure prints the recomputed ratio and the floor it missed.
+Fix the seed hex and re-run until green. `rebrand.test.ts` then re-checks
+that every seed slot drives a real `globals.css` token and is well-formed.
+
+One named exception to keep in step: `src/components/checkout/PaymentLauncher.tsx`
+hands the hosted Razorpay checkout a literal `theme.color` hex (the widget
+renders outside our document and cannot read CSS variables). The rebrand test
+pins that literal to `DEFAULT_SEED.brand` and names the file when it drifts.
+
+### 3. Django admin — Site settings (≈5 min, no rebuild)
+
+Sign in to the Django admin at `<NEXT_PUBLIC_ADMIN_ORIGIN>/admin/` and open
+the **Site settings** singleton (Ops section; `ops.SiteSettings` on the
+backend). The storefront reads `GET /api/settings/` server-side with a 60 s
+cache, so edits appear without a frontend rebuild once the cache lapses.
+Resolution priority (`src/lib/server-settings.ts`): **Django admin →
+build-time env → hidden**. Fields and fall-backs:
+
+| Admin field | Drives | Falls back to |
+| --- | --- | --- |
+| `support_email` | footer contact inbox | `NEXT_PUBLIC_SUPPORT_EMAIL` |
+| `support_phone` | footer phone row | env, else hidden |
+| `whatsapp_number` | `wa.me` deep link | env, else hidden |
+| `whatsapp_message` | pre-filled WhatsApp text | env, then template default |
+| `instagram_url` | Instagram link | env, else hidden |
+| `return_window_days` | returns page + home fact strip | blank = store default; `0` = returns closed |
+
+### 4. Fonts (≈2 min — usually no change)
+
+The seed's font keys are the entire font surface: `playfair-display`,
+`plus-jakarta-sans`, `georgia`, `system-sans`. Arbitrary webfonts are
+impossible by design — `next/font` resolves faces at BUILD time and the CSP
+serves only self-hosted faces (§2.2.5, §2b). Pick from the allowlist; a new
+typeface is a code change, not a rebrand step.
+
+### 5. Verify — the exact commands (≈15 min)
+
+```powershell
+cd frontend
+npx vitest run src/lib/theme.test.ts     # contrast guard: green after step 2
+npx vitest run src/lib/rebrand.test.ts   # brand-literal lint + seed wiring: green
+npm run build                            # exit 0 — brand strings inlined from .env.local
+npx vitest run                           # full suite: all files pass, none skipped
+```
+
+Expected outputs: each targeted run reports its file(s) passed with zero
+failures; `npm run build` exits 0 and lists every route (a missing
+`NEXT_PUBLIC_ADMIN_ORIGIN` fails here, loudly); the full run reports every
+test file passed. Any red is a missed step, not an environment quirk — the
+rebrand test's failure message names the file still carrying the brand
+literal. Then spot-check in a browser: header/footer show the new name, the
+accent appears on hover/CTA, contact channels render (or stay hidden when
+unset), and the legal/contact pages carry the new identity.
+
+### Boundary — what one hour buys, and what it does not
+
+In scope: **brand identity** (name, tagline, description, URL), **palette +
+fonts** (the seed slots), **contact channels** (env + Django admin),
+**return-window policy** (Django admin), and **nav/footer links** (manifest
+edit) — one rebuild at the end.
+
+Out of scope: **catalogue content** (products, copy and imagery are
+backend-owned data), **arbitrary redesign** (layout, motion and the token
+system are the template's design, not knobs), currency/locale (`money.ts` is
+`en-IN`/`INR`; §7), legal prose (page-component content edits; §7), deploy
+identifiers (Worker name/route in `wrangler.jsonc`; §7), and any
+feature-flag wiring beyond the two flags §4 lists as consumed.

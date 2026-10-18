@@ -160,12 +160,29 @@ describe("shippingPolicy", () => {
       `${shippingPolicy.deliveryWindow} depending on your location. ` +
       `Business days exclude Sundays and public holidays.`;
     expect(text).toContain(sentence);
-    // The page states exactly two range windows on screen — the two the
-    // module owns. A third claim typed anywhere else fails here.
+    // §5.7 (D1 screens): the same two module windows ALSO render as the
+    // scannable fact matrix at the top, so each appears twice on screen
+    // (facts + prose) by design. The pin is the SET of range claims: a
+    // third distinct window typed anywhere on the page fails here, and a
+    // typed range in the source fails the source pin below.
     const claims = text.match(/\d+[–-]\d+ (?:business )?days/g) ?? [];
-    expect([...claims].sort()).toEqual(
+    expect([...new Set(claims)].sort()).toEqual(
       [shippingPolicy.dispatchWindow, shippingPolicy.deliveryWindow].sort(),
     );
+  });
+
+  it("states each window twice: the top fact matrix and the prose sentence", async () => {
+    const [{ shippingPolicy }, { default: ShippingPage }] = await Promise.all([
+      import("./policies"),
+      import("@/app/shipping/page"),
+    ]);
+
+    const text = collectText(ShippingPage());
+    // Counting, not just containment: a refactor that drops the fact
+    // matrix (or the sentence) leaves only one occurrence and fails here.
+    const occurrences = (needle: string) => text.split(needle).length - 1;
+    expect(occurrences(shippingPolicy.dispatchWindow)).toBe(2);
+    expect(occurrences(shippingPolicy.deliveryWindow)).toBe(2);
   });
 
   it("no window range is typed into the page source — constants only", () => {
@@ -177,5 +194,37 @@ describe("shippingPolicy", () => {
     expect(source).toContain("shippingPolicy.dispatchWindow");
     expect(source).toContain("shippingPolicy.deliveryWindow");
     expect(source).not.toMatch(/\d+[–-]\d+/);
+  });
+});
+
+/**
+ * /returns (D1 screens, U-W13-T12): the API window renders in the top
+ * fact matrix AND the short-version prose when `GET /api/settings/`
+ * publishes one, and the page ships NO return-window count when it does
+ * not: A-12.D.2's single-source rule extended to the new fact-matrix
+ * surface. (Operational copy, i.e. refund timing and the damage-notice
+ * deadline, carries its own figures by design and is not the window.)
+ */
+describe("returns page window claims (A-12.D.2)", () => {
+  async function renderReturns() {
+    const { default: ReturnsPage } = await import("@/app/returns/page");
+    return collectText(await ReturnsPage());
+  }
+
+  it("with a published window: fact matrix and prose both state it", async () => {
+    stubFetch(async () =>
+      jsonResponse({ support_email: "", return_window_days: 14 }),
+    );
+
+    const text = await renderReturns();
+    expect(text).toContain("within 14 days of delivery");
+    expect(text.split("14 days from delivery").length - 1).toBe(1);
+  });
+
+  it("with no published window: no return-window count typed into the page", async () => {
+    stubFetch(async () => jsonResponse({ support_email: "" }));
+
+    const text = await renderReturns();
+    expect(text).not.toMatch(/\d+ days/);
   });
 });

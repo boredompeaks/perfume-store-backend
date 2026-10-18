@@ -15,6 +15,13 @@ import OrderStatusBadge, { formatOrderDate } from "./OrderStatusBadge";
  * there is no entrance animation and no accent moment, by design (P2 —
  * none-by-design, and §5.5 line 1441 says so verbatim).
  *
+ * Screen parity (U-W12-T9, media/designs/maison_ther_vos_commandes): the
+ * folio register — serif order number, hairline status rectangle inline,
+ * muted date, right-aligned tabular total with the mobile "TOTAL" eyebrow,
+ * item summary beneath on truncate, per-row hairline that darkens to ink on
+ * hover. The screen's status VOCABULARY (DISPATCHED / ARCHIVED) is mockup
+ * fiction; the backend's own status words ride in OrderStatusBadge (P5).
+ *
  * Pagination reads the backend's own contract: `?page=` / `?page_size=` with
  * the house page-number envelope (backend/orders/views/order.py:48-79,
  * `page_size` capped by `ORDER_HISTORY_MAX_PAGE_SIZE`). The pager only
@@ -84,7 +91,10 @@ export default function OrdersListView() {
 
   return (
     <div>
-      <ul className="divide-y divide-hairline border-y border-hairline">
+      {/* The screen's ledger: border-t on the register, one border-b per
+          entry, hover darkens the rule toward the screen's primary tone
+          (house ink). Duration stays the page's one allowed motion token. */}
+      <ul className="border-t border-hairline">
         {data.results.map((order) => {
           const itemSummary = order.items
             .map((item) => `${item.product_name} × ${item.quantity}`)
@@ -94,25 +104,34 @@ export default function OrdersListView() {
             <li key={order.id}>
               <Link
                 href={`/orders/${order.id}`}
-                className="block py-5 transition-colors duration-(--motion-hover-dur) hover:text-bronze"
+                className="group block border-b border-hairline py-6 transition-colors duration-(--motion-hover-dur) hover:border-ink md:py-8"
               >
-                <div className="flex flex-wrap items-baseline gap-x-4 gap-y-1">
-                  <h3 className="font-display text-lg tracking-tight">
-                    Order #{order.order_number}
-                  </h3>
-                  <OrderStatusBadge
-                    status={order.status}
-                    paymentStatus={order.payment_status}
-                    fulfilmentStatus={order.fulfilment_status}
-                  />
-                  <span className="text-sm text-ink-secondary">
-                    {formatOrderDate(order.created_at)}
-                  </span>
-                  <span className="ml-auto text-money tabular-nums lining-nums">
-                    {formatINR(order.total_amount)}
-                  </span>
+                <div className="flex flex-wrap items-baseline justify-between gap-x-4 gap-y-2">
+                  <div className="flex flex-wrap items-baseline gap-x-3 gap-y-2 md:gap-x-4">
+                    <h2 className="font-display text-h3 tracking-tight transition-colors duration-(--motion-hover-dur) group-hover:text-bronze">
+                      Order #{order.order_number}
+                    </h2>
+                    <OrderStatusBadge
+                      status={order.status}
+                      paymentStatus={order.payment_status}
+                      fulfilmentStatus={order.fulfilment_status}
+                    />
+                    <span className="text-sm text-ink-secondary">
+                      {formatOrderDate(order.created_at)}
+                    </span>
+                  </div>
+                  {/* Screen: mobile labels the figure ("TOTAL" eyebrow,
+                      code.html line 43); desktop shows the bare amount. */}
+                  <div className="flex w-full items-baseline justify-between md:w-auto md:justify-end md:gap-2">
+                    <span className="text-eyebrow uppercase text-ink-secondary md:hidden">
+                      Total
+                    </span>
+                    <span className="text-money tabular-nums lining-nums">
+                      {formatINR(order.total_amount)}
+                    </span>
+                  </div>
                 </div>
-                <p className="mt-1 truncate text-sm text-ink-secondary">
+                <p className="mt-2 truncate text-sm text-ink-secondary">
                   {itemSummary}
                 </p>
               </Link>

@@ -128,6 +128,44 @@ describe("motion: none (§5.10)", () => {
   });
 });
 
+describe("recovery family parity (U-W13-T11 screens)", () => {
+  it("closes every email-only column with the rule + link stack", () => {
+    // Screen r_cup_ration_de_compte: hairline rule under the CTA, then the
+    // underlined links. The stack renders under form AND sent panel.
+    expect(emailOnlySource).toContain("border-t border-hairline");
+    expect(emailOnlySource).toContain('href="/login"');
+    expect(emailOnlySource).toContain('href="/contact"');
+  });
+
+  it("reset states keep the plate + full-width CTA + link stack", () => {
+    // Screen nouveau_mot_de_passe: white plate on paper, full-width ink CTA
+    // inside the panel, rule + links closing the column.
+    expect(resetSource).toContain("border border-hairline bg-surface p-8");
+    expect(resetSource).toContain("block w-full bg-ink");
+    expect(resetSource).toContain("border-t border-hairline");
+    expect(resetSource).toContain("Choose a new password");
+  });
+
+  it("verify states wear the register-panel status line (refined screen)", () => {
+    // Refined v_rification_de_courriel: eyebrow status line over the inner
+    // hairline; bronze only ever on the confirmed line, danger on the
+    // refusal, never bronze on a failure (CHANGE-2).
+    expect(verifySource).toContain("border border-hairline bg-surface p-8");
+    expect(verifySource).toContain("text-eyebrow");
+    expect(verifySource).toContain('statusLabel = "Status: confirmed"');
+    expect(verifySource).toContain('statusLabel = "Status: unconfirmed"');
+    expect(verifySource).toContain('statusTone = "text-bronze"');
+    expect(verifySource).toContain('statusTone = "text-danger"');
+    expect(verifySource).not.toMatch(/role="alert"[^>]*bronze/);
+  });
+
+  it("ships a full-width ink CTA in every client", () => {
+    for (const [file, source] of Object.entries(CLIENT_SOURCES)) {
+      expect(source, file).toContain("w-full bg-ink");
+    }
+  });
+});
+
 describe("recovery page wiring (§5.10, §8.1)", () => {
   it("posts the three email flows to the verified backend paths", () => {
     expect(pageSource("forgot-password")).toContain(

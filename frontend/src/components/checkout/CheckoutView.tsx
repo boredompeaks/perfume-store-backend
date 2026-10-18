@@ -16,6 +16,7 @@ import {
   type ShippingDetails,
 } from "@/lib/shipping-store";
 import type { Order } from "@/lib/types";
+import ProductImage from "../ProductImage";
 import AddressForm from "./AddressForm";
 import CouponForm from "../cart/CouponForm";
 import PaymentLauncher from "./PaymentLauncher";
@@ -47,6 +48,20 @@ export type EstimateOption = {
 export function stepFraction(step: Step): number {
   const index = STEPS.findIndex((s) => s.id === step);
   return (index < 0 ? 0 : index) / (STEPS.length - 1);
+}
+
+/**
+ * D1 (U-W12-T8, screen `maison_ther_commande_r_glement`): the rule's ink fill
+ * covers the ACTIVE tab's share of the rule — thirds, so 1/3, 2/3, 1 — which
+ * is what the screen draws (pixel probe of screen.png: at Delivery the ink
+ * runs 80→359 of a rule spanning 80→919). Spec 5.4's fill is the completed
+ * prefix instead (0 / half / full); the owner's screen overrides that layout
+ * detail, so this maps the pinned `stepFraction` arithmetic onto the active
+ * segment rather than redefining it — `checkout.test.ts` still pins the
+ * arithmetic that reaches the pixels.
+ */
+export function activeFraction(step: Step): number {
+  return (stepFraction(step) * (STEPS.length - 1) + 1) / STEPS.length;
 }
 
 /**
@@ -284,9 +299,31 @@ export default function CheckoutView() {
     (sum, item) => sum + Number(item.product.price) * item.quantity,
     0,
   );
+  const cartItemCount = cart.items.reduce(
+    (total, item) => total + item.quantity,
+    0,
+  );
 
   const chosenOption =
     estimate?.find((option) => option.method === selectedMethod) ?? null;
+
+  /**
+   * The summary's courier figure, from server truth only: the created
+   * order's shipping_amount, else the server-quoted option the customer
+   * picked in step 1. Nothing known yet renders no row — the screen's
+   * static "₹ 0 / complimentary over ₹ 15,000" line would be a price this
+   * client is not allowed to invent (P5), so the estimate block carries
+   * that information instead.
+   */
+  const courierValue = order
+    ? Number(order.shipping_amount) > 0
+      ? formatINR(order.shipping_amount)
+      : "Complimentary"
+    : chosenOption
+      ? chosenOption.free_shipping
+        ? "Complimentary"
+        : formatINR(chosenOption.amount)
+      : null;
 
   const requestEstimate = (details: ShippingDetails) => {
     const state = details.state.trim();
@@ -369,9 +406,7 @@ export default function CheckoutView() {
 
   const deliveryEstimate = (
     <div data-testid="delivery-estimate">
-      <h3 className="text-sm font-medium uppercase tracking-wide text-ink-secondary">
-        Delivery estimate
-      </h3>
+      <h3 className="text-eyebrow text-ink-secondary">Delivery estimate</h3>
       {estimateError ? (
         <p role="alert" className="mt-3 text-sm text-danger">
           {estimateError}
@@ -395,7 +430,7 @@ export default function CheckoutView() {
               />
               <span>{option.name}</span>
               <span className="ml-auto text-money tabular-nums">
-                {option.free_shipping ? "Free" : formatINR(option.amount)}
+                {option.free_shipping ? "Complimentary" : formatINR(option.amount)}
               </span>
             </label>
           ))}
@@ -411,45 +446,53 @@ export default function CheckoutView() {
   return (
     <div className="grid gap-10 lg:grid-cols-[1fr_380px]">
       <div>
-        {/* 5.4: the step indicator is the one motion on this page — an
-            --color-ink scaleX fill over a hairline rule, answering "which
-            step am I on, and how many are left". Duration and easing are
-            the progress-intent tokens; the reduced-motion layer zeroes them. */}
-        <div className="mb-8">
-          <div className="relative h-px w-full bg-hairline" aria-hidden="true">
+        {/* 5.4's step indicator, in the D1 screen's tabbed form (U-W12-T8):
+            numbered tabs ABOVE the 1px rule, both inside max-w-2xl, the active
+            tab in ink and the rest muted, and the rule's ink fill covering the
+            active tab's third (the screen's own pixels: 80→359 of a rule
+            spanning 80→919 at Delivery). Still this page's one motion — an
+            --color-ink scaleX fill answering "which step am I on, and how many
+            are left"; duration and easing are the progress-intent tokens and
+            the reduced-motion layer zeroes their duration at the token layer. */}
+        <div className="mb-8 max-w-2xl">
+          <ol className="flex justify-between">
+            {STEPS.map((item, index) => (
+              <li
+                key={item.id}
+                aria-current={item.id === step ? "step" : undefined}
+                className={`text-eyebrow ${
+                  item.id === step ? "text-ink" : "text-ink-secondary"
+                }`}
+              >
+                {String(index + 1).padStart(2, "0")}. {item.label}
+              </li>
+            ))}
+          </ol>
+          <div
+            className="relative mt-2 h-px w-full bg-hairline"
+            aria-hidden="true"
+          >
             <div
               className="absolute inset-0 origin-left bg-ink"
               style={{
-                transform: `scaleX(${stepFraction(step)})`,
+                transform: `scaleX(${activeFraction(step)})`,
                 transition:
                   "transform var(--motion-progress-dur) var(--motion-ease)",
               }}
             />
           </div>
-          <ol className="mt-3 flex gap-6">
-            {STEPS.map((item) => (
-              <li
-                key={item.id}
-                aria-current={item.id === step ? "step" : undefined}
-                className={`text-label ${
-                  item.id === step ? "text-ink" : "text-ink-secondary"
-                }`}
-              >
-                {item.label}
-              </li>
-            ))}
-          </ol>
         </div>
 
         {step === "details" && (
           <section aria-labelledby="step-details">
+            <p className="text-eyebrow text-bronze">Lieu de Réception</p>
             <h2
               id="step-details"
               ref={stepHeading}
               tabIndex={-1}
-              className="font-display text-2xl tracking-tight"
+              className="mt-1 font-display text-h2 tracking-tight"
             >
-              Delivery details
+              Carriage Destination
             </h2>
             <div className="mt-6">
               <AddressForm
@@ -471,23 +514,28 @@ export default function CheckoutView() {
 
         {step === "review" && shipping && (
           <section aria-labelledby="step-review">
+            <p className="text-eyebrow text-bronze">Inventaire Raisonné</p>
             <h2
               id="step-review"
               ref={stepHeading}
               tabIndex={-1}
-              className="font-display text-2xl tracking-tight"
+              className="mt-1 font-display text-h2 tracking-tight"
             >
-              Review your order
+              Order Verification
             </h2>
             <ul className="mt-6 divide-y divide-hairline border-y border-hairline">
               {cart.items.map((item) => (
                 <li
                   key={item.id}
-                  className="flex items-baseline justify-between gap-3 py-3 text-sm"
+                  className="flex items-baseline justify-between gap-4 py-4"
                 >
                   <span>
-                    {item.product.name}{" "}
-                    <span className="text-ink-secondary">× {item.quantity}</span>
+                    <span className="block font-display text-body">
+                      {item.product.name}
+                    </span>
+                    <span className="text-small text-ink-secondary">
+                      × {item.quantity}
+                    </span>
                   </span>
                   <span className="text-money tabular-nums">
                     {formatINR(Number(item.product.price) * item.quantity)}
@@ -495,27 +543,27 @@ export default function CheckoutView() {
                 </li>
               ))}
             </ul>
-            <p className="mt-3 text-sm text-ink-secondary">
+            {/* Kept as ONE text node: the e2e happy path matches
+                /Subtotal ₹…/ and /coupon …/ inside this line. */}
+            <p className="mt-3 text-small text-ink-secondary">
               Subtotal {formatINR(clientSubtotal)}
               {couponCode ? ` · coupon ${couponCode}` : ""}
             </p>
-            <p className="text-xs text-ink-secondary">
+            <p className="text-small text-ink-secondary">
               The final total is computed server-side when the order is
               created.
             </p>
             {chosenOption && (
-              <p className="mt-2 text-sm text-ink-secondary">
+              <p className="mt-2 text-small text-ink-secondary">
                 Delivery: {chosenOption.name} ·{" "}
                 {chosenOption.free_shipping
-                  ? "Free"
+                  ? "Complimentary"
                   : formatINR(chosenOption.amount)}
               </p>
             )}
 
             <div className="mt-8 border-t border-hairline pt-6">
-              <h3 className="text-sm font-medium uppercase tracking-wide text-ink-secondary">
-                Coupon
-              </h3>
+              <h3 className="text-eyebrow text-ink-secondary">Coupon</h3>
               <div className="mt-3">
                 <CouponForm onCodeChange={setCouponCode} />
               </div>
@@ -546,7 +594,7 @@ export default function CheckoutView() {
                   setCreationError(null);
                   setStep("details");
                 }}
-                className="border border-ink px-5 py-3 text-sm transition-colors hover:bg-ink hover:text-paper"
+                className="border border-ink px-8 py-4 text-label transition-colors hover:bg-ink hover:text-paper"
               >
                 Back
               </button>
@@ -555,7 +603,7 @@ export default function CheckoutView() {
                 data-testid="create-order"
                 onClick={() => createOrder(shipping)}
                 disabled={creating}
-                className="bg-ink px-6 py-3 text-sm text-paper transition-colors hover:bg-bronze disabled:opacity-60"
+                className="bg-ink px-8 py-4 text-label text-paper transition-colors hover:bg-bronze disabled:opacity-60"
               >
                 Create order
               </button>
@@ -565,36 +613,51 @@ export default function CheckoutView() {
 
         {step === "pay" && order && shipping && (
           <section aria-labelledby="step-pay">
+            <p className="text-eyebrow text-bronze">Règlement Scellé</p>
             <h2
               id="step-pay"
               ref={stepHeading}
               tabIndex={-1}
-              className="font-display text-2xl tracking-tight"
+              className="mt-1 font-display text-h2 tracking-tight"
             >
-              Payment
+              Payment Authorization
             </h2>
-            <p className="mt-3 text-sm text-ink-secondary">
-              Order <span className="text-ink">{order.order_number}</span>
-            </p>
-            <p className="mt-1 text-sm text-ink-secondary">
-              Total{" "}
-              <strong className="text-money tabular-nums">
-                {formatINR(order.total_amount)}
-              </strong>{" "}
-              — computed and held server-side.
-            </p>
-            <p className="mt-1 text-sm text-ink-secondary">
-              Shipping{" "}
-              <span className="text-money tabular-nums">
-                {Number(order.shipping_amount) > 0
-                  ? formatINR(order.shipping_amount)
-                  : "Free"}
-              </span>
-            </p>
-            <p className="mt-3 text-xs text-ink-secondary">
-              The cart is now frozen into this order. Editing it on the cart
-              page won&apos;t change this amount.
-            </p>
+            {/* D1 screen's reference box: a ruled two-column header carrying
+                the SERVER's reference and total (never derived here), then
+                the shipping line and the freeze note it shows around the
+                launcher. PaymentLauncher itself is untouched logic-wise. */}
+            <div className="mt-6 border border-hairline bg-surface p-6">
+              <div className="flex flex-col gap-4 border-b border-hairline pb-4 sm:flex-row sm:items-baseline sm:justify-between">
+                <div>
+                  <p className="text-eyebrow text-ink-secondary">
+                    Order reference
+                  </p>
+                  <p className="mt-1 font-display text-h3 tracking-tight">
+                    {order.order_number}
+                  </p>
+                </div>
+                <div className="sm:text-right">
+                  <p className="text-eyebrow text-ink-secondary">
+                    Confirmed Total
+                  </p>
+                  <p className="mt-1 font-display text-h3 tabular-nums">
+                    {formatINR(order.total_amount)}
+                  </p>
+                </div>
+              </div>
+              <p className="mt-4 text-small text-ink-secondary">
+                Shipping{" "}
+                <span className="text-money tabular-nums">
+                  {Number(order.shipping_amount) > 0
+                    ? formatINR(order.shipping_amount)
+                    : "Complimentary"}
+                </span>
+              </p>
+              <p className="mt-2 text-small text-ink-secondary">
+                The cart is now frozen into this order. Editing it on the cart
+                page won&apos;t change this amount.
+              </p>
+            </div>
 
             <div className="mt-6">
               {rawAuthStatus === "anonymous" ? (
@@ -633,48 +696,86 @@ export default function CheckoutView() {
         )}
       </div>
 
+      {/* D1 screen's ledger rail: ruled summary card — thumbnailed line
+          items, a server-figure breakdown, one big serif total, and the
+          provider note. Nothing here invents money: subtotal is the display
+          sum of server item prices (reconciled at order creation), delivery
+          shows only a server quote or the created order's shipping_amount,
+          and the big total reads "Confirmed" only once the server has one. */}
       <aside
         aria-labelledby="order-summary"
-        className="self-start border border-hairline p-6 lg:sticky lg:top-24"
+        className="self-start border border-hairline bg-surface p-6 lg:sticky lg:top-24"
       >
         <h2
           id="order-summary"
-          className="font-display text-xl tracking-tight"
+          className="font-display text-h3 tracking-tight"
         >
-          Order summary
+          Summary
         </h2>
-        <div className="mt-4 flex items-baseline justify-between text-sm">
-          <span className="text-ink-secondary">Cart subtotal</span>
-          <span className="tabular-nums">{formatINR(clientSubtotal)}</span>
-        </div>
-        {order && (
-          <>
-            {Number(order.discount_amount) > 0 && (
-              <div className="mt-2 flex items-baseline justify-between text-sm">
-                <span className="text-ink-secondary">Coupon discount</span>
-                <span className="tabular-nums">
-                  −{formatINR(order.discount_amount)}
-                </span>
+        <div className="mt-4 space-y-4 border-b border-hairline pb-4">
+          {cart.items.map((item) => (
+            <div key={item.id} className="flex items-center gap-4">
+              <div className="relative h-20 w-16 shrink-0 border border-hairline bg-hairline">
+                <ProductImage
+                  src={item.product.image}
+                  alt={item.product.name}
+                  sizes="64px"
+                />
               </div>
-            )}
-            <div className="mt-2 flex items-baseline justify-between text-sm">
-              <span className="text-ink-secondary">Shipping</span>
-              <span className="tabular-nums">
-                {Number(order.shipping_amount) > 0
-                  ? formatINR(order.shipping_amount)
-                  : "Free"}
-              </span>
-            </div>
-            <div className="mt-2 flex items-baseline justify-between text-sm">
-              <span className="text-ink-secondary">Order total (server)</span>
+              <div className="min-w-0 flex-1">
+                {item.product.category ? (
+                  <span className="block text-eyebrow text-bronze">
+                    {item.product.category}
+                  </span>
+                ) : null}
+                <p className="truncate font-display text-body">
+                  {item.product.name}
+                </p>
+                <p className="text-small text-ink-secondary">
+                  {item.product.size} ml · Qty {item.quantity}
+                </p>
+              </div>
               <span className="text-money tabular-nums">
-                {formatINR(order.total_amount)}
+                {formatINR(Number(item.product.price) * item.quantity)}
               </span>
             </div>
-          </>
-        )}
-        <p className="mt-4 border-t border-hairline pt-4 text-xs text-ink-secondary">
-          Payments are processed by Razorpay. Card details never touch our
+          ))}
+        </div>
+        <div className="mt-4 space-y-1 text-small text-ink-secondary">
+          <div className="flex items-baseline justify-between gap-3">
+            <span>
+              Subtotal ({cartItemCount}{" "}
+              {cartItemCount === 1 ? "item" : "items"})
+            </span>
+            <span className="tabular-nums text-ink">
+              {formatINR(clientSubtotal)}
+            </span>
+          </div>
+          {courierValue && (
+            <div className="flex items-baseline justify-between gap-3">
+              <span>Courier delivery</span>
+              <span className="text-bronze">{courierValue}</span>
+            </div>
+          )}
+          {order && Number(order.discount_amount) > 0 && (
+            <div className="flex items-baseline justify-between gap-3">
+              <span>Coupon discount</span>
+              <span className="tabular-nums text-ink">
+                −{formatINR(order.discount_amount)}
+              </span>
+            </div>
+          )}
+        </div>
+        <div className="mt-6 flex items-baseline justify-between gap-3 border-t border-hairline pt-4">
+          <span className="font-display text-h3">
+            {order ? "Confirmed Total" : "Estimated Total"}
+          </span>
+          <span className="font-display text-h3 tabular-nums">
+            {formatINR(order ? order.total_amount : clientSubtotal)}
+          </span>
+        </div>
+        <p className="mt-4 border-t border-hairline pt-4 text-small text-ink-secondary">
+          Processed securely via Razorpay. Card credentials never reach our
           servers.
         </p>
       </aside>
