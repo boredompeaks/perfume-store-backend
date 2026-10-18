@@ -402,6 +402,36 @@ class ApplyCouponTests(OrderTestBase):
         self.assertEqual(res.data["discount"], Decimal("40.00"))
         self.assertEqual(res.data["final_total"], Decimal("960.00"))
 
+    # 33. free-shipping coupons carry no merchandise discount -------------------
+    def test_free_shipping_coupon_grants_no_merchandise_discount(self):
+        """A free-shipping coupon waives the delivery charge, so the
+        merchandise preview is untouched: the discount is 0.00 and the
+        subtotal stands -- never the (irrelevant) discount_value, which would
+        make the cart preview and the checkout order disagree."""
+        self.make_coupon(
+            code="FREESHIP",
+            discount_type="free_shipping",
+            discount_value="50",  # deliberately non-zero: it must be ignored
+        )
+        res = self._preview("FREESHIP")
+        self.assertEqual(res.status_code, 200, res.data)
+        self.assertEqual(res.data["subtotal"], Decimal("1000.00"))
+        self.assertEqual(res.data["discount"], Decimal("0.00"))
+        self.assertEqual(res.data["final_total"], Decimal("1000.00"))
+
+    def test_free_shipping_coupon_still_honours_the_minimum_order_amount(self):
+        """The free-shipping type composes with the redemption rules: a
+        below-minimum cart is refused with the same uniform body as any
+        other coupon."""
+        self.make_coupon(
+            code="FREESHIPBIG",
+            discount_type="free_shipping",
+            minimum_order_amount="5000",
+        )
+        res = self._preview("FREESHIPBIG")
+        self.assertEqual(res.status_code, 400, res.data)
+        self.assertEqual(res.data["error"], "Invalid coupon code")
+
     def test_preview_without_session_or_cart(self):
         self.make_coupon(code="SAVE10", discount_value="10")
         res = self.fresh_client().post(

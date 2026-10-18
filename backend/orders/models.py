@@ -38,9 +38,17 @@ def default_currency():
 
 
 class Coupon(models.Model):
+    # The one type that carries NO merchandise discount: it waives the
+    # order's shipping charge instead, applied to the server-side delivery
+    # quote at checkout. Named here so the checkout readers compare against a
+    # single symbol rather than repeating a literal across files, and so the
+    # choice value and the comparison can never drift apart.
+    FREE_SHIPPING = "free_shipping"
+
     DISCOUNT_TYPES = [
         ("percentage", "Percentage"),
         ("fixed", "Fixed Amount"),
+        (FREE_SHIPPING, "Free Shipping"),
     ]
 
     code = models.CharField(max_length=50, unique=True)

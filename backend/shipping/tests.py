@@ -555,6 +555,35 @@ class CheckoutShippingCostTests(ApiTestCase):
         self.assertEqual(order.shipping_amount, Decimal("49.00"))
         self.assertEqual(order.total_amount, Decimal("948.99"))
 
+    def test_a_free_shipping_coupon_waives_the_charge_but_keeps_the_method(self):
+        """A free-shipping coupon zeroes the delivery charge while still
+        recording WHICH method was quoted -- the zero-charge-with-a-method
+        shape, distinct from the no-shipping-configured zero below. The
+        merchandise is untouched: no discount, full subtotal."""
+        self.make_coupon(code="FREESHIP", discount_type="free_shipping")
+        self.seed_session_cart([(self.product, 1)])
+        res = self.checkout(coupon_code="FREESHIP")
+        self.assertEqual(res.status_code, 201, res.data)
+        order = Order.objects.get()
+        self.assertEqual(order.shipping_amount, Decimal("0.00"))
+        self.assertEqual(order.shipping_method, self.standard)
+        self.assertEqual(order.shipping_method_code, "standard")
+        self.assertEqual(order.discount_amount, Decimal("0.00"))
+        self.assertEqual(order.total_amount, Decimal("999.99"))
+        self.assertEqual(res.data["shipping_amount"], "0.00")
+
+    def test_a_free_shipping_coupon_does_not_make_a_destination_serviceable(self):
+        """Free shipping waives the CHARGE, not the serviceability: an
+        unserviceable destination is refused and nothing is written, exactly
+        as it would be without the coupon."""
+        self.make_coupon(code="FREESHIP", discount_type="free_shipping")
+        ShippingRate.objects.update(region="Karnataka")
+        self.seed_session_cart([(self.product, 1)])
+        res = self.checkout(state="Maharashtra", coupon_code="FREESHIP")
+        self.assertEqual(res.status_code, 400, res.data)
+        self.assertIn("not available for this destination", res.data["error"])
+        self.assertEqual(Order.objects.count(), 0)
+
     def test_the_charge_is_recorded_in_the_creation_trail_row(self):
         self.seed_session_cart([(self.product, 1)])
         self.checkout()

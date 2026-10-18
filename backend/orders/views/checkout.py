@@ -595,23 +595,11 @@ def create_order(request):
                 status=status.HTTP_400_BAD_REQUEST,
             )
 
-        if coupon.discount_type == "percentage":
-            # Quantize before any comparison or storage: the raw division
-            # carries extra decimal places, and an unquantized discount
-            # drifts the display, the audit trail and the stored 2-dp
-            # order amount apart (F-11).
-            discount_amount = quantize_money(
-                (subtotal_amount * coupon.discount_value) / Decimal("100")
-            )
-
-            if coupon.maximum_discount is not None:
-                discount_amount = min(discount_amount, coupon.maximum_discount)
-
-        else:
-            discount_amount = coupon.discount_value
-
-        # Never discount more than subtotal
-        discount_amount = min(discount_amount, subtotal_amount)
+        # The coupon-type math lives in one helper so this order row and the
+        # public preview can never disagree about what a coupon is worth
+        # (F-11). A free-shipping coupon returns 0.00 merchandise discount
+        # here; its waiver is applied to the delivery quote below instead.
+        discount_amount = coupon_merchandise_discount(coupon, subtotal_amount)
 
     # [R-1.07] SPEC-1-B05: still the MERCHANDISE total. The shipping charge is
     # added inside the atomic block below, once the collapse guards have had
@@ -722,6 +710,15 @@ def create_order(request):
             shipping_amount = (
                 shipping_quote.amount if shipping_quote is not None else Decimal("0.00")
             )
+            # A free-shipping coupon waives the delivery charge entirely. The
+            # quote above still ran (so an unserviceable destination is still
+            # refused -- free shipping waives the charge, not the service),
+            # but the order is charged nothing for delivery while KEEPING the
+            # quoted method as the record of how it ships. That retained
+            # method is what tells this zero apart from the
+            # no-shipping-configured zero where the method is null.
+            if coupon is not None and coupon.discount_type == Coupon.FREE_SHIPPING:
+                shipping_amount = Decimal("0.00")
             shipping_method_id = (
                 shipping_quote.method_id if shipping_quote is not None else None
             )
@@ -1008,6 +1005,37 @@ def validate_redeemable_coupon(code, cart):
     return coupon, subtotal, None
 
 
+def coupon_merchandise_discount(coupon, subtotal):
+    """The merchandise discount ``coupon`` grants against ``subtotal``.
+
+    The one place the coupon-type math lives, so the public preview
+    (``apply_coupon``) and the persisted checkout discount can never disagree
+    about what a coupon is worth -- the F-11 quantize parity, and the reason
+    a free-shipping rule added in one caller cannot silently miss the other.
+    Both callers pass their own server-computed subtotal and store exactly
+    what this returns.
+
+    A free-shipping coupon carries NO merchandise discount: it waives the
+    order's delivery charge instead (applied to the server-side quote in
+    ``create_order``). It therefore always returns 0.00 here regardless of
+    ``discount_value``, while still passing every validity and minimum-order
+    check in its callers. The result is never more than the subtotal.
+    """
+    if coupon.discount_type == Coupon.FREE_SHIPPING:
+        return Decimal("0.00")
+
+    if coupon.discount_type == "percentage":
+        discount = quantize_money((subtotal * coupon.discount_value) / Decimal("100"))
+
+        if coupon.maximum_discount is not None:
+            discount = min(discount, coupon.maximum_discount)
+
+    else:
+        discount = coupon.discount_value
+
+    return min(discount, subtotal)
+
+
 @api_view(["POST"])
 @throttle_scope("coupon")
 def apply_coupon(request):
@@ -1041,19 +1069,11 @@ def apply_coupon(request):
     if rejection is not None:
         return rejection
 
-    if coupon.discount_type == "percentage":
-        # Same quantize parity as checkout (F-11): the preview must show
-        # the exact 2-dp discount the order will store.
-        discount = quantize_money((subtotal * coupon.discount_value) / Decimal("100"))
-
-        if coupon.maximum_discount is not None:
-            discount = min(discount, coupon.maximum_discount)
-
-    else:
-        discount = coupon.discount_value
-
-    # Never allow discount greater than subtotal
-    discount = min(discount, subtotal)
+    # Same helper and quantize parity as checkout (F-11): the preview shows
+    # the exact 2-dp merchandise discount the order will store. A
+    # free-shipping coupon shows 0.00 here -- its waiver lands on the delivery
+    # charge at checkout, which this merchandise-only preview has no field for.
+    discount = coupon_merchandise_discount(coupon, subtotal)
 
     final_total = subtotal - discount
 
