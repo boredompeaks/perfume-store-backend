@@ -104,7 +104,10 @@ export default async function HomePage() {
           Typographic on paper: there is no campaign photograph, so the KEEP
           paper grain and ghost "A" are the only imagery. Nothing in here
           animates — the hero is the first-screen content and the LCP
-          candidate (§10, §3: "Never on the hero"). The D1 screen shows an
+          candidate (§10, §3: "Never on the hero") — and nothing in here is
+          `cv-auto` either: content-visibility on the LCP section would defer
+          the paint it exists to win (§10.3's below-fold rule names the
+          sections that follow it, not this one). The D1 screen shows an
           atelier photograph behind this block; §5.1 bans the stock-photo
           hero (one image per product, none of them a campaign asset) and
           W6-T1 ruled this treatment compliant, so the photograph is not
@@ -161,8 +164,11 @@ export default async function HomePage() {
           even 2-column grid, applied from `md` so §5.1's "two columns at md"
           still holds. Copy KEEP verbatim — it is the most honest text on the
           site; the screen's own wording ("Philosophy of measure") is mockup
-          drift against that KEEP. */}
-      <section className="settle mx-auto max-w-6xl px-4 pt-16 sm:px-6 md:pt-24 lg:pt-32">
+          drift against that KEEP. `cv-auto` (§10.3, U-W15-T17): the band sits
+          a full screen below the hero, so its layout/paint is skipped until
+          it nears the viewport — the settle reveal still plays there, and
+          print/find-in-page are covered by the utility's own guarantees. */}
+      <section className="settle cv-auto mx-auto max-w-6xl px-4 pt-16 sm:px-6 md:pt-24 lg:pt-32">
         <div className="grid gap-6 border-t border-hairline pt-8 md:grid-cols-12 md:gap-8">
           <div className="md:col-span-5">
             <p className="text-label uppercase text-bronze">
@@ -192,8 +198,10 @@ export default async function HomePage() {
           one (A-12.D.2); the `·` glyphs are decorative. The screen's band
           ("Complimentary shipping … Razorpay & Stripe … returnable within
           seven days") claims two things this store does not do (Stripe, a
-          blanket seven-day window), so §5.1's verified wording stays. */}
-      <section className="settle mx-auto max-w-6xl px-4 py-16 sm:px-6 md:py-24 lg:py-32">
+          blanket seven-day window), so §5.1's verified wording stays.
+          `cv-auto` (§10.3): the strip is the page's last band, always below
+          the fold once the carousel is on screen. */}
+      <section className="settle cv-auto mx-auto max-w-6xl px-4 py-16 sm:px-6 md:py-24 lg:py-32">
         <p className="flex flex-wrap items-center gap-x-6 gap-y-2 text-label uppercase text-ink-secondary">
           <span>Ships across India</span>
           <span aria-hidden="true" className="text-hairline">

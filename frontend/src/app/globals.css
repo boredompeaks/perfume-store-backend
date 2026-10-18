@@ -549,6 +549,42 @@
 }
 
 /* ==========================================================================
+   §10.3 below-fold rendering — the `.cv-auto` utility (U-W15-T17, W9-T3
+   deferred F2). `content-visibility: auto` lets the browser skip
+   layout/paint for a section that is far from the viewport and render it
+   the moment it comes near (a ~50% viewport margin). The paired
+   `contain-intrinsic-size: auto 600px` is §10.3's own figure: the
+   placeholder keeps the scrollbar honest before first render, and the
+   `auto` keyword swaps in the remembered real size after the section has
+   rendered once.
+
+   Three rules this utility encodes — the first two are pinned in
+   `lib/home.test.ts`, the third was live-verified under `next start`:
+
+   - Apply ONLY to sections that are genuinely below the fold. The hero,
+     the header and every LCP candidate are excluded (§10.1; ui-motion's
+     LCP guard: nothing above the fold waits on anything).
+   - Never a `.noise` ancestor (§10.3: the grain wrapper's `position:
+     relative` + `overflow-hidden` must not sit inside skipped content).
+   - Print must never depend on viewport proximity, so `@media print`
+     restores `content-visibility: visible`. Find-in-page, fragment
+     navigation and the `.settle` reveal keep working on cv:auto content:
+     the browser reveals it for search and anchors, and renders
+     near-viewport content before the view-timeline's entry zone
+     (`animation-range: entry 0% entry 40%`), so the reveal still plays.
+   ======================================================================== */
+.cv-auto {
+  content-visibility: auto;
+  contain-intrinsic-size: auto 600px;
+}
+
+@media print {
+  .cv-auto {
+    content-visibility: visible;
+  }
+}
+
+/* ==========================================================================
    §5.2 /products/[slug] — THE PDP'S ONE ACCENT MOMENT (P2): the still-life
    plate drifts as the notes beside it are read (STITCH §2 row 3: "the story
    image drifting as the notes beside it are read — one sticky frame on a

@@ -89,6 +89,48 @@ describe("home settle reveal (§5.1 / §3 O4 / §10)", () => {
 });
 
 /* ==========================================================================
+   U-W15-T17 (W9-T3 deferred F2) — `content-visibility: auto` on the
+   below-the-fold bands only. The two properties that make it safe are
+   pinned here so they cannot drift silently: the utility carries the
+   spec's intrinsic-size pair and a print escape, and its consumers are
+   exactly the house-position band and the facts strip — never the hero
+   (the LCP candidate, §10.1) and never the new-arrivals carousel section
+   (the second-screen content that must paint as soon as it is reached).
+   ========================================================================== */
+
+describe("content-visibility on below-fold bands (§10.3 / F2)", () => {
+  it("declares .cv-auto with the spec's pair and a print escape", () => {
+    const rule = globalsCss.match(/\.cv-auto\s*\{[^}]*\}/)?.[0] ?? "";
+    expect(rule).toContain("content-visibility: auto");
+    // §10.3's own figure: placeholder for the scrollbar, `auto` remembers
+    // the real size after first render.
+    expect(rule).toContain("contain-intrinsic-size: auto 600px");
+    // Print must never depend on viewport proximity: skipped subtrees can
+    // drop out of printed output, so the print layer restores visible.
+    const printRule = globalsCss.match(
+      /@media print\s*\{\s*\.cv-auto\s*\{[^}]*\}/,
+    )?.[0];
+    expect(printRule).toBeDefined();
+    expect(printRule).toContain("content-visibility: visible");
+  });
+
+  it("applies cv-auto to the two below-fold bands and nothing else on the page", () => {
+    // House position + facts strip. New arrivals keeps its plain `settle`
+    // class (one occurrence), so the consumer count is exact.
+    expect(pageSource.match(/className="settle cv-auto /g)).toHaveLength(2);
+    expect(pageSource.match(/className="settle mx-auto /g)).toHaveLength(1);
+    // The hero is the LCP candidate: no content-visibility may reach it.
+    const hero = pageSource.match(
+      /<section className="noise[\s\S]*?<\/section>/,
+    )?.[0];
+    expect(hero).toBeDefined();
+    expect(hero).not.toContain("cv-auto");
+    // The carousel island ships no cv of its own either.
+    expect(carouselSource).not.toContain("cv-auto");
+  });
+});
+
+/* ==========================================================================
    U-W11-T4 — the D1 screen's "New arrivals" carousel
    (`media/designs/maison_ther_catalogue_accueil_carousel_edition/`).
    Three claims the reviewer will re-read: the data is the server's real
