@@ -268,7 +268,9 @@ rather than left standing:
 decision and the reason, so here it is:
 
 - **`/admin`** — the admin is Django's, served on the **API origin**, and
-  `src/app/admin/page.tsx` is a five-line redirect to `ADMIN_URL`. There is no
+  `src/app/admin/page.tsx` is a `redirect()` (307) to
+  `process.env.NEXT_PUBLIC_ADMIN_ORIGIN` (fail-if-unset at build; the origin is
+  normalized to the backend's `/admin/` mount — no localhost default). There is no
   storefront `/admin` to design. Spec §5 and §13 both require the admin to be a
   *separate application surface* with its own layout, navigation tree and access
   control, and the backend has already built it behind an RBAC capability layer.

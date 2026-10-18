@@ -51,10 +51,14 @@ export default async function ProductsPage({ searchParams }: Props) {
 
   return (
     <div className="mx-auto max-w-6xl px-4 py-10 sm:px-6">
+      {/* Screen header block (U-W11-T5): bronze eyebrow over the display
+          title, eyebrow-to-title gap per the screen (4px = --space-1). The
+          screen's right-hand "Série Permanente · Grasse MMXXIV" line is
+          design-system fiction (A-0b: refs are a SYSTEM, not content) and is
+          deliberately not shipped. */}
       <header>
-        <h1 className="font-display text-4xl tracking-tight">
-          Shop all fragrances
-        </h1>
+        <p className="text-eyebrow uppercase text-bronze">Catalogue Raisonné</p>
+        <h1 className="mt-1 font-display text-display">All fragrances</h1>
       </header>
 
       <FilterBar />
@@ -88,10 +92,13 @@ export default async function ProductsPage({ searchParams }: Props) {
 }
 
 /**
- * §5.2's count sentence, kept verbatim. Two honest exits: no count is
- * announced for a genuine empty set (the empty state below speaks for it), and
- * none for an unreachable backend — a number we never received is exactly the
- * figure P5 forbids on screen.
+ * The count sentence, per the screen (U-W11-T5): "Showing **N creations** …",
+ * with the bold middle step from the screen's emphasis. Two honest exits kept
+ * from §5.2: no count is announced for a genuine empty set (the empty state
+ * below speaks for it), and none for an unreachable backend — a number we
+ * never received is exactly the figure P5 forbids on screen. The filtered
+ * suffix ("matching your filters") is the §5.2 behaviour pin and stays; the
+ * unfiltered tail is the screen's "in small batch circulation".
  */
 async function ResultCount({ filters }: { filters: ProductFilters }) {
   const page = await fetchProductsPage(filtersToParams(filters)).catch(
@@ -102,8 +109,11 @@ async function ResultCount({ filters }: { filters: ProductFilters }) {
   const filtered = isFiltered(filters);
   return (
     <p className="text-sm text-ink-secondary">
-      {page.count} {page.count === 1 ? "product" : "products"}
-      {filtered ? " matching your filters" : ""}
+      Showing{" "}
+      <span className="font-medium text-ink">
+        {page.count} {page.count === 1 ? "creation" : "creations"}
+      </span>
+      {filtered ? " matching your filters" : " in small batch circulation"}
     </p>
   );
 }

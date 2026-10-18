@@ -4,15 +4,18 @@ import { restockSubscribe, restockUnsubscribe } from "./products-api";
 import { clearTokens, setTokens } from "./tokens";
 
 /**
- * Restock opt-in state machine (U-W4-F3, SPEC-19-4 / §12.G6), mocked at
- * the fetch seam. What is pinned:
+ * Restock opt-in state machine (U-W4-F3, SPEC-19-4 / §12.G6 /
+ * SPEC-Q-RS1), mocked at the fetch seam. What is pinned:
  *  - request shape (path, method, credentials, JWT, CSRF, email body);
- *  - 201 created vs 200 already-registered — the same body at two codes,
- *    which is exactly why apiFetch grew `onStatus`;
+ *  - the three 2xx codes the same preference body arrives at: authed
+ *    201 = first opt-in, authed 200 = re-armed, guest 202 = uniform
+ *    first-or-repeat (zero oracle) — which is exactly why apiFetch grew
+ *    `onStatus`;
  *  - every refusal surfaced as ApiError with the backend's uniform
  *    SPEC-9-03 envelope message VERBATIM (P5), including the 429 the
  *    form's calm inline alert renders and the 401 that becomes the
- *    sign-in door;
+ *    sign-in door (the guest arms that still answer 401: an email-less
+ *    POST, and every DELETE);
  *  - DELETE's uniform {active: false} opt-out.
  *
  * The 429 message text below is illustrative of DRF's throttle detail: the
@@ -79,6 +82,27 @@ describe("restockSubscribe", () => {
 
     expect(result.created).toBe(false);
     expect(result.preference).toEqual(preference);
+  });
+
+  it("reads the guest's uniform 202 as registered (signed out, no bearer)", async () => {
+    // SPEC-Q-RS1: an unauthenticated POST carrying an email answers one
+    // 202 whether first-time or repeat — the form must show the "on the
+    // list" copy, never "already" (the pre-guest-arm bug this pins).
+    const fetchMock = vi.fn().mockResolvedValue(ok(preference, 202));
+    vi.stubGlobal("fetch", fetchMock);
+    // no setTokens: this caller is signed out.
+
+    const result = await restockSubscribe(SLUG, "buyer@example.com");
+
+    expect(result.created).toBe(true);
+    expect(result.preference).toEqual(preference);
+    const [, init] = fetchMock.mock.calls[0];
+    const headers = init.headers as Record<string, string>;
+    expect(headers.Authorization).toBeUndefined();
+    expect(init.credentials).toBe("include");
+    expect(JSON.parse(init.body as string)).toEqual({
+      email: "buyer@example.com",
+    });
   });
 
   it("surfaces the in-stock 400 message verbatim", async () => {
@@ -156,7 +180,11 @@ describe("restockSubscribe", () => {
     expect(refreshCalls).toBe(1);
   });
 
-  it("a guest submit 401s with no bearer header (the sign-in door, one refresh probe)", async () => {
+  it("a signed-out submit that lands on a 401 (the remaining guest arms) attaches no bearer and probes refresh once", async () => {
+    // SPEC-Q-RS1 keeps two guest-401 arms: a POST with no submitted
+    // email (or an unparseable body), and every DELETE. What this pins
+    // at the fetch seam is the CLIENT's handling of that 401: no bearer
+    // when signed out, one refresh probe, the envelope message verbatim.
     let refreshCalls = 0;
     let authHeader: string | undefined;
     vi.stubGlobal(

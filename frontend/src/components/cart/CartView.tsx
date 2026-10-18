@@ -139,16 +139,20 @@ export default function CartView() {
           ) : status === "anonymous" ? (
             guestCheckout ? (
               <>
-                {/* §5.3 CTA by auth state (CHANGE-11). CheckoutView owns the
-                    sign-in wall when the flag is off, and surfaces the
-                    backend's own refusal verbatim when an anonymous order is
-                    refused (BACKEND_REQUESTS P1, TIER1-GUEST-DEADEND) — the
-                    cart promises the door, not the outcome. */}
+                {/* §5.3 CTA by auth state (CHANGE-11). D2 (U-W10-T2) renames
+                    this button: /checkout now replaces an anonymous visitor
+                    with /register?next=/checkout, so the old guest wording
+                    would promise an outcome the route no longer offers. Same
+                    position, same primary-ink block, same target — the cart
+                    still promises the door, not the outcome (CheckoutView
+                    owns the redirect; it surfaces the backend's own refusal
+                    verbatim when an anonymous order is refused —
+                    BACKEND_REQUESTS P1, TIER1-GUEST-DEADEND). */}
                 <Link
                   href="/checkout"
                   className="block bg-ink px-6 py-3 text-center text-sm text-paper transition-colors hover:bg-bronze"
                 >
-                  Checkout as guest
+                  Continue to checkout
                 </Link>
                 <p className="mt-3 text-center text-xs text-ink-secondary">
                   or{" "}

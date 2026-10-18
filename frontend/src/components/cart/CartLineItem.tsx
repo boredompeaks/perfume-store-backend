@@ -133,10 +133,13 @@ export default function CartLineItem({
           className={`mt-auto flex items-center justify-between pt-3 ${busy ? "opacity-60" : ""}`}
         >
           <div
-            className="flex items-center border border-hairline"
+            className="flex items-center border border-field-border"
             role="group"
             aria-label={`Quantity for ${item.product.name}`}
           >
+            {/* §7.5 — same 44px touch floor as the PDP stepper: `px-3 py-1.5`
+                was ~32×32, under the system's 44px convention (WCAG's own
+                24px minimum still passed). */}
             <button
               type="button"
               onClick={() => {
@@ -146,7 +149,7 @@ export default function CartLineItem({
               }}
               disabled={qty <= 1 || busy}
               aria-label="Decrease quantity"
-              className="px-3 py-1.5 text-ink-secondary transition-colors hover:text-ink disabled:opacity-40"
+              className="flex h-11 min-w-11 items-center justify-center text-ink-secondary transition-colors hover:text-ink disabled:opacity-40"
             >
               −
             </button>
@@ -169,7 +172,7 @@ export default function CartLineItem({
               }}
               disabled={qty >= maxQty || busy}
               aria-label="Increase quantity"
-              className="px-3 py-1.5 text-ink-secondary transition-colors hover:text-ink disabled:opacity-40"
+              className="flex h-11 min-w-11 items-center justify-center text-ink-secondary transition-colors hover:text-ink disabled:opacity-40"
             >
               +
             </button>

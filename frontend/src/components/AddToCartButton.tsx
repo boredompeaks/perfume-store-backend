@@ -55,16 +55,20 @@ export default function AddToCartButton({
   return (
     <div className="flex items-stretch gap-3">
       <div
-        className="flex items-center border border-hairline"
+        className="flex items-center border border-field-border"
         role="group"
         aria-label="Quantity"
       >
+        {/* §7.5: `px-3 py-2` on a 14px glyph was ~32×36 — inside WCAG 2.2's
+            24px floor but under this system's 44px touch convention. The
+            stepper buttons are 44×44 (h-11/min-w-11 are already in the
+            stylesheet; no new utility is emitted for this fix). */}
         <button
           type="button"
           onClick={() => setQty((q) => Math.max(1, q - 1))}
           disabled={qty <= 1}
           aria-label="Decrease quantity"
-          className="px-3 py-2 text-ink-secondary transition-colors hover:text-ink disabled:opacity-40"
+          className="flex h-11 min-w-11 items-center justify-center text-ink-secondary transition-colors hover:text-ink disabled:opacity-40"
         >
           −
         </button>
@@ -76,7 +80,7 @@ export default function AddToCartButton({
           onClick={() => setQty((q) => Math.min(maxQty, q + 1))}
           disabled={qty >= maxQty}
           aria-label="Increase quantity"
-          className="px-3 py-2 text-ink-secondary transition-colors hover:text-ink disabled:opacity-40"
+          className="flex h-11 min-w-11 items-center justify-center text-ink-secondary transition-colors hover:text-ink disabled:opacity-40"
         >
           +
         </button>
