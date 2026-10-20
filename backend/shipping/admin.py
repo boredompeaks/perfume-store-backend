@@ -31,6 +31,7 @@ from .models import (
     Shipment,
     ShipmentEvent,
     ShippingMethod,
+    ShippingProvider,
     ShippingRate,
 )
 
@@ -100,6 +101,18 @@ class ShipmentAdmin(RoleAwareModelAdmin):
     picking an order by customer name instead of by the reference they are
     holding. Adding it would edit the SPEC-1-B03-audited order admin, which
     this task has no reason to touch.
+
+    ``provider`` is a plain select too, for the opposite reason to ``order``
+    and the same one that governs every field on this surface: the operator
+    who links a parcel holds ``shipments.write`` (support + admin), while the
+    autocomplete endpoint resolves through ``ShippingProviderAdmin``'s view
+    permission, which is ``shipping.manage`` (finance + admin). Support holds
+    the first and not the second, so an autocomplete provider widget would
+    403 for exactly the role this surface exists to serve and the operator
+    would save the parcel unlinked. A plain select reads the provider table
+    directly, adds no read authority on the provider admin, and therefore
+    keeps both capabilities where they were instead of widening
+    ``shipping.manage`` to make a widget work.
     """
 
     capability_map = SHIPMENT_CAPABILITY_MAP
@@ -107,14 +120,22 @@ class ShipmentAdmin(RoleAwareModelAdmin):
         "order",
         "tracking_number",
         "carrier",
+        "provider",
         "status",
         "estimated_delivery",
         "updated_at",
     )
-    list_filter = ("status", "carrier")
+    list_filter = ("status", "carrier", "provider")
     # Spec 6.9 line 2013: the tracking number is how staff and customers find
-    # a parcel, so it is searchable alongside the order reference it belongs to.
-    search_fields = ("tracking_number", "carrier", "order__order_number")
+    # a parcel, so it is searchable alongside the order reference it belongs to
+    # and the provider it travels with.
+    search_fields = (
+        "tracking_number",
+        "carrier",
+        "provider__code",
+        "provider__name",
+        "order__order_number",
+    )
     readonly_fields = ("created_at", "updated_at")
     date_hierarchy = "created_at"
 
@@ -211,3 +232,12 @@ class ShipmentEventAdmin(RoleAwareModelAdmin):
 
     def has_delete_permission(self, request, obj=None):
         return False  # audit history is never deletable
+
+
+@admin.register(ShippingProvider)
+class ShippingProviderAdmin(RoleAwareModelAdmin):
+    capability_map = SHIPPING_CAPABILITY_MAP
+    list_display = ("code", "name", "is_active", "updated_at")
+    list_filter = ("is_active",)
+    search_fields = ("code", "name")
+    ordering = ("code",)

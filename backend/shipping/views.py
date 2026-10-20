@@ -165,8 +165,12 @@ def _trackable_shipments(request, order_number):
     # were dispatched. The model's own ``-created_at`` ordering is the admin
     # grid's (newest activity at the top) and is deliberately not what a
     # tracking timeline should do; ``id`` breaks a same-instant tie.
+    #
+    # ``provider`` rides the join because ``tracking_url`` reads it once per
+    # parcel; without it a split order would be one query per parcel for the
+    # very link the customer came for.
     return list(
-        Shipment.objects.select_related("order")
+        Shipment.objects.select_related("order", "provider")
         .prefetch_related("events")
         .filter(order__order_number=order_number, **owner)
         .order_by("created_at", "id")
@@ -195,7 +199,7 @@ class ShipmentTrackingView(APIView):
     deliberate change of envelope from B06's first cut, which returned one
     bare parcel object and so reported only the newest parcel of a split
     order. The parcel object itself is unchanged -
-    ``ShipmentTrackingSerializer`` still carries exactly its six keys with
+    ``ShipmentTrackingSerializer`` still carries exactly its eight keys with
     exactly their sensitivity, and every one of them is a per-parcel fact, so
     none of them was hoisted or dropped to make room for the envelope.
 
