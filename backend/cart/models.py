@@ -1,10 +1,30 @@
+from django.conf import settings
 from django.db import models
+from django.db.models import Q
 
 from products.models import products
 
 
 class Cart(models.Model):
-    session_id = models.CharField(max_length=100, unique=True)
+    # D-04a: a cart belongs to an ACCOUNT once the customer signs in, and to
+    # the browser session before that. Both keys are nullable because exactly
+    # one of them is set on any live cart: a guest cart is keyed by session,
+    # a signed-in cart by user. A session cart that is adopted into an
+    # account CLEARS session_id, so the same browser cookie can never resolve
+    # back to somebody's account cart after logout (resolve_cart's anonymous
+    # branch looks the session key up unchanged). unique=True still holds on
+    # the session key; both engines allow repeated NULLs.
+    session_id = models.CharField(max_length=100, unique=True, null=True, blank=True)
+
+    # D-04a: the account owner. CASCADE because deleting an account must not
+    # leave a cart addressable by its old user id. Nullable is the guest half.
+    user = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.CASCADE,
+        null=True,
+        blank=True,
+        related_name="carts",
+    )
 
     # R-9.3.5/R-9.3.6: the applied coupon is persistent cart state, not a
     # per-request payload -- it survives across requests so checkout can
@@ -43,6 +63,20 @@ class Cart(models.Model):
 
     def __str__(self):
         return f"Cart {self.id}"
+
+    class Meta:
+        constraints = [
+            # D-04a: one active cart per account. PARTIAL on purpose — guest
+            # carts all carry user=NULL and must stay unlimited, while two
+            # account carts for one user would fork the customer's basket
+            # between requests (resolve_cart's get_or_create would race onto
+            # whichever row the DB returned first).
+            models.UniqueConstraint(
+                fields=["user"],
+                condition=Q(user__isnull=False),
+                name="unique_active_cart_per_user",
+            )
+        ]
 
 
 class CartItem(models.Model):

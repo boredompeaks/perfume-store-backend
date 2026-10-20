@@ -186,10 +186,12 @@ class TokenAuthMutationCsrfTruthTests(ApiTestCase):
         the session cookie checkout requires rides along but the credential
         that authorizes the order is the non-ambient JWT."""
         product = self.make_product()
-        self.seed_session_cart([(product, 1)])
         self.make_user()
         _, token = self.api_login()
         self.assertTrue(token)
+        # D-04a: an authenticated client owns the ACCOUNT cart, so the basket
+        # is built after the bearer is attached.
+        self.seed_session_cart([(product, 1)])
         res = self.checkout()
         self.assertEqual(res.status_code, 201, res.data)
 
@@ -200,11 +202,12 @@ class TokenAuthMutationCsrfTruthTests(ApiTestCase):
         SessionCartCsrfEnforcementTests and cart/test_csrf.py for the
         guest surface)."""
         product = self.make_product(price="200.00")
-        self.seed_session_cart([(product, 1)])
         self.make_coupon(code="CSRF10", discount_type="percentage", discount_value="10")
         self.make_user()
         _, token = self.api_login()
         self.assertTrue(token)
+        # D-04a: build the ACCOUNT cart the bearer resolves to.
+        self.seed_session_cart([(product, 1)])
         res = self.client.post(
             "/api/orders/apply-coupon/", {"code": "CSRF10"}, format="json"
         )
@@ -251,10 +254,11 @@ class ApiXssOutputSafetyTests(ApiTestCase):
 
     def test_xss_payloads_in_checkout_user_content_return_verbatim_as_json(self):
         product = self.make_product()
-        self.seed_session_cart([(product, 1)])
         self.make_user()
         _, token = self.api_login()
         self.assertTrue(token)
+        # D-04a: the authenticated client's basket is its account cart.
+        self.seed_session_cart([(product, 1)])
         name = "<img src=x onerror=alert(1)>"
         address = f"12 {self.SCRIPT} Lane"
         res = self.checkout(full_name=name, address=address)

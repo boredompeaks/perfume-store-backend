@@ -649,13 +649,15 @@ class ClientSuppliedAmountTests(ApiTestCase):
             )
         ):
             with self.subTest(forged=forged):
-                # A fresh client (and so a fresh cart) and a distinct
-                # destination per shape: the owner-scoped duplicate guard
-                # would otherwise collapse a repeat of the same cart and
-                # address onto the first order, which would prove nothing
-                # about the forged field.
+                # D-04a: one account owns ONE cart, so a "fresh client" does
+                # not get a fresh basket — the account cart is emptied
+                # explicitly, and each shape gets a distinct destination so
+                # the owner-scoped duplicate guard cannot collapse a repeat
+                # onto the first order.
                 client = self.fresh_client()
                 client.credentials(HTTP_AUTHORIZATION=f"Bearer {self.token}")
+                self.seed_session_cart([], client=client)
+                self.current_cart(client).items.all().delete()
                 self.seed_session_cart([(self.product, 1)], client=client)
                 res = client.post(
                     "/api/orders/checkout/",
@@ -885,7 +887,6 @@ class ShippingCostAtomicityTests(ApiTestCase):
         AuditEvent.record = original
         res = self.checkout()
         self.assertEqual(res.status_code, 201, res.data)
-        import re
         self.assertRegex(res.data["order_number"], r"ORD-2026-[0-9A-F]{8}")
         self.assertEqual(Order.objects.get().total_amount, Decimal("1048.99"))
 

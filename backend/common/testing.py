@@ -233,6 +233,31 @@ class ApiTestCase(TestCase):
     # Cart / checkout helpers
     # ------------------------------------------------------------------
 
+    def current_cart(self, client=None):
+        """The cart the given client's requests resolve to (D-04a).
+
+        An APIClient carrying a JWT owns that account's cart; anything else
+        owns the cart keyed by its session cookie. Tests that used to look a
+        cart up by ``session_id`` after a login now ask for the cart the
+        request actually resolves, which keeps the assertion honest without
+        duplicating ``resolve_cart``'s rules in every module.
+        """
+        import base64
+        import json
+
+        from cart.models import Cart
+
+        client = client or self.client
+        header = (getattr(client, "_credentials", None) or {}).get(
+            "HTTP_AUTHORIZATION", ""
+        )
+        if header.startswith("Bearer "):
+            payload = header.split(" ", 1)[1].split(".")[1]
+            payload += "=" * (-len(payload) % 4)
+            claims = json.loads(base64.urlsafe_b64decode(payload))
+            return Cart.objects.get(user_id=claims["user_id"])
+        return Cart.objects.get(session_id=client.session.session_key)
+
     def seed_session_cart(self, items, client=None):
         """Build a session cart through the public cart API.
 

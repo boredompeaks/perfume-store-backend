@@ -6,6 +6,7 @@ from decimal import Decimal
 from unittest import mock
 
 from django.core.cache import cache
+from django.db import IntegrityError, transaction
 from django.test import tag
 from django.urls import resolve
 from django.utils import timezone
@@ -632,3 +633,103 @@ class NonObjectJsonBodyTests(ApiTestCase):
             lambda body: self._post(body, "/api/cart/coupon/")
         )
         self.assertIsNone(Cart.objects.get().coupon_id)  # nothing persisted
+
+
+@tag("cart")
+class CartOwnershipTests(ApiTestCase):
+    """D-04a: the cart a request owns follows the credential, not the cookie.
+
+    An authenticated request owns the ACCOUNT cart (one per user); an
+    anonymous one owns its SESSION cart. Nothing may resolve a cart through
+    the other owner's key, and a guest basket must survive unchanged for a
+    visitor who never signs in.
+    """
+
+    def setUp(self):
+        self.product = self.make_product(stock=10)
+        self.buyer = self.make_user("buyer")
+
+    def test_authenticated_request_gets_the_account_cart(self):
+        _, token = self.api_login("buyer")
+
+        res = self.client.get("/api/cart/")
+
+        self.assertEqual(res.status_code, 200, res.data)
+        cart = Cart.objects.get(id=res.data["id"])
+        self.assertEqual(cart.user, self.buyer)
+        self.assertIsNone(cart.session_id)
+        self.assertFalse(Cart.objects.filter(session_id__isnull=False).exists())
+
+    def test_anonymous_request_gets_the_session_cart(self):
+        res = self.client.get("/api/cart/")
+
+        self.assertEqual(res.status_code, 200, res.data)
+        cart = Cart.objects.get(id=res.data["id"])
+        self.assertIsNone(cart.user_id)
+        self.assertEqual(cart.session_id, self.client.session.session_key)
+        # The test helper resolves the same row for an anonymous client (the
+        # session-key branch), not just the bearer branch used elsewhere.
+        self.assertEqual(self.current_cart().id, cart.id)
+
+    def test_two_users_never_share_a_cart(self):
+        _, token = self.api_login("buyer")
+        self.client.post(
+            "/api/cart/", {"product_id": self.product.id, "quantity": 2}, format="json"
+        )
+
+        other = self.fresh_client()
+        self.make_user("other")
+        self.api_login("other", client=other)
+        res = other.get("/api/cart/")
+
+        self.assertEqual(res.status_code, 200, res.data)
+        self.assertEqual(res.data["items"], [])
+        self.assertNotEqual(res.data["id"], Cart.objects.get(user=self.buyer).id)
+
+    def test_one_cart_per_user_across_requests(self):
+        _, token = self.api_login("buyer")
+
+        first = self.client.get("/api/cart/").data
+        second = self.client.get("/api/cart/").data
+
+        self.assertEqual(first["id"], second["id"])
+        self.assertEqual(Cart.objects.filter(user=self.buyer).count(), 1)
+
+    def test_the_unique_constraint_refuses_a_second_account_cart(self):
+        Cart.objects.create(user=self.buyer, session_id=None)
+        with self.assertRaises(IntegrityError):
+            with transaction.atomic():
+                Cart.objects.create(user=self.buyer, session_id=None)
+
+    def test_a_guest_cart_is_unchanged_for_a_visitor_who_never_signs_in(self):
+        first = self.client.get("/api/cart/").data
+        self.client.post(
+            "/api/cart/", {"product_id": self.product.id, "quantity": 1}, format="json"
+        )
+        second = self.client.get("/api/cart/").data
+
+        self.assertEqual(first["id"], second["id"])
+        self.assertEqual(len(second["items"]), 1)
+        self.assertEqual(Cart.objects.filter(user__isnull=True).count(), 1)
+
+    def test_an_account_cart_cannot_reach_a_guest_cart_line(self):
+        # The guest basket is built under this client's session cookie...
+        self.seed_session_cart([(self.product, 1)])
+        guest_item = CartItem.objects.get()
+        # ...then a bearer for an account is attached WITHOUT posting the
+        # storefront login (which would merge the basket in D-04b). The
+        # request must resolve the account cart, and the guest line is out of
+        # scope for it.
+        login_client = self.fresh_client()
+        _, token = self.api_login("buyer", client=login_client)
+        self.client.credentials(HTTP_AUTHORIZATION=f"Bearer {token}")
+        self.client.get("/api/cart/")  # materialise the account cart
+
+        res = self.client.patch(
+            f"/api/cart/{guest_item.id}/", {"quantity": 5}, format="json"
+        )
+
+        self.assertEqual(res.status_code, 404, res.data)
+        guest_item.refresh_from_db()
+        self.assertEqual(guest_item.quantity, 1)
+        self.assertEqual(Cart.objects.filter(user=self.buyer).count(), 1)

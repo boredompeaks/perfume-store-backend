@@ -192,7 +192,7 @@ class DelistCheckoutRefusalTests(ApiTestCase):
     def test_cart_line_survives_the_refusal(self):
         self._delist(self.product)
         self.checkout()
-        cart = Cart.objects.get(session_id=self.client.session.session_key)
+        cart = self.current_cart()
         line = cart.items.get(product=self.product)
         self.assertEqual(line.quantity, 2)
 

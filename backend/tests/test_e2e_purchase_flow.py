@@ -105,6 +105,9 @@ class CartPersistenceTests(ApiTestCase):
     # cleared after the paid verify
     def test_cart_persists_across_requests_and_clears_after_paid_verify(self):
         self.make_user("buyer")
+        # D-04a: sign in FIRST — the persistent cart under test is the
+        # account cart, resolved by the bearer on every request.
+        self.api_login("buyer")
         product = self.make_product(price="100.00", stock=5)
 
         res = self.client.get("/api/cart/")
@@ -118,7 +121,6 @@ class CartPersistenceTests(ApiTestCase):
         self.assertEqual(res.data["id"], cart_id)
         self.assertEqual(res.data["items"][0]["quantity"], 3)
 
-        self.api_login("buyer")
         res = self.checkout()
         order_id = res.data["id"]
 

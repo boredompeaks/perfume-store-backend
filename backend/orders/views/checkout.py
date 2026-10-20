@@ -35,6 +35,7 @@ from rest_framework.permissions import AllowAny
 from rest_framework.response import Response
 
 from cart.models import Cart
+from cart.services import resolve_cart
 from common.models import AuditEvent
 from common.money import quantize_money
 
@@ -413,15 +414,13 @@ def create_order(request):
     guest_email = ""
     owner = {"user": user}
 
-    if not request.session.session_key:
-        return Response({"error": "Cart not found"}, status=status.HTTP_404_NOT_FOUND)
+    # D-04a/D-07: the SAME ownership rule the cart endpoints use. A customer
+    # who signed in checks out their ACCOUNT cart; a legacy guest order read
+    # stays scoped to the caller's session cart. create=False keeps the
+    # documented "Cart not found" 404 instead of minting an empty cart.
+    cart = resolve_cart(request, create=False)
 
-    session_id = request.session.session_key
-
-    try:
-        cart = Cart.objects.get(session_id=session_id)
-
-    except Cart.DoesNotExist:
+    if cart is None:
         return Response({"error": "Cart not found"}, status=status.HTTP_404_NOT_FOUND)
 
     cart_items = cart.items.select_related("product").all()
@@ -1050,16 +1049,11 @@ def apply_coupon(request):
     # Resolve the cart before the coupon: otherwise a caller with no cart
     # could still probe code existence by watching for the coupon error
     # instead of the cart error. With the cart first, every cartless caller
-    # gets the same answer for every code.
-    if not request.session.session_key:
-        return Response({"error": "Cart not found"}, status=status.HTTP_404_NOT_FOUND)
+    # gets the same answer for every code. Ownership follows the credential
+    # (D-04a): account cart for a bearer, session cart for a guest.
+    cart = resolve_cart(request, create=False)
 
-    session_id = request.session.session_key
-
-    try:
-        cart = Cart.objects.get(session_id=session_id)
-
-    except Cart.DoesNotExist:
+    if cart is None:
         return Response({"error": "Cart not found"}, status=status.HTTP_404_NOT_FOUND)
 
     # From here on every rejection shares one uniform response: unknown,

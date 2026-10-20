@@ -10,6 +10,7 @@ from products.models import products
 
 from .models import Cart, CartItem
 from .serializers import CartSerializer
+from .services import resolve_cart
 
 
 class CartMutationRateThrottle(ScopedRateThrottle):
@@ -49,14 +50,10 @@ def _object_body(data):
 @throttle_scope("cart")
 def cart_detail(request):
 
-    # The session key is the cart's owner key; mint one so a first-time
-    # boot GET finds (or lazily creates) the cart row instead of failing.
-    if not request.session.session_key:
-        request.session.create()
-
-    session_id = request.session.session_key
-
-    cart, created = Cart.objects.get_or_create(session_id=session_id)
+    # D-04a: ownership lives in one place. A signed-in caller gets the
+    # account cart; a guest gets the session cart, whose session key is
+    # minted lazily so a first-time boot GET finds its row instead of failing.
+    cart = resolve_cart(request)
 
     if request.method == "GET":
         serializer = CartSerializer(cart)
@@ -141,15 +138,18 @@ def cart_detail(request):
 @throttle_scope("cart")
 def cart_item_detail(request, item_id):
 
-    # Uniform cart-family 404 (conventions.md: no existence leaks): no
-    # session is answered exactly like a missing cart row.
-    if not request.session.session_key:
+    # Uniform cart-family 404 (conventions.md: no existence leaks): no cart
+    # for this caller is answered exactly like a missing item. Resolution
+    # goes through the helper so the item can only ever be looked up inside
+    # the caller's OWN cart — an account cart and a guest cart can never
+    # share an item id space.
+    cart = resolve_cart(request, create=False)
+
+    if cart is None:
         return Response({"error": "Cart not found"}, status=status.HTTP_404_NOT_FOUND)
 
-    session_id = request.session.session_key
-
     try:
-        cart_item = CartItem.objects.get(id=item_id, cart__session_id=session_id)
+        cart_item = CartItem.objects.get(id=item_id, cart=cart)
 
     except CartItem.DoesNotExist:
         return Response(
@@ -213,13 +213,9 @@ def cart_coupon(request):
     a coupon invalidated between apply and checkout can never reach an
     order."""
 
-    if not request.session.session_key:
-        return Response({"error": "Cart not found"}, status=status.HTTP_404_NOT_FOUND)
+    cart = resolve_cart(request, create=False)
 
-    try:
-        cart = Cart.objects.get(session_id=request.session.session_key)
-
-    except Cart.DoesNotExist:
+    if cart is None:
         return Response({"error": "Cart not found"}, status=status.HTTP_404_NOT_FOUND)
 
     if request.method == "DELETE":
