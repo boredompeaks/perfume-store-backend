@@ -61,33 +61,26 @@ class BackfillMappingTests(TestCase):
             provider=provider,
         )
 
+    def _matches(self, carrier):
+        return matching_provider_ids(carrier, list(ShippingProvider.objects.all()))
+
     def test_code_match_is_case_insensitive(self):
-        shipment = self._shipment("BF-CODE", "DELHIVERY")
-        self.assertEqual(
-            matching_provider_ids(shipment.carrier, list(ShippingProvider.objects.all())),
-            {self.delhivery.pk},
-        )
+        self.assertEqual(self._matches("DELHIVERY"), {self.delhivery.pk})
 
     def test_name_match_is_exact_but_not_case_folded(self):
-        shipment = self._shipment("BF-NAME", "Blue Dart")
-        self.assertEqual(
-            matching_provider_ids(shipment.carrier, list(ShippingProvider.objects.all())),
-            {self.bluedart.pk},
-        )
+        self.assertEqual(self._matches("Blue Dart"), {self.bluedart.pk})
 
     def test_two_providers_with_one_name_are_ambiguous(self):
-        shipment = self._shipment("BF-AMBIGUOUS", "Delhivery")
         self.assertEqual(
-            matching_provider_ids(shipment.carrier, list(ShippingProvider.objects.all())),
+            self._matches("Delhivery"),
             {self.delhivery.pk, self.delhivery_twin.pk},
         )
 
     def test_unknown_and_blank_carriers_match_nothing(self):
-        providers = list(ShippingProvider.objects.all())
-        self.assertEqual(matching_provider_ids("FedEx", providers), set())
-        self.assertEqual(matching_provider_ids("", providers), set())
-        self.assertEqual(matching_provider_ids(None, providers), set())
-        self.assertEqual(matching_provider_ids("   ", providers), set())
+        self.assertEqual(self._matches("FedEx"), set())
+        self.assertEqual(self._matches(""), set())
+        self.assertEqual(self._matches(None), set())
+        self.assertEqual(self._matches("   "), set())
 
     def test_already_linked_parcel_is_never_rewritten(self):
         shipment = self._shipment(
