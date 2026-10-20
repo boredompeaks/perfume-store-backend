@@ -48,8 +48,9 @@ from unittest.mock import patch
 from django import forms
 from django.contrib import admin
 from django.contrib.auth.models import Group, User
+from django.core.exceptions import ValidationError
 from django.db import IntegrityError, models
-from django.test import RequestFactory
+from django.test import RequestFactory, override_settings
 from django.utils import timezone
 from django.utils.dateparse import parse_datetime
 
@@ -1874,6 +1875,158 @@ class OrderLifecycleSyncTests(ShipmentTestCase):
         self.assertEqual(order.status, "confirmed")
 
 
+class OrderBindingAndRefusalTests(ShipmentTestCase):
+    """[B-2] A parcel's order is fixed at creation, and a refused order move
+    is explained to the operator instead of happening silently.
+
+    The order is the thing the customer reads, so two rules meet here: the
+    binding is chosen once (read-only afterwards) and the order machine - not
+    this surface - decides whether a parcel's status may move it. When the
+    machine refuses, the parcel still saves; the operator is told which rule
+    held the order back, in the machine's own words.
+    """
+
+    def setUp(self):
+        super().setUp()
+        self.client.force_login(self.support)
+
+    def _order_in(self, status, *, payment_status="captured", with_items=True):
+        order = self._account_order(
+            "ORD-2026-000431",
+            status=status,
+            payment_status=payment_status,
+        )
+        if with_items:
+            OrderItem.objects.create(
+                order=order,
+                product_name="Rose Absolute",
+                price=Decimal("499.00"),
+                quantity=1,
+                subtotal=Decimal("499.00"),
+            )
+        return order
+
+    def _parcel(self, order, tracking_number="TRK-431"):
+        return self._shipment(order, tracking_number)
+
+    def _post_status(self, shipment, status, *, order=None):
+        return self.client.post(
+            self.change_url(shipment),
+            {
+                "order": shipment.order_id if order is None else order,
+                "tracking_number": shipment.tracking_number,
+                "carrier": shipment.carrier,
+                "status": status,
+                "estimated_delivery": "",
+                "internal_note": "",
+                "_save": "Save",
+            },
+            follow=True,
+        )
+
+    def _order_events(self, order):
+        return list(
+            OrderStatusEvent.objects.filter(order=order)
+            .order_by("created_at", "id")
+            .values_list("from_status", "to_status")
+        )
+
+    def test_the_order_is_read_only_on_the_change_form(self):
+        res = self.client.get(self.change_url())
+
+        self.assertEqual(res.status_code, 200)
+        self.assertNotIn("order", res.context["adminform"].form.fields)
+        # Read-only, not hidden: the operator still sees which order owns it
+        # (the admin renders the FK's own label, ``Order.__str__``).
+        self.assertContains(res, f"Order #{self.order.pk}")
+
+    def test_the_order_is_selectable_on_the_add_form_with_binding_help(self):
+        res = self.client.get(f"{CHANGELIST}add/")
+
+        form = res.context["adminform"].form
+        self.assertIn("order", form.fields)
+        self.assertEqual(
+            form.fields["order"].help_text,
+            "A parcel belongs to the order it was created for. To serve "
+            "another order, create a new parcel.",
+        )
+
+    def test_a_posted_order_cannot_re_point_an_existing_parcel(self):
+        # ``get_readonly_fields`` makes Django EXCLUDE the field from the
+        # change form, so a hand-posted id is not even a form field. The
+        # stored binding survives, rather than the POST winning.
+        self._post_status(
+            self.shipment,
+            Shipment.Status.LABEL_CREATED,
+            order=self.guest_order.pk,
+        )
+
+        self.shipment.refresh_from_db()
+        self.assertEqual(self.shipment.order_id, self.order.pk)
+
+    def test_a_refused_move_saves_the_parcel_and_names_the_payment_rule(self):
+        order = self._order_in("confirmed", payment_status="pending")
+        shipment = self._parcel(order)
+
+        res = self._post_status(shipment, Shipment.Status.DISPATCHED)
+
+        shipment.refresh_from_db()
+        self.assertEqual(shipment.status, Shipment.Status.DISPATCHED)
+        order.refresh_from_db()
+        self.assertEqual(order.status, "confirmed")
+        self.assertEqual(self._order_events(order), [])
+        self.assertContains(
+            res,
+            "Order not moved: payment must be captured (is &#x27;pending&#x27;)",
+        )
+
+    def test_an_illegal_transition_is_named(self):
+        order = self._order_in("confirmed")
+        shipment = self._parcel(order)
+
+        res = self._post_status(shipment, Shipment.Status.DELIVERED)
+
+        shipment.refresh_from_db()
+        self.assertEqual(shipment.status, Shipment.Status.DELIVERED)
+        order.refresh_from_db()
+        self.assertEqual(order.status, "confirmed")
+        self.assertEqual(self._order_events(order), [])
+        self.assertContains(
+            res,
+            "Order not moved: confirmed -&gt; delivered is not a legal transition",
+        )
+
+    def test_the_all_parcels_gate_is_named_for_a_split_order(self):
+        order = self._order_in("confirmed")
+        first = self._parcel(order, "TRK-441")
+        second = self._parcel(order, "TRK-442")
+        self._post_status(first, Shipment.Status.DISPATCHED)
+        self._post_status(second, Shipment.Status.DISPATCHED)
+        order.refresh_from_db()
+        self.assertEqual(order.status, "shipped")
+
+        res = self._post_status(first, Shipment.Status.DELIVERED)
+
+        first.refresh_from_db()
+        self.assertEqual(first.status, Shipment.Status.DELIVERED)
+        order.refresh_from_db()
+        self.assertEqual(order.status, "shipped")
+        self.assertEqual(self._order_events(order), [("confirmed", "shipped")])
+        self.assertContains(res, "Order not moved: not every parcel has been delivered")
+
+    def test_a_legal_move_warns_nothing_and_writes_exactly_one_event(self):
+        order = self._order_in("confirmed")
+        shipment = self._parcel(order)
+
+        res = self._post_status(shipment, Shipment.Status.DISPATCHED)
+
+        order.refresh_from_db()
+        self.assertEqual(order.status, "shipped")
+        self.assertEqual(order.fulfilment_status, "fulfilled")
+        self.assertEqual(self._order_events(order), [("confirmed", "shipped")])
+        self.assertNotContains(res, "Order not moved")
+
+
 # ==================================
 # [SPEC-B-02] The provider link and the tracking URL it renders
 # ==================================
@@ -1949,6 +2102,139 @@ class ProviderTrackingUrlTests(ShipmentTestCase):
                 "https://track.delhivery.com/TRK-401",
             )
         urlopen.assert_not_called()
+
+
+class TrackingTemplateValidationTests(ShipmentTestCase):
+    """[B-1] The template is rendered into an ``href``, so it is a URL.
+
+    Staff configure it, but the customer's browser follows what it produces.
+    A ``javascript:`` template would run in that customer's session and a
+    ``data:`` one would serve a document this store never published, so the
+    scheme is a boundary rather than a formatting preference. The model's
+    ``clean`` is the one place the rule lives (Django's admin forms call it),
+    and the renderer re-checks the scheme for a row written through the ORM.
+    """
+
+    def provider(self, template):
+        return ShippingProvider(
+            name="Carrier", code="carrier", tracking_url_template=template
+        )
+
+    def assert_rejected(self, template, expected):
+        with self.assertRaises(ValidationError) as caught:
+            self.provider(template).clean()
+        message = "; ".join(caught.exception.message_dict["tracking_url_template"])
+        self.assertIn(expected, message)
+
+    def test_a_javascript_template_is_rejected(self):
+        self.assert_rejected(
+            "javascript:alert({tracking_number})", "absolute http(s) URL"
+        )
+
+    def test_a_data_template_is_rejected(self):
+        self.assert_rejected("data:text/html,{tracking_number}", "absolute http(s)")
+
+    def test_a_template_with_no_placeholder_is_rejected(self):
+        self.assert_rejected(
+            "https://track.example.com/status", "exactly one {tracking_number}"
+        )
+
+    def test_a_template_with_two_placeholders_is_rejected(self):
+        self.assert_rejected(
+            "https://track.example.com/{tracking_number}/{tracking_number}",
+            "exactly one {tracking_number}",
+        )
+
+    def test_a_string_that_is_not_a_url_is_rejected(self):
+        self.assert_rejected("track.example.com/{tracking_number}", "absolute http(s)")
+
+    def test_a_scheme_relative_url_is_rejected(self):
+        # ``//host/path`` inherits the page's scheme and is not the absolute
+        # http(s) link the store promises the customer.
+        self.assert_rejected(
+            "//track.example.com/{tracking_number}", "absolute http(s)"
+        )
+
+    def test_a_newline_in_the_template_is_rejected(self):
+        self.assert_rejected(
+            "https://track.example.com/{tracking_number}\n", "whitespace or control"
+        )
+
+    def test_https_is_accepted(self):
+        self.provider("https://track.example.com/{tracking_number}").clean()
+
+    def test_blank_is_accepted_and_renders_no_link(self):
+        provider = self.provider("")
+        provider.clean()
+        provider.save()
+
+        shipment = self._shipment(self.guest_order, "TRK-BLANK", provider=provider)
+
+        self.assertIsNone(shipment.tracking_url)
+
+    def test_http_is_rejected_outside_debug(self):
+        # The test runner forces DEBUG off, which is also the production
+        # posture: the customer's link must not be cleartext.
+        self.assert_rejected("http://track.example.com/{tracking_number}", "https://")
+
+    @override_settings(DEBUG=True)
+    def test_http_is_accepted_for_a_local_development_page(self):
+        self.provider("http://localhost:8000/track/{tracking_number}").clean()
+
+    def test_a_non_http_template_written_through_the_orm_renders_no_link(self):
+        # Defense in depth: a direct ORM write never runs clean(), and the
+        # property is the last place before the storefront's href.
+        for index, template in enumerate(
+            (
+                "javascript:alert({tracking_number})",
+                "data:text/html,{tracking_number}",
+                "track.example.com/{tracking_number}",
+            )
+        ):
+            with self.subTest(template=template):
+                provider = ShippingProvider.objects.create(
+                    name="Carrier",
+                    code=f"carrier{index}",
+                    tracking_url_template=template,
+                )
+                shipment = self._shipment(
+                    self.guest_order, f"TRK-UNSAFE-{index}", provider=provider
+                )
+                self.assertIsNone(shipment.tracking_url)
+
+    def test_the_admin_form_refuses_a_javascript_template(self):
+        self.client.force_login(self.chief)
+
+        res = self.client.post(
+            "/admin/shipping/shippingprovider/add/",
+            {
+                "name": "Evil",
+                "code": "evil",
+                "tracking_url_template": "javascript:alert({tracking_number})",
+                "is_active": "on",
+                "_save": "Save",
+            },
+        )
+
+        self.assertEqual(res.status_code, 200)
+        self.assertFalse(ShippingProvider.objects.filter(code="evil").exists())
+
+    def test_the_admin_form_still_saves_an_https_template(self):
+        self.client.force_login(self.chief)
+
+        res = self.client.post(
+            "/admin/shipping/shippingprovider/add/",
+            {
+                "name": "Delhivery",
+                "code": "delhivery",
+                "tracking_url_template": "https://track.delhivery.com/{tracking_number}",
+                "is_active": "on",
+                "_save": "Save",
+            },
+        )
+
+        self.assertEqual(res.status_code, 302)
+        self.assertTrue(ShippingProvider.objects.filter(code="delhivery").exists())
 
 
 class ProviderLinkDeletionTests(ShipmentTestCase):

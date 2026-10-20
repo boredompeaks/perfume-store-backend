@@ -21,7 +21,7 @@ second door onto shipments: it was never granted the capability, and
 SPEC-1-B03's exact-set pin on that role stays true.
 """
 
-from django.contrib import admin
+from django.contrib import admin, messages
 from django.db import transaction
 
 from common.admin import RoleAwareModelAdmin
@@ -52,6 +52,13 @@ SHIPMENT_CAPABILITY_MAP = {
     "change": SHIPMENT_WRITE,
     "delete": SHIPMENT_WRITE,
 }
+
+# Shown beside the order select on the add form, which is the only place the
+# link can be chosen: the change form renders it read-only.
+SHIPMENT_ORDER_HELP_TEXT = (
+    "A parcel belongs to the order it was created for. To serve another "
+    "order, create a new parcel."
+)
 
 
 @admin.register(ShippingMethod)
@@ -113,6 +120,13 @@ class ShipmentAdmin(RoleAwareModelAdmin):
     directly, adds no read authority on the provider admin, and therefore
     keeps both capabilities where they were instead of widening
     ``shipping.manage`` to make a widget work.
+
+    ``order`` is chosen once. It is selectable on the add form and read-only
+    on the change form (``get_readonly_fields``), because a parcel's order is
+    what its whole trail and its tracking page are about - re-pointing a
+    dispatched parcel at a different order would rewrite the customer's
+    history without a trace. Serving another order means creating another
+    parcel, which is what the add form's help text says.
     """
 
     capability_map = SHIPMENT_CAPABILITY_MAP
@@ -138,6 +152,25 @@ class ShipmentAdmin(RoleAwareModelAdmin):
     )
     readonly_fields = ("created_at", "updated_at")
     date_hierarchy = "created_at"
+
+    def get_readonly_fields(self, request, obj=None):
+        """Bind the parcel to its order after creation.
+
+        Django's ``get_form`` EXCLUDES a read-only field from the ModelForm,
+        so a hand-posted ``order`` on a change form is not a field at all and
+        cannot re-point an existing parcel: the instance's stored value is
+        what gets saved. The add form keeps the select, where the binding is
+        decided exactly once.
+        """
+        readonly = super().get_readonly_fields(request, obj)
+        if obj is not None:
+            readonly += ("order",)
+        return readonly
+
+    def formfield_for_foreignkey(self, db_field, request, **kwargs):
+        if db_field.name == "order":
+            kwargs["help_text"] = SHIPMENT_ORDER_HELP_TEXT
+        return super().formfield_for_foreignkey(db_field, request, **kwargs)
 
     def save_model(self, request, obj, form, change):
         """Append the tracking event for this save, in the same transaction.
@@ -177,6 +210,15 @@ class ShipmentAdmin(RoleAwareModelAdmin):
         and the order move commit together. ``old is None`` (the add form)
         passes through too, because a parcel created already dispatched has
         moved just as surely as one edited into it.
+
+        A refused order move is a WARNING, never a failed save. The parcel
+        status is a fact about the parcel and the order machine is the
+        authority on the order, so a paid-parcel/pending-order mismatch must
+        still record the dispatch; what it must not do is leave the operator
+        guessing why the order did not follow. ``sync_order_status`` builds
+        that reason from the machine's own ``transition_allowed`` /
+        ``precondition_failures`` answer and the all-parcels gate, so this
+        surface reports the rule rather than restating it.
         """
         with transaction.atomic():
             old = None
@@ -190,7 +232,13 @@ class ShipmentAdmin(RoleAwareModelAdmin):
                     to_status=obj.status,
                     actor=request.user,
                 )
-            sync_order_status(obj, actor=request.user)
+            result = sync_order_status(obj, actor=request.user)
+            if result.refusal:
+                self.message_user(
+                    request,
+                    f"Order not moved: {result.refusal}",
+                    level=messages.WARNING,
+                )
 
 
 @admin.register(ShipmentEvent)
