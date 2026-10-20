@@ -44,6 +44,7 @@ from datetime import timedelta
 from decimal import Decimal
 from unittest.mock import patch
 
+from django import forms
 from django.contrib import admin
 from django.contrib.auth.models import Group, User
 from django.db import IntegrityError, models
@@ -1737,21 +1738,102 @@ class ProviderLinkAdminTests(ShipmentTestCase):
     """[SPEC-B-02] The operator links a parcel to an order and a provider, and
     a parcel is discoverable afterwards."""
 
-    def test_the_provider_is_an_autocomplete_field(self):
+    def staff_add(self, **fields):
+        """A complete add-form POST, with every field the form renders."""
+        payload = {
+            "order": self.guest_order.pk,
+            "tracking_number": "",
+            "carrier": "",
+            "provider": "",
+            "status": Shipment.Status.LABEL_CREATED,
+            "estimated_delivery": "",
+            "internal_note": "",
+            "_save": "Save",
+        }
+        payload.update(fields)
+        return self.client.post(f"{CHANGELIST}add/", payload)
+
+    def test_the_provider_field_is_a_plain_select_not_a_gated_autocomplete(self):
+        # ``shipments.write`` (support + admin) and ``shipping.manage``
+        # (finance + admin) are different capabilities, and the provider
+        # autocomplete endpoint resolves through ShippingProviderAdmin's view
+        # permission - shipping.manage. An autocomplete widget therefore 403s
+        # for support, the role this surface exists to serve. A plain select
+        # needs no endpoint and adds no read authority on the provider table.
         model_admin = admin.site._registry[Shipment]
-        self.assertIn("provider", model_admin.autocomplete_fields)
+        provider = ShippingProvider.objects.create(name="Delhivery", code="delhivery")
+
+        self.assertNotIn("provider", model_admin.autocomplete_fields)
+        field = model_admin.get_form(request_for(self.support)).base_fields["provider"]
+        self.assertIsInstance(field, forms.ModelChoiceField)
+        self.assertIn(provider, field.queryset)
+
+    def test_a_support_holder_links_a_provider_and_gets_the_tracking_url(self):
+        # The headline output of SPEC-B-02, reachable by the role that writes
+        # shipments: support holds shipments.write but NOT shipping.manage, so
+        # this is the case the autocomplete widget silently broke.
+        provider = ShippingProvider.objects.create(
+            name="Delhivery",
+            code="delhivery",
+            tracking_url_template="https://track.delhivery.com/{tracking_number}",
+        )
+        self.client.force_login(self.support)
+
+        form = self.client.get(f"{CHANGELIST}add/")
+
+        self.assertEqual(form.status_code, 200)
+        self.assertContains(
+            form, f'<option value="{provider.pk}">Delhivery</option>', html=True
+        )
+
+        res = self.staff_add(
+            order=self.guest_order.pk,
+            tracking_number="TRK-SUPPORT-1",
+            carrier="Delhivery",
+            provider=provider.pk,
+            status=Shipment.Status.LABEL_CREATED,
+        )
+
+        self.assertEqual(res.status_code, 302, getattr(res, "context", None))
+        created = Shipment.objects.get(tracking_number="TRK-SUPPORT-1")
+        self.assertEqual(created.provider_id, provider.pk)
+        self.assertEqual(
+            created.tracking_url,
+            "https://track.delhivery.com/TRK-SUPPORT-1",
+        )
+
+    def test_a_role_without_shipments_write_cannot_link_a_provider(self):
+        # The other half of the pair: the plain select must not become a
+        # general read door onto providers for a role that cannot write a
+        # shipment at all. The packing operator is the closest caller to
+        # fulfilment and is still refused.
+        provider = ShippingProvider.objects.create(name="Delhivery", code="delhivery")
+        self.client.force_login(self.packer)
+
+        form = self.client.get(f"{CHANGELIST}add/")
+        self.assertEqual(form.status_code, 403)
+
+        res = self.staff_add(
+            order=self.guest_order.pk,
+            tracking_number="TRK-PACKER-1",
+            carrier="Delhivery",
+            provider=provider.pk,
+            status=Shipment.Status.LABEL_CREATED,
+        )
+
+        self.assertEqual(res.status_code, 403)
+        self.assertFalse(
+            Shipment.objects.filter(tracking_number="TRK-PACKER-1").exists()
+        )
 
     def test_the_admin_links_a_new_parcel_to_its_order_and_provider(self):
         provider = ShippingProvider.objects.create(name="Delhivery", code="delhivery")
         self.client.force_login(self.chief)
 
-        res = self.staff_post(
-            f"{CHANGELIST}add/",
-            order=self.guest_order.pk,
+        res = self.staff_add(
             tracking_number="TRK-LINK-1",
             carrier="Delhivery",
             provider=provider.pk,
-            status=Shipment.Status.LABEL_CREATED,
         )
 
         self.assertEqual(res.status_code, 302, getattr(res, "context", None))
@@ -1759,9 +1841,15 @@ class ProviderLinkAdminTests(ShipmentTestCase):
         self.assertEqual(created.order_id, self.guest_order.pk)
         self.assertEqual(created.provider_id, provider.pk)
 
-    def test_the_provider_autocomplete_endpoint_answers_for_a_capability_holder(self):
+    def test_the_provider_autocomplete_endpoint_refuses_the_shipments_writer(self):
+        # The auditor's repro, kept as the reason the field is a plain select:
+        # the endpoint resolves through ShippingProviderAdmin's view
+        # permission (shipping.manage), so support - which holds
+        # shipments.write - gets 403. If a future change makes this endpoint
+        # answer for support, that is a capability decision to take
+        # deliberately, not a widget choice to sneak in.
         ShippingProvider.objects.create(name="Delhivery", code="delhivery")
-        self.client.force_login(self.chief)
+        self.client.force_login(self.support)
 
         res = self.client.get(
             "/admin/autocomplete/",
@@ -1773,8 +1861,7 @@ class ProviderLinkAdminTests(ShipmentTestCase):
             },
         )
 
-        self.assertEqual(res.status_code, 200, res.content[:400])
-        self.assertIn("Delhivery", res.content.decode())
+        self.assertEqual(res.status_code, 403, res.content[:400])
 
     def test_a_parcel_is_discoverable_by_its_reference_and_its_order(self):
         self.client.force_login(self.chief)
