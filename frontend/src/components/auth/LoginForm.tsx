@@ -2,6 +2,7 @@
 
 import Link from "next/link";
 import { useRouter } from "next/navigation";
+import { useQueryClient } from "@tanstack/react-query";
 import { useState } from "react";
 import { ApiError } from "@/lib/api";
 import { useAuth } from "@/lib/auth";
@@ -22,6 +23,7 @@ export default function LoginForm({
   variant?: "customer" | "staff";
 }) {
   const router = useRouter();
+  const queryClient = useQueryClient();
   const { login } = useAuth();
   const [username, setUsername] = useState("");
   const [password, setPassword] = useState("");
@@ -37,10 +39,13 @@ export default function LoginForm({
       // The surface picks both the endpoint and whether a code may ride
       // along (lib/mfa.ts): the customer body can never grow a totp key.
       await login(variant, username.trim(), password, totp.trim() || undefined);
-      // Cart is session-based and survives login; go where the user was
-      // headed. Awaiting keeps "Signing in…" visible until the destination
-      // is rendering (the backend's PBKDF2 check costs ~0.7s — honest
-      // feedback beats a dead-looking button).
+      // D-04b: the backend merged the guest basket into the account cart at
+      // sign-in, so the held cart query is stale — refetch it before the
+      // destination renders the header badge from it.
+      await queryClient.invalidateQueries({ queryKey: ["cart"] });
+      // Go where the user was headed. Awaiting keeps "Signing in…" visible
+      // until the destination is rendering (the backend's PBKDF2 check costs
+      // ~0.7s — honest feedback beats a dead-looking button).
       await router.push(next ?? "/");
     } catch (err) {
       setError(

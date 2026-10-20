@@ -2,13 +2,16 @@ import { apiFetch } from "./api";
 import type { CouponPreview, Order, PaymentSession } from "./types";
 
 /**
- * Session-cookie coupon preview; no JWT needed. Explicit-submit only — the
- * backend endpoint is unthrottled (V-11), so never per keystroke.
+ * Coupon preview against the caller's resolved cart. Explicit-submit only —
+ * the backend endpoint is unthrottled (V-11), so never per keystroke. The
+ * bearer is sent when one exists so a signed-in customer prices their ACCOUNT
+ * cart (D-04a); a guest sends none and still prices the session cart.
  */
 export function applyCoupon(code: string): Promise<CouponPreview> {
   return apiFetch<CouponPreview>("/api/orders/apply-coupon/", {
     method: "POST",
     body: { code },
+    auth: true,
   });
 }
 

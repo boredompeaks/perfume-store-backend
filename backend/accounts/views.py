@@ -27,6 +27,7 @@ from rest_framework_simplejwt.token_blacklist.models import (
 from rest_framework_simplejwt.tokens import RefreshToken
 from rest_framework_simplejwt.views import TokenObtainPairView, TokenRefreshView
 
+from cart.services import merge_session_cart_into_user_cart
 from common import notifications, qr, totp
 from common.models import AuditEvent
 from common.permissions import IsPrivilegedRole, is_privileged
@@ -80,7 +81,25 @@ class LoginView(TokenObtainPairView):
             self._record_login(request, succeeded=False)
             raise
         self._record_login(request, succeeded=True)
+        # D-04b: the guest basket this browser built follows the account it
+        # just signed into. Done on the shared door so the storefront (which
+        # inherits this post) and the staff door agree; a sign-in with no
+        # guest basket and no existing cart adds no key and mints nothing.
+        user = self._logged_in_user(request)
+        if user is not None:
+            cart = merge_session_cart_into_user_cart(request, user)
+            if cart is not None:
+                response.data["cart_id"] = cart.pk
         return _set_refresh_cookie(response)
+
+    @staticmethod
+    def _logged_in_user(request):
+        # The login serializer validates an exact username, so the account is
+        # the row authenticate() just proved; an unparsable body cannot reach
+        # this line (it would not have authenticated).
+        payload = request.data if isinstance(request.data, dict) else {}
+        username = str(payload.get("username", "") or "")
+        return User.objects.filter(username=username).first()
 
     @staticmethod
     def _record_login(request, succeeded):
@@ -471,26 +490,32 @@ def register(request):
                 detail={"username": user.username},
             )
 
+        # D-04b: the basket built before signing up belongs to the new
+        # account, exactly as it would on a login. Optional cart_id keeps the
+        # response additive; no guest basket mints nothing.
+        cart = merge_session_cart_into_user_cart(request, user)
+        body = {
+            "message": "User registered. Check your email to verify the account.",
+            "user": {
+                "username": user.username,
+                "email": user.email,
+            },
+        }
+        if cart is not None:
+            body["cart_id"] = cart.pk
+
         try:
             _send_verification_email(user)
         except Exception:
             return Response(
                 {
-                    "error": "Account created, but verification email could not be sent. Check SMTP settings."
+                    "error": "Account created, but verification email could not be sent. Check SMTP settings.",
+                    **({"cart_id": cart.pk} if cart is not None else {}),
                 },
                 status=status.HTTP_503_SERVICE_UNAVAILABLE,
             )
 
-        return Response(
-            {
-                "message": "User registered. Check your email to verify the account.",
-                "user": {
-                    "username": user.username,
-                    "email": user.email,
-                },
-            },
-            status=status.HTTP_201_CREATED,
-        )
+        return Response(body, status=status.HTTP_201_CREATED)
 
     return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
 

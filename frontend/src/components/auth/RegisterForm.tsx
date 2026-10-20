@@ -1,6 +1,7 @@
 "use client";
 
 import Link from "next/link";
+import { useQueryClient } from "@tanstack/react-query";
 import { useEffect, useRef, useState } from "react";
 import { ApiError } from "@/lib/api";
 import { register, usernameAvailable } from "@/lib/accounts-api";
@@ -14,6 +15,7 @@ type Availability =
   | { state: "short" };
 
 export default function RegisterForm() {
+  const queryClient = useQueryClient();
   const [username, setUsername] = useState("");
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
@@ -54,6 +56,9 @@ export default function RegisterForm() {
     setFieldErrors({});
     try {
       await register(username.trim(), email.trim(), password);
+      // D-04b: registration adopts the guest basket into the new account, so
+      // the anonymous cart query no longer describes what this browser owns.
+      await queryClient.invalidateQueries({ queryKey: ["cart"] });
       setRegistered({ emailFailed: false });
     } catch (err) {
       if (err instanceof ApiError) {

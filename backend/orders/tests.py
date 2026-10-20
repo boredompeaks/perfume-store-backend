@@ -1271,6 +1271,22 @@ class VerifyPaymentTests(OrderTestBase):
         self.assertEqual(res.status_code, 200, res.data)
         self.assertEqual(legacy.items.count(), 0)  # the bought line is gone
 
+    def test_verify_succeeds_when_the_session_has_no_cart_row(self):
+        """The legacy sweep is best-effort: a browser that carries a session
+        cookie but no cart row (expired/cleared) must not turn a successful
+        capture into an error."""
+        self.auth(None)
+        self.client.get("/api/cart/")  # mint the session cookie + cart
+        self.current_cart().delete()
+        self.auth(self.token)
+
+        _client_mock, order, payload = self._prepare_paid_setup()
+        res = self.client.post("/api/orders/payment/verify/", payload, format="json")
+
+        self.assertEqual(res.status_code, 200, res.data)
+        order.refresh_from_db()
+        self.assertEqual(order.payment_status, "captured")
+
     def test_verified_payment_writes_one_sale_movement_per_product(self):
         """SPEC-6-02 [6.5.17]: payment-time decrements are inventory
         mutations too — one SALE ledger row per product, system actor (no
