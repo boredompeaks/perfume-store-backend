@@ -23,10 +23,11 @@ an edit made through the admin change form, and that vocabulary is an exact-set
 contract pinned to its migration-recorded spellings, so a shipment-specific
 trigger is a vocabulary change with its own migration rather than a new string
 here. The conflation is bounded on both sides - a tracking-number-only edit
-reaches this module on every ``save_model`` but writes no ``OrderStatusEvent``
-because the order status does not move, and a move that writes an order event
-always wrote its ``ShipmentEvent`` first - but a reader of the order trail
-cannot recover "this came from the shipment screen" from the row today.
+reaches this module on every ``save_model`` but writes no order event while the
+order already sits at the status its parcel implies, and a move that writes an
+order event always wrote its ``ShipmentEvent`` first - but a reader of the
+order trail cannot recover "this came from the shipment screen" from the row
+today.
 """
 
 from django.db import transaction
