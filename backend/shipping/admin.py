@@ -26,6 +26,7 @@ from django.db import transaction
 
 from common.admin import RoleAwareModelAdmin
 
+from .lifecycle import sync_order_status
 from .models import (
     Shipment,
     ShipmentEvent,
@@ -148,6 +149,13 @@ class ShipmentAdmin(RoleAwareModelAdmin):
         ``ShipmentQuerySet.update`` is what makes that true rather than merely
         intended: a bulk ``update(status=...)`` would move a parcel with no
         record of where it moved from, so it is refused.
+
+        SPEC-D-01 adds the order half: because this is the only place a parcel
+        moves, it is also the only place the linked order can be kept in step,
+        and the sync runs inside the same transaction so the parcel, its event
+        and the order move commit together. ``old is None`` (the add form)
+        passes through too, because a parcel created already dispatched has
+        moved just as surely as one edited into it.
         """
         with transaction.atomic():
             old = None
@@ -161,6 +169,7 @@ class ShipmentAdmin(RoleAwareModelAdmin):
                     to_status=obj.status,
                     actor=request.user,
                 )
+            sync_order_status(obj, actor=request.user)
 
 
 @admin.register(ShipmentEvent)

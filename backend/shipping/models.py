@@ -294,11 +294,15 @@ class Shipment(models.Model):
     shipments "if needed", and no order-level status could express two
     parcels leaving on different days, so ``order`` is one-to-many.
 
-    Deliberately NOT wired into ``orders.state``. Spec 10.2 lists shipment as
-    a dimension BESIDE fulfilment, and SPEC-1-B03 scoped that machine for
-    audit; requirement 8 of this task forbids widening it. The two lifecycles
-    stay separate records of separate facts, and the shipment vocabulary is
-    never pushed through the order transition machine.
+    The parcel status drives the order's visible lifecycle through
+    ``shipping.lifecycle`` (SPEC-D-01 owner directive), and it does so by
+    READING ``orders.state`` rather than by widening it: only "dispatched",
+    "in_transit" and "delivered" map to an order move, and every one of them
+    is gated by ``transition_allowed`` and ``precondition_failures``, so a
+    move the order machine refuses (a pending or cancelled order) is skipped
+    instead of forced. The two vocabularies stay separate records of separate
+    facts - "label_created" and "exception" are not order states, and
+    cancellation and returns remain their own actions with their own writers.
     """
 
     class Status(models.TextChoices):

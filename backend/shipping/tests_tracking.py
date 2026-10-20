@@ -63,7 +63,7 @@ from common.roles import (
     ROLE_SUPPORT,
 )
 from common.testing import ApiTestCase
-from orders.models import Order
+from orders.models import Order, OrderItem, OrderStatusEvent
 from orders.views import GUEST_TOKEN_HEADER
 from orders.views import GUEST_TOKEN_MAX_LENGTH as ORDERS_TOKEN_MAX_LENGTH
 from shipping.models import Shipment, ShipmentEvent, ShippingMethod
@@ -1569,3 +1569,235 @@ class WidthGateTests(ShipmentTestCase):
         self.assertEqual(res.status_code, 200)
         self.shipment.refresh_from_db()
         self.assertEqual(self.shipment.tracking_number, "TRK-401")
+
+
+class OrderLifecycleSyncTests(ShipmentTestCase):
+    """A parcel's status drives its order's visible lifecycle (SPEC-D-01).
+
+    The two records stay separate - the shipment vocabulary is never pushed
+    through the order machine - so every probe here is about the SEAM: a move
+    the machine allows is mirrored, a move it refuses is skipped, and a replay
+    writes no second audit row. The order fixtures name their own state
+    because the machine, not this module, decides which edges exist.
+    """
+
+    def setUp(self):
+        super().setUp()
+        self.client.force_login(self.support)
+
+    def _order_in(self, status, *, payment_status="captured", with_items=True):
+        order = self._account_order(
+            "ORD-2026-000411",
+            status=status,
+            payment_status=payment_status,
+        )
+        if with_items:
+            OrderItem.objects.create(
+                order=order,
+                product_name="Rose Absolute",
+                price=Decimal("499.00"),
+                quantity=1,
+                subtotal=Decimal("499.00"),
+            )
+        return order
+
+    def _parcel(self, order, tracking_number="TRK-411"):
+        return self._shipment(order, tracking_number)
+
+    def _advance(self, shipment, status):
+        return self.client.post(
+            self.change_url(shipment),
+            {
+                "order": shipment.order_id,
+                "tracking_number": shipment.tracking_number,
+                "carrier": shipment.carrier,
+                "status": status,
+                "estimated_delivery": "",
+                "internal_note": "",
+                "_save": "Save",
+            },
+        )
+
+    def _order_events(self, order):
+        return list(
+            OrderStatusEvent.objects.filter(order=order)
+            .order_by("created_at", "id")
+            .values_list("from_status", "to_status")
+        )
+
+    def test_a_dispatched_parcel_ships_its_confirmed_order(self):
+        order = self._order_in("confirmed")
+        shipment = self._parcel(order)
+
+        res = self._advance(shipment, Shipment.Status.DISPATCHED)
+
+        self.assertEqual(res.status_code, 302)
+        order.refresh_from_db()
+        self.assertEqual(order.status, "shipped")
+        self.assertEqual(order.fulfilment_status, "fulfilled")
+        event = OrderStatusEvent.objects.get(order=order)
+        self.assertEqual((event.from_status, event.to_status), ("confirmed", "shipped"))
+        self.assertEqual(event.actor, self.support)
+        # The move happened through the admin change form; the trigger is the
+        # registered surface, not a new unregistered source.
+        self.assertEqual(event.trigger, "admin_change_form")
+
+    def test_an_in_transit_parcel_ships_its_confirmed_order(self):
+        order = self._order_in("confirmed")
+        shipment = self._parcel(order)
+
+        res = self._advance(shipment, Shipment.Status.IN_TRANSIT)
+
+        self.assertEqual(res.status_code, 302)
+        order.refresh_from_db()
+        self.assertEqual(order.status, "shipped")
+        self.assertEqual(self._order_events(order), [("confirmed", "shipped")])
+
+    def test_a_delivered_parcel_delivers_a_shipped_order(self):
+        order = self._order_in("confirmed")
+        shipment = self._parcel(order)
+        self._advance(shipment, Shipment.Status.DISPATCHED)
+        self._advance(shipment, Shipment.Status.DELIVERED)
+
+        order.refresh_from_db()
+        self.assertEqual(order.status, "delivered")
+        self.assertEqual(
+            self._order_events(order),
+            [("confirmed", "shipped"), ("shipped", "delivered")],
+        )
+
+    def test_a_delivered_parcel_never_skips_confirmed_to_delivered(self):
+        # "delivered" maps to an order edge that starts at "shipped"; a parcel
+        # marked delivered straight from label creation must not force the
+        # machine across a state the order never visited.
+        order = self._order_in("confirmed")
+        shipment = self._parcel(order)
+
+        res = self._advance(shipment, Shipment.Status.DELIVERED)
+
+        self.assertEqual(res.status_code, 302)
+        order.refresh_from_db()
+        self.assertEqual(order.status, "confirmed")
+        self.assertEqual(self._order_events(order), [])
+
+    def test_label_created_on_creation_leaves_a_confirmed_order_alone(self):
+        order = self._order_in("confirmed")
+        self.client.force_login(self.chief)
+
+        res = self.client.post(
+            f"{CHANGELIST}add/",
+            {
+                "order": order.pk,
+                "tracking_number": "TRK-412",
+                "carrier": "Delhivery",
+                "status": Shipment.Status.LABEL_CREATED,
+            },
+        )
+
+        self.assertEqual(res.status_code, 302)
+        order.refresh_from_db()
+        self.assertEqual(order.status, "confirmed")
+        self.assertEqual(self._order_events(order), [])
+
+    def test_a_dispatched_creation_ships_the_order(self):
+        order = self._order_in("confirmed")
+        self.client.force_login(self.chief)
+
+        res = self.client.post(
+            f"{CHANGELIST}add/",
+            {
+                "order": order.pk,
+                "tracking_number": "TRK-413",
+                "carrier": "Delhivery",
+                "status": Shipment.Status.DISPATCHED,
+            },
+        )
+
+        self.assertEqual(res.status_code, 302)
+        order.refresh_from_db()
+        self.assertEqual(order.status, "shipped")
+
+    def test_an_exception_leaves_the_order_where_it_was(self):
+        order = self._order_in("confirmed")
+        shipment = self._parcel(order)
+        self._advance(shipment, Shipment.Status.DISPATCHED)
+
+        self._advance(shipment, Shipment.Status.EXCEPTION)
+
+        order.refresh_from_db()
+        self.assertEqual(order.status, "shipped")
+        self.assertEqual(self._order_events(order), [("confirmed", "shipped")])
+
+    def test_a_pending_order_is_never_auto_shipped(self):
+        order = self._order_in("pending", payment_status="pending")
+        shipment = self._parcel(order)
+
+        res = self._advance(shipment, Shipment.Status.DISPATCHED)
+
+        self.assertEqual(res.status_code, 302)
+        shipment.refresh_from_db()
+        self.assertEqual(shipment.status, Shipment.Status.DISPATCHED)
+        order.refresh_from_db()
+        self.assertEqual(order.status, "pending")
+        self.assertEqual(self._order_events(order), [])
+
+    def test_a_confirmed_but_unpaid_order_is_not_shipped(self):
+        # The status edge exists, so the precondition is the only thing holding
+        # the order back: shipping it would be un-reconcilable money.
+        order = self._order_in("confirmed", payment_status="pending")
+        shipment = self._parcel(order)
+
+        self._advance(shipment, Shipment.Status.DISPATCHED)
+
+        order.refresh_from_db()
+        self.assertEqual(order.status, "confirmed")
+        self.assertEqual(self._order_events(order), [])
+
+    def test_a_cancelled_order_is_skipped(self):
+        order = self._order_in("cancelled", payment_status="pending")
+        shipment = self._parcel(order)
+
+        self._advance(shipment, Shipment.Status.DELIVERED)
+
+        order.refresh_from_db()
+        self.assertEqual(order.status, "cancelled")
+        self.assertEqual(self._order_events(order), [])
+
+    def test_an_already_delivered_order_writes_no_second_event(self):
+        order = self._order_in("delivered")
+        shipment = self._parcel(order)
+
+        self._advance(shipment, Shipment.Status.DELIVERED)
+
+        order.refresh_from_db()
+        self.assertEqual(order.status, "delivered")
+        self.assertEqual(self._order_events(order), [])
+
+    def test_repeating_the_advance_writes_one_order_event(self):
+        order = self._order_in("confirmed")
+        shipment = self._parcel(order)
+        self._advance(shipment, Shipment.Status.DISPATCHED)
+
+        self._advance(shipment, Shipment.Status.IN_TRANSIT)
+
+        order.refresh_from_db()
+        self.assertEqual(order.status, "shipped")
+        self.assertEqual(self._order_events(order), [("confirmed", "shipped")])
+
+    def test_the_parcel_and_order_moves_roll_back_together(self):
+        # The order sync rides the transaction that wrote the parcel event, so
+        # a failure after the parcel move leaves neither half behind.
+        order = self._order_in("confirmed")
+        shipment = self._parcel(order)
+
+        with patch(
+            "shipping.admin.sync_order_status", side_effect=RuntimeError("boom")
+        ):
+            with self.assertRaises(RuntimeError):
+                self._advance(shipment, Shipment.Status.DISPATCHED)
+
+        shipment.refresh_from_db()
+        self.assertEqual(shipment.status, Shipment.Status.LABEL_CREATED)
+        self.assertFalse(ShipmentEvent.objects.filter(shipment=shipment).exists())
+        order.refresh_from_db()
+        self.assertEqual(order.status, "confirmed")
