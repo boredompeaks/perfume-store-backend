@@ -1,0 +1,67 @@
+{% extends "admin/base_site.html" %}
+{% load i18n admin_urls %}
+
+{% block breadcrumbs %}
+<div class="breadcrumbs">
+  <a href="{% url 'admin:index' %}">{% translate 'Home' %}</a>
+  &rsaquo; <a href="{% url 'admin:app_list' app_label=opts.app_label %}">{{ opts.app_config.verbose_name }}</a>
+  &rsaquo; <a href="{% url opts|admin_urlname:'changelist' %}">{{ opts.verbose_name_plural|capfirst }}</a>
+  &rsaquo; <a href="{% url opts|admin_urlname:'change' order.pk %}">{{ order }}</a>
+  &rsaquo; {% translate 'Issue refund' %}
+</div>
+{% endblock %}
+
+{% block content %}
+<h1>Issue refund for order #{{ order.pk }}</h1>
+
+<div class="module">
+  <table>
+    <caption>Payment</caption>
+    <tr>
+      <th scope="row">Order</th>
+      <td>{{ order }}</td>
+    </tr>
+    <tr>
+      <th scope="row">Order status</th>
+      <td>{{ order.status }}</td>
+    </tr>
+    <tr>
+      <th scope="row">Payment status</th>
+      <td>{{ order.payment_status }}</td>
+    </tr>
+    <tr>
+      <th scope="row">Order total</th>
+      <td>{{ order.total_amount }} {{ order.currency }}</td>
+    </tr>
+    <tr>
+      <th scope="row">Already refunded</th>
+      <td>{{ order.refunds.count }} refund(s)</td>
+    </tr>
+    <tr>
+      <th scope="row">Refundable balance</th>
+      <td>{{ order.refundable_remaining }} {{ order.currency }}</td>
+    </tr>
+  </table>
+</div>
+
+<form method="post" novalidate>
+  {% csrf_token %}
+  <fieldset class="module aligned">
+    <h2>Refund details</h2>
+    {% for field in form %}
+      <div class="form-row{% if field.errors %} errors{% endif %}">
+        {{ field.errors }}
+        <div>
+          {{ field.label_tag }}
+          {{ field }}
+          {% if field.help_text %}<div class="help">{{ field.help_text }}</div>{% endif %}
+        </div>
+      </div>
+    {% endfor %}
+  </fieldset>
+  <div class="submit-row">
+    <input type="submit" value="Issue refund" class="default">
+    <a href="{{ cancel_url }}" class="closelink">Cancel</a>
+  </div>
+</form>
+{% endblock %}

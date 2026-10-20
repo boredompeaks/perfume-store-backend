@@ -311,7 +311,9 @@ class RoleAwareAdminActionGatingTests(ApiTestCase):
                 "cancel_pending",
                 "export_csv",
             },
-            "finance": {"export_csv"},
+            # SPEC-D-03: finance holds ``refunds.create``, so it is the role
+            # that gets the refund action; support's set below is unchanged.
+            "finance": {"export_csv", "issue_refund"},
             "marketing": set(),
             "catalogue": set(),
             # SPEC-1-B03 (spec 1.1 line 110): the inventory/fulfilment
@@ -380,6 +382,7 @@ class RoleAwareAdminActionGatingTests(ApiTestCase):
                 "mark_delivered",
                 "cancel_pending",
                 "export_csv",
+                "issue_refund",
             },
         )
 
