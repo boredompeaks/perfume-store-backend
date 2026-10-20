@@ -1,11 +1,13 @@
 """``manage.py seed_e2e``: the owner's end-to-end TEST DATA set (SPEC-E2E-01).
 
 This command exists so a human can exercise the five integrated tasks against a
-running server without hand-building fixtures: a superadmin to sign into the
-admin, two products, two coupons, two carriers with priced delivery methods,
-three orders in three different lifecycle states, and one parcel per order. It
-is TEST DATA ONLY -- the credential below is a local development login, never a
-production value, and nothing here should run against a live store.
+running server without hand-building fixtures: a superadmin (with a confirmed
+TOTP device, because R-17.9 refuses an unenrolled privileged login) to sign into
+the admin, two products, two coupons, two carriers with priced delivery
+methods, three orders in three different lifecycle states, and one parcel per
+order. It is TEST DATA ONLY -- the credential and the fixed MFA secret below are
+local development values, never production ones, and nothing here should run
+against a live store.
 
 Homes in ``orders`` for the same reason ``seed_demo`` does: that app owns most
 of the seeded model classes (Coupon, Order, OrderItem; products and shipping
@@ -15,8 +17,9 @@ Idempotency: every row is upserted on its natural key (username, slug, code,
 tracking number) rather than recreated, so re-running converges on the same set
 and preserves values a human changed -- notably each order's generated
 ``order_number``. Re-running DOES reset the seeded statuses (both the three
-orders and the three parcels) to the declared starting states, which is what
-makes a second pass a reset rather than a blind duplicate.
+orders and the three parcels) to the declared starting states, and resets the
+superadmin device's replay watermark so a consumed code never locks the owner
+out, which is what makes a second pass a reset rather than a blind duplicate.
 
 ``--cleanup`` deletes only the rows this command owns, addressed by those same
 natural keys, and is itself idempotent.
@@ -31,6 +34,8 @@ from django.db import IntegrityError, transaction
 from django.urls import reverse
 from django.utils import timezone
 
+from accounts.models import TOTPDevice
+from common import totp
 from orders.models import Coupon, Order, OrderItem
 from orders.state import fulfilment_for_status, payment_for_status
 from orders.views.checkout import (
@@ -51,6 +56,13 @@ from shipping.models import (
 SUPERADMIN_USERNAME = "superadmin"
 SUPERADMIN_EMAIL = "superadmin@example.com"
 SUPERADMIN_PASSWORD = "SuperAdmin#2026"
+
+# Fixed TEST-ONLY base32 secret. Variability would be useless here: the owner
+# enrolls one authenticator once and the command must keep printing the same
+# factor, while production never runs this command. TEST-ONLY because a real
+# factor's secret is generated per user and never written down anywhere.
+TEST_TOTP_SECRET = "JBSWY3DPEHPK3PXPJBSWY3DPEHPK3PXP"
+TEST_TOTP_ISSUER = "Perfume Store"
 
 TEST_PRODUCTS = (
     {
@@ -227,6 +239,30 @@ def _seed_superadmin():
     return user
 
 
+def _seed_totp_device(user):
+    """Enroll the superadmin's second factor (R-17.9 requires it to log in).
+
+    ``update_or_create`` on the OneToOne user keeps the set at exactly one
+    device. Clearing ``last_used_counter`` every run is the important half:
+    verification consumes a counter, so without the reset the code printed
+    now would be refused after any earlier login in the same 30-second step
+    and the owner would have to wait out the window. Clearing
+    ``trusted_until`` keeps the seed a clean challenge-every-login state
+    rather than inheriting a browser grant a human opted into.
+    """
+    device, _ = TOTPDevice.objects.update_or_create(
+        user=user,
+        defaults={
+            "secret": TEST_TOTP_SECRET,
+            "enabled": True,
+            "confirmed_at": timezone.now(),
+            "last_used_counter": None,
+            "trusted_until": None,
+        },
+    )
+    return device
+
+
 def _seed_products():
     seeded = []
     for row in TEST_PRODUCTS:
@@ -316,8 +352,7 @@ def _ensure_order_number(order):
         except IntegrityError:
             continue
     raise CommandError(
-        "[seed_e2e] could not mint a unique order_number for "
-        f"{order.idempotency_key}"
+        f"[seed_e2e] could not mint a unique order_number for {order.idempotency_key}"
     )
 
 
@@ -390,6 +425,7 @@ def seed():
     """Upsert the whole E2E set; returns the rows the summary prints."""
     with transaction.atomic():
         user = _seed_superadmin()
+        device = _seed_totp_device(user)
         product_by_slug = _seed_products()
         coupons = _seed_coupons()
         providers, methods = _seed_shipping()
@@ -397,6 +433,10 @@ def seed():
         shipments = _seed_shipments(orders, providers)
     return {
         "user": user,
+        "device": device,
+        "otpauth_uri": totp.otpauth_uri(
+            device.secret, user.username, issuer=TEST_TOTP_ISSUER
+        ),
         "products": list(product_by_slug.values()),
         "coupons": coupons,
         "orders": [orders[row["label"]] for row in TEST_ORDERS],
@@ -418,9 +458,7 @@ def clean():
         products.objects.filter(
             slug__in=[row["slug"] for row in TEST_PRODUCTS]
         ).delete()
-        Coupon.objects.filter(
-            code__in=[row["code"] for row in TEST_COUPONS]
-        ).delete()
+        Coupon.objects.filter(code__in=[row["code"] for row in TEST_COUPONS]).delete()
         ShippingRate.objects.filter(
             method__code__in=[row["code"] for row in TEST_METHODS]
         ).delete()
@@ -434,6 +472,8 @@ def clean():
             code__in=[row["code"] for row in TEST_PROVIDERS],
             shipments__isnull=True,
         ).delete()
+        # Deleting the user cascades its OneToOne TOTPDevice, so cleanup
+        # removes the seeded factor with the account it belongs to.
         User.objects.filter(username=SUPERADMIN_USERNAME).delete()
 
 
@@ -458,9 +498,7 @@ class Command(BaseCommand):
     def handle(self, *args, **options):
         if options["cleanup"]:
             clean()
-            self.stdout.write(
-                "[seed_e2e] removed the E2E test rows (test data only)"
-            )
+            self.stdout.write("[seed_e2e] removed the E2E test rows (test data only)")
             return
         summary = seed()
         self._print_summary(summary)
@@ -471,6 +509,12 @@ class Command(BaseCommand):
         write("[seed_e2e] TEST DATA ONLY -- seeded the owner E2E set")
         write(f"  superadmin: {user.username} / {SUPERADMIN_PASSWORD}")
         write(f"  email: {user.email}")
+        write("  admin MFA -- TEST-ONLY, must never exist outside this local test DB:")
+        write(f"    otpauth URI: {summary['otpauth_uri']}")
+        write(
+            "    current code: manage.py totp_code "
+            f"{SUPERADMIN_USERNAME} (or any enrolled authenticator)"
+        )
         write("  products:")
         for product in summary["products"]:
             write(
@@ -491,8 +535,7 @@ class Command(BaseCommand):
                 f"shipping {order.shipping_amount}"
             )
             write(
-                "      admin: "
-                + reverse("admin:orders_order_change", args=[order.pk])
+                "      admin: " + reverse("admin:orders_order_change", args=[order.pk])
             )
         write("  shipments:")
         for shipment in summary["shipments"]:

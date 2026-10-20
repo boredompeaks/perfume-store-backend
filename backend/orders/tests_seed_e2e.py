@@ -17,6 +17,8 @@ from django.core.management import CommandError, call_command
 from django.test import TestCase
 from django.utils import timezone
 
+from accounts.models import TOTPDevice
+from common import totp
 from orders.management.commands import seed_e2e
 from orders.models import Coupon, Order, OrderItem
 from products.models import products
@@ -29,6 +31,15 @@ from shipping.models import (
 
 SUPERADMIN_PASSWORD = "SuperAdmin#2026"
 ORDER_NUMBER_PATTERN = re.compile(r"^ORD-\d{4}-[0-9A-F]{8}$")
+# Hand-written literals, never derived from the command's constants: a pin
+# that recomputes its expected value from the code under test agrees with a
+# wrong value from both sides.
+SEEDED_TOTP_SECRET = "JBSWY3DPEHPK3PXPJBSWY3DPEHPK3PXP"
+SEEDED_OTPAUTH_URI = (
+    "otpauth://totp/Perfume%20Store:superadmin"
+    "?secret=JBSWY3DPEHPK3PXPJBSWY3DPEHPK3PXP"
+    "&issuer=Perfume%20Store&algorithm=SHA1&digits=6&period=30"
+)
 
 
 def _run(*argv):
@@ -201,16 +212,82 @@ class SeedE2ETests(TestCase):
         self.assertIn("/admin/shipping/shipment/", out)
         self.assertIn("TEST DATA ONLY", out)
 
+    def test_seed_enrolls_exactly_one_confirmed_enabled_device(self):
+        out = _run()
+
+        devices = TOTPDevice.objects.filter(user__username="superadmin")
+        self.assertEqual(devices.count(), 1)
+        device = devices.get()
+        self.assertEqual(device.secret, SEEDED_TOTP_SECRET)
+        self.assertTrue(device.enabled)
+        self.assertIsNotNone(device.confirmed_at)
+        self.assertIsNone(device.last_used_counter)
+        self.assertIsNone(device.trusted_until)
+        self.assertEqual(TOTPDevice.active_for(device.user), device)
+
+        self.assertIn(SEEDED_OTPAUTH_URI, out)
+        self.assertIn("TEST-ONLY", out)
+        self.assertNotIn(SEEDED_TOTP_SECRET, out.split("otpauth URI:")[0])
+
+    def test_reseed_resets_the_replay_watermark_and_keeps_one_device(self):
+        _run()
+        device = TOTPDevice.objects.get(user__username="superadmin")
+        # Simulate a consumed code and a browser trust grant: both must be
+        # cleared by the next seed run, or the printed current code would be
+        # refused (replay guard) or the challenge skipped (stale grant).
+        device.last_used_counter = 56_666_666
+        device.trusted_until = timezone.now() + timedelta(days=1)
+        device.save(update_fields=["last_used_counter", "trusted_until"])
+
+        _run()
+
+        self.assertEqual(
+            TOTPDevice.objects.filter(user__username="superadmin").count(), 1
+        )
+        device.refresh_from_db()
+        self.assertEqual(device.secret, SEEDED_TOTP_SECRET)
+        self.assertTrue(device.enabled)
+        self.assertIsNotNone(device.confirmed_at)
+        self.assertIsNone(device.last_used_counter)
+        self.assertIsNone(device.trusted_until)
+        at_time = totp.now()
+        code = totp.totp(device.secret, at_time)
+        self.assertIsNotNone(
+            totp.verify_code(
+                device.secret,
+                code,
+                at_time,
+                last_used_counter=device.last_used_counter,
+            )
+        )
+
+    def test_seeded_device_admits_the_admin_login(self):
+        _run()
+        device = TOTPDevice.objects.get(user__username="superadmin")
+        code = totp.totp(device.secret, totp.now())
+
+        res = self.client.post(
+            "/admin/login/",
+            {
+                "username": "superadmin",
+                "password": SUPERADMIN_PASSWORD,
+                "totp": code,
+                "next": "/admin/",
+            },
+        )
+
+        self.assertEqual(res.status_code, 302)
+        self.assertEqual(res["Location"], "/admin/")
+        self.assertIn("_auth_user_id", self.client.session)
+        device.refresh_from_db()
+        self.assertIsNotNone(device.last_used_counter)
+
     def test_second_run_is_idempotent_and_preserves_order_numbers(self):
         first_numbers = _seed_then_order_numbers()
         counts = {
             "users": User.objects.filter(username="superadmin").count(),
-            "products": products.objects.filter(
-                slug__in=["marj", "oud-noir"]
-            ).count(),
-            "coupons": Coupon.objects.filter(
-                code__in=["FREESHIP", "SAVE10"]
-            ).count(),
+            "products": products.objects.filter(slug__in=["marj", "oud-noir"]).count(),
+            "coupons": Coupon.objects.filter(code__in=["FREESHIP", "SAVE10"]).count(),
             "providers": ShippingProvider.objects.filter(
                 code__in=["delhivery", "bluedart"]
             ).count(),
@@ -277,15 +354,11 @@ class SeedE2ETests(TestCase):
         ) as generator:
             _run()
         self.assertEqual(generator.call_count, 4)
-        self.assertTrue(
-            Order.objects.filter(order_number="ORD-2026-BBBBBBBB").exists()
-        )
+        self.assertTrue(Order.objects.filter(order_number="ORD-2026-BBBBBBBB").exists())
 
         _run("--cleanup")
         Order.objects.filter(order_number=taken).delete()
-        with mock.patch.object(
-            seed_e2e, "_generate_order_number", return_value=taken
-        ):
+        with mock.patch.object(seed_e2e, "_generate_order_number", return_value=taken):
             Order.objects.create(
                 user=holder,
                 full_name="Holder",
@@ -351,6 +424,7 @@ class SeedE2ECleanupTests(TestCase):
         _run("--cleanup")
 
         self.assertFalse(User.objects.filter(username="superadmin").exists())
+        self.assertEqual(TOTPDevice.objects.count(), 0)
         self.assertFalse(
             products.objects.filter(slug__in=["marj", "oud-noir"]).exists()
         )
@@ -358,17 +432,11 @@ class SeedE2ECleanupTests(TestCase):
             Coupon.objects.filter(code__in=["FREESHIP", "SAVE10"]).exists()
         )
         self.assertFalse(
-            ShippingMethod.objects.filter(
-                code__in=["standard", "express"]
-            ).exists()
+            ShippingMethod.objects.filter(code__in=["standard", "express"]).exists()
         )
+        self.assertFalse(ShippingProvider.objects.filter(code="bluedart").exists())
         self.assertFalse(
-            ShippingProvider.objects.filter(code="bluedart").exists()
-        )
-        self.assertFalse(
-            Order.objects.filter(
-                idempotency_key__startswith="seed-e2e-order-"
-            ).exists()
+            Order.objects.filter(idempotency_key__startswith="seed-e2e-order-").exists()
         )
         self.assertFalse(
             Shipment.objects.filter(
@@ -390,6 +458,7 @@ class SeedE2ECleanupTests(TestCase):
         self.assertEqual(User.objects.count(), 0)
         self.assertEqual(Order.objects.count(), 0)
         self.assertEqual(products.objects.count(), 0)
+        self.assertEqual(TOTPDevice.objects.count(), 0)
 
         _run()
         _run("--cleanup")
@@ -398,3 +467,4 @@ class SeedE2ECleanupTests(TestCase):
         self.assertEqual(Order.objects.count(), 0)
         self.assertEqual(Shipment.objects.count(), 0)
         self.assertEqual(ShippingRate.objects.count(), 0)
+        self.assertEqual(TOTPDevice.objects.count(), 0)
