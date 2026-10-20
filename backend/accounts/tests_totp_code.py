@@ -52,7 +52,7 @@ class TOTPCodeCommandTests(TestCase):
         with mock.patch("common.totp.now", return_value=RFC_TIME):
             out = _run("alice")
 
-        self.assertIn("code: 287082", out)
+        self.assertIn(f"code: {RFC_SIX_DIGIT_CODE}", out)
         # 59 seconds leaves 1 of the 30-second step (59 % 30 == 29).
         self.assertIn("valid for: 1s", out)
         self.assertIn("LOCAL TEST HELPER", out)
