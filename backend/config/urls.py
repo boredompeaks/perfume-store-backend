@@ -6,6 +6,7 @@ from django.urls import include, path, re_path
 from django.views.static import serve as serve_media
 
 from common.admin_search import global_search
+from common.onboarding import onboarding
 from common.saved_filters import delete_saved_filter, save_saved_filter
 from ops.views import api_settings, audit_log, dashboard, health, health_detail
 from orders.views import (
@@ -112,6 +113,10 @@ urlpatterns = [
     # its ModelAdmin — same before-the-admin include rule as the chrome
     # routes above.
     path("admin/search/", global_search, name="admin-global-search"),
+    # SPEC-D-06: the staff onboarding page - role -> capabilities -> the admin
+    # surfaces they unlock. Same before-the-admin include rule as the chrome
+    # routes above, or Django's admin URLconf swallows the path.
+    path("admin/onboarding/", onboarding, name="admin-onboarding"),
     # SPEC-20-6 [R-20.11]: the saved-filter write endpoints — save the
     # current filter selection under a name, and drop one of the caller's
     # own. Applying a saved filter needs no route: it is the

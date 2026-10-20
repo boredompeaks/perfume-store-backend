@@ -1,0 +1,61 @@
+{% extends "admin/base_site.html" %}
+
+{% block content %}
+<h1>Staff onboarding</h1>
+
+<p>
+  Every role below is read from <code>common.roles.CAPABILITY_ROLES</code>, and
+  the surfaces and actions beside each capability are read from the registered
+  admin (<code>capability_map</code>, <code>action_capabilities</code> and
+  <code>scoped_view_capability</code>). Nothing on this page is a second,
+  hand-maintained list of either.
+</p>
+
+<p>
+  {{ surface_count }} registered admin surface{{ surface_count|pluralize }} declare
+  RBAC metadata. Capabilities the current account holds are marked
+  <strong>you hold this</strong>{% if is_superuser %} (the superuser bypass holds
+  every capability){% endif %}.
+</p>
+
+{% for role in roles %}
+<section id="role-{{ role.name }}" class="module" aria-labelledby="role-{{ role.name }}-heading">
+  <h2 id="role-{{ role.name }}-heading">
+    {{ role.label }} role
+    {% if role.is_current %}<span>(your role)</span>{% endif %}
+  </h2>
+
+  <table>
+    <caption>Capabilities held by the {{ role.label }} role</caption>
+    <thead>
+      <tr>
+        <th scope="col">Capability</th>
+        <th scope="col">Admin surfaces and actions it unlocks</th>
+      </tr>
+    </thead>
+    <tbody>
+      {% for capability in role.capabilities %}
+      <tr{% if capability.held_by_user %} class="held-capability"{% endif %}>
+        <th scope="row">
+          <code>{{ capability.name }}</code>
+          {% if capability.held_by_user %}<br><strong>you hold this</strong>{% endif %}
+        </th>
+        <td>
+          {% for access in capability.access %}
+          <div>
+            <a href="{{ access.url }}">{{ access.label }}</a>
+            {% if access.kinds %}<span>({{ access.kinds|join:", " }})</span>{% endif %}
+            {% if access.actions %}<span>actions: {{ access.actions|join:", " }}</span>{% endif %}
+            {% if access.scoped_view %}<span>(scoped view)</span>{% endif %}
+          </div>
+          {% empty %}
+          <span>No registered admin surface declares this capability yet.</span>
+          {% endfor %}
+        </td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</section>
+{% endfor %}
+{% endblock %}
