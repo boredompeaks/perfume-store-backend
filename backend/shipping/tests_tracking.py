@@ -1874,6 +1874,7 @@ class OrderLifecycleSyncTests(ShipmentTestCase):
         order.refresh_from_db()
         self.assertEqual(order.status, "confirmed")
 
+
 class OrderBindingAndRefusalTests(ShipmentTestCase):
     """[B-2] A parcel's order is fixed at creation, and a refused order move
     is explained to the operator instead of happening silently.
@@ -2011,9 +2012,7 @@ class OrderBindingAndRefusalTests(ShipmentTestCase):
         order.refresh_from_db()
         self.assertEqual(order.status, "shipped")
         self.assertEqual(self._order_events(order), [("confirmed", "shipped")])
-        self.assertContains(
-            res, "Order not moved: not every parcel has been delivered"
-        )
+        self.assertContains(res, "Order not moved: not every parcel has been delivered")
 
     def test_a_legal_move_warns_nothing_and_writes_exactly_one_event(self):
         order = self._order_in("confirmed")
@@ -2152,7 +2151,9 @@ class TrackingTemplateValidationTests(ShipmentTestCase):
     def test_a_scheme_relative_url_is_rejected(self):
         # ``//host/path`` inherits the page's scheme and is not the absolute
         # http(s) link the store promises the customer.
-        self.assert_rejected("//track.example.com/{tracking_number}", "absolute http(s)")
+        self.assert_rejected(
+            "//track.example.com/{tracking_number}", "absolute http(s)"
+        )
 
     def test_a_newline_in_the_template_is_rejected(self):
         self.assert_rejected(
