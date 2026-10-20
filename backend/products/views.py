@@ -68,12 +68,13 @@ def product_list(request):
                 status=status.HTTP_400_BAD_REQUEST,
             )
 
-        # Minimum price
-        if min_price:
+        # Minimum price. Tested against None rather than truthiness: "0" is a
+        # valid floor and Decimal("0") is falsy, which silently ignored it.
+        if min_price is not None:
             products_data = products_data.filter(price__gte=min_price)
 
-        # Maximum price
-        if max_price:
+        # Maximum price (same None test: a zero ceiling must filter everything).
+        if max_price is not None:
             products_data = products_data.filter(price__lte=max_price)
 
         # =========================

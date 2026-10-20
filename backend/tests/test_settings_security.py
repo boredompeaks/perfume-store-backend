@@ -68,6 +68,9 @@ _LEAKED_ENV_NAMES = frozenset(
         "ALERT_CACHE_LOCATION",
         "CACHE_BACKEND",
         "CACHE_LOCATION",
+        # Same reason as CSRF_TRUSTED_ORIGINS: outside the DJANGO_ family and
+        # now a documented default this module pins.
+        "CORS_ALLOWED_ORIGINS",
         "CSRF_COOKIE_SECURE",
         # Outside the DJANGO_ family, and a documented default this module
         # pins: without the scrub, an untracked local .env value reached the
@@ -442,6 +445,48 @@ class SettingsGuardTests(SimpleTestCase):
         res = run_settings_import({"DJANGO_DEBUG": "true"})
         self.assertEqual(res.returncode, 0, res.stderr)
         self.assertIn("IMPORT_OK", res.stdout)
+
+
+class DevFrontendOriginTests(SimpleTestCase):
+    """Both loopback spellings of the dev storefront are trusted by default.
+
+    The storefront addresses the API on the host it was served from, so a page
+    at 127.0.0.1:3000 needs the API to accept that origin too; a single-origin
+    default silently refused those sessions.
+    """
+
+    def _origins(self, env_overrides):
+        res = run_settings_import(
+            env_overrides,
+            snippet=(
+                "import config.settings as s; "
+                "print('CORS', s.CORS_ALLOWED_ORIGINS); "
+                "print('CSRF', s.CSRF_TRUSTED_ORIGINS)"
+            ),
+        )
+        self.assertEqual(res.returncode, 0, res.stderr)
+        return res.stdout
+
+    def test_development_defaults_trust_both_loopback_spellings(self):
+        expected = "['http://localhost:3000', 'http://127.0.0.1:3000']"
+        stdout = self._origins({"DJANGO_DEBUG": "true"})
+        self.assertIn(f"CORS {expected}", stdout)
+        self.assertIn(f"CSRF {expected}", stdout)
+
+    def test_an_explicit_origin_list_wins_and_is_stripped(self):
+        # Padding after the commas is a plain typo, not a broken deployment:
+        # stripped, or the origin never matches any browser's Origin header.
+        overrides = {
+            "DJANGO_DEBUG": "true",
+            "CORS_ALLOWED_ORIGINS": " https://shop.example.test , ",
+            "CSRF_TRUSTED_ORIGINS": " https://shop.example.test , https://admin.example.test ",
+        }
+        stdout = self._origins(overrides)
+        self.assertIn("CORS ['https://shop.example.test']", stdout)
+        self.assertIn(
+            "CSRF ['https://shop.example.test', 'https://admin.example.test']",
+            stdout,
+        )
 
 
 class DatabaseUrlParsingTests(SimpleTestCase):
