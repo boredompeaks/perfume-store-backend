@@ -30,6 +30,8 @@ order trail cannot recover "this came from the shipment screen" from the row
 today.
 """
 
+from dataclasses import dataclass
+
 from django.db import transaction
 
 from orders.events import notify_transition
@@ -60,6 +62,25 @@ ORDER_STATUS_FOR_SHIPMENT = {
 ORDER_DELIVERED = ORDER_STATUS_FOR_SHIPMENT[Shipment.Status.DELIVERED]
 
 
+@dataclass(frozen=True)
+class OrderSyncResult:
+    """What :func:`sync_order_status` did, and - when it did nothing - why.
+
+    ``moved_to`` is the order status this call wrote; ``refusal`` is the
+    operator-facing reason the machine declined the move that the parcel's
+    status implied. Both are ``None`` when the parcel status implies no order
+    move at all (``label_created`` / ``exception``) or the order already sits
+    at the target, so a caller can tell "nothing to do" from "asked and
+    refused" without re-running the gates itself. The refusal is built HERE,
+    beside the ``transition_allowed`` / ``precondition_failures`` checks that
+    produced it, so the admin reports the machine's own words instead of a
+    second copy of its rules.
+    """
+
+    moved_to: str | None = None
+    refusal: str | None = None
+
+
 def _every_parcel_delivered(order_id):
     """Whether ``order_id`` has parcels and every one of them has arrived.
 
@@ -82,12 +103,15 @@ def _every_parcel_delivered(order_id):
 def sync_order_status(shipment, *, actor=None):
     """Mirror ``shipment``'s status onto its order where the machine allows it.
 
-    Returns the status the order moved to, or ``None`` when this shipment
-    status changes nothing, the order is already there, or the machine refuses
-    the move. Every refusal is silent by design: a parcel may legitimately be
-    marked delivered before its order was ever paid for, and the honest answer
-    to that is to leave the order alone rather than to fail the operator's
-    save with an error they cannot act on.
+    Returns an :class:`OrderSyncResult`: ``moved_to`` names the status written,
+    and ``refusal`` names the machine's reason when a move the parcel implies
+    was declined. Every refusal is non-fatal by design: a parcel may
+    legitimately be marked delivered before its order was ever paid for, and
+    the honest answer to that is to leave the order alone - the parcel still
+    saves - while telling the operator which rule held it back. A refusal is
+    only produced for an edge the parcel status actually asked for; a status
+    that implies no order move, or an order already at the target, answers with
+    an empty result rather than a reason.
 
     "Delivered" is a claim about the WHOLE order, so it is the one target that
     is also gated on the order's other parcels: a split order advances only
@@ -104,18 +128,21 @@ def sync_order_status(shipment, *, actor=None):
     """
     target = ORDER_STATUS_FOR_SHIPMENT.get(shipment.status)
     if target is None:
-        return None
+        return OrderSyncResult()
 
     with transaction.atomic():
         order = Order.objects.select_for_update().get(pk=shipment.order_id)
         if order.status == target:
-            return None
+            return OrderSyncResult()
         if not transition_allowed(order.status, target):
-            return None
-        if precondition_failures(order, target):
-            return None
+            return OrderSyncResult(
+                refusal=f"{order.status} -> {target} is not a legal transition"
+            )
+        failures = precondition_failures(order, target)
+        if failures:
+            return OrderSyncResult(refusal="; ".join(failures))
         if target == ORDER_DELIVERED and not _every_parcel_delivered(order.pk):
-            return None
+            return OrderSyncResult(refusal="not every parcel has been delivered")
 
         previous = order.status
         order.status = target
@@ -136,4 +163,4 @@ def sync_order_status(shipment, *, actor=None):
             trigger=TRIGGER_ADMIN_CHANGE_FORM,
         )
         notify_transition(order, previous, target)
-    return target
+    return OrderSyncResult(moved_to=target)

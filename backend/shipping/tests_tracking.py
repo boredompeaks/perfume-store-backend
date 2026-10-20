@@ -1874,6 +1874,160 @@ class OrderLifecycleSyncTests(ShipmentTestCase):
         order.refresh_from_db()
         self.assertEqual(order.status, "confirmed")
 
+class OrderBindingAndRefusalTests(ShipmentTestCase):
+    """[B-2] A parcel's order is fixed at creation, and a refused order move
+    is explained to the operator instead of happening silently.
+
+    The order is the thing the customer reads, so two rules meet here: the
+    binding is chosen once (read-only afterwards) and the order machine - not
+    this surface - decides whether a parcel's status may move it. When the
+    machine refuses, the parcel still saves; the operator is told which rule
+    held the order back, in the machine's own words.
+    """
+
+    def setUp(self):
+        super().setUp()
+        self.client.force_login(self.support)
+
+    def _order_in(self, status, *, payment_status="captured", with_items=True):
+        order = self._account_order(
+            "ORD-2026-000431",
+            status=status,
+            payment_status=payment_status,
+        )
+        if with_items:
+            OrderItem.objects.create(
+                order=order,
+                product_name="Rose Absolute",
+                price=Decimal("499.00"),
+                quantity=1,
+                subtotal=Decimal("499.00"),
+            )
+        return order
+
+    def _parcel(self, order, tracking_number="TRK-431"):
+        return self._shipment(order, tracking_number)
+
+    def _post_status(self, shipment, status, *, order=None):
+        return self.client.post(
+            self.change_url(shipment),
+            {
+                "order": shipment.order_id if order is None else order,
+                "tracking_number": shipment.tracking_number,
+                "carrier": shipment.carrier,
+                "status": status,
+                "estimated_delivery": "",
+                "internal_note": "",
+                "_save": "Save",
+            },
+            follow=True,
+        )
+
+    def _order_events(self, order):
+        return list(
+            OrderStatusEvent.objects.filter(order=order)
+            .order_by("created_at", "id")
+            .values_list("from_status", "to_status")
+        )
+
+    def test_the_order_is_read_only_on_the_change_form(self):
+        res = self.client.get(self.change_url())
+
+        self.assertEqual(res.status_code, 200)
+        self.assertNotIn("order", res.context["adminform"].form.fields)
+        # Read-only, not hidden: the operator still sees which order owns it
+        # (the admin renders the FK's own label, ``Order.__str__``).
+        self.assertContains(res, f"Order #{self.order.pk}")
+
+    def test_the_order_is_selectable_on_the_add_form_with_binding_help(self):
+        res = self.client.get(f"{CHANGELIST}add/")
+
+        form = res.context["adminform"].form
+        self.assertIn("order", form.fields)
+        self.assertEqual(
+            form.fields["order"].help_text,
+            "A parcel belongs to the order it was created for. To serve "
+            "another order, create a new parcel.",
+        )
+
+    def test_a_posted_order_cannot_re_point_an_existing_parcel(self):
+        # ``get_readonly_fields`` makes Django EXCLUDE the field from the
+        # change form, so a hand-posted id is not even a form field. The
+        # stored binding survives, rather than the POST winning.
+        self._post_status(
+            self.shipment,
+            Shipment.Status.LABEL_CREATED,
+            order=self.guest_order.pk,
+        )
+
+        self.shipment.refresh_from_db()
+        self.assertEqual(self.shipment.order_id, self.order.pk)
+
+    def test_a_refused_move_saves_the_parcel_and_names_the_payment_rule(self):
+        order = self._order_in("confirmed", payment_status="pending")
+        shipment = self._parcel(order)
+
+        res = self._post_status(shipment, Shipment.Status.DISPATCHED)
+
+        shipment.refresh_from_db()
+        self.assertEqual(shipment.status, Shipment.Status.DISPATCHED)
+        order.refresh_from_db()
+        self.assertEqual(order.status, "confirmed")
+        self.assertEqual(self._order_events(order), [])
+        self.assertContains(
+            res,
+            "Order not moved: payment must be captured (is &#x27;pending&#x27;)",
+        )
+
+    def test_an_illegal_transition_is_named(self):
+        order = self._order_in("confirmed")
+        shipment = self._parcel(order)
+
+        res = self._post_status(shipment, Shipment.Status.DELIVERED)
+
+        shipment.refresh_from_db()
+        self.assertEqual(shipment.status, Shipment.Status.DELIVERED)
+        order.refresh_from_db()
+        self.assertEqual(order.status, "confirmed")
+        self.assertEqual(self._order_events(order), [])
+        self.assertContains(
+            res,
+            "Order not moved: confirmed -&gt; delivered is not a legal transition",
+        )
+
+    def test_the_all_parcels_gate_is_named_for_a_split_order(self):
+        order = self._order_in("confirmed")
+        first = self._parcel(order, "TRK-441")
+        second = self._parcel(order, "TRK-442")
+        self._post_status(first, Shipment.Status.DISPATCHED)
+        self._post_status(second, Shipment.Status.DISPATCHED)
+        order.refresh_from_db()
+        self.assertEqual(order.status, "shipped")
+
+        res = self._post_status(first, Shipment.Status.DELIVERED)
+
+        first.refresh_from_db()
+        self.assertEqual(first.status, Shipment.Status.DELIVERED)
+        order.refresh_from_db()
+        self.assertEqual(order.status, "shipped")
+        self.assertEqual(self._order_events(order), [("confirmed", "shipped")])
+        self.assertContains(
+            res, "Order not moved: not every parcel has been delivered"
+        )
+
+    def test_a_legal_move_warns_nothing_and_writes_exactly_one_event(self):
+        order = self._order_in("confirmed")
+        shipment = self._parcel(order)
+
+        res = self._post_status(shipment, Shipment.Status.DISPATCHED)
+
+        order.refresh_from_db()
+        self.assertEqual(order.status, "shipped")
+        self.assertEqual(order.fulfilment_status, "fulfilled")
+        self.assertEqual(self._order_events(order), [("confirmed", "shipped")])
+        self.assertNotContains(res, "Order not moved")
+
+
 # ==================================
 # [SPEC-B-02] The provider link and the tracking URL it renders
 # ==================================
