@@ -74,6 +74,22 @@ class SeedE2ETests(TestCase):
             authenticate(username="superadmin", password=SUPERADMIN_PASSWORD)
         )
 
+        customer = User.objects.get(username="customer")
+        self.assertEqual(customer.email, "customer@example.com")
+        self.assertFalse(customer.is_staff)
+        self.assertFalse(customer.is_superuser)
+        self.assertTrue(customer.is_active)
+        self.assertNotEqual(customer.password, "Customer#2026")
+        self.assertTrue(customer.check_password("Customer#2026"))
+        # The owner signs in on the storefront, so the customer door must
+        # admit it: the staff door refuses non-staff accounts.
+        res = self.client.post(
+            "/api/accounts/storefront/login/",
+            {"username": "customer", "password": "Customer#2026"},
+        )
+        self.assertEqual(res.status_code, 200, res.content)
+        self.assertIn("access", res.json())
+
         marj = products.objects.get(slug="marj")
         self.assertEqual(marj.name, "Marj")
         self.assertEqual(marj.price, Decimal("2499.00"))
@@ -206,6 +222,7 @@ class SeedE2ETests(TestCase):
         self.assertFalse(parcel_a.events.exists())
 
         self.assertIn("superadmin / SuperAdmin#2026", out)
+        self.assertIn("customer (storefront): customer / Customer#2026", out)
         self.assertIn(parcel_a.tracking_url, out)
         self.assertIn(order_a.order_number, out)
         self.assertIn("/admin/orders/order/", out)
@@ -286,6 +303,7 @@ class SeedE2ETests(TestCase):
         first_numbers = _seed_then_order_numbers()
         counts = {
             "users": User.objects.filter(username="superadmin").count(),
+            "customers": User.objects.filter(username="customer").count(),
             "products": products.objects.filter(slug__in=["marj", "oud-noir"]).count(),
             "coupons": Coupon.objects.filter(code__in=["FREESHIP", "SAVE10"]).count(),
             "providers": ShippingProvider.objects.filter(
@@ -306,6 +324,7 @@ class SeedE2ETests(TestCase):
             counts,
             {
                 "users": 1,
+                "customers": 1,
                 "products": 2,
                 "coupons": 2,
                 "providers": 2,
@@ -321,6 +340,7 @@ class SeedE2ETests(TestCase):
 
         second_numbers = _seed_then_order_numbers()
         self.assertEqual(first_numbers, second_numbers)
+        self.assertEqual(User.objects.filter(username="customer").count(), 1)
         self.assertEqual(Order.objects.count(), 3)
         self.assertEqual(OrderItem.objects.count(), 3)
         self.assertEqual(Shipment.objects.count(), 3)
@@ -424,6 +444,7 @@ class SeedE2ECleanupTests(TestCase):
         _run("--cleanup")
 
         self.assertFalse(User.objects.filter(username="superadmin").exists())
+        self.assertFalse(User.objects.filter(username="customer").exists())
         self.assertEqual(TOTPDevice.objects.count(), 0)
         self.assertFalse(
             products.objects.filter(slug__in=["marj", "oud-noir"]).exists()
@@ -452,6 +473,28 @@ class SeedE2ECleanupTests(TestCase):
         self.assertTrue(Shipment.objects.filter(pk=foreign_shipment.pk).exists())
         # The provider is still referenced by the foreign parcel, so it stays.
         self.assertTrue(ShippingProvider.objects.filter(pk=provider.pk).exists())
+
+    def test_cleanup_keeps_the_customer_account_when_it_owns_an_order(self):
+        _run()
+        customer = User.objects.get(username="customer")
+        # An order the owner placed during the walk is not this command's
+        # row; deleting the account would cascade it away.
+        order = Order.objects.create(
+            user=customer,
+            full_name="Customer Walk",
+            phone="9999999999",
+            address="4 Walk Street",
+            city="Mumbai",
+            state="Maharashtra",
+            pincode="400001",
+            total_amount=Decimal("100.00"),
+            idempotency_key="owner-walk-order",
+        )
+
+        _run("--cleanup")
+
+        self.assertTrue(User.objects.filter(pk=customer.pk).exists())
+        self.assertTrue(Order.objects.filter(pk=order.pk).exists())
 
     def test_cleanup_is_idempotent_and_cleanup_on_empty_db_is_a_noop(self):
         _run("--cleanup")

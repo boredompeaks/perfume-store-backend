@@ -3,11 +3,11 @@
 This command exists so a human can exercise the five integrated tasks against a
 running server without hand-building fixtures: a superadmin (with a confirmed
 TOTP device, because R-17.9 refuses an unenrolled privileged login) to sign into
-the admin, two products, two coupons, two carriers with priced delivery
-methods, three orders in three different lifecycle states, and one parcel per
-order. It is TEST DATA ONLY -- the credential and the fixed MFA secret below are
-local development values, never production ones, and nothing here should run
-against a live store.
+the admin, a non-staff customer to sign into the storefront, two products, two
+coupons, two carriers with priced delivery methods, three orders in three
+different lifecycle states, and one parcel per order. It is TEST DATA ONLY --
+the credentials and the fixed MFA secret below are local development values,
+never production ones, and nothing here should run against a live store.
 
 Homes in ``orders`` for the same reason ``seed_demo`` does: that app owns most
 of the seeded model classes (Coupon, Order, OrderItem; products and shipping
@@ -56,6 +56,13 @@ from shipping.models import (
 SUPERADMIN_USERNAME = "superadmin"
 SUPERADMIN_EMAIL = "superadmin@example.com"
 SUPERADMIN_PASSWORD = "SuperAdmin#2026"
+
+# The storefront sign-in for the same walk. Deliberately NOT staff: the owner
+# needs the buyer's surface (cart, checkout, account pages), and staff flags
+# would change what the API and the admin show for that session.
+CUSTOMER_USERNAME = "customer"
+CUSTOMER_EMAIL = "customer@example.com"
+CUSTOMER_PASSWORD = "Customer#2026"
 
 # Fixed TEST-ONLY base32 secret. Variability would be useless here: the owner
 # enrolls one authenticator once and the command must keep printing the same
@@ -235,6 +242,28 @@ def _seed_superadmin():
     # still resetting a password the owner changed away from the documented one.
     if not user.check_password(SUPERADMIN_PASSWORD):
         user.set_password(SUPERADMIN_PASSWORD)
+        user.save(update_fields=["password"])
+    return user
+
+
+def _seed_customer():
+    """The storefront account: a plain, active customer.
+
+    Same password rule as the superadmin: ``check_password`` keeps a re-run
+    from rewriting the hash while still resetting a password the owner changed
+    away from the documented one.
+    """
+    user, _ = User.objects.update_or_create(
+        username=CUSTOMER_USERNAME,
+        defaults={
+            "email": CUSTOMER_EMAIL,
+            "is_staff": False,
+            "is_superuser": False,
+            "is_active": True,
+        },
+    )
+    if not user.check_password(CUSTOMER_PASSWORD):
+        user.set_password(CUSTOMER_PASSWORD)
         user.save(update_fields=["password"])
     return user
 
@@ -425,6 +454,7 @@ def seed():
     """Upsert the whole E2E set; returns the rows the summary prints."""
     with transaction.atomic():
         user = _seed_superadmin()
+        customer = _seed_customer()
         device = _seed_totp_device(user)
         product_by_slug = _seed_products()
         coupons = _seed_coupons()
@@ -433,6 +463,7 @@ def seed():
         shipments = _seed_shipments(orders, providers)
     return {
         "user": user,
+        "customer": customer,
         "device": device,
         "otpauth_uri": totp.otpauth_uri(
             device.secret, user.username, issuer=TEST_TOTP_ISSUER
@@ -475,13 +506,18 @@ def clean():
         # Deleting the user cascades its OneToOne TOTPDevice, so cleanup
         # removes the seeded factor with the account it belongs to.
         User.objects.filter(username=SUPERADMIN_USERNAME).delete()
+        # The storefront customer goes only while it owns no orders: an order
+        # the owner placed during the walk is not this command's row, and
+        # deleting the account would cascade it away.
+        User.objects.filter(username=CUSTOMER_USERNAME, orders__isnull=True).delete()
 
 
 class Command(BaseCommand):
     help = (
         "Seed (or with --cleanup, remove) the SPEC-E2E-01 owner test data: "
-        "superadmin, products, coupons, shipping providers/methods/rates, "
-        "three orders and three parcels. TEST DATA ONLY."
+        "superadmin, storefront customer, products, coupons, shipping "
+        "providers/methods/rates, three orders and three parcels. TEST DATA "
+        "ONLY."
     )
 
     def add_arguments(self, parser):
@@ -509,6 +545,11 @@ class Command(BaseCommand):
         write("[seed_e2e] TEST DATA ONLY -- seeded the owner E2E set")
         write(f"  superadmin: {user.username} / {SUPERADMIN_PASSWORD}")
         write(f"  email: {user.email}")
+        write(
+            "  customer (storefront): "
+            f"{summary['customer'].username} / {CUSTOMER_PASSWORD}"
+        )
+        write(f"  email: {summary['customer'].email}")
         write("  admin MFA -- TEST-ONLY, must never exist outside this local test DB:")
         write(f"    otpauth URI: {summary['otpauth_uri']}")
         write(

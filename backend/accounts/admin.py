@@ -587,3 +587,45 @@ class StoreUserAdmin(RoleAwareModelAdmin, DjangoUserAdmin):
             status__in=("confirmed", "shipped", "delivered")
         ).aggregate(s=Sum("total_amount"))["s"]
         return f"₹{total}" if total is not None else "₹0"
+
+
+@admin.register(TOTPDevice)
+class TOTPDeviceAdmin(RoleAwareModelAdmin):
+    """Read-only register of enrolled MFA factors.
+
+    Support needs to answer "does this account have a working second factor?"
+    without a database console; this row answers that. Nothing on this surface
+    is writable — not for any staff role and not through the superuser bypass,
+    which is why the three write permissions deny unconditionally instead of
+    following the capability map: a hand-edited row could silently strip a
+    factor from a privileged account or plant one, and enrollment/disable have
+    their own audited flows. ``secret`` appears in no field, column, filter or
+    search target, honouring the model's "returned exactly once, by the
+    enrollment endpoint and by nothing else" discipline.
+    """
+
+    capability_map = {"view": "customers.read"}
+    fields = (
+        "user",
+        "enabled",
+        "confirmed_at",
+        "last_used_counter",
+        "trusted_until",
+        "created_at",
+    )
+    # The view-only change page renders every field listed above, so pinning
+    # readonly to the same tuple keeps even a superuser from typing into it.
+    readonly_fields = fields
+    list_display = ("user", "enabled", "confirmed_at", "trusted_until", "created_at")
+    list_filter = ("enabled",)
+    search_fields = ("user__username", "user__email")
+    ordering = ("-created_at",)
+
+    def has_add_permission(self, request):
+        return False
+
+    def has_change_permission(self, request, obj=None):
+        return False
+
+    def has_delete_permission(self, request, obj=None):
+        return False

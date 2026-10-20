@@ -16,8 +16,11 @@ from django.contrib import admin
 from django.contrib.admin.models import LogEntry
 from django.contrib.auth.models import Group, User
 from django.test import RequestFactory, tag
+from django.urls import reverse
+from django.utils import timezone
 
-from accounts.admin import StoreUserAdmin
+from accounts.admin import StoreUserAdmin, TOTPDeviceAdmin
+from accounts.models import TOTPDevice
 from cart.admin import CartAdmin
 from cart.models import Cart
 from common.admin import CONFIRMATION_NOTE_MAX_LENGTH, RoleAwareModelAdmin
@@ -34,7 +37,9 @@ from products.models import products
 TEST_PASSWORD = "S3cure-Passphrase!"
 
 # The pinned store admin surface (registry test asserts nothing else leaks in).
-EXPECTED_MODELS = frozenset({products, Order, Coupon, SiteSettings, Cart, User})
+EXPECTED_MODELS = frozenset(
+    {products, Order, Coupon, SiteSettings, Cart, User, TOTPDevice}
+)
 EXPECTED_REGISTRY = {
     products: ProductAdmin,
     Order: OrderAdmin,
@@ -42,6 +47,7 @@ EXPECTED_REGISTRY = {
     SiteSettings: SiteSettingsAdmin,
     Cart: CartAdmin,
     User: StoreUserAdmin,
+    TOTPDevice: TOTPDeviceAdmin,
 }
 PERMISSION_KINDS = ("view", "add", "change", "delete")
 
@@ -88,7 +94,7 @@ def store_admins():
 class RoleAwareAdminRegistryTests(ApiTestCase):
     """Every store ModelAdmin is role-aware and consistently configured."""
 
-    def test_exactly_the_six_store_model_admins_are_registered(self):
+    def test_every_store_model_admin_is_registered(self):
         # admin.site._registry is the ground truth: if a future ModelAdmin
         # forgets the role-aware base, this equality fails.
         self.assertEqual(
@@ -172,7 +178,8 @@ class RoleAwareAdminPermissionMatrixTests(ApiTestCase):
         # Django's own superuser bypass is preserved verbatim: even kinds no
         # role may perform (cart edits, manual order rows) keep working. The
         # only exceptions are SiteSettings' add/delete, whose unconditional
-        # singleton denial (pre-existing, deliberate) outranks the bypass.
+        # singleton denial (pre-existing, deliberate) outranks the bypass, and
+        # the TOTP register, which refuses every write to everyone.
         superuser = User.objects.create_superuser(
             "root", "root@example.com", TEST_PASSWORD
         )
@@ -180,6 +187,8 @@ class RoleAwareAdminPermissionMatrixTests(ApiTestCase):
         for model, model_admin in store_admins().items():
             for kind in PERMISSION_KINDS:
                 if model is SiteSettings and kind in ("add", "delete"):
+                    continue
+                if model is TOTPDevice and kind in ("add", "change", "delete"):
                     continue
                 with self.subTest(model=model.__name__, kind=kind):
                     self.assertTrue(
@@ -194,6 +203,99 @@ class RoleAwareAdminPermissionMatrixTests(ApiTestCase):
                     model_admin.has_module_permission(request),
                     model_admin.has_view_permission(request),
                 )
+
+
+class TOTPDeviceAdminTests(ApiTestCase):
+    """The MFA factor register is a read-only audit surface.
+
+    The owner's e2e finding: support could not see whether an account had a
+    working second factor. The register answers that, but a writable one could
+    silently strip a privileged account's factor or plant one, and the secret
+    must never be readable outside the enrollment flow.
+    """
+
+    SECRET = "JBSWY3DPEHPK3PXP"
+
+    def setUp(self):
+        self.account = User.objects.create_user(
+            username="mfa-holder",
+            email="mfa-holder@example.com",
+            password=TEST_PASSWORD,
+            is_staff=True,
+        )
+        self.device = TOTPDevice.objects.create(
+            user=self.account,
+            secret=self.SECRET,
+            enabled=True,
+            confirmed_at=timezone.now(),
+        )
+        self.root = User.objects.create_superuser(
+            "totp-root", "totp-root@example.com", TEST_PASSWORD
+        )
+
+    def test_no_role_can_write_the_register(self):
+        for role in STAFF_ROLES:
+            request = request_for(make_role_user(role, f"totp-{role}"))
+            model_admin = admin.site._registry[TOTPDevice]
+            for kind in ("add", "change", "delete"):
+                with self.subTest(role=role, kind=kind):
+                    self.assertFalse(
+                        getattr(model_admin, f"has_{kind}_permission")(request)
+                    )
+
+    def test_the_superuser_bypass_does_not_write_it_either(self):
+        model_admin = admin.site._registry[TOTPDevice]
+        request = request_for(self.root)
+        for kind in ("add", "change", "delete"):
+            with self.subTest(kind=kind):
+                self.assertFalse(
+                    getattr(model_admin, f"has_{kind}_permission")(request)
+                )
+
+    def test_secret_is_not_a_field_a_column_or_a_search_target(self):
+        model_admin = admin.site._registry[TOTPDevice]
+        for surface in (
+            model_admin.fields,
+            model_admin.readonly_fields,
+            model_admin.list_display,
+            model_admin.list_filter,
+            model_admin.search_fields,
+            model_admin.exclude or (),
+        ):
+            with self.subTest(surface=surface):
+                self.assertNotIn("secret", surface)
+        self.assertNotIn("secret", model_admin.get_fields(request_for(self.root)))
+
+    def test_changelist_shows_the_account_and_never_the_secret(self):
+        self.client.force_login(self.root)
+        res = self.client.get(reverse("admin:accounts_totpdevice_changelist"))
+        self.assertEqual(res.status_code, 200)
+        self.assertContains(res, self.account.username)
+        self.assertNotContains(res, self.SECRET)
+        # The row the superuser sees is the CONFIRMED device, not merely some
+        # row for the account: enabled plus a confirmation timestamp.
+        listed = list(res.context["cl"].result_list)
+        self.assertEqual(listed, [self.device])
+        self.assertTrue(listed[0].enabled)
+        self.assertIsNotNone(listed[0].confirmed_at)
+
+    def test_the_change_page_is_a_read_only_view_without_the_secret(self):
+        self.client.force_login(self.root)
+        res = self.client.get(
+            reverse("admin:accounts_totpdevice_change", args=[self.device.pk])
+        )
+        self.assertEqual(res.status_code, 200)
+        self.assertNotContains(res, self.SECRET)
+
+    def test_add_and_delete_pages_are_refused(self):
+        self.client.force_login(self.root)
+        add = self.client.get(reverse("admin:accounts_totpdevice_add"))
+        self.assertEqual(add.status_code, 403)
+        delete = self.client.get(
+            reverse("admin:accounts_totpdevice_delete", args=[self.device.pk])
+        )
+        self.assertEqual(delete.status_code, 403)
+        self.assertTrue(TOTPDevice.objects.filter(pk=self.device.pk).exists())
 
 
 class RoleAwareAdminActionGatingTests(ApiTestCase):
