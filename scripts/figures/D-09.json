@@ -2,7 +2,7 @@
   "kind": "floor",
   "task": "D-09",
   "tool": "scripts/changelog_figures.py",
-  "measured_at": "2026-10-20T23:57:15+05:30",
+  "measured_at": "2026-10-21T00:11:18+05:30",
   "pair_complete": true,
   "engines": [
     {
@@ -20,7 +20,7 @@
         "expected_failures": 2
       },
       "coverage": {
-        "statements": 12305,
+        "statements": 12301,
         "missed": 0,
         "coverage_percent": "99.82",
         "branches": 1592,
@@ -44,7 +44,7 @@
         "expected_failures": 2
       },
       "coverage": {
-        "statements": 12305,
+        "statements": 12301,
         "missed": 0,
         "coverage_percent": "99.82",
         "branches": 1592,

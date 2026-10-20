@@ -319,13 +319,6 @@ LIFECYCLE_SHIPMENTS = (
     },
 )
 
-LIFECYCLE_TRACKING_NUMBERS = tuple(
-    row["tracking_number"] for row in LIFECYCLE_SHIPMENTS
-)
-LIFECYCLE_IDEMPOTENCY_KEYS = tuple(
-    row["idempotency_key"] for row in LIFECYCLE_ORDERS
-)
-
 
 def _seed_superadmin():
     user, _ = User.objects.update_or_create(
