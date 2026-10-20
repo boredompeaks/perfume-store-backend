@@ -48,8 +48,9 @@ from unittest.mock import patch
 from django import forms
 from django.contrib import admin
 from django.contrib.auth.models import Group, User
+from django.core.exceptions import ValidationError
 from django.db import IntegrityError, models
-from django.test import RequestFactory
+from django.test import RequestFactory, override_settings
 from django.utils import timezone
 from django.utils.dateparse import parse_datetime
 
@@ -1873,7 +1874,6 @@ class OrderLifecycleSyncTests(ShipmentTestCase):
         order.refresh_from_db()
         self.assertEqual(order.status, "confirmed")
 
-
 # ==================================
 # [SPEC-B-02] The provider link and the tracking URL it renders
 # ==================================
@@ -1949,6 +1949,137 @@ class ProviderTrackingUrlTests(ShipmentTestCase):
                 "https://track.delhivery.com/TRK-401",
             )
         urlopen.assert_not_called()
+
+
+class TrackingTemplateValidationTests(ShipmentTestCase):
+    """[B-1] The template is rendered into an ``href``, so it is a URL.
+
+    Staff configure it, but the customer's browser follows what it produces.
+    A ``javascript:`` template would run in that customer's session and a
+    ``data:`` one would serve a document this store never published, so the
+    scheme is a boundary rather than a formatting preference. The model's
+    ``clean`` is the one place the rule lives (Django's admin forms call it),
+    and the renderer re-checks the scheme for a row written through the ORM.
+    """
+
+    def provider(self, template):
+        return ShippingProvider(
+            name="Carrier", code="carrier", tracking_url_template=template
+        )
+
+    def assert_rejected(self, template, expected):
+        with self.assertRaises(ValidationError) as caught:
+            self.provider(template).clean()
+        message = "; ".join(caught.exception.message_dict["tracking_url_template"])
+        self.assertIn(expected, message)
+
+    def test_a_javascript_template_is_rejected(self):
+        self.assert_rejected(
+            "javascript:alert({tracking_number})", "absolute http(s) URL"
+        )
+
+    def test_a_data_template_is_rejected(self):
+        self.assert_rejected("data:text/html,{tracking_number}", "absolute http(s)")
+
+    def test_a_template_with_no_placeholder_is_rejected(self):
+        self.assert_rejected(
+            "https://track.example.com/status", "exactly one {tracking_number}"
+        )
+
+    def test_a_template_with_two_placeholders_is_rejected(self):
+        self.assert_rejected(
+            "https://track.example.com/{tracking_number}/{tracking_number}",
+            "exactly one {tracking_number}",
+        )
+
+    def test_a_string_that_is_not_a_url_is_rejected(self):
+        self.assert_rejected("track.example.com/{tracking_number}", "absolute http(s)")
+
+    def test_a_scheme_relative_url_is_rejected(self):
+        # ``//host/path`` inherits the page's scheme and is not the absolute
+        # http(s) link the store promises the customer.
+        self.assert_rejected("//track.example.com/{tracking_number}", "absolute http(s)")
+
+    def test_a_newline_in_the_template_is_rejected(self):
+        self.assert_rejected(
+            "https://track.example.com/{tracking_number}\n", "whitespace or control"
+        )
+
+    def test_https_is_accepted(self):
+        self.provider("https://track.example.com/{tracking_number}").clean()
+
+    def test_blank_is_accepted_and_renders_no_link(self):
+        provider = self.provider("")
+        provider.clean()
+        provider.save()
+
+        shipment = self._shipment(self.guest_order, "TRK-BLANK", provider=provider)
+
+        self.assertIsNone(shipment.tracking_url)
+
+    def test_http_is_rejected_outside_debug(self):
+        # The test runner forces DEBUG off, which is also the production
+        # posture: the customer's link must not be cleartext.
+        self.assert_rejected("http://track.example.com/{tracking_number}", "https://")
+
+    @override_settings(DEBUG=True)
+    def test_http_is_accepted_for_a_local_development_page(self):
+        self.provider("http://localhost:8000/track/{tracking_number}").clean()
+
+    def test_a_non_http_template_written_through_the_orm_renders_no_link(self):
+        # Defense in depth: a direct ORM write never runs clean(), and the
+        # property is the last place before the storefront's href.
+        for index, template in enumerate(
+            (
+                "javascript:alert({tracking_number})",
+                "data:text/html,{tracking_number}",
+                "track.example.com/{tracking_number}",
+            )
+        ):
+            with self.subTest(template=template):
+                provider = ShippingProvider.objects.create(
+                    name="Carrier",
+                    code=f"carrier{index}",
+                    tracking_url_template=template,
+                )
+                shipment = self._shipment(
+                    self.guest_order, f"TRK-UNSAFE-{index}", provider=provider
+                )
+                self.assertIsNone(shipment.tracking_url)
+
+    def test_the_admin_form_refuses_a_javascript_template(self):
+        self.client.force_login(self.chief)
+
+        res = self.client.post(
+            "/admin/shipping/shippingprovider/add/",
+            {
+                "name": "Evil",
+                "code": "evil",
+                "tracking_url_template": "javascript:alert({tracking_number})",
+                "is_active": "on",
+                "_save": "Save",
+            },
+        )
+
+        self.assertEqual(res.status_code, 200)
+        self.assertFalse(ShippingProvider.objects.filter(code="evil").exists())
+
+    def test_the_admin_form_still_saves_an_https_template(self):
+        self.client.force_login(self.chief)
+
+        res = self.client.post(
+            "/admin/shipping/shippingprovider/add/",
+            {
+                "name": "Delhivery",
+                "code": "delhivery",
+                "tracking_url_template": "https://track.delhivery.com/{tracking_number}",
+                "is_active": "on",
+                "_save": "Save",
+            },
+        )
+
+        self.assertEqual(res.status_code, 302)
+        self.assertTrue(ShippingProvider.objects.filter(code="delhivery").exists())
 
 
 class ProviderLinkDeletionTests(ShipmentTestCase):
