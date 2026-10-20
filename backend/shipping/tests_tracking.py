@@ -39,7 +39,8 @@ Every probe here answers one of the questions the task is graded on:
   update (``MoneyIsUntouchedTests``).
 """
 
-from datetime import timedelta
+from datetime import datetime, timedelta
+from datetime import timezone as dt_timezone
 from decimal import Decimal
 from unittest.mock import patch
 
@@ -1665,6 +1666,70 @@ class OrderLifecycleSyncTests(ShipmentTestCase):
             self._order_events(order),
             [("confirmed", "shipped"), ("shipped", "delivered")],
         )
+
+    def test_one_delivered_parcel_does_not_deliver_a_split_order(self):
+        # A split order is several parcels, so "one parcel arrived" is not "the
+        # order arrived": the customer reads the order, and it is not delivered
+        # while a sibling parcel is still in the warehouse. The order advances
+        # only when the LAST parcel does.
+        order = self._order_in("confirmed")
+        first = self._parcel(order, "TRK-421")
+        second = self._parcel(order, "TRK-422")
+        self._advance(first, Shipment.Status.DISPATCHED)
+        self._advance(second, Shipment.Status.DISPATCHED)
+        order.refresh_from_db()
+        self.assertEqual(order.status, "shipped")
+
+        self._advance(first, Shipment.Status.DELIVERED)
+
+        order.refresh_from_db()
+        self.assertEqual(order.status, "shipped")
+        self.assertEqual(self._order_events(order), [("confirmed", "shipped")])
+
+        self._advance(second, Shipment.Status.DELIVERED)
+
+        order.refresh_from_db()
+        self.assertEqual(order.status, "delivered")
+        self.assertEqual(
+            self._order_events(order),
+            [("confirmed", "shipped"), ("shipped", "delivered")],
+        )
+
+    def test_an_exception_parcel_blocks_the_order_delivery(self):
+        # A delivery failure is a parcel the customer does not have, so it
+        # blocks the order exactly as a parcel in transit does. The order
+        # machine has no "partially delivered" state; leaving the order at
+        # shipped is the honest record until the failure is resolved.
+        order = self._order_in("confirmed")
+        arrived = self._parcel(order, "TRK-423")
+        failed = self._parcel(order, "TRK-424")
+        self._advance(arrived, Shipment.Status.DISPATCHED)
+        self._advance(failed, Shipment.Status.DISPATCHED)
+        self._advance(failed, Shipment.Status.EXCEPTION)
+
+        self._advance(arrived, Shipment.Status.DELIVERED)
+
+        order.refresh_from_db()
+        self.assertEqual(order.status, "shipped")
+        self.assertEqual(self._order_events(order), [("confirmed", "shipped")])
+
+    def test_a_parcel_driven_move_refreshes_the_order_updated_at(self):
+        # orders/admin.py's bulk writer pins the same invariant: a transition
+        # is a write to the row, so its freshness marker moves with it. A
+        # shipment-driven move that omits updated_at from update_fields leaves
+        # the order looking untouched on any "changed since" query.
+        order = self._order_in("confirmed")
+        shipment = self._parcel(order)
+        stale = datetime(2026, 1, 1, tzinfo=dt_timezone.utc)
+        Order.objects.filter(pk=order.pk).update(updated_at=stale)
+        order.refresh_from_db()
+        self.assertEqual(order.updated_at, stale)
+
+        self._advance(shipment, Shipment.Status.DISPATCHED)
+
+        order.refresh_from_db()
+        self.assertEqual(order.status, "shipped")
+        self.assertGreater(order.updated_at, stale)
 
     def test_a_delivered_parcel_never_skips_confirmed_to_delivered(self):
         # "delivered" maps to an order edge that starts at "shipped"; a parcel
