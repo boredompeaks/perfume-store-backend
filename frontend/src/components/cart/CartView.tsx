@@ -1,9 +1,8 @@
 "use client";
 
 import Link from "next/link";
-import { useQuery } from "@tanstack/react-query";
 import { useAuth } from "@/lib/auth";
-import { getCart } from "@/lib/cart-api";
+import { useCart } from "@/lib/use-cart";
 import { formatINR } from "@/lib/money";
 import CartLineItem from "./CartLineItem";
 import CouponForm from "./CouponForm";
@@ -27,11 +26,7 @@ function CartSkeleton() {
 
 export default function CartView() {
   const { status } = useAuth();
-  const { data: cart, isPending, isError, refetch } = useQuery({
-    queryKey: ["cart"],
-    queryFn: getCart,
-    retry: false,
-  });
+  const { data: cart, isPending, isError, refetch } = useCart();
 
   if (isPending) return <CartSkeleton />;
 
