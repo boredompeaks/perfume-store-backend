@@ -42,6 +42,22 @@ from .checkout import IDEMPOTENCY_KEY_HEADER, IDEMPOTENCY_KEY_MAX_LENGTH
 
 logger = logging.getLogger(__name__)
 
+
+def _object_body(data):
+    """The write body as a dict, or ``{}`` when it is not a JSON object.
+
+    A JSON array / scalar / null body parses fine but has no ``.get`` to
+    call, so reading keys off it raised AttributeError — a 500 on this
+    staff money seam (F7-B1). Reading it as the empty object routes every
+    such body into this endpoint's own refusal below (the required-reason
+    400), byte-identical to posting ``{}``; form posts are QueryDict (a
+    dict subclass) and are unaffected. Same helper as
+    ``cart.views._object_body``, inlined because cart.views imports
+    orders.views — importing it back here would be an order-dependent
+    circular import."""
+    return data if isinstance(data, dict) else {}
+
+
 # ==================================
 # Admin refund seam (SPEC-1-05, spec 1.14 / [1.31])
 # ==================================
@@ -96,6 +112,8 @@ def admin_order_refund(request, order_id):
     (``partially_refunded`` / ``refunded``) — this writer is their first
     writer, and no new choice was added for them.
     """
+    body = _object_body(request.data)
+
     idempotency_key = (
         request.headers.get(IDEMPOTENCY_KEY_HEADER) or ""
     ).strip() or None
@@ -108,7 +126,7 @@ def admin_order_refund(request, order_id):
             {"error": "Idempotency-Key is too long"}, status=status.HTTP_400_BAD_REQUEST
         )
 
-    reason = (request.data.get("reason") or "").strip()
+    reason = (body.get("reason") or "").strip()
     if not reason:
         # A refund is a financial action the reconciliation trail has to
         # explain later, so the operator's words are required input, not an
@@ -204,7 +222,7 @@ def admin_order_refund(request, order_id):
                     status=status.HTTP_409_CONFLICT,
                 )
 
-            requested = request.data.get("amount")
+            requested = body.get("amount")
             if requested is None:
                 # No amount asked for: the rest of the order's money.
                 amount = remaining
@@ -307,7 +325,7 @@ def admin_order_refund(request, order_id):
         logger.warning(
             "Refund gateway failure for order %s (amount %s): %s",
             order_id,
-            request.data.get("amount"),
+            body.get("amount"),
             exc,
         )
         return Response(
