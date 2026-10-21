@@ -232,6 +232,7 @@ def restock_notification(request, slug):
         # first-time are indistinguishable for the same reason (no
         # history oracle), hence the single 202 rather than the authed
         # path's 201/200 split.
+        # Upstream gate: IsAuthenticatedOrSubmittedEmail's hasattr(data, "get") guard means only an object body can pass as "submitted email", so this anonymous-only read never sees a non-object body; pinned by RestockNonObjectPreservationTests.
         email = _normalize_guest_email(request.data.get("email"))
         if _guest_email_is_valid(email):
             with transaction.atomic():
