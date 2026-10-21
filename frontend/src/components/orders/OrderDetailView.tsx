@@ -9,6 +9,7 @@ import { formatINR } from "@/lib/money";
 import { loadShipping } from "@/lib/shipping-store";
 import type { Order } from "@/lib/types";
 import OrderStatusBadge, { formatOrderDate } from "./OrderStatusBadge";
+import ShipmentPanel from "./ShipmentPanel";
 import PaymentLauncher from "../checkout/PaymentLauncher";
 
 export default function OrderDetailView({
@@ -185,6 +186,8 @@ export default function OrderDetailView({
           )}
         </aside>
       </div>
+
+      <ShipmentPanel orderNumber={order.order_number} />
     </div>
   );
 }
