@@ -134,6 +134,25 @@ green, floors 2151 both engines. **BLOCKED-ROWS OWNER OPS:** seed UAT
 shipping on — then a second-pass task closes the 24. Q-OPS1 SHIPPED same day
 (lane/b @c36a3b5): compose.uat.yml overlay authored, compose config green.
 
+**Q-T1F2 sibling sweep + Q-CORS1 all SHIPPED 2026-10-17, both lanes pushed.**
+- **Q-CORS1 (lane/a, `d5a0e20`)** — CORS preflight restore: settings
+  `CORS_ALLOW_HEADERS` extends the INSTALLED corsheaders defaults (imported
+  constant, not retyped) with `idempotency-key` + `x-guest-order-token`,
+  fail-first pinned against the real `IDEMPOTENCY_KEY_HEADER` /
+  `GUEST_TOKEN_HEADER` constants + defaults-survival. Root cause proven from
+  UAT access logs: OPTIONS x8 answered 200, browser POST never left the client.
+- **T1F2a (lane/a, `2fcbe13`)** — uniform-400 non-object guards across
+  orders/refund/payment/checkout/coupon/adjust + `tests/test_nonobject_bodies.py`.
+- **T1F2b (lane/b, `9e575e6`+`0a62275`, DOC-ONLY c2 `a246245`)** — accounts
+  recovery/token guards + `tests/test_nonobject_bodies_accounts.py`; cycle-1
+  FIX on a single P3 (missing :235 classification comment) closed by the
+  documented fold-in, delta re-audit SHIP.
+- Audits: lane/a FULL SHIP 2162 OK both engines cov 99.81% (mutation-proven),
+  pushed `74fa867..d5a0e20`; lane/b c2 delta SHIP 2165 OK, pushed
+  `5ab76aa..a246245`. Suites never ran concurrently in the first batch
+  (sequential by design); the parallel batch used per-lane DB isolation only.
+  Non-blocking carried: REDIS_URL owner-op (F3-C4 throttle-cache family).
+
 T2 — Load / stress / resource against the REAL URL (after red team):
 - k6 profiles: catalog browse + cart ops (read-heavy), then checkout ramp.
 - Stress ramp to breakpoint; record the knee (workers x PG pool vs

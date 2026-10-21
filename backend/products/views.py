@@ -290,6 +290,22 @@ def product_detail(request, slug):
 _VALID_ADJUSTMENT_REASONS = frozenset(StockMovement.Reason.values)
 
 
+def _object_body(data):
+    """The write body as a dict, or ``{}`` when it is not a JSON object.
+
+    A JSON array / scalar / null body parses fine but has no ``.get`` to
+    call, so reading keys off it raised AttributeError — a 500 on this
+    staff stock-write endpoint (F7-B1). Reading it as the empty object
+    routes every such body into the endpoint's own missing-key 400 below
+    (product_id required), byte-identical to posting ``{}``; form posts
+    are QueryDict (a dict subclass) and are unaffected. The body of
+    ``cart.views._object_body`` (T1F1's pattern) is duplicated rather
+    than imported: importing that module here would couple the products
+    view layer to the whole cart + orders view stack for a one-liner,
+    which is a worse trade than the line it saves."""
+    return data if isinstance(data, dict) else {}
+
+
 @api_view(["POST"])
 @permission_classes([HasInventoryAdjust])
 def inventory_adjust(request):
@@ -302,10 +318,12 @@ def inventory_adjust(request):
     (conventions.md: never inline is_staff), payload validation, and the
     service's outcomes as status codes. The movement row IS the audit
     record, per the no-silent-inventory-edits rule [6.5.17]."""
-    product_id = request.data.get("product_id")
-    delta = request.data.get("delta")
-    reason = request.data.get("reason")
-    note = request.data.get("note", "")
+    body = _object_body(request.data)
+
+    product_id = body.get("product_id")
+    delta = body.get("delta")
+    reason = body.get("reason")
+    note = body.get("note", "")
 
     if product_id is None:
         return Response(
