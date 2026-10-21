@@ -23,6 +23,12 @@ out, which is what makes a second pass a reset rather than a blind duplicate.
 
 ``--cleanup`` deletes only the rows this command owns, addressed by those same
 natural keys, and is itself idempotent.
+
+``--scenario lifecycle`` (D-09) seeds the same accounts, catalogue and delivery
+table but swaps the three A/B/C orders for L1/L2/L3: a dispatch that must move
+the order, a split order whose delivered parcel must wait for its in-transit
+sibling, and an unpaid order whose dispatch must be refused. Every lifecycle
+row is owned by the same cleanup keys as the full seed.
 """
 
 from datetime import timedelta
@@ -227,6 +233,92 @@ TEST_SHIPMENTS = (
     },
 )
 
+# The lifecycle scenario (D-09) is three orders that exercise the three order
+# moves a shipment can drive: a dispatch that must move, a delivery that must
+# wait for a sibling parcel, and a dispatch that must be refused because the
+# order was never paid. It replaces the A/B/C set rather than adding to it, so
+# a walk has one order per outcome instead of five overlapping fixtures.
+LIFECYCLE_ORDERS = (
+    {
+        "label": "L1",
+        "idempotency_key": "seed-e2e-lifecycle-l1",
+        "status": "confirmed",
+        "full_name": "Lifecycle One",
+        "phone": "9999999991",
+        "address": "11 Dispatch Road",
+        "city": "Mumbai",
+        "state": "Maharashtra",
+        "pincode": "400001",
+        "shipping_method_code": "standard",
+        "shipping_amount": Decimal("49.00"),
+        "item_slug": "marj",
+        "item_quantity": 1,
+    },
+    {
+        "label": "L2",
+        "idempotency_key": "seed-e2e-lifecycle-l2",
+        "status": "confirmed",
+        "full_name": "Lifecycle Two",
+        "phone": "9999999992",
+        "address": "22 Split Parcel Road",
+        "city": "Pune",
+        "state": "Maharashtra",
+        "pincode": "411001",
+        "shipping_method_code": "standard",
+        "shipping_amount": Decimal("99.00"),
+        "item_slug": "oud-noir",
+        "item_quantity": 1,
+    },
+    {
+        "label": "L3",
+        "idempotency_key": "seed-e2e-lifecycle-l3",
+        "status": "pending",
+        "full_name": "Lifecycle Three",
+        "phone": "9999999993",
+        "address": "33 Unpaid Road",
+        "city": "Delhi",
+        "state": "Delhi",
+        "pincode": "110001",
+        "shipping_method_code": "standard",
+        "shipping_amount": Decimal("99.00"),
+        "item_slug": "marj",
+        "item_quantity": 1,
+    },
+)
+
+LIFECYCLE_SHIPMENTS = (
+    {
+        "order_label": "L1",
+        "provider_code": "delhivery",
+        "tracking_number": "LCY000000001",
+        "carrier": "Delhivery",
+        "status": Shipment.Status.LABEL_CREATED,
+    },
+    {
+        # One of L2's two parcels has arrived; the other is still moving. The
+        # order stays at "confirmed" until a parcel move asks to advance it.
+        "order_label": "L2",
+        "provider_code": "delhivery",
+        "tracking_number": "LCY000000002",
+        "carrier": "Delhivery",
+        "status": Shipment.Status.DELIVERED,
+    },
+    {
+        "order_label": "L2",
+        "provider_code": "bluedart",
+        "tracking_number": "LCY000000003",
+        "carrier": "Blue Dart",
+        "status": Shipment.Status.IN_TRANSIT,
+    },
+    {
+        "order_label": "L3",
+        "provider_code": "delhivery",
+        "tracking_number": "LCY000000004",
+        "carrier": "Delhivery",
+        "status": Shipment.Status.LABEL_CREATED,
+    },
+)
+
 
 def _seed_superadmin():
     user, _ = User.objects.update_or_create(
@@ -385,9 +477,9 @@ def _ensure_order_number(order):
     )
 
 
-def _seed_orders(user, product_by_slug, method_by_code):
+def _seed_orders(user, product_by_slug, method_by_code, rows=TEST_ORDERS):
     seeded = {}
-    for row in TEST_ORDERS:
+    for row in rows:
         product = product_by_slug[row["item_slug"]]
         quantity = row["item_quantity"]
         merchandise_total = product.price * quantity
@@ -434,9 +526,9 @@ def _seed_orders(user, product_by_slug, method_by_code):
     return seeded
 
 
-def _seed_shipments(order_by_label, provider_by_code):
+def _seed_shipments(order_by_label, provider_by_code, rows=TEST_SHIPMENTS):
     seeded = []
-    for row in TEST_SHIPMENTS:
+    for row in rows:
         shipment, _ = Shipment.objects.update_or_create(
             tracking_number=row["tracking_number"],
             defaults={
@@ -450,8 +542,16 @@ def _seed_shipments(order_by_label, provider_by_code):
     return seeded
 
 
-def seed():
-    """Upsert the whole E2E set; returns the rows the summary prints."""
+def seed(scenario="full"):
+    """Upsert the whole E2E set; returns the rows the summary prints.
+
+    ``full`` is the original A/B/C walk. ``lifecycle`` builds the same shared
+    catalogue and accounts but three orders chosen for the D-01 lifecycle
+    moves (dispatch, split-delivery gate, unpaid refusal). Both paths share
+    the upsert functions, so idempotency and cleanup ownership are identical.
+    """
+    order_rows = TEST_ORDERS if scenario == "full" else LIFECYCLE_ORDERS
+    shipment_rows = TEST_SHIPMENTS if scenario == "full" else LIFECYCLE_SHIPMENTS
     with transaction.atomic():
         user = _seed_superadmin()
         customer = _seed_customer()
@@ -459,9 +559,10 @@ def seed():
         product_by_slug = _seed_products()
         coupons = _seed_coupons()
         providers, methods = _seed_shipping()
-        orders = _seed_orders(user, product_by_slug, methods)
-        shipments = _seed_shipments(orders, providers)
+        orders = _seed_orders(user, product_by_slug, methods, rows=order_rows)
+        shipments = _seed_shipments(orders, providers, rows=shipment_rows)
     return {
+        "scenario": scenario,
         "user": user,
         "customer": customer,
         "device": device,
@@ -470,21 +571,27 @@ def seed():
         ),
         "products": list(product_by_slug.values()),
         "coupons": coupons,
-        "orders": [orders[row["label"]] for row in TEST_ORDERS],
+        "orders": [orders[row["label"]] for row in order_rows],
+        "orders_by_label": orders,
         "shipments": shipments,
+        "shipments_by_tracking": {
+            shipment.tracking_number: shipment for shipment in shipments
+        },
     }
 
 
 def clean():
     """Delete only the rows this command owns, by their natural keys."""
+    order_rows = TEST_ORDERS + LIFECYCLE_ORDERS
+    shipment_rows = TEST_SHIPMENTS + LIFECYCLE_SHIPMENTS
     with transaction.atomic():
         # Shipments first: ShippingProvider is PROTECTed by a live parcel.
         Shipment.objects.filter(
-            tracking_number__in=[row["tracking_number"] for row in TEST_SHIPMENTS]
+            tracking_number__in=[row["tracking_number"] for row in shipment_rows]
         ).delete()
         Order.objects.filter(
             user__username=SUPERADMIN_USERNAME,
-            idempotency_key__in=[row["idempotency_key"] for row in TEST_ORDERS],
+            idempotency_key__in=[row["idempotency_key"] for row in order_rows],
         ).delete()
         products.objects.filter(
             slug__in=[row["slug"] for row in TEST_PRODUCTS]
@@ -516,11 +623,21 @@ class Command(BaseCommand):
     help = (
         "Seed (or with --cleanup, remove) the SPEC-E2E-01 owner test data: "
         "superadmin, storefront customer, products, coupons, shipping "
-        "providers/methods/rates, three orders and three parcels. TEST DATA "
-        "ONLY."
+        "providers/methods/rates, and either the original three orders or "
+        "(--scenario lifecycle) the D-09 lifecycle set. TEST DATA ONLY."
     )
 
     def add_arguments(self, parser):
+        parser.add_argument(
+            "--scenario",
+            choices=("full", "lifecycle"),
+            default="full",
+            help=(
+                "Which order set to seed: 'full' (the original A/B/C walk, "
+                "the default) or 'lifecycle' (D-09: dispatch, split-delivery "
+                "gate, unpaid refusal)."
+            ),
+        )
         parser.add_argument(
             "--cleanup",
             action="store_true",
@@ -536,7 +653,7 @@ class Command(BaseCommand):
             clean()
             self.stdout.write("[seed_e2e] removed the E2E test rows (test data only)")
             return
-        summary = seed()
+        summary = seed(scenario=options["scenario"])
         self._print_summary(summary)
 
     def _print_summary(self, summary):
@@ -600,3 +717,42 @@ class Command(BaseCommand):
             ("shipments", "admin:shipping_shipment_changelist"),
         ):
             write(f"    {label}: {reverse(url_name)}")
+        if summary["scenario"] == "lifecycle":
+            self._print_lifecycle_outcomes(summary)
+
+    def _print_lifecycle_outcomes(self, summary):
+        """The three moves a human should see, written before the walk."""
+        orders = summary["orders_by_label"]
+        parcels = summary["shipments_by_tracking"]
+        write = self.stdout.write
+        l2_order = reverse("admin:orders_order_change", args=[orders["L2"].pk])
+        l1_parcel = reverse(
+            "admin:shipping_shipment_change", args=[parcels["LCY000000001"].pk]
+        )
+        l2_delivered = reverse(
+            "admin:shipping_shipment_change", args=[parcels["LCY000000002"].pk]
+        )
+        l2_in_transit = reverse(
+            "admin:shipping_shipment_change", args=[parcels["LCY000000003"].pk]
+        )
+        l3_parcel = reverse(
+            "admin:shipping_shipment_change", args=[parcels["LCY000000004"].pk]
+        )
+        write("  expected outcomes (lifecycle scenario):")
+        write(
+            "    L1: set its label_created parcel to dispatched; the order "
+            "moves confirmed -> shipped."
+        )
+        write(f"      L1 parcel: {l1_parcel}")
+        write(
+            "    L2: the delivered parcel alone must NOT move the order to "
+            f"delivered while the second parcel is in_transit ({l2_order}). "
+            "After BOTH parcels are delivered the order moves to delivered."
+        )
+        write(f"      L2 delivered parcel: {l2_delivered}")
+        write(f"      L2 in-transit parcel: {l2_in_transit}")
+        write(
+            "    L3: set its label_created parcel to dispatched; the parcel "
+            "saves but the order stays pending because the order is unpaid."
+        )
+        write(f"      L3 parcel: {l3_parcel}")

@@ -1209,6 +1209,11 @@ REST_FRAMEWORK = {
         # Signature verification is what defends this endpoint; the rate
         # only bounds the parsing work an unsigned caller can ask for.
         "webhook": os.getenv("THROTTLE_WEBHOOK_RATE", "120/min"),
+        # D-08: the customer tracking read is anonymous and carries a
+        # customer's parcel data. Its credential is the 256-bit guest token,
+        # but the order-number half of the lookup is enumerable, so this budget
+        # bounds that enumeration without changing what authorizes a read.
+        "tracking": os.getenv("THROTTLE_TRACKING_RATE", "60/min"),
     },
     # How many reverse proxies stand in front of the app, which decides whose
     # address an anonymous throttle budget is keyed on - for every scope above

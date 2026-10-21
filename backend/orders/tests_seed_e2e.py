@@ -22,6 +22,7 @@ from common import totp
 from orders.management.commands import seed_e2e
 from orders.models import Coupon, Order, OrderItem
 from products.models import products
+from shipping.lifecycle import sync_order_status
 from shipping.models import (
     Shipment,
     ShippingMethod,
@@ -511,3 +512,176 @@ class SeedE2ECleanupTests(TestCase):
         self.assertEqual(Shipment.objects.count(), 0)
         self.assertEqual(ShippingRate.objects.count(), 0)
         self.assertEqual(TOTPDevice.objects.count(), 0)
+
+
+def _run_lifecycle(*argv):
+    out = StringIO()
+    call_command("seed_e2e", "--scenario", "lifecycle", *argv, stdout=out)
+    return out.getvalue()
+
+
+class SeedE2ELifecycleTests(TestCase):
+    """D-09: the three states a shipment-driven order walk has to prove."""
+
+    def _orders(self):
+        return {
+            order.idempotency_key: order
+            for order in Order.objects.filter(
+                idempotency_key__startswith="seed-e2e-lifecycle-"
+            )
+        }
+
+    def test_lifecycle_scenario_seeds_the_expected_three_states(self):
+        out = _run_lifecycle()
+
+        orders = self._orders()
+        self.assertEqual(
+            set(orders),
+            {
+                "seed-e2e-lifecycle-l1",
+                "seed-e2e-lifecycle-l2",
+                "seed-e2e-lifecycle-l3",
+            },
+        )
+        self.assertEqual(Order.objects.count(), 3)
+        self.assertEqual(Shipment.objects.count(), 4)
+        # The default A/B/C set is not seeded by this scenario.
+        self.assertFalse(
+            Order.objects.filter(idempotency_key__startswith="seed-e2e-order-").exists()
+        )
+
+        l1 = orders["seed-e2e-lifecycle-l1"]
+        self.assertEqual(l1.status, "confirmed")
+        self.assertEqual(l1.payment_status, "captured")
+        self.assertEqual(l1.fulfilment_status, "unfulfilled")
+        self.assertEqual(l1.shipments.count(), 1)
+        self.assertEqual(l1.shipments.get().status, Shipment.Status.LABEL_CREATED)
+
+        l2 = orders["seed-e2e-lifecycle-l2"]
+        self.assertEqual(l2.status, "confirmed")
+        self.assertEqual(l2.payment_status, "captured")
+        self.assertEqual(l2.fulfilment_status, "unfulfilled")
+        self.assertEqual(
+            set(l2.shipments.values_list("status", flat=True)),
+            {Shipment.Status.DELIVERED, Shipment.Status.IN_TRANSIT},
+        )
+
+        l3 = orders["seed-e2e-lifecycle-l3"]
+        self.assertEqual(l3.status, "pending")
+        self.assertEqual(l3.payment_status, "pending")
+        self.assertEqual(l3.fulfilment_status, "unfulfilled")
+        self.assertEqual(l3.shipments.count(), 1)
+        self.assertEqual(l3.shipments.get().status, Shipment.Status.LABEL_CREATED)
+
+        for order in orders.values():
+            self.assertRegex(order.order_number, ORDER_NUMBER_PATTERN)
+
+        self.assertIn("expected outcomes (lifecycle scenario)", out)
+        self.assertIn("L1: set its label_created parcel to dispatched", out)
+        self.assertIn("L2: the delivered parcel alone must NOT", out)
+        self.assertIn("After BOTH parcels are delivered", out)
+        self.assertIn("L3: set its label_created parcel to dispatched", out)
+        self.assertIn("/admin/shipping/shipment/", out)
+        self.assertIn("/admin/orders/order/", out)
+        self.assertIn("TEST DATA ONLY", out)
+
+    def test_lifecycle_scenario_is_idempotent(self):
+        _run_lifecycle()
+        first_numbers = {
+            order.idempotency_key: order.order_number
+            for order in self._orders().values()
+        }
+        l1 = self._orders()["seed-e2e-lifecycle-l1"]
+        parcel = l1.shipments.get()
+        parcel.status = Shipment.Status.DISPATCHED
+        parcel.save(update_fields=["status"])
+
+        _run_lifecycle()
+
+        self.assertEqual(Order.objects.count(), 3)
+        self.assertEqual(Shipment.objects.count(), 4)
+        self.assertEqual(
+            {
+                order.idempotency_key: order.order_number
+                for order in self._orders().values()
+            },
+            first_numbers,
+        )
+        parcel.refresh_from_db()
+        # A re-run resets the declared starting state rather than preserving a
+        # human's in-progress walk.
+        self.assertEqual(parcel.status, Shipment.Status.LABEL_CREATED)
+
+    def test_lifecycle_cleanup_removes_only_the_lifecycle_rows(self):
+        _run_lifecycle()
+        _run("--cleanup")
+
+        self.assertFalse(
+            Order.objects.filter(
+                idempotency_key__startswith="seed-e2e-lifecycle-"
+            ).exists()
+        )
+        self.assertFalse(
+            Shipment.objects.filter(
+                tracking_number__in=[
+                    "LCY000000001",
+                    "LCY000000002",
+                    "LCY000000003",
+                    "LCY000000004",
+                ]
+            ).exists()
+        )
+        self.assertFalse(products.objects.filter(slug="marj").exists())
+        self.assertFalse(ShippingProvider.objects.exists())
+
+    def test_l1_dispatch_moves_the_order_to_shipped(self):
+        _run_lifecycle()
+        order = self._orders()["seed-e2e-lifecycle-l1"]
+        parcel = order.shipments.get()
+        parcel.status = Shipment.Status.DISPATCHED
+        parcel.save(update_fields=["status"])
+
+        result = sync_order_status(parcel)
+
+        order.refresh_from_db()
+        self.assertEqual(result.moved_to, "shipped")
+        self.assertIsNone(result.refusal)
+        self.assertEqual(order.status, "shipped")
+        self.assertEqual(order.fulfilment_status, "fulfilled")
+
+    def test_l2_delivered_gate_waits_for_both_parcels(self):
+        _run_lifecycle()
+        order = self._orders()["seed-e2e-lifecycle-l2"]
+        delivered = order.shipments.get(status=Shipment.Status.DELIVERED)
+        in_transit = order.shipments.get(status=Shipment.Status.IN_TRANSIT)
+
+        # Dispatching the moving parcel advances the order; the delivered one
+        # then asks for "delivered" but the sibling has not arrived.
+        self.assertEqual(sync_order_status(in_transit).moved_to, "shipped")
+        result = sync_order_status(delivered)
+        order.refresh_from_db()
+        self.assertEqual(result.refusal, "not every parcel has been delivered")
+        self.assertEqual(order.status, "shipped")
+
+        in_transit.status = Shipment.Status.DELIVERED
+        in_transit.save(update_fields=["status"])
+        result = sync_order_status(in_transit)
+        order.refresh_from_db()
+        self.assertEqual(result.moved_to, "delivered")
+        self.assertEqual(order.status, "delivered")
+
+    def test_l3_dispatch_saves_the_parcel_but_not_the_unpaid_order(self):
+        _run_lifecycle()
+        order = self._orders()["seed-e2e-lifecycle-l3"]
+        parcel = order.shipments.get()
+        parcel.status = Shipment.Status.DISPATCHED
+        parcel.save(update_fields=["status"])
+
+        result = sync_order_status(parcel)
+
+        parcel.refresh_from_db()
+        order.refresh_from_db()
+        self.assertEqual(parcel.status, Shipment.Status.DISPATCHED)
+        self.assertEqual(result.refusal, "pending -> shipped is not a legal transition")
+        self.assertEqual(order.status, "pending")
+        self.assertEqual(order.payment_status, "pending")
