@@ -214,3 +214,51 @@ Format per entry: priority, where needed, what's missing, why, suggested contrac
 - **Suggested contract:** `POST /api/accounts/logout/` (authenticated + CSRF) -> blacklist the refresh token from the cookie, clear the cookie (path=/api/, matching Q-P1's set), return 204 with no body oracle. Client already clears local state regardless, so the endpoint is purely the server half.
 - **Current workaround:** frontend clears local state + cookie hint; refresh cookie lives until max-age expiry. BACKEND_REQUESTS P1.
 
+
+## [P1] Order number generation - randomized, not padded sequential (user finding 2026-10-18)
+- **Where it's needed:** orders list/detail, tracking, admin
+- **What's missing:** order numbers are sequential padded (`2026000003` for the 3rd order) instead of randomized/unpredictable.
+- **Why:** sequential padded numbers leak order volume and are guessable; user expects randomized order numbers.
+- **Suggested contract:** generate order number with a random component (e.g. `ORD-<random>` or UUID-derived) at order creation; keep a stable display format.
+- **Current workaround:** frontend displays whatever `order_number` the API returns.
+
+## [P0] Admin panel - address not found / broken order lifecycle (user finding 2026-10-18)
+- **Where it's needed:** Django admin orders view
+- **What's missing:** shipping/billing address not visible in admin; order lifecycle transitions broken.
+- **Why:** admin cannot fulfill/support orders without address; lifecycle (pending->paid->shipped->delivered->refunded/cancelled) must be operable.
+- **Suggested contract:** expose address fields on OrderAdmin; implement/fix status transition actions with guards.
+- **Current workaround:** none - flagged as P0.
+
+## [P1] Product image upload - admin allows only 1 upload but populates both image fields (user finding 2026-10-18)
+- **Where it's needed:** product admin + PDP gallery
+- **What's missing:** admin upload accepts a single image that is written to both image fields; no multi-image support.
+- **Why:** PDP can show multiple images per product but admin can only supply one.
+- **Suggested contract:** ProductImage model (FK to Product, ordering, alt) with inline admin; or accept multiple uploads and store as list.
+- **Current workaround:** frontend shows whatever images the API returns (single).
+
+## [P1] Product variant images - no option to add images for variants (user finding 2026-10-18)
+- **Where it's needed:** variant admin + PDP variant selector
+- **What's missing:** variant model/admin has no image field.
+- **Suggested contract:** add `image` (FK/URL) to ProductVariant; admin inline upload.
+- **Current workaround:** none.
+
+## [P1] Product variants API surfacing (user finding 2026-10-18)
+- **Where it's needed:** PDP variant selector, cart
+- **What's missing:** verify `/api/products/{slug}/` (or variants endpoint) returns variants with price/stock/image; if absent, add.
+- **Why:** variants are not surfaced in the UI.
+- **Suggested contract:** include `variants: [{id, name, price, stock, image}]` in product detail payload.
+- **Current workaround:** frontend hides variant selector if no variants.
+
+## [P1] Refund endpoint for a product/order (user finding 2026-10-18)
+- **Where it's needed:** refund page + order lifecycle
+- **What's missing:** no refund API (create refund request, status, admin approval).
+- **Why:** there is no page to refund a product; lifecycle includes refunded state.
+- **Suggested contract:** `POST /api/orders/{id}/refund/` (or `/api/refunds/`) with reason + items; admin approve/reject; status transitions.
+- **Current workaround:** none - frontend refund page blocked on this.
+
+## [P2] Order lifecycle status definitions (refunded/cancelled on tracking) (user finding 2026-10-18)
+- **Where it's needed:** tracking page, orders list
+- **What's missing:** documented status enum + transitions; frontend unsure whether to show refunded/cancelled sections.
+- **Why:** tracking page shows refunded/cancelled sections; user questions their presence.
+- **Suggested contract:** publish status enum + allowed transitions; frontend renders only applicable states.
+- **Current workaround:** frontend renders all statuses returned.
