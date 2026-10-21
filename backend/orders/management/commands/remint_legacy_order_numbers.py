@@ -46,25 +46,28 @@ def legacy_rows():
     ]
 
 
-def reject_duplicate_numbers(olds, news):
-    """Refuse a plan whose old or new references repeat.
+def reject_duplicate_old_numbers(olds):
+    """Refuse a plan in which two rows claim the same existing reference.
 
     A repeated non-blank OLD number means two rows claim the reference a
-    customer may be holding, so no old,new pair can be unambiguous. A repeated
-    NEW number would collapse two customers onto one reference. Blank old
+    customer may be holding, so no old,new pair can be unambiguous. Blank old
     values are exempt on purpose: several rows can legitimately predate the
     column, and they carry no reference to be ambiguous about.
+
+    New references are not checked here. The unique constraint on
+    ``Order.order_number`` is what refuses a repeated new value, and
+    ``_remint`` retries with a fresh candidate when it does, so a check after
+    the write could only restate a guarantee the database already made.
     """
-    for label, values in (("old", olds), ("new", news)):
-        seen = set()
-        for value in values:
-            if not value:
-                continue
-            if value in seen:
-                raise CommandError(
-                    f"refusing to remint: duplicate {label} order number {value}"
-                )
-            seen.add(value)
+    seen = set()
+    for value in olds:
+        if not value:
+            continue
+        if value in seen:
+            raise CommandError(
+                f"refusing to remint: duplicate old order number {value}"
+            )
+        seen.add(value)
 
 
 class Command(BaseCommand):
@@ -119,7 +122,7 @@ class Command(BaseCommand):
             )
             return
 
-        reject_duplicate_numbers([number for _, number in rows], [])
+        reject_duplicate_old_numbers([number for _, number in rows])
         self.stdout.write(
             f"[remint_legacy_order_numbers] {len(rows)} order(s) not in the "
             "checkout format:"
@@ -145,9 +148,6 @@ class Command(BaseCommand):
                     continue
                 changes.append((number or "", new_number))
                 self.stdout.write(f"  #{pk} {number or '(none)'} -> {new_number}")
-        reject_duplicate_numbers(
-            [old for old, _ in changes], [new for _, new in changes]
-        )
 
         if options["mapping"]:
             self._write_mapping(options["mapping"], changes)

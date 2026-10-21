@@ -17,6 +17,7 @@ from unittest import mock
 
 from django.contrib.auth.models import User
 from django.core.management import CommandError, call_command
+from django.db import IntegrityError, transaction
 from django.test import TestCase
 
 from orders.management.commands import remint_legacy_order_numbers as remint
@@ -204,6 +205,20 @@ class RemintApplyTests(RemintTestCase):
         self.assertEqual(self.number_of(legacy), CONFORMING)
         self.assertIn("reminted concurrently", out)
 
+    def test_the_unique_constraint_refuses_a_duplicate_new_number(self):
+        # The command does not check new numbers: the database does. Pin that
+        # authority here, so the docstring's claim rests on a failing save
+        # rather than on a comment.
+        self.make_order(CONFORMING)
+        legacy = self.make_order(LEGACY_SEQUENTIAL)
+        legacy.order_number = CONFORMING
+
+        with self.assertRaises(IntegrityError):
+            with transaction.atomic():
+                legacy.save(update_fields=["order_number"])
+
+        self.assertEqual(self.number_of(legacy), LEGACY_SEQUENTIAL)
+
     def test_the_checkout_generator_and_attempt_bound_are_imported(self):
         self.assertIs(
             remint._generate_order_number, checkout_views._generate_order_number
@@ -216,11 +231,7 @@ class RemintApplyTests(RemintTestCase):
 class RemintDuplicateGuardTests(TestCase):
     def test_a_duplicate_old_number_is_refused(self):
         with self.assertRaisesMessage(CommandError, "duplicate old order number"):
-            remint.reject_duplicate_numbers([LEGACY_SEQUENTIAL, LEGACY_SEQUENTIAL], [])
-
-    def test_a_duplicate_new_number_is_refused(self):
-        with self.assertRaisesMessage(CommandError, "duplicate new order number"):
-            remint.reject_duplicate_numbers([LEGACY_SEQUENTIAL], [FRESH, FRESH])
+            remint.reject_duplicate_old_numbers([LEGACY_SEQUENTIAL, LEGACY_SEQUENTIAL])
 
     def test_blank_old_numbers_are_not_duplicates(self):
-        remint.reject_duplicate_numbers(["", None, ""], [FRESH, FRESH_B])
+        remint.reject_duplicate_old_numbers(["", None, ""])
