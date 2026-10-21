@@ -534,8 +534,12 @@ def username_available(request):
 @api_view(["POST"])
 @throttle_scope("auth")
 def verify_email(request):
-    user = _get_user(request.data.get("uid"))
-    token = request.data.get("token", "")
+    # Non-object JSON bodies have no .get; reading them as {} routes every
+    # such body into this endpoint's own invalid-link 400 (the _body_value
+    # shape) instead of a 500.
+    payload = request.data if isinstance(request.data, dict) else {}
+    user = _get_user(payload.get("uid"))
+    token = payload.get("token", "")
     if user is None or not default_token_generator.check_token(user, token):
         return Response(
             {"error": "This verification link is invalid or expired."},
@@ -565,7 +569,10 @@ def verify_email(request):
 @api_view(["POST"])
 @throttle_scope("recovery")
 def resend_verification(request):
-    email = request.data.get("email", "").strip()
+    # Non-object JSON bodies have no .get; {} keeps them on the uniform
+    # 200 (the _body_value shape) instead of a 500.
+    payload = request.data if isinstance(request.data, dict) else {}
+    email = payload.get("email", "").strip()
     user = User.objects.filter(email__iexact=email, is_active=False).first()
     if user:
         try:
@@ -585,7 +592,10 @@ def resend_verification(request):
 @api_view(["POST"])
 @throttle_scope("recovery")
 def forgot_username(request):
-    email = request.data.get("email", "").strip()
+    # Non-object JSON bodies have no .get; {} keeps them on the uniform
+    # 200 (the _body_value shape) instead of a 500.
+    payload = request.data if isinstance(request.data, dict) else {}
+    email = payload.get("email", "").strip()
     user = User.objects.filter(email__iexact=email).first()
     if user:
         try:
@@ -608,7 +618,10 @@ def forgot_username(request):
 @api_view(["POST"])
 @throttle_scope("recovery")
 def request_password_reset(request):
-    email = request.data.get("email", "").strip()
+    # Non-object JSON bodies have no .get; {} keeps them on the uniform
+    # 200 (the _body_value shape) instead of a 500.
+    payload = request.data if isinstance(request.data, dict) else {}
+    email = payload.get("email", "").strip()
     user = User.objects.filter(email__iexact=email, is_active=True).first()
     if user:
         uid = _encoded_user_id(user)
@@ -641,9 +654,13 @@ def request_password_reset(request):
 @api_view(["POST"])
 @throttle_scope("auth")
 def reset_password(request):
-    user = _get_user(request.data.get("uid"))
-    token = request.data.get("token", "")
-    password = request.data.get("password", "")
+    # Non-object JSON bodies have no .get; reading them as {} routes every
+    # such body into this endpoint's own invalid-link 400 (the _body_value
+    # shape) instead of a 500.
+    payload = request.data if isinstance(request.data, dict) else {}
+    user = _get_user(payload.get("uid"))
+    token = payload.get("token", "")
+    password = payload.get("password", "")
     if user is None or not default_token_generator.check_token(user, token):
         return Response(
             {"error": "This password-reset link is invalid or expired."},
