@@ -42,7 +42,7 @@ describe("templateConfig defaults (Maison Aurel)", () => {
       "Perfumes composed with restraint",
     );
     expect(templateConfig.brand.description).toContain("Maison Aurel");
-     expect(templateConfig.brand.url).toBe("https://test.boredompeaks.me");
+    expect(templateConfig.brand.url).toBe("https://test.boredompeaks.me");
   });
 
   it("contact defaults match the shipped tenant", async () => {
