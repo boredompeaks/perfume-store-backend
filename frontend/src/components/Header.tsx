@@ -3,9 +3,9 @@
 import Link from "next/link";
 import { usePathname } from "next/navigation";
 import { useEffect, useState } from "react";
-import { useQuery } from "@tanstack/react-query";
 import { useAuth } from "@/lib/auth";
-import { cartCount, getCart } from "@/lib/cart-api";
+import { cartCount } from "@/lib/cart-api";
+import { useCart } from "@/lib/use-cart";
 import { site } from "@/lib/site";
 import MenuOverlay from "./MenuOverlay";
 
@@ -37,12 +37,7 @@ export default function Header() {
   const [menuOpen, setMenuOpen] = useState(false);
   const [scrolled, setScrolled] = useState(false);
 
-  const { data: cart } = useQuery({
-    queryKey: ["cart"],
-    queryFn: getCart,
-    staleTime: 15_000,
-    retry: false,
-  });
+  const { data: cart } = useCart();
   const count = cartCount(cart);
 
   // Close the overlay on any navigation.

@@ -1,11 +1,10 @@
 "use client";
 
 import Link from "next/link";
-import { useQuery } from "@tanstack/react-query";
 import { useState } from "react";
 import { ApiError } from "@/lib/api";
 import { useAuth } from "@/lib/auth";
-import { getCart } from "@/lib/cart-api";
+import { useCart } from "@/lib/use-cart";
 import { formatINR } from "@/lib/money";
 import { checkout } from "@/lib/orders-api";
 import {
@@ -27,7 +26,7 @@ export default function CheckoutView() {
     isPending: cartLoading,
     isError: cartError,
     refetch: refetchCart,
-  } = useQuery({ queryKey: ["cart"], queryFn: getCart, retry: false });
+  } = useCart();
 
   const [step, setStep] = useState<Step>("details");
   const [shipping, setShipping] = useState<ShippingDetails | null>(() =>
