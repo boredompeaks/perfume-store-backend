@@ -55,7 +55,6 @@ def backfill_shipment_providers(apps, schema_editor):
 
 
 class Migration(migrations.Migration):
-
     dependencies = [
         ("shipping", "0004_shipment_provider"),
     ]

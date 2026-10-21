@@ -83,9 +83,7 @@ class BackfillMappingTests(TestCase):
         self.assertEqual(self._matches("   "), set())
 
     def test_already_linked_parcel_is_never_rewritten(self):
-        shipment = self._shipment(
-            "BF-LINKED", "Delhivery", provider=self.bluedart
-        )
+        shipment = self._shipment("BF-LINKED", "Delhivery", provider=self.bluedart)
         from shipping.backfill import backfill_shipments
 
         counts = backfill_shipments(apply=True)

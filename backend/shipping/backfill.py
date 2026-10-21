@@ -49,9 +49,7 @@ def backfill_shipments(*, apply):
     """
     providers = list(ShippingProvider.objects.all())
     counts = {"matched": 0, "ambiguous": 0, "unmatched": 0, "already_linked": 0}
-    counts["already_linked"] = Shipment.objects.filter(
-        provider__isnull=False
-    ).count()
+    counts["already_linked"] = Shipment.objects.filter(provider__isnull=False).count()
 
     for shipment in Shipment.objects.filter(provider__isnull=True):
         matches = matching_provider_ids(shipment.carrier, providers)

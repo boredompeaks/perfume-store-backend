@@ -45,18 +45,14 @@ class TrackingHardeningTests(ShipmentTestCase):
         self.assertEqual(api_settings.DEFAULT_THROTTLE_RATES["tracking"], "60/min")
 
     def test_a_hit_carries_the_privacy_headers(self):
-        response = self.track(
-            self.guest_order.order_number, token="guest-token-value"
-        )
+        response = self.track(self.guest_order.order_number, token="guest-token-value")
 
         self.assertEqual(response.status_code, 200, response.data)
         self.assert_privacy_headers(response)
 
     def test_the_uniform_miss_is_unchanged_and_carries_the_headers(self):
         no_credential = self.track(self.guest_order.order_number)
-        wrong_token = self.track(
-            self.guest_order.order_number, token="not-the-token"
-        )
+        wrong_token = self.track(self.guest_order.order_number, token="not-the-token")
 
         self.assertEqual(no_credential.status_code, 404)
         self.assertEqual(wrong_token.status_code, 404)
@@ -66,13 +62,9 @@ class TrackingHardeningTests(ShipmentTestCase):
         self.assert_privacy_headers(wrong_token)
 
     def test_the_limit_returns_429_and_the_429_keeps_the_headers(self):
-        with mock.patch.object(
-            TrackingRateThrottle, "THROTTLE_RATES", self._rates()
-        ):
+        with mock.patch.object(TrackingRateThrottle, "THROTTLE_RATES", self._rates()):
             cache.clear()
-            first = self.track(
-                self.guest_order.order_number, token="guest-token-value"
-            )
+            first = self.track(self.guest_order.order_number, token="guest-token-value")
             second = self.track(
                 self.guest_order.order_number, token="guest-token-value"
             )
@@ -86,14 +78,10 @@ class TrackingHardeningTests(ShipmentTestCase):
         method = ShippingMethod.objects.create(code="standard", name="Standard")
         ShippingRate.objects.create(method=method, amount=Decimal("49.00"))
 
-        with mock.patch.object(
-            TrackingRateThrottle, "THROTTLE_RATES", self._rates()
-        ):
+        with mock.patch.object(TrackingRateThrottle, "THROTTLE_RATES", self._rates()):
             cache.clear()
             responses = [
-                self.client.get(
-                    ESTIMATE, {"state": "Maharashtra", "pincode": "400001"}
-                )
+                self.client.get(ESTIMATE, {"state": "Maharashtra", "pincode": "400001"})
                 for _ in range(3)
             ]
 
@@ -101,12 +89,8 @@ class TrackingHardeningTests(ShipmentTestCase):
             self.assertEqual(response.status_code, 200, response.data)
         # The tracking view still owns the budget: a fourth tracking read is
         # refused even though the estimate calls above spent nothing.
-        with mock.patch.object(
-            TrackingRateThrottle, "THROTTLE_RATES", self._rates()
-        ):
-            first = self.track(
-                self.guest_order.order_number, token="guest-token-value"
-            )
+        with mock.patch.object(TrackingRateThrottle, "THROTTLE_RATES", self._rates()):
+            first = self.track(self.guest_order.order_number, token="guest-token-value")
             second = self.track(
                 self.guest_order.order_number, token="guest-token-value"
             )
@@ -117,9 +101,7 @@ class TrackingHardeningTests(ShipmentTestCase):
         self.login_as(self.buyer)
 
         own = self.track(self.order.order_number)
-        guest = self.track(
-            self.guest_order.order_number, token="guest-token-value"
-        )
+        guest = self.track(self.guest_order.order_number, token="guest-token-value")
 
         self.assertEqual(own.status_code, 200, own.data)
         self.assertTrue(

@@ -547,9 +547,7 @@ class SeedE2ELifecycleTests(TestCase):
         self.assertEqual(Shipment.objects.count(), 4)
         # The default A/B/C set is not seeded by this scenario.
         self.assertFalse(
-            Order.objects.filter(
-                idempotency_key__startswith="seed-e2e-order-"
-            ).exists()
+            Order.objects.filter(idempotency_key__startswith="seed-e2e-order-").exists()
         )
 
         l1 = orders["seed-e2e-lifecycle-l1"]
@@ -687,4 +685,3 @@ class SeedE2ELifecycleTests(TestCase):
         self.assertEqual(result.refusal, "pending -> shipped is not a legal transition")
         self.assertEqual(order.status, "pending")
         self.assertEqual(order.payment_status, "pending")
-

@@ -72,9 +72,7 @@ class AdminOnboardingContentTests(TestCase):
     def test_every_staff_role_has_a_section(self):
         _, html = self._page(self.finance)
         for role in STAFF_ROLES:
-            self.assertTrue(
-                role_section(html, role), f"missing section for {role}"
-            )
+            self.assertTrue(role_section(html, role), f"missing section for {role}")
 
     def test_a_role_lists_only_the_capabilities_it_holds(self):
         _, html = self._page(self.finance)
