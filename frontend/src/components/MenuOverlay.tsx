@@ -4,13 +4,15 @@ import Link from "next/link";
 import { useEffect, useRef } from "react";
 import { useAuth } from "@/lib/auth";
 import { site } from "@/lib/site";
+import { templateConfig } from "@/lib/template.config";
 
+// Mobile menu = Home + the manifest's shop footer group, minus the sign-in
+// link: the overlay renders auth in its own footer block below (and Home is
+// already the logo's hardcoded root link in Header). Kept as a derived list
+// so a manifest edit moves this menu with the footer (U-W3-T5).
 const links = [
   { href: "/", label: "Home" },
-  { href: "/products", label: "Shop all" },
-  { href: "/products?ordering=-created_at", label: "New arrivals" },
-  { href: "/cart", label: "Cart" },
-  { href: "/orders", label: "Orders" },
+  ...templateConfig.footer.shop.filter((link) => link.href !== "/login"),
 ];
 
 export default function MenuOverlay({
@@ -72,9 +74,9 @@ export default function MenuOverlay({
       role="dialog"
       aria-modal="true"
       aria-label="Menu"
-      className="fixed inset-0 z-50 flex flex-col bg-paper"
+      className="fixed inset-0 z-(--z-overlay) flex flex-col bg-paper"
     >
-      <div className="flex h-16 items-center justify-between border-b border-line px-4 sm:px-6">
+      <div className="flex h-16 items-center justify-between border-b border-hairline px-4 sm:px-6">
         <span className="font-display text-xl tracking-tight">
           {site.name}
         </span>
@@ -114,7 +116,7 @@ export default function MenuOverlay({
         </ul>
       </nav>
 
-      <div className="border-t border-line px-6 py-6 text-sm">
+      <div className="border-t border-hairline px-6 py-6 text-sm">
         {status === "authenticated" ? (
           <button
             type="button"
@@ -122,7 +124,7 @@ export default function MenuOverlay({
               logout();
               onClose();
             }}
-            className="text-ink-muted transition-colors hover:text-bronze"
+            className="text-ink-secondary transition-colors hover:text-bronze"
           >
             Sign out
           </button>

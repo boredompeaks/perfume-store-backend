@@ -1,17 +1,29 @@
-import { expect, test, type Page } from "@playwright/test";
-import { apiLogin, loginCustomer } from "./helpers";
-
-const API = "http://localhost:8000";
-const CUSTOMER = { username: "e2e_customer", password: "e2e-Customer-9" };
+import { expect, test } from "@playwright/test";
+import {
+  API,
+  CUSTOMER,
+  ORDER_NUMBER,
+  apiLogin,
+  fetchProduct,
+  formatINR,
+  loginCustomer,
+} from "./helpers";
 
 test("orders list and detail render; pending order shows resume panel", async ({
   page,
 }) => {
   await loginCustomer(page);
 
+  // Fixture derived from the catalogue the test itself reads — no hardcoded
+  // product id, name or price (E2E-4: seed drift used to stale the ₹
+  // literals the WP0 spec hardcoded).
+  const prod = await fetchProduct(page, "marj");
+  const qty = 2;
+  const merchandise = Number(prod.price) * qty;
+
   // Seed an order through the real API (session cart + JWT checkout).
   await page.request.post(`${API}/api/cart/`, {
-    data: { product_id: 4, quantity: 2 },
+    data: { product_id: prod.id, quantity: qty },
   });
   const { access } = await apiLogin(page, CUSTOMER);
   const res = await page.request.post(`${API}/api/orders/checkout/`, {
@@ -28,25 +40,42 @@ test("orders list and detail render; pending order shows resume panel", async ({
   expect(res.status()).toBe(201);
   const order = (await res.json()) as {
     id: number;
+    order_number: string;
     total_amount: string;
+    discount_amount: string;
+    shipping_amount: string;
     status: string;
   };
   expect(order.status).toBe("pending");
+  expect(order.order_number).toMatch(ORDER_NUMBER);
+  // Server money math, derived not literal: catalogue price × qty, no coupon
+  // in this flow, plus whatever the server priced shipping at (E2E-4).
+  expect(Number(order.discount_amount)).toBe(0);
+  expect(Number(order.total_amount)).toBe(
+    merchandise + Number(order.shipping_amount),
+  );
 
-  // List: row with id, item summary, server total.
+  // List: row with order_number (the customer-facing reference — §5.5
+  // replaces the sequential id in all customer-facing text), the item
+  // summary built from the fetched product, and the server total as the UI
+  // formats it with the app's own formatter.
   await page.goto("/orders");
-  const row = page.getByRole("link", { name: new RegExp(`Order #${order.id}`) });
+  const row = page.getByRole("link", {
+    name: `Order #${order.order_number}`,
+  });
   await expect(row).toBeVisible();
-  await expect(row.getByText("marj × 2")).toBeVisible();
-  await expect(row.getByText("₹4,000.00")).toBeVisible();
+  await expect(row.getByText(`${prod.name} × ${qty}`)).toBeVisible();
+  await expect(row.getByText(formatINR(order.total_amount))).toBeVisible();
   await expect(row.getByText("Pending payment")).toBeVisible();
 
   // Detail: items, server total, delivery block, resume panel.
   await row.click();
-  await expect(page.getByRole("heading", { name: `Order #${order.id}` })).toBeVisible();
+  await expect(
+    page.getByRole("heading", { name: `Order ${order.order_number}` }),
+  ).toBeVisible();
   await expect(page.getByTestId("resume-payment-panel")).toBeVisible();
-  await expect(page.getByText("marj × 2")).toBeVisible();
-  await expect(page.getByText("₹4,000.00").first()).toBeVisible();
+  await expect(page.getByText(`${prod.name} × ${qty}`)).toBeVisible();
+  await expect(page.getByText(formatINR(order.total_amount)).first()).toBeVisible();
   await expect(page.getByText("Mumbai, Maharashtra 400001")).toBeVisible();
 });
 

@@ -7,12 +7,8 @@ import { useAuth } from "@/lib/auth";
 import { cartCount } from "@/lib/cart-api";
 import { useCart } from "@/lib/use-cart";
 import { site } from "@/lib/site";
+import { templateConfig } from "@/lib/template.config";
 import MenuOverlay from "./MenuOverlay";
-
-const navLinks = [
-  { href: "/products", label: "Shop" },
-  { href: "/products?ordering=-created_at", label: "New arrivals" },
-];
 
 function CartIcon() {
   return (
@@ -56,8 +52,8 @@ export default function Header() {
   return (
     <>
       <header
-        className={`sticky top-0 z-40 border-b border-line bg-paper transition-shadow ${
-          scrolled ? "shadow-[0_2px_12px_-6px_rgb(28_25_23/0.15)]" : ""
+        className={`sticky top-0 z-(--z-header) border-b border-hairline bg-paper transition-shadow ${
+          scrolled ? "shadow-(--elevation-bar)" : ""
         }`}
       >
         <div className="relative mx-auto flex h-16 max-w-6xl items-center justify-between px-4 sm:px-6">
@@ -68,7 +64,7 @@ export default function Header() {
               aria-controls="site-menu"
               aria-label="Open menu"
               onClick={() => setMenuOpen(true)}
-              className="-ml-2 p-2 md:hidden"
+              className="-ml-2 flex h-11 min-w-11 items-center justify-center md:hidden"
             >
               <svg
                 width="20"
@@ -86,7 +82,7 @@ export default function Header() {
               aria-label="Primary"
               className="hidden items-center gap-7 md:flex"
             >
-              {navLinks.map((link) => (
+              {templateConfig.nav.map((link) => (
                 <Link
                   key={link.label}
                   href={link.href}
@@ -106,18 +102,26 @@ export default function Header() {
           </Link>
 
           <div className="flex items-center gap-4 text-sm">
+            {/* OBS-1 (U-W13-T10): the account links used `hidden inline-flex`,
+                but Tailwind v4 emits `.inline-flex` AFTER `.hidden`, so the
+                pair computed to inline-flex at EVERY viewport — at 390 the
+                always-visible "Orders" link overlapped the centred wordmark.
+                The display utility now rides the `sm:` variant alone:
+                display:none below 640, inline-flex (44px floor intact) at
+                sm and up. Desktop geometry is unchanged — the links were
+                already rendered there. */}
             {status === "authenticated" ? (
               <>
                 <Link
                   href="/orders"
-                  className="hidden transition-colors hover:text-bronze sm:inline"
+                  className="hidden sm:inline-flex min-h-11 items-center transition-colors hover:text-bronze"
                 >
                   Orders
                 </Link>
                 <button
                   type="button"
                   onClick={logout}
-                  className="hidden text-ink-muted transition-colors hover:text-bronze sm:inline"
+                  className="hidden sm:inline-flex min-h-11 items-center text-ink-secondary transition-colors hover:text-bronze"
                 >
                   Sign out
                 </button>
@@ -125,7 +129,7 @@ export default function Header() {
             ) : status === "anonymous" ? (
               <Link
                 href="/login"
-                className="hidden transition-colors hover:text-bronze sm:inline"
+                className="hidden sm:inline-flex min-h-11 items-center transition-colors hover:text-bronze"
               >
                 Sign in
               </Link>
@@ -135,7 +139,7 @@ export default function Header() {
 
             <Link
               href="/cart"
-              className="relative flex items-center p-1 transition-colors hover:text-bronze"
+              className="relative flex items-center p-3 transition-colors hover:text-bronze"
               aria-label={`Cart, ${count} item${count === 1 ? "" : "s"}`}
             >
               <CartIcon />

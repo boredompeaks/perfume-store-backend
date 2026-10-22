@@ -31,7 +31,7 @@ same-site (subdomains of one registrable domain, or one origin behind a reverse 
 - **No categories endpoint.** Workaround: derive/hardcode; see BACKEND_REQUESTS.md.
 
 ### Cart (session cookie, no JWT)
-- `GET /api/cart/` → `{id, session_id(ignored), items: [{id, product: Product, quantity, created_at}], ...}` — lazily creates session + cart.
+- `GET /api/cart/` → `{id, items: [{id, product: Product, quantity, created_at}], ...}` — lazily creates session + cart.
 - `POST /api/cart/ {product_id, quantity}` → `201` full cart | `400 {error}` ("Not enough stock" etc.) | `404`
 - `PATCH /api/cart/{item_id}/ {quantity}` → `200` full cart | `400 | 404`
 - `DELETE /api/cart/{item_id}/` → **200** with full cart (not 204).

@@ -15,12 +15,12 @@ export function LegalShell({
         {site.name}
       </p>
       <h1 className="mt-3 font-display text-4xl tracking-tight">{title}</h1>
-      <p className="mt-2 text-sm text-ink-muted">
+      <p className="mt-2 text-sm text-ink-secondary">
         Last updated: September 2026
       </p>
       <div className="mt-12 space-y-10">{children}</div>
 
-      <div className="mt-16 border-t border-line pt-6 text-sm text-ink-muted">
+      <div className="mt-16 border-t border-hairline pt-6 text-sm text-ink-secondary">
         <p>
           Questions? Write to{" "}
           <a
@@ -54,7 +54,7 @@ export function LegalSection({
   return (
     <section>
       <h2 className="font-display text-xl tracking-tight">{title}</h2>
-      <div className="mt-3 space-y-3 leading-relaxed text-ink-muted">
+      <div className="mt-3 space-y-3 leading-relaxed text-ink-secondary">
         {children}
       </div>
     </section>

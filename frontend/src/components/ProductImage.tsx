@@ -33,7 +33,7 @@ export default function ProductImage({
     return (
       <div
         aria-hidden="true"
-        className={`absolute inset-0 flex items-center justify-center bg-bronze-soft ${className ?? ""}`}
+        className={`absolute inset-0 flex items-center justify-center bg-hairline ${className ?? ""}`}
       >
         <span className="font-display text-4xl text-bronze/60">
           {monogram}

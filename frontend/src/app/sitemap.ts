@@ -1,28 +1,40 @@
 import type { MetadataRoute } from "next";
 import { API_BASE } from "@/lib/config";
 import { site } from "@/lib/site";
+import { pages } from "@/lib/pages";
 import type { ProductPage } from "@/lib/types";
 
-// Regenerated hourly. NOTE: walking every page at the backend's current
-// hardcoded page size of 2 costs ~count/2 requests — a temporary cost that
-// collapses once the P0 page-size fix lands (BACKEND_REQUESTS.md).
+// Regenerated hourly. NOTE: walking every product page costs ~count/12
+// requests at the backend's default PRODUCTS_PAGE_SIZE of 12: an
+// env-overridable setting (backend/config/settings.py:978), consumed by the
+// Paginator in backend/products/views.py:108, not a hardcoded constant.
 export const revalidate = 3600;
 
+// Static-route priorities: home leads, the shop listing is close behind, and
+// supporting/legal pages sit lower. Product slugs are ranked below the shop
+// index itself.
+function staticPriority(path: string): number {
+  if (path === "/") return 1;
+  if (path === "/products") return 0.9;
+  return 0.5;
+}
+
+function staticChangeFrequency(path: string): "weekly" | "monthly" {
+  if (path === "/" || path === "/products") return "weekly";
+  return "monthly";
+}
+
 export default async function sitemap(): Promise<MetadataRoute.Sitemap> {
-  const staticRoutes: MetadataRoute.Sitemap = [
-    {
-      url: `${site.url}/`,
+  // Static entries are generated from the page registry so sitemap and robots
+  // can never disagree about which routes exist or are indexable.
+  const staticRoutes: MetadataRoute.Sitemap = pages
+    .filter((p) => p.indexable)
+    .map((p) => ({
+      url: `${site.url}${p.path}`,
       lastModified: new Date(),
-      changeFrequency: "weekly",
-      priority: 1,
-    },
-    {
-      url: `${site.url}/products`,
-      lastModified: new Date(),
-      changeFrequency: "weekly",
-      priority: 0.9,
-    },
-  ];
+      changeFrequency: staticChangeFrequency(p.path),
+      priority: staticPriority(p.path),
+    }));
 
   try {
     const productRoutes: MetadataRoute.Sitemap = [];

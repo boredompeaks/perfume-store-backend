@@ -38,24 +38,24 @@ export default function ShipmentPanel({ orderNumber }: { orderNumber: string }) 
   return (
     <section
       aria-labelledby="shipments-heading"
-      className="mt-8 border border-line p-6"
+      className="mt-8 border border-hairline p-6"
       data-testid="shipment-panel"
     >
       <h3
         id="shipments-heading"
-        className="text-sm font-medium uppercase tracking-wide text-ink-muted"
+        className="text-sm font-medium uppercase tracking-wide text-ink-secondary"
       >
         Shipments
       </h3>
 
       {isPending && (
-        <p role="status" className="mt-3 text-sm text-ink-muted">
+        <p role="status" className="mt-3 text-sm text-ink-secondary">
           Loading tracking…
         </p>
       )}
 
       {isEmpty && (
-        <p data-testid="shipments-empty" className="mt-3 text-sm text-ink-muted">
+        <p data-testid="shipments-empty" className="mt-3 text-sm text-ink-secondary">
           Tracking will appear here once your order ships.
         </p>
       )}
@@ -68,17 +68,17 @@ export default function ShipmentPanel({ orderNumber }: { orderNumber: string }) 
               <li
                 key={`${shipment.tracking_number}-${index}`}
                 data-testid="shipment-parcel"
-                className="border-t border-line pt-4 first:border-t-0 first:pt-0"
+                className="border-t border-hairline pt-4 first:border-t-0 first:pt-0"
               >
                 <div className="flex flex-wrap items-center gap-3">
                   <span className="inline-block bg-ink px-2 py-0.5 text-xs uppercase tracking-wide text-paper">
                     {shipmentStatusLabel(shipment.status)}
                   </span>
-                  <span className="text-sm text-ink-muted">
+                  <span className="text-sm text-ink-secondary">
                     {shipment.carrier || "Carrier pending"}
                   </span>
                   {shipment.provider && (
-                    <span className="text-sm text-ink-muted">
+                    <span className="text-sm text-ink-secondary">
                       via {shipment.provider}
                     </span>
                   )}
@@ -86,12 +86,12 @@ export default function ShipmentPanel({ orderNumber }: { orderNumber: string }) 
 
                 <dl className="mt-3 space-y-1 text-sm">
                   <div className="flex justify-between gap-4">
-                    <dt className="text-ink-muted">Tracking number</dt>
+                    <dt className="text-ink-secondary">Tracking number</dt>
                     <dd>{shipment.tracking_number}</dd>
                   </div>
                   {shipment.estimated_delivery && (
                     <div className="flex justify-between gap-4">
-                      <dt className="text-ink-muted">Estimated delivery</dt>
+                      <dt className="text-ink-secondary">Estimated delivery</dt>
                       <dd>
                         <time dateTime={shipment.estimated_delivery}>
                           {formatOrderDate(shipment.estimated_delivery)}
@@ -115,15 +115,15 @@ export default function ShipmentPanel({ orderNumber }: { orderNumber: string }) 
 
                 {shipment.events.length > 0 && (
                   <div className="mt-4">
-                    <h4 className="text-xs font-medium uppercase tracking-wide text-ink-muted">
+                    <h4 className="text-xs font-medium uppercase tracking-wide text-ink-secondary">
                       Timeline
                     </h4>
-                    <ol className="mt-2 space-y-1 border-l border-line pl-4 text-sm">
+                    <ol className="mt-2 space-y-1 border-l border-hairline pl-4 text-sm">
                       {shipment.events.map((event, eventIndex) => (
                         <li key={`${event.occurred_at}-${eventIndex}`}>
                           <time
                             dateTime={event.occurred_at}
-                            className="text-ink-muted"
+                            className="text-ink-secondary"
                           >
                             {formatTimestamp(event.occurred_at)}
                           </time>

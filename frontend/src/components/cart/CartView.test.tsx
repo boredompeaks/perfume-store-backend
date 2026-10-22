@@ -97,6 +97,11 @@ describe("CartView identity-keyed cart cache", () => {
     const html = renderWith([[["cart", "anonymous"], GUEST_CART]]);
 
     expect(html).toContain("Guest Bergamot");
-    expect(html).toContain("Sign in to checkout");
+    // spec-ui's anonymous CTA (guest checkout flag on): the cart still offers
+    // the checkout door plus a sign-in alternative. The assertion above is the
+    // one that pins D-04b's identity-keyed cache; this one only verifies the
+    // anonymous basket is not a dead end.
+    expect(html).toContain("Continue to checkout");
+    expect(html).toContain("sign in");
   });
 });

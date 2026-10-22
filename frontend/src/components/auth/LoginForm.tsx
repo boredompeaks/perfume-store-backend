@@ -66,9 +66,16 @@ export default function LoginForm({
 
   return (
     <div>
-      <form onSubmit={onSubmit} className="space-y-4" noValidate>
+      <form onSubmit={onSubmit} className="space-y-5" noValidate>
         <div>
-          <label htmlFor="login-username" className="mb-1 block text-sm">
+          {/* W13-T10 (design parity): labels are the screen's uppercase
+              small treatment — `--text-label-sm` (11px, 0.08em) in
+              `--color-ink-secondary`, outside the field, never bronze (one
+              accent moment per page: the shell's eyebrow). */}
+          <label
+            htmlFor="login-username"
+            className="mb-2 block text-label-sm uppercase text-ink-secondary"
+          >
             Username
           </label>
           <input
@@ -82,7 +89,10 @@ export default function LoginForm({
           />
         </div>
         <div>
-          <label htmlFor="login-password" className="mb-1 block text-sm">
+          <label
+            htmlFor="login-password"
+            className="mb-2 block text-label-sm uppercase text-ink-secondary"
+          >
             Password
           </label>
           <input
@@ -100,7 +110,10 @@ export default function LoginForm({
             {/* SPEC-17-05 (R-17.9): the second factor the backend demands
                 for privileged accounts on this door. It does not exist on
                 the storefront door — see SPEC-20-10. */}
-            <label htmlFor="login-totp" className="mb-1 block text-sm">
+            <label
+              htmlFor="login-totp"
+              className="mb-2 block text-label-sm uppercase text-ink-secondary"
+            >
               Authentication code
             </label>
             <input
@@ -116,23 +129,29 @@ export default function LoginForm({
           </div>
         )}
 
+        {/* CHANGE-2: validation and failure copy is `--color-danger`, never
+            the accent — bronze must never mean "this failed". The message
+            itself is the server's, verbatim (401 ambiguity, 429 throttle
+            wording); the non-ApiError branch is the network-down state. */}
         {error && (
-          <p role="alert" className="text-sm text-bronze" aria-live="polite">
+          <p role="alert" className="text-sm text-danger" aria-live="polite">
             {error}
           </p>
         )}
 
+        {/* The screen's full-width ink button: `--text-label` uppercase on
+            the AddressForm CTA construction (§5.9 harmonisation). */}
         <button
           type="submit"
           disabled={pending}
-          className="w-full bg-ink px-6 py-3 text-sm text-paper transition-colors hover:bg-bronze disabled:opacity-60"
+          className="w-full bg-ink px-8 py-4 text-label uppercase text-paper transition-colors hover:bg-bronze disabled:opacity-60"
         >
           {pending ? "Signing in…" : "Sign in"}
         </button>
       </form>
 
       {variant === "staff" && (
-        <p className="mt-6 border-t border-line pt-6 text-sm text-ink-muted">
+        <p className="mt-6 border-t border-hairline pt-6 text-sm text-ink-secondary">
           Setting up for the first time?{" "}
           <Link
             href="/staff/mfa/enroll"
@@ -150,36 +169,55 @@ export default function LoginForm({
         the failure reason would leak that signal back. They are also
         customer-only now that the form has two surfaces: registration and
         email recovery are storefront concerns (SPEC-20-10).
+
+        W13-T10 (design parity): the stack is centred under a hairline rule,
+        per the sign-in screen. "New here? Create an account" keeps the
+        shipped honest English (the screen's "Do not possess an account?"
+        reads as translated boilerplate); "Resend verification email" and
+        the "Forgot your" pair follow the screen's wording.
       */}
       {variant === "customer" && (
-        <div className="mt-6 space-y-2 border-t border-line pt-6 text-sm text-ink-muted">
-          <p>
-            Staff member?{" "}
-            <Link href="/staff/login" className="underline underline-offset-4 transition-colors hover:text-bronze">
-              Staff sign in
-            </Link>
-          </p>
+        <nav
+          aria-label="Account recovery"
+          className="mt-8 flex flex-col items-center gap-3 border-t border-hairline pt-8 text-center text-sm text-ink-secondary"
+        >
           <p>
             New here?{" "}
-            <Link href="/register" className="underline underline-offset-4 transition-colors hover:text-bronze">
+            <Link
+              href="/register"
+              className="underline underline-offset-4 transition-colors hover:text-bronze"
+            >
               Create an account
             </Link>
           </p>
+          <Link
+            href="/resend-verification"
+            className="underline underline-offset-4 transition-colors hover:text-bronze"
+          >
+            Resend verification email
+          </Link>
+          <Link
+            href="/forgot-username"
+            className="underline underline-offset-4 transition-colors hover:text-bronze"
+          >
+            Forgot your username
+          </Link>
+          <Link
+            href="/forgot-password"
+            className="underline underline-offset-4 transition-colors hover:text-bronze"
+          >
+            Forgot your password
+          </Link>
           <p>
-            Waiting for a verification email?{" "}
-            <Link href="/resend-verification" className="underline underline-offset-4 transition-colors hover:text-bronze">
-              Resend it
+            Staff member?{" "}
+            <Link
+              href="/staff/login"
+              className="underline underline-offset-4 transition-colors hover:text-bronze"
+            >
+              Staff sign in
             </Link>
           </p>
-          <p className="flex gap-4">
-            <Link href="/forgot-username" className="underline underline-offset-4 transition-colors hover:text-bronze">
-              Forgot username?
-            </Link>
-            <Link href="/forgot-password" className="underline underline-offset-4 transition-colors hover:text-bronze">
-              Forgot password?
-            </Link>
-          </p>
-        </div>
+        </nav>
       )}
     </div>
   );
