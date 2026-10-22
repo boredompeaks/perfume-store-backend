@@ -11,7 +11,7 @@ from django.db import transaction
 from django.utils import timezone
 from django.utils.encoding import force_bytes, force_str
 from django.utils.http import urlsafe_base64_decode, urlsafe_base64_encode
-from rest_framework import status
+from rest_framework import status, viewsets
 from rest_framework.decorators import api_view, throttle_scope
 from rest_framework.exceptions import AuthenticationFailed, PermissionDenied
 from rest_framework.exceptions import ValidationError as DRFValidationError
@@ -36,13 +36,63 @@ from ops import alerts
 from . import mfa_trust
 from .models import (
     MFA_CODE_INVALID,
+    Address,
     TOTPDevice,
 )
 from .serializers import (
+    AddressSerializer,
     MFATokenObtainPairSerializer,
     RegisterSerializer,
     StorefrontTokenObtainPairSerializer,
 )
+
+
+def _lock_user_addresses(user):
+    """Lock one owner's rows before a default-flag write (SPEC-9-T4).
+
+    The address rows alone cannot serialize the FIRST default: there is
+    nothing to lock yet, so two concurrent creates would both win. Locking
+    the owner row first gives every writer one serialization point, and
+    every writer takes the locks in this same order (owner, then rows), so
+    the flip is race-free and deadlock-free. Caller must be inside
+    ``transaction.atomic()``.
+    """
+    User.objects.select_for_update().get(pk=user.pk)
+    return Address.objects.select_for_update().filter(user=user, is_default=True)
+
+
+class AddressViewSet(viewsets.ModelViewSet):
+    """CRUD for the caller's saved addresses (SPEC-9-T4, R-9.2.20).
+
+    The queryset is the authorization boundary: filtering by ``request.user``
+    turns a foreign id into the repo's uniform 404 rather than a 403, so the
+    endpoint reveals nothing about addresses the caller does not own.
+    """
+
+    serializer_class = AddressSerializer
+    permission_classes = [IsAuthenticated]
+    throttle_scope = "auth"
+
+    def get_queryset(self):
+        return Address.objects.filter(user=self.request.user)
+
+    def perform_create(self, serializer):
+        if serializer.validated_data.get("is_default"):
+            with transaction.atomic():
+                _lock_user_addresses(self.request.user).update(is_default=False)
+                serializer.save(user=self.request.user)
+        else:
+            serializer.save(user=self.request.user)
+
+    def perform_update(self, serializer):
+        if serializer.validated_data.get("is_default"):
+            with transaction.atomic():
+                _lock_user_addresses(self.request.user).exclude(
+                    pk=serializer.instance.pk
+                ).update(is_default=False)
+                serializer.save()
+        else:
+            serializer.save()
 
 
 class LoginView(TokenObtainPairView):
