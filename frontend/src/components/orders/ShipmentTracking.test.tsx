@@ -1,9 +1,9 @@
 import { describe, expect, it } from "vitest";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { renderToStaticMarkup } from "react-dom/server";
-import { safeExternalUrl, shipmentStatusLabel } from "@/lib/shipping-api";
-import type { Shipment } from "@/lib/types";
-import ShipmentPanel from "./ShipmentPanel";
+import { safeExternalUrl } from "@/lib/shipping-api";
+import type { Shipment } from "@/lib/tracking-api";
+import ShipmentTracking from "./ShipmentTracking";
 
 const ORDER = "ORD-2026-ABCDEF12";
 
@@ -30,26 +30,44 @@ function renderWith(shipments: Shipment[]): string {
       queries: { retry: false, staleTime: Infinity, gcTime: Infinity },
     },
   });
-  client.setQueryData(["shipments", ORDER], shipments);
+  client.setQueryData(["orders", "tracking", ORDER], shipments);
   return renderToStaticMarkup(
     <QueryClientProvider client={client}>
-      <ShipmentPanel orderNumber={ORDER} />
+      <ShipmentTracking orderNumber={ORDER} />
     </QueryClientProvider>,
   );
 }
 
-describe("ShipmentPanel", () => {
-  it("renders a parcel with status, carrier, provider, number and timeline", () => {
+describe("ShipmentTracking", () => {
+  it("renders exactly one tracking panel and one parcel", () => {
     const html = renderWith([shipment()]);
 
-    expect(html).toContain("data-testid=\"shipment-parcel\"");
+    expect((html.match(/data-testid="shipment-tracking"/g) ?? []).length).toBe(
+      1,
+    );
+    expect((html.match(/data-testid="shipment-parcel"/g) ?? []).length).toBe(1);
+  });
+
+  it("renders status, carrier, provider, waybill and timeline", () => {
+    const html = renderWith([shipment()]);
+
     expect(html).toContain("In transit");
     expect(html).toContain("BlueDart");
     expect(html).toContain("via shiprocket");
     expect(html).toContain("BD123456");
-    expect(html).toContain("Timeline");
+    expect(html).toContain("Checkpoints");
     expect(html).toContain("Label created");
     expect(html).toContain("Dispatched");
+    expect(html.indexOf("Label created")).toBeLessThan(
+      html.indexOf("Dispatched"),
+    );
+  });
+
+  it("omits the provider line when the parcel is unlinked", () => {
+    const html = renderWith([shipment({ provider: null })]);
+
+    expect(html).not.toContain("via ");
+    expect(html).toContain("BD123456");
   });
 
   it("renders the tracking link as a safe external tab", () => {
@@ -58,11 +76,17 @@ describe("ShipmentPanel", () => {
     expect(html).toContain('href="https://track.example.com/BD123456"');
     expect(html).toContain('target="_blank"');
     expect(html).toContain('rel="noopener noreferrer"');
+    expect(html).toContain("Track this parcel");
   });
 
   it("never renders an anchor for a non-http(s) tracking URL", () => {
-    for (const unsafe of ["javascript:alert(1)", "data:text/html,hi", "//evil.example/steal"]) {
+    for (const unsafe of [
+      "javascript:alert(1)",
+      "data:text/html,hi",
+      "//evil.example/steal",
+    ]) {
       const html = renderWith([shipment({ tracking_url: unsafe })]);
+
       expect(html).not.toContain("<a ");
       expect(html).not.toContain("javascript:");
       // The parcel itself still renders; only the link is withheld.
@@ -74,7 +98,7 @@ describe("ShipmentPanel", () => {
     const html = renderWith([]);
 
     expect(html).toContain("Tracking will appear here once your order ships.");
-    expect(html).not.toContain("data-testid=\"shipment-parcel\"");
+    expect(html).not.toContain('data-testid="shipment-parcel"');
   });
 });
 
@@ -101,12 +125,5 @@ describe("safeExternalUrl", () => {
     ]) {
       expect(safeExternalUrl(raw)).toBeNull();
     }
-  });
-});
-
-describe("shipmentStatusLabel", () => {
-  it("labels known parcel statuses and keeps unknown ones readable", () => {
-    expect(shipmentStatusLabel("label_created")).toBe("Label created");
-    expect(shipmentStatusLabel("out_for_delivery")).toBe("out for delivery");
   });
 });

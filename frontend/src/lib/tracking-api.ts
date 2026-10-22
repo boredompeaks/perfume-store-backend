@@ -46,7 +46,11 @@ export type Shipment = {
   order_number: string;
   status: string;
   carrier: string;
+  /** Provider slug code, or null when the parcel is unlinked. */
+  provider: string | null;
   tracking_number: string;
+  /** Operator-configured URL - render only through safeExternalUrl(). */
+  tracking_url: string | null;
   estimated_delivery: string | null;
   events: ShipmentEvent[];
 };
