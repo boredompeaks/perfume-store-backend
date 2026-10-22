@@ -5,15 +5,20 @@ from django.db import migrations, models
 
 
 class Migration(migrations.Migration):
-
     dependencies = [
-        ('shipping', '0003_shippingprovider'),
+        ("shipping", "0003_shippingprovider"),
     ]
 
     operations = [
         migrations.AddField(
-            model_name='shipment',
-            name='provider',
-            field=models.ForeignKey(blank=True, null=True, on_delete=django.db.models.deletion.PROTECT, related_name='shipments', to='shipping.shippingprovider'),
+            model_name="shipment",
+            name="provider",
+            field=models.ForeignKey(
+                blank=True,
+                null=True,
+                on_delete=django.db.models.deletion.PROTECT,
+                related_name="shipments",
+                to="shipping.shippingprovider",
+            ),
         ),
     ]
