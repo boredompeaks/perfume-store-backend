@@ -376,31 +376,27 @@ class ApplyCouponTests(OrderTestBase):
         self.make_coupon(code="HALFCAP", discount_value="50", maximum_discount="300")
         res = self._preview("HALFCAP")
         self.assertEqual(res.status_code, 200, res.data)
-        self.assertEqual(res.data["subtotal"], Decimal("1000.00"))
-        self.assertEqual(
-            res.data["discount"], Decimal("300.00")
-        )  # 500.00 raw -> capped
-        self.assertEqual(res.data["final_total"], Decimal("700.00"))
+        self.assertEqual(res.data["subtotal"], "1000.00")
+        self.assertEqual(res.data["discount"], "300.00")  # 500.00 raw -> capped
+        self.assertEqual(res.data["final_total"], "700.00")
 
         self.make_coupon(code="HALF", discount_value="50")
         res = self._preview("HALF")
-        self.assertEqual(res.data["discount"], Decimal("500.00"))  # uncapped 50%
-        self.assertEqual(res.data["final_total"], Decimal("500.00"))
+        self.assertEqual(res.data["discount"], "500.00")  # uncapped 50%
+        self.assertEqual(res.data["final_total"], "500.00")
 
     # 32. discount clamped at subtotal -------------------------------------------------------
     def test_fixed_discount_clamped_to_subtotal(self):
         self.make_coupon(code="FLAT1500", discount_type="fixed", discount_value="1500")
         res = self._preview("FLAT1500")
         self.assertEqual(res.status_code, 200, res.data)
-        self.assertEqual(
-            res.data["discount"], Decimal("1000.00")
-        )  # clamped, not negative total
-        self.assertEqual(res.data["final_total"], Decimal("0.00"))
+        self.assertEqual(res.data["discount"], "1000.00")  # clamped, not negative
+        self.assertEqual(res.data["final_total"], "0.00")
 
         self.make_coupon(code="FLAT40", discount_type="fixed", discount_value="40")
         res = self._preview("FLAT40")
-        self.assertEqual(res.data["discount"], Decimal("40.00"))
-        self.assertEqual(res.data["final_total"], Decimal("960.00"))
+        self.assertEqual(res.data["discount"], "40.00")
+        self.assertEqual(res.data["final_total"], "960.00")
 
     # 33. free-shipping coupons carry no merchandise discount -------------------
     def test_free_shipping_coupon_grants_no_merchandise_discount(self):
@@ -415,9 +411,9 @@ class ApplyCouponTests(OrderTestBase):
         )
         res = self._preview("FREESHIP")
         self.assertEqual(res.status_code, 200, res.data)
-        self.assertEqual(res.data["subtotal"], Decimal("1000.00"))
-        self.assertEqual(res.data["discount"], Decimal("0.00"))
-        self.assertEqual(res.data["final_total"], Decimal("1000.00"))
+        self.assertEqual(res.data["subtotal"], "1000.00")
+        self.assertEqual(res.data["discount"], "0.00")
+        self.assertEqual(res.data["final_total"], "1000.00")
 
     def test_free_shipping_coupon_still_honours_the_minimum_order_amount(self):
         """The free-shipping type composes with the redemption rules: a
@@ -481,6 +477,88 @@ class ApplyCouponThrottleTests(OrderTestBase):
             self.assertEqual(self._preview("GHOST404").status_code, 400)
             throttled = self._preview("GHOST404")
         self.assertEqual(throttled.status_code, 429, throttled.data)
+
+
+@tag("orders")
+class MoneyWireFormatTests(OrderTestBase):
+    """[R-9.3.24] Every money value in the coupon preview and checkout
+    responses is a 2-dp string in the RENDERED JSON, never a float.
+
+    ``.data`` alone cannot prove this: DRF's JSON renderer is where a bare
+    ``Decimal`` becomes a float, so each pin renders the response and reads
+    the bytes/parsed body a client would actually receive."""
+
+    TWO_DP = r"^-?\d+\.\d{2}$"
+
+    def _rendered(self, response):
+        response.render()
+        return response.content.decode(), json.loads(response.content)
+
+    def test_preview_money_is_two_decimal_strings_on_the_wire(self):
+        self.make_coupon(code="SAVE10", discount_value="10")
+        response = self.client.post(
+            "/api/orders/apply-coupon/", {"code": "SAVE10"}, format="json"
+        )
+        self.assertEqual(response.status_code, 200, response.data)
+
+        text, payload = self._rendered(response)
+        expected = {
+            "subtotal": "1000.00",
+            "discount": "100.00",
+            "final_total": "900.00",
+        }
+        for key, value in expected.items():
+            self.assertIsInstance(
+                payload[key], str, f"{key} rendered as {type(payload[key])}"
+            )
+            self.assertRegex(payload[key], self.TWO_DP)
+            self.assertEqual(payload[key], value)
+            self.assertIn(f'"{key}":"{value}"', text)
+        # The defect this closes: a raw Decimal renders as a JSON float and
+        # loses the second decimal place.
+        self.assertNotIn('"subtotal":1000.0', text)
+        self.assertNotIn('"final_total":900.0', text)
+
+    def test_checkout_money_is_two_decimal_strings_on_the_wire(self):
+        self.make_coupon(code="SAVE10", discount_value="10")
+        response = self.checkout(coupon_code="SAVE10")
+        self.assertEqual(response.status_code, 201, response.data)
+
+        text, payload = self._rendered(response)
+        order_money = {
+            "discount_amount": "100.00",
+            "total_amount": "900.00",
+            "shipping_amount": "0.00",
+        }
+        for key, value in order_money.items():
+            self.assertIsInstance(
+                payload[key], str, f"{key} rendered as {type(payload[key])}"
+            )
+            self.assertRegex(payload[key], self.TWO_DP)
+            self.assertEqual(payload[key], value)
+            self.assertIn(f'"{key}":"{value}"', text)
+
+        self.assertEqual(len(payload["items"]), 1)
+        item = payload["items"][0]
+        item_money = {"price": "500.00", "subtotal": "1000.00"}
+        for key, value in item_money.items():
+            self.assertIsInstance(
+                item[key], str, f"items[0].{key} rendered as {type(item[key])}"
+            )
+            self.assertRegex(item[key], self.TWO_DP)
+            self.assertEqual(item[key], value)
+            self.assertIn(f'"{key}":"{value}"', text)
+
+        self.assertNotIn('"subtotal":1000.0', text)
+        self.assertNotIn('"total_amount":900.0', text)
+
+        # Only the wire representation moved: the stored money stays Decimal.
+        order = Order.objects.get(id=payload["id"])
+        self.assertIsInstance(order.total_amount, Decimal)
+        self.assertEqual(order.total_amount, Decimal("900.00"))
+        item_row = order.items.get()
+        self.assertIsInstance(item_row.subtotal, Decimal)
+        self.assertEqual(item_row.subtotal, Decimal("1000.00"))
 
 
 @tag("orders")

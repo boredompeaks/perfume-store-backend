@@ -50,7 +50,7 @@ from products.models import StockReservation
 from shipping.pricing import ShippingUnavailable, quote_shipping
 
 from ..models import Coupon, Order, OrderItem, OrderStatusEvent
-from ..serializers import OrderSerializer
+from ..serializers import CouponPreviewSerializer, OrderSerializer
 
 # [R-10.12] SPEC-10-02: transition-audit writers. Own import line so every
 # hunk above stays insertion-only.
@@ -1071,11 +1071,15 @@ def apply_coupon(request):
 
     final_total = subtotal - discount
 
+    # [R-9.3.24] The figures stay Decimal through the math; the serializer is
+    # the boundary that spells them as 2-dp strings on the wire.
     return Response(
-        {
-            "coupon": coupon.code,
-            "subtotal": subtotal,
-            "discount": discount,
-            "final_total": final_total,
-        }
+        CouponPreviewSerializer(
+            {
+                "coupon": coupon.code,
+                "subtotal": subtotal,
+                "discount": discount,
+                "final_total": final_total,
+            }
+        ).data
     )
