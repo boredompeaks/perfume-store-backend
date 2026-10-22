@@ -5,9 +5,15 @@ running server without hand-building fixtures: a superadmin (with a confirmed
 TOTP device, because R-17.9 refuses an unenrolled privileged login) to sign into
 the admin, a non-staff customer to sign into the storefront, two products, two
 coupons, two carriers with priced delivery methods, three orders in three
-different lifecycle states, and one parcel per order. It is TEST DATA ONLY --
-the credentials and the fixed MFA secret below are local development values,
-never production ones, and nothing here should run against a live store.
+different lifecycle states, and one parcel per order. It is TEST DATA ONLY and
+refuses to run anywhere that is not recognisably a test database:
+``--i-know-this-is-a-test-db`` is mandatory, and the resolved database must be
+DEBUG-mode, sqlite, or a localhost / 127.0.0.1 host (see
+``_database_is_a_test_db``). No credential is stored in this file: the
+superadmin password, the customer password and the MFA secret come from
+``SEED_E2E_SUPERADMIN_PASSWORD``, ``SEED_E2E_CUSTOMER_PASSWORD`` and
+``SEED_E2E_TOTP_SECRET``, and an unset value is generated fresh and printed
+once with a "save this" warning.
 
 Homes in ``orders`` for the same reason ``seed_demo`` does: that app owns most
 of the seeded model classes (Coupon, Order, OrderItem; products and shipping
@@ -21,6 +27,12 @@ orders and the three parcels) to the declared starting states, and resets the
 superadmin device's replay watermark so a consumed code never locks the owner
 out, which is what makes a second pass a reset rather than a blind duplicate.
 
+Credentials are the exception to that reset: an existing account keeps its
+password and an existing device keeps its secret unless the matching env var is
+supplied, because silently rotating a factor a human already enrolled would
+lock that human out mid-walk. The summary says "existing; unchanged" when it
+keeps a value, and "SAVE THIS NOW" when it generated one.
+
 ``--cleanup`` deletes only the rows this command owns, addressed by those same
 natural keys, and is itself idempotent.
 
@@ -31,9 +43,12 @@ sibling, and an unpaid order whose dispatch must be refused. Every lifecycle
 row is owned by the same cleanup keys as the full seed.
 """
 
+import os
+import secrets
 from datetime import timedelta
 from decimal import Decimal
 
+from django.conf import settings
 from django.contrib.auth.models import User
 from django.core.management.base import BaseCommand, CommandError
 from django.db import IntegrityError, transaction
@@ -56,26 +71,31 @@ from shipping.models import (
     ShippingRate,
 )
 
-# Test credential, printed by the command so a human can sign in. The leading
-# "SuperAdmin" is the brief's required local login, not a secret: this command
-# is the only place it appears and the summary labels the data as test-only.
+# The two local logins, not secrets. The superadmin is the brief's required
+# local sign-in; the customer is deliberately NOT staff because the owner needs the
+# buyer's surface (cart, checkout, account pages) and staff flags would change
+# what the API and the admin show for that session.
 SUPERADMIN_USERNAME = "superadmin"
 SUPERADMIN_EMAIL = "superadmin@example.com"
-SUPERADMIN_PASSWORD = "SuperAdmin#2026"
-
-# The storefront sign-in for the same walk. Deliberately NOT staff: the owner
-# needs the buyer's surface (cart, checkout, account pages), and staff flags
-# would change what the API and the admin show for that session.
 CUSTOMER_USERNAME = "customer"
 CUSTOMER_EMAIL = "customer@example.com"
-CUSTOMER_PASSWORD = "Customer#2026"
 
-# Fixed TEST-ONLY base32 secret. Variability would be useless here: the owner
-# enrolls one authenticator once and the command must keep printing the same
-# factor, while production never runs this command. TEST-ONLY because a real
-# factor's secret is generated per user and never written down anywhere.
-TEST_TOTP_SECRET = "JBSWY3DPEHPK3PXPJBSWY3DPEHPK3PXP"
+# Credentials are configuration, never literals: an operator supplies these, or
+# this command generates one and prints it once. `.env.example` documents them.
+SUPERADMIN_PASSWORD_ENV = "SEED_E2E_SUPERADMIN_PASSWORD"
+CUSTOMER_PASSWORD_ENV = "SEED_E2E_CUSTOMER_PASSWORD"
+TOTP_SECRET_ENV = "SEED_E2E_TOTP_SECRET"
+
+# The acknowledgement this command demands before it writes anything. A flag
+# rather than an env var so it cannot be baked into a deployment's environment
+# once and forgotten; the database check below is the second, independent half.
+TEST_DB_FLAG = "--i-know-this-is-a-test-db"
+
 TEST_TOTP_ISSUER = "Perfume Store"
+
+# The only hosts this command treats as local. A remote Postgres is exactly the
+# production shape this guard exists to refuse.
+_LOCAL_DATABASE_HOSTS = frozenset({"localhost", "127.0.0.1"})
 
 TEST_PRODUCTS = (
     {
@@ -320,8 +340,61 @@ LIFECYCLE_SHIPMENTS = (
 )
 
 
+def _database_is_a_test_db():
+    """Whether the database this process resolved is a test one.
+
+    Read from ``settings.DATABASES`` rather than the raw environment: settings
+    resolves ``DATABASE_URL`` (including a value loaded from ``.env``), so the
+    setting is the database the process will actually write to. Fail closed on
+    anything unrecognised -- a remote host with no DEBUG is refused, and so is
+    a production URL whose scheme was typo'd.
+    """
+    if settings.DEBUG:
+        return True
+    entry = settings.DATABASES.get("default", {})
+    if entry.get("ENGINE") == "django.db.backends.sqlite3":
+        return True
+    host = (entry.get("HOST") or "").strip().lower()
+    return host in _LOCAL_DATABASE_HOSTS
+
+
+def _guard_test_database(acknowledged):
+    """Refuse unless the operator acknowledged the test DB and it looks local."""
+    if not acknowledged:
+        raise CommandError(
+            "[seed_e2e] refused: this command writes TEST credentials and "
+            f"requires {TEST_DB_FLAG}. Re-run with that flag against a local "
+            "test database (DEBUG=true, the sqlite engine, or a DATABASE_URL "
+            "host of localhost/127.0.0.1)."
+        )
+    if not _database_is_a_test_db():
+        raise CommandError(
+            "[seed_e2e] refused: the configured database does not look like a "
+            "test DB, so test credentials will not be written to it. Point "
+            "DATABASE_URL at a local test database (DEBUG=true, the sqlite "
+            "engine, or a host of localhost/127.0.0.1) and pass "
+            f"{TEST_DB_FLAG}."
+        )
+
+
+def _resolve_password(env_name, user_exists):
+    """Return ``(password, source)`` for one seeded account.
+
+    ``source`` is ``"env"`` when the operator supplied a value, ``"existing"``
+    when the account already exists and no override was supplied (the plaintext
+    is unknowable, so it is not rotated and the value is ``None``), and
+    ``"generated"`` for a fresh account with no configured password.
+    """
+    configured = os.environ.get(env_name) or ""
+    if configured:
+        return configured, "env"
+    if user_exists:
+        return None, "existing"
+    return secrets.token_urlsafe(18), "generated"
+
+
 def _seed_superadmin():
-    user, _ = User.objects.update_or_create(
+    user, created = User.objects.update_or_create(
         username=SUPERADMIN_USERNAME,
         defaults={
             "email": SUPERADMIN_EMAIL,
@@ -330,22 +403,20 @@ def _seed_superadmin():
             "is_active": True,
         },
     )
-    # check_password keeps a re-run from rewriting the hash on every pass while
-    # still resetting a password the owner changed away from the documented one.
-    if not user.check_password(SUPERADMIN_PASSWORD):
-        user.set_password(SUPERADMIN_PASSWORD)
+    password, source = _resolve_password(SUPERADMIN_PASSWORD_ENV, not created)
+    if password is not None and (created or not user.check_password(password)):
+        user.set_password(password)
         user.save(update_fields=["password"])
-    return user
+    return user, password, source
 
 
 def _seed_customer():
     """The storefront account: a plain, active customer.
 
-    Same password rule as the superadmin: ``check_password`` keeps a re-run
-    from rewriting the hash while still resetting a password the owner changed
-    away from the documented one.
+    Same credential rule as the superadmin: an env value may rotate it, an
+    existing account is otherwise left exactly as it is.
     """
-    user, _ = User.objects.update_or_create(
+    user, created = User.objects.update_or_create(
         username=CUSTOMER_USERNAME,
         defaults={
             "email": CUSTOMER_EMAIL,
@@ -354,10 +425,11 @@ def _seed_customer():
             "is_active": True,
         },
     )
-    if not user.check_password(CUSTOMER_PASSWORD):
-        user.set_password(CUSTOMER_PASSWORD)
+    password, source = _resolve_password(CUSTOMER_PASSWORD_ENV, not created)
+    if password is not None and (created or not user.check_password(password)):
+        user.set_password(password)
         user.save(update_fields=["password"])
-    return user
+    return user, password, source
 
 
 def _seed_totp_device(user):
@@ -370,18 +442,30 @@ def _seed_totp_device(user):
     and the owner would have to wait out the window. Clearing
     ``trusted_until`` keeps the seed a clean challenge-every-login state
     rather than inheriting a browser grant a human opted into.
+
+    The secret follows the same env-or-existing-or-generated rule as the
+    passwords: rotating a factor a human already enrolled would lock them out
+    of the walk, so only an explicit env value replaces it.
     """
+    existing = TOTPDevice.objects.filter(user=user).first()
+    configured = os.environ.get(TOTP_SECRET_ENV) or ""
+    if configured:
+        secret, source = configured, "env"
+    elif existing is not None:
+        secret, source = existing.secret, "existing"
+    else:
+        secret, source = totp.generate_secret(), "generated"
     device, _ = TOTPDevice.objects.update_or_create(
         user=user,
         defaults={
-            "secret": TEST_TOTP_SECRET,
+            "secret": secret,
             "enabled": True,
             "confirmed_at": timezone.now(),
             "last_used_counter": None,
             "trusted_until": None,
         },
     )
-    return device
+    return device, source
 
 
 def _seed_products():
@@ -553,9 +637,9 @@ def seed(scenario="full"):
     order_rows = TEST_ORDERS if scenario == "full" else LIFECYCLE_ORDERS
     shipment_rows = TEST_SHIPMENTS if scenario == "full" else LIFECYCLE_SHIPMENTS
     with transaction.atomic():
-        user = _seed_superadmin()
-        customer = _seed_customer()
-        device = _seed_totp_device(user)
+        user, superadmin_password, superadmin_password_source = _seed_superadmin()
+        customer, customer_password, customer_password_source = _seed_customer()
+        device, totp_source = _seed_totp_device(user)
         product_by_slug = _seed_products()
         coupons = _seed_coupons()
         providers, methods = _seed_shipping()
@@ -566,6 +650,11 @@ def seed(scenario="full"):
         "user": user,
         "customer": customer,
         "device": device,
+        "superadmin_password": superadmin_password,
+        "superadmin_password_source": superadmin_password_source,
+        "customer_password": customer_password,
+        "customer_password_source": customer_password_source,
+        "totp_source": totp_source,
         "otpauth_uri": totp.otpauth_uri(
             device.secret, user.username, issuer=TEST_TOTP_ISSUER
         ),
@@ -629,6 +718,16 @@ class Command(BaseCommand):
 
     def add_arguments(self, parser):
         parser.add_argument(
+            TEST_DB_FLAG,
+            action="store_true",
+            dest="test_db_acknowledged",
+            help=(
+                "Required. Acknowledge that the target database is a local "
+                "test database; the command refuses to write test credentials "
+                "without it and without a test-DB-looking connection."
+            ),
+        )
+        parser.add_argument(
             "--scenario",
             choices=("full", "lifecycle"),
             default="full",
@@ -649,6 +748,7 @@ class Command(BaseCommand):
         )
 
     def handle(self, *args, **options):
+        _guard_test_database(options["test_db_acknowledged"])
         if options["cleanup"]:
             clean()
             self.stdout.write("[seed_e2e] removed the E2E test rows (test data only)")
@@ -656,22 +756,71 @@ class Command(BaseCommand):
         summary = seed(scenario=options["scenario"])
         self._print_summary(summary)
 
-    def _print_summary(self, summary):
-        user = summary["user"]
+    def _print_credential(self, label, user, password, source, env_name):
+        """Print one login, saying plainly whether a human must save it.
+
+        A generated value exists only in this output, so the line has to be
+        unmissable; an existing one is deliberately not rotated, and printing a
+        "(existing; unchanged)" marker is what stops an operator assuming the
+        old printed password still works after they changed it themselves.
+        """
+        if source == "existing":
+            self.stdout.write(
+                f"  {label}: {user.username} "
+                f"(existing; unchanged -- set {env_name} to rotate)"
+            )
+            return
+        self.stdout.write(f"  {label}: {user.username} / {password}")
+        if source == "generated":
+            self.stdout.write(
+                f"    SAVE THIS NOW: generated because {env_name} was unset. "
+                "It is printed once; a re-run keeps it but will not print it again."
+            )
+
+    def _print_totp(self, summary):
         write = self.stdout.write
-        write("[seed_e2e] TEST DATA ONLY -- seeded the owner E2E set")
-        write(f"  superadmin: {user.username} / {SUPERADMIN_PASSWORD}")
-        write(f"  email: {user.email}")
-        write(
-            "  customer (storefront): "
-            f"{summary['customer'].username} / {CUSTOMER_PASSWORD}"
-        )
-        write(f"  email: {summary['customer'].email}")
         write("  admin MFA -- TEST-ONLY, must never exist outside this local test DB:")
+        if summary["totp_source"] == "generated":
+            write(
+                "    SAVE THIS NOW: generated because "
+                f"{TOTP_SECRET_ENV} was unset. Enroll the URI below and keep it."
+            )
+        elif summary["totp_source"] == "existing":
+            write(
+                "    existing; unchanged -- set "
+                f"{TOTP_SECRET_ENV} to rotate the factor."
+            )
         write(f"    otpauth URI: {summary['otpauth_uri']}")
         write(
             "    current code: manage.py totp_code "
             f"{SUPERADMIN_USERNAME} (or any enrolled authenticator)"
+        )
+
+    def _print_summary(self, summary):
+        user = summary["user"]
+        write = self.stdout.write
+        write("[seed_e2e] TEST DATA ONLY -- seeded the owner E2E set")
+        self._print_credential(
+            "superadmin",
+            user,
+            summary["superadmin_password"],
+            summary["superadmin_password_source"],
+            SUPERADMIN_PASSWORD_ENV,
+        )
+        write(f"  email: {user.email}")
+        self._print_credential(
+            "customer (storefront)",
+            summary["customer"],
+            summary["customer_password"],
+            summary["customer_password_source"],
+            CUSTOMER_PASSWORD_ENV,
+        )
+        write(f"  email: {summary['customer'].email}")
+        self._print_totp(summary)
+        write(
+            "  reproduce/save: set "
+            f"{SUPERADMIN_PASSWORD_ENV}, {CUSTOMER_PASSWORD_ENV} and "
+            f"{TOTP_SECRET_ENV}, then run: manage.py seed_e2e {TEST_DB_FLAG}"
         )
         write("  products:")
         for product in summary["products"]:

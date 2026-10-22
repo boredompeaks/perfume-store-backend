@@ -6,8 +6,10 @@ import { formatINR } from "../src/lib/money";
 export { formatINR };
 
 export const API = "http://localhost:8000";
-export const CUSTOMER = { username: "e2e_customer", password: "e2e-Customer-9" };
-export const STAFF = { username: "e2e_staff", password: "e2e-Staff-9" };
+// Both passwords are low-entropy fixtures for users the local e2e seed creates;
+// no deployed account accepts them.
+export const CUSTOMER = { username: "e2e_customer", password: "e2e-Customer-9" }; // ggignore 2026-10-22 e2e fixture password for the locally seeded customer, not a credential
+export const STAFF = { username: "e2e_staff", password: "e2e-Staff-9" }; // ggignore 2026-10-22 e2e fixture password for the locally seeded staff user, not a credential
 
 /**
  * Coupon used by the checkout happy path. Its CONFIG lives in the e2e dev

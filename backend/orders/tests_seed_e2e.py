@@ -2,15 +2,23 @@
 
 Pins the full seeded state with hand-written literals (never recomputed from
 the command's own tables), the idempotent re-run, the cleanup ownership
-boundary, and the summary a human uses to sign in and open the admin.
+boundary, the summary a human uses to sign in and open the admin, and the two
+independent guards that keep a production-shaped database out of reach: the
+mandatory acknowledgement flag and the test-database check.
+
+The credentials in this module are low-entropy fixtures, passed in through the
+documented env vars. The command itself carries no usable credential.
 """
 
+import os
 import re
+from contextlib import contextmanager
 from datetime import timedelta
 from decimal import Decimal
 from io import StringIO
 from unittest import mock
 
+from django.conf import settings
 from django.contrib.auth import authenticate
 from django.contrib.auth.models import User
 from django.core.management import CommandError, call_command
@@ -30,22 +38,44 @@ from shipping.models import (
     ShippingRate,
 )
 
-SUPERADMIN_PASSWORD = "SuperAdmin#2026"
+FLAG = "--i-know-this-is-a-test-db"
 ORDER_NUMBER_PATTERN = re.compile(r"^ORD-\d{4}-[0-9A-F]{8}$")
-# Hand-written literals, never derived from the command's constants: a pin
-# that recomputes its expected value from the code under test agrees with a
-# wrong value from both sides.
-SEEDED_TOTP_SECRET = "JBSWY3DPEHPK3PXPJBSWY3DPEHPK3PXP"
+# Low-entropy fixtures, hand-written so an assertion cannot agree with a wrong
+# command constant from both sides. They are values a test hands the command,
+# not credentials: no server anywhere accepts them.
+SUPERADMIN_PASSWORD = "seed-superadmin-fixture"  # ggignore 2026-10-22 low-entropy seed_e2e test fixture, not a credential
+CUSTOMER_PASSWORD = "seed-customer-fixture"  # ggignore 2026-10-22 low-entropy seed_e2e test fixture, not a credential
+SEEDED_TOTP_SECRET = "SEEDE2ETOTPFIXTURE"  # ggignore 2026-10-22 seed_e2e test fixture (base32 alphabet, low entropy), not a credential
 SEEDED_OTPAUTH_URI = (
     "otpauth://totp/Perfume%20Store:superadmin"
-    "?secret=JBSWY3DPEHPK3PXPJBSWY3DPEHPK3PXP"
+    "?secret=SEEDE2ETOTPFIXTURE"
     "&issuer=Perfume%20Store&algorithm=SHA1&digits=6&period=30"
 )
+
+CREDENTIAL_ENV = {
+    "SEED_E2E_SUPERADMIN_PASSWORD": SUPERADMIN_PASSWORD,
+    "SEED_E2E_CUSTOMER_PASSWORD": CUSTOMER_PASSWORD,
+    "SEED_E2E_TOTP_SECRET": SEEDED_TOTP_SECRET,
+}
+
+
+@contextmanager
+def _credentials_env(**overrides):
+    with mock.patch.dict(os.environ, {**CREDENTIAL_ENV, **overrides}):
+        yield
+
+
+@contextmanager
+def _no_credentials_env():
+    # An empty value is the resolver's "unset" case, so this needs no deletion
+    # and cannot leave a developer's real env var behind after the test.
+    with mock.patch.dict(os.environ, {name: "" for name in CREDENTIAL_ENV}):
+        yield
 
 
 def _run(*argv):
     out = StringIO()
-    call_command("seed_e2e", *argv, stdout=out)
+    call_command("seed_e2e", *argv, FLAG, stdout=out)
     return out.getvalue()
 
 
@@ -60,7 +90,15 @@ def _seed_then_order_numbers():
     }
 
 
-class SeedE2ETests(TestCase):
+class CredentialEnvMixin:
+    """Give every test the documented env values instead of literals in code."""
+
+    def setUp(self):
+        super().setUp()
+        self.enterContext(_credentials_env())
+
+
+class SeedE2ETests(CredentialEnvMixin, TestCase):
     def test_seed_creates_the_expected_owner_set(self):
         out = _run()
 
@@ -80,13 +118,13 @@ class SeedE2ETests(TestCase):
         self.assertFalse(customer.is_staff)
         self.assertFalse(customer.is_superuser)
         self.assertTrue(customer.is_active)
-        self.assertNotEqual(customer.password, "Customer#2026")
-        self.assertTrue(customer.check_password("Customer#2026"))
+        self.assertNotEqual(customer.password, CUSTOMER_PASSWORD)
+        self.assertTrue(customer.check_password(CUSTOMER_PASSWORD))
         # The owner signs in on the storefront, so the customer door must
         # admit it: the staff door refuses non-staff accounts.
         res = self.client.post(
             "/api/accounts/storefront/login/",
-            {"username": "customer", "password": "Customer#2026"},
+            {"username": "customer", "password": CUSTOMER_PASSWORD},
         )
         self.assertEqual(res.status_code, 200, res.content)
         self.assertIn("access", res.json())
@@ -222,8 +260,8 @@ class SeedE2ETests(TestCase):
         # walk in the admin.
         self.assertFalse(parcel_a.events.exists())
 
-        self.assertIn("superadmin / SuperAdmin#2026", out)
-        self.assertIn("customer (storefront): customer / Customer#2026", out)
+        self.assertIn(f"superadmin: superadmin / {SUPERADMIN_PASSWORD}", out)
+        self.assertIn(f"customer (storefront): customer / {CUSTOMER_PASSWORD}", out)
         self.assertIn(parcel_a.tracking_url, out)
         self.assertIn(order_a.order_number, out)
         self.assertIn("/admin/orders/order/", out)
@@ -395,7 +433,7 @@ class SeedE2ETests(TestCase):
                 _run()
 
 
-class SeedE2ECleanupTests(TestCase):
+class SeedE2ECleanupTests(CredentialEnvMixin, TestCase):
     def _foreign_rows(self):
         buyer = User.objects.create_user(username="other-buyer", password="fixture")
         product = products.objects.create(
@@ -516,11 +554,11 @@ class SeedE2ECleanupTests(TestCase):
 
 def _run_lifecycle(*argv):
     out = StringIO()
-    call_command("seed_e2e", "--scenario", "lifecycle", *argv, stdout=out)
+    call_command("seed_e2e", "--scenario", "lifecycle", *argv, FLAG, stdout=out)
     return out.getvalue()
 
 
-class SeedE2ELifecycleTests(TestCase):
+class SeedE2ELifecycleTests(CredentialEnvMixin, TestCase):
     """D-09: the three states a shipment-driven order walk has to prove."""
 
     def _orders(self):
@@ -669,6 +707,146 @@ class SeedE2ELifecycleTests(TestCase):
         order.refresh_from_db()
         self.assertEqual(result.moved_to, "delivered")
         self.assertEqual(order.status, "delivered")
+
+
+class SeedE2ECredentialTests(CredentialEnvMixin, TestCase):
+    def test_unset_env_generates_prints_once_and_keeps_on_rerun(self):
+        with _no_credentials_env():
+            first = _run()
+            password = re.search(r"superadmin: superadmin / (\S+)", first).group(1)
+            customer_password = re.search(
+                r"customer \(storefront\): customer / (\S+)", first
+            ).group(1)
+            totp_secret = re.search(r"secret=([A-Z2-7]+)", first).group(1)
+
+            # token_urlsafe(18) is exactly 24 characters; the assertion pins
+            # the documented generator, not just "some value".
+            self.assertEqual(len(password), 24)
+            self.assertNotEqual(password, SUPERADMIN_PASSWORD)
+            self.assertNotEqual(customer_password, CUSTOMER_PASSWORD)
+            self.assertNotEqual(totp_secret, SEEDED_TOTP_SECRET)
+            self.assertIn("SAVE THIS NOW", first)
+            self.assertTrue(authenticate(username="superadmin", password=password))
+            self.assertTrue(
+                authenticate(username="customer", password=customer_password)
+            )
+            self.assertEqual(TOTPDevice.objects.get().secret, totp_secret)
+
+            second = _run()
+
+            self.assertIn("existing; unchanged", second)
+            self.assertNotIn(password, second)
+            self.assertNotIn(customer_password, second)
+            self.assertTrue(authenticate(username="superadmin", password=password))
+            self.assertTrue(
+                authenticate(username="customer", password=customer_password)
+            )
+            self.assertEqual(TOTPDevice.objects.get().secret, totp_secret)
+
+    def test_explicit_env_rotates_an_existing_password_and_totp(self):
+        _run()
+        rotated = "seed-superadmin-rotated"  # ggignore 2026-10-22 rotation fixture, not a credential
+        with _credentials_env(
+            SEED_E2E_SUPERADMIN_PASSWORD=rotated,
+            SEED_E2E_TOTP_SECRET="ROTATEDTOTPFIXTURE",  # ggignore 2026-10-22 rotation fixture, not a credential
+        ):
+            out = _run()
+
+        self.assertIn(f"superadmin: superadmin / {rotated}", out)
+        self.assertNotIn("existing; unchanged", out)
+        self.assertTrue(authenticate(username="superadmin", password=rotated))
+        self.assertEqual(TOTPDevice.objects.get().secret, "ROTATEDTOTPFIXTURE")
+
+        # A later run with no env keeps the rotated values rather than falling
+        # back to generation (or to a value the operator never saw printed).
+        with _no_credentials_env():
+            kept = _run()
+
+        self.assertIn("existing; unchanged", kept)
+        self.assertNotIn(rotated, kept)
+        self.assertTrue(authenticate(username="superadmin", password=rotated))
+        self.assertEqual(TOTPDevice.objects.get().secret, "ROTATEDTOTPFIXTURE")
+
+
+class SeedE2EGuardTests(CredentialEnvMixin, TestCase):
+    def test_refuses_without_the_acknowledgement_flag(self):
+        with self.assertRaisesMessage(CommandError, FLAG):
+            call_command("seed_e2e", stdout=StringIO())
+        self.assertEqual(User.objects.count(), 0)
+
+    def test_refuses_cleanup_without_the_flag_too(self):
+        with self.assertRaisesMessage(CommandError, FLAG):
+            call_command("seed_e2e", "--cleanup", stdout=StringIO())
+
+    def test_refuses_a_production_shaped_database_even_with_the_flag(self):
+        with (
+            mock.patch.dict(
+                settings.DATABASES["default"],
+                {
+                    "ENGINE": "django.db.backends.postgresql",
+                    "HOST": "database-1.cluster.example.rds.amazonaws.com",
+                },
+            ),
+            mock.patch.object(settings, "DEBUG", False),
+        ):
+            with self.assertRaisesMessage(CommandError, "does not look like a test DB"):
+                _run()
+        self.assertEqual(User.objects.count(), 0)
+
+    def test_accepts_the_suite_test_database(self):
+        # The runner forces DEBUG=False, so this acceptance comes from the
+        # resolved engine (sqlite) or localhost host (PostgreSQL) -- the same
+        # two conditions CI's localhost Postgres exercises.
+        self.assertFalse(settings.DEBUG)
+        out = _run()
+        self.assertIn("TEST DATA ONLY", out)
+        self.assertEqual(User.objects.filter(username="superadmin").count(), 1)
+
+    def test_debug_mode_is_an_accepted_condition(self):
+        with mock.patch.object(settings, "DEBUG", True):
+            out = _run()
+        self.assertIn("TEST DATA ONLY", out)
+
+    def test_sqlite_engine_is_an_accepted_condition(self):
+        # Driven directly so the check is exercised on the engine the suite
+        # itself is not running on: a PostgreSQL run still proves the sqlite
+        # arm (and a sqlite run still proves the localhost arm below).
+        with (
+            mock.patch.dict(
+                settings.DATABASES["default"],
+                {
+                    "ENGINE": "django.db.backends.sqlite3",
+                    "HOST": "database-1.cluster.example.rds.amazonaws.com",
+                },
+            ),
+            mock.patch.object(settings, "DEBUG", False),
+        ):
+            self.assertTrue(seed_e2e._database_is_a_test_db())
+
+    def test_localhost_host_is_an_accepted_condition(self):
+        with (
+            mock.patch.dict(
+                settings.DATABASES["default"],
+                {
+                    "ENGINE": "django.db.backends.postgresql",
+                    "HOST": "127.0.0.1",
+                },
+            ),
+            mock.patch.object(settings, "DEBUG", False),
+        ):
+            self.assertTrue(seed_e2e._database_is_a_test_db())
+
+
+class SeedE2ELifecycleDispatchTests(CredentialEnvMixin, TestCase):
+    """The D-09 unpaid-dispatch half, split out so the class name is unique."""
+
+    def _orders(self):
+        return {
+            order.idempotency_key: order
+            for order in Order.objects.filter(
+                idempotency_key__startswith="seed-e2e-lifecycle-"
+            )
+        }
 
     def test_l3_dispatch_saves_the_parcel_but_not_the_unpaid_order(self):
         _run_lifecycle()

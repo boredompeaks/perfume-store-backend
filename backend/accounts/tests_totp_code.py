@@ -20,7 +20,7 @@ from common import totp
 
 # RFC 6238 SHA-1 key ("12345678901234567890" in base32) and its 8-digit vector
 # at Unix time 59 ("94287082"); the 6-digit form is the low six digits.
-RFC_SECRET = "GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ"
+RFC_SECRET = "GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ"  # ggignore 2026-10-22 RFC 6238 App-B public SHA-1 test vector, not a credential
 RFC_TIME = 59
 RFC_SIX_DIGIT_CODE = "287082"
 RFC_COUNTER = 1
