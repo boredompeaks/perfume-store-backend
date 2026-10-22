@@ -876,3 +876,253 @@ class PartiallyRefundedShipmentTests(RefundTestBase):
                 self.assertEqual(res.status_code, 409, res.data)
                 order.refresh_from_db()
                 self.assertEqual(order.status, "confirmed")
+
+
+@tag("orders")
+class RefundAdminActionTests(RefundTestBase):
+    """SPEC-D-03: refunds are issuable from the order admin.
+
+    The owner's finding was "refund not showing": the refund record page was
+    read-only and empty with no way to issue one, so the only writer was the
+    DRF POST. These pins hold the admin entry point to the SAME authority and
+    the SAME issuance core: an operator with ``refunds.create`` can issue a
+    full or partial refund from an order, support cannot, and every refusal
+    leaves the order untouched.
+    """
+
+    CHANGELIST = "/admin/orders/order/"
+    REFUND_PAGE = "/admin/orders/order/{order_id}/issue-refund/"
+
+    def admin_post(self, order, data, user=None):
+        self.client.force_login(user or self.finance)
+        return self.client.post(
+            self.REFUND_PAGE.format(order_id=order.id), data, follow=True
+        )
+
+    def run_action(self, user, orders, follow=False):
+        self.client.force_login(user)
+        return self.client.post(
+            self.CHANGELIST,
+            {
+                "action": "issue_refund",
+                "_selected_action": [str(order.id) for order in orders],
+                "select_across": "0",
+            },
+            follow=follow,
+        )
+
+    def test_the_action_is_visible_to_a_finance_operator(self):
+        # A row is needed: Django hides the action bar on an empty changelist.
+        self.captured_order()
+        self.client.force_login(self.finance)
+
+        res = self.client.get(self.CHANGELIST)
+
+        self.assertEqual(res.status_code, 200)
+        self.assertContains(res, "Issue a refund for the selected order")
+
+    def test_the_action_routes_the_selected_order_to_the_input_page(self):
+        order = self.captured_order()
+
+        res = self.run_action(self.finance, [order])
+
+        self.assertEqual(res.status_code, 302)
+        self.assertTrue(
+            res.headers["Location"].endswith(
+                self.REFUND_PAGE.format(order_id=order.id)
+            ),
+            res.headers["Location"],
+        )
+
+    def test_the_input_page_renders_the_balance_and_both_fields(self):
+        order = self.captured_order()
+        self.client.force_login(self.finance)
+
+        page = self.client.get(self.REFUND_PAGE.format(order_id=order.id))
+
+        self.assertEqual(page.status_code, 200)
+        self.assertContains(page, "Refundable balance")
+        self.assertContains(page, "900.00")
+        self.assertContains(page, 'name="amount"')
+        self.assertContains(page, 'name="reason"')
+
+    def test_a_finance_operator_issues_a_full_refund_with_a_blank_amount(self):
+        order = self.captured_order()
+        client = self.gateway()
+
+        res = self.admin_post(order, {"reason": "Damaged in transit"})
+
+        self.assertEqual(res.status_code, 200)
+        # The success message names the refund id and the money.
+        self.assertContains(res, "Refund #")
+        self.assertContains(res, "900.00")
+        refund = Refund.objects.get()
+        self.assertEqual(refund.amount, Decimal("900.00"))
+        self.assertEqual(refund.kind, Refund.Kind.FULL)
+        self.assertEqual(refund.status, Refund.Status.PROCESSED)
+        self.assertEqual(refund.actor_id, self.finance.pk)
+        self.assertEqual(refund.gateway_refund_id, "rfnd_TEST1")
+        order.refresh_from_db()
+        self.assertEqual(order.payment_status, "refunded")
+        self.assertEqual(order.refundable_remaining, Decimal("0.00"))
+        self.assertIsNotNone(order.refunded_at)
+        client.refund.create.assert_called_once_with(
+            {"payment_id": "pay_CAPTURED1", "amount": 90000}, timeout=10
+        )
+
+    def test_the_admin_refund_is_audited_against_the_refund(self):
+        order = self.captured_order()
+        self.gateway()
+
+        self.admin_post(order, {"amount": "300.00", "reason": "Goodwill"})
+
+        entry = LogEntry.objects.get(
+            content_type=ContentType.objects.get_for_model(Refund)
+        )
+        self.assertEqual(entry.user_id, self.finance.pk)
+        self.assertEqual(entry.action_flag, ADDITION)
+        self.assertIn(f"order #{order.id}", entry.change_message)
+        self.assertIn("300.00", entry.change_message)
+        # The audit trail names the surface the money moved through.
+        self.assertIn("via admin", entry.change_message)
+
+    def test_a_partial_refund_leaves_the_rest_refundable(self):
+        order = self.captured_order()
+        self.gateway()
+
+        res = self.admin_post(
+            order, {"amount": "300.00", "reason": "One item returned"}
+        )
+
+        self.assertEqual(res.status_code, 200)
+        self.assertContains(res, "300.00")
+        refund = Refund.objects.get()
+        self.assertEqual(refund.kind, Refund.Kind.PARTIAL)
+        order.refresh_from_db()
+        self.assertEqual(order.payment_status, "partially_refunded")
+        self.assertEqual(order.refundable_remaining, Decimal("600.00"))
+
+    def test_a_superuser_sees_the_action_and_can_issue_a_refund(self):
+        root = User.objects.create_superuser(
+            "refundroot", "refundroot@example.com", "S3cure-Passphrase!"
+        )
+        order = self.captured_order()
+        self.gateway()
+        self.client.force_login(root)
+
+        grid = self.client.get(self.CHANGELIST)
+        self.assertContains(grid, "Issue a refund for the selected order")
+
+        res = self.admin_post(order, {"reason": "Superuser correction"}, user=root)
+        self.assertEqual(res.status_code, 200)
+        self.assertEqual(Refund.objects.get().actor_id, root.pk)
+
+    def test_support_gets_no_action_and_cannot_reach_the_input_page(self):
+        support = self.user_with_role("supp-refund", ROLE_SUPPORT, staff=True)
+        order = self.captured_order()
+        client = self.gateway()
+
+        grid = self.run_action(support, [order], follow=True)
+        self.assertEqual(grid.status_code, 200)
+        self.assertNotContains(grid, "Issue a refund for the selected order")
+
+        page = self.client.get(self.REFUND_PAGE.format(order_id=order.id))
+        posted = self.client.post(
+            self.REFUND_PAGE.format(order_id=order.id),
+            {"reason": "Support should not move money"},
+        )
+        self.assertEqual(page.status_code, 403)
+        self.assertEqual(posted.status_code, 403)
+        self.assertEqual(Refund.objects.count(), 0)
+        client.refund.create.assert_not_called()
+
+    def test_a_blank_reason_is_refused_as_an_admin_error(self):
+        order = self.captured_order()
+        client = self.gateway()
+
+        res = self.admin_post(order, {"amount": "100.00", "reason": ""})
+
+        self.assertContains(res, "A refund reason is required")
+        self.assertEqual(Refund.objects.count(), 0)
+        client.refund.create.assert_not_called()
+        order.refresh_from_db()
+        self.assertEqual(order.payment_status, "captured")
+        self.assertIsNone(order.refunded_at)
+
+    def test_an_over_refund_is_refused_as_an_admin_error(self):
+        order = self.captured_order()
+        client = self.gateway()
+
+        res = self.admin_post(order, {"amount": "900.01", "reason": "Too much"})
+
+        self.assertContains(
+            res, "Refund of 900.01 exceeds the refundable balance of 900.00"
+        )
+        self.assertEqual(Refund.objects.count(), 0)
+        client.refund.create.assert_not_called()
+        order.refresh_from_db()
+        self.assertEqual(order.payment_status, "captured")
+
+    def test_a_gateway_failure_rolls_the_admin_attempt_back(self):
+        order = self.captured_order()
+        client = self.gateway()
+        client.refund.create.side_effect = razorpay.errors.BadRequestError(
+            "provider internals"
+        )
+
+        res = self.admin_post(order, {"amount": "300.00", "reason": "Damaged"})
+
+        self.assertContains(res, "The payment gateway could not complete this refund")
+        self.assertNotContains(res, "provider internals")
+        self.assertEqual(Refund.objects.count(), 0)
+        order.refresh_from_db()
+        self.assertEqual(order.payment_status, "captured")
+        self.assertIsNone(order.refunded_at)
+
+    def test_a_non_numeric_amount_is_a_form_error_not_a_refund(self):
+        order = self.captured_order()
+        client = self.gateway()
+
+        res = self.admin_post(order, {"amount": "ten", "reason": "Damaged"})
+
+        self.assertEqual(res.status_code, 200)
+        self.assertEqual(Refund.objects.count(), 0)
+        client.refund.create.assert_not_called()
+
+    def test_selecting_several_orders_refuses_to_issue_anything(self):
+        first = self.captured_order(payment_id="pay_CAPTURED1")
+        second = self.captured_order(payment_id="pay_CAPTURED2")
+        client = self.gateway()
+
+        res = self.run_action(self.finance, [first, second], follow=True)
+
+        self.assertContains(res, "Select exactly one order to refund")
+        self.assertEqual(Refund.objects.count(), 0)
+        client.refund.create.assert_not_called()
+
+    def test_an_unknown_order_is_a_404_on_the_input_page(self):
+        self.client.force_login(self.finance)
+
+        res = self.client.get(self.REFUND_PAGE.format(order_id=999999))
+
+        self.assertEqual(res.status_code, 404)
+
+    def test_the_existing_keyed_retry_still_calls_the_gateway_once(self):
+        # The replay contract moved into the shared core with the refactor;
+        # this is the same call the API suite makes, kept here so the admin
+        # extraction cannot quietly drop it.
+        order = self.captured_order()
+        client = self.gateway(prefix="rfnd_RETRY")
+        headers = {"HTTP_IDEMPOTENCY_KEY": "admin-refactor-key"}
+
+        for _ in range(2):
+            res = self.client.post(
+                self.REFUND_PATH.format(order_id=order.id),
+                {"reason": "Damaged in transit", "amount": "300.00"},
+                format="json",
+                **headers,
+            )
+            self.assertIn(res.status_code, (200, 201), res.data)
+
+        self.assertEqual(Refund.objects.count(), 1)
+        client.refund.create.assert_called_once()

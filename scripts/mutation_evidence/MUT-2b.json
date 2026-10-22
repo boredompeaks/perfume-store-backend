@@ -1,0 +1,126 @@
+{
+  "task": "MUT-2b",
+  "title": "Kill the 12 REAL[hole] survivors of mutation-weekly run 38249016821 (2026-10-12)",
+  "note": "One entry per hole-class survivor classified in backend/docs/mutation/2026-10-12.md, replaying the EXACT old->new texts recorded from the CI artifact HTML (scripts/figures/mutation-2026-10-12.json carries the per-mutant hunks; mutant numbers below are that run's). Every find text was verified to occur exactly once in its target. M25/M75-M89 are the recomputed-oracle vocabulary holes (migration 0014/0016 hardcode the wire spellings; no test spelled them by hand). M107/M108 degrade the provider's refund.processed spelling onto the unhandled fallback, which returns the same RECORDED outcome the old test pinned. M121 flips and->or in get_user_roles' None-user short-circuit; only an outright None caller can observe it (AnonymousUser is truthy). M121 omits claimed_count deliberately: the flipped guard raises AttributeError, so the run reports errors=1 and a failures=N line never appears.",
+  "mutations": [
+    {
+      "id": "M25",
+      "description": "run 38249016821 mutant 25: PAYMENT_METHOD_COD = \"cod\" renamed to \"XXcodXX\" (REAL[hole] - the cod wire literal was unpinned)",
+      "path": "backend/orders/state.py",
+      "find": "PAYMENT_METHOD_COD = \"cod\"",
+      "replace": "PAYMENT_METHOD_COD = \"XXcodXX\"",
+      "expected_failing_tests": ["test_payment_method_wire_literals"],
+      "claimed_count": 1,
+      "test_scope": ["orders.tests_state_vocabulary"]
+    },
+    {
+      "id": "M75",
+      "description": "run 38249016821 mutant 75: TRIGGER_ORDER_CREATE = \"order_create\" renamed (REAL[hole] - every test recomputed the expected trigger from the constant; migration 0016 hardcodes the spelling)",
+      "path": "backend/orders/state.py",
+      "find": "TRIGGER_ORDER_CREATE = \"order_create\"",
+      "replace": "TRIGGER_ORDER_CREATE = \"XXorder_createXX\"",
+      "expected_failing_tests": ["test_trigger_wire_literals"],
+      "claimed_count": 2,
+      "test_scope": ["orders.tests_state_vocabulary"]
+    },
+    {
+      "id": "M77",
+      "description": "run 38249016821 mutant 77: TRIGGER_ADMIN_CHANGE_FORM renamed (REAL[hole], same class as M75)",
+      "path": "backend/orders/state.py",
+      "find": "TRIGGER_ADMIN_CHANGE_FORM = \"admin_change_form\"",
+      "replace": "TRIGGER_ADMIN_CHANGE_FORM = \"XXadmin_change_formXX\"",
+      "expected_failing_tests": ["test_trigger_wire_literals"],
+      "claimed_count": 2,
+      "test_scope": ["orders.tests_state_vocabulary"]
+    },
+    {
+      "id": "M79",
+      "description": "run 38249016821 mutant 79: TRIGGER_ADMIN_BULK_ACTION renamed (REAL[hole], same class as M75)",
+      "path": "backend/orders/state.py",
+      "find": "TRIGGER_ADMIN_BULK_ACTION = \"admin_bulk_action\"",
+      "replace": "TRIGGER_ADMIN_BULK_ACTION = \"XXadmin_bulk_actionXX\"",
+      "expected_failing_tests": ["test_trigger_wire_literals"],
+      "claimed_count": 2,
+      "test_scope": ["orders.tests_state_vocabulary"]
+    },
+    {
+      "id": "M81",
+      "description": "run 38249016821 mutant 81: TRIGGER_PAYMENT_VERIFY renamed (REAL[hole], same class as M75)",
+      "path": "backend/orders/state.py",
+      "find": "TRIGGER_PAYMENT_VERIFY = \"payment_verify\"",
+      "replace": "TRIGGER_PAYMENT_VERIFY = \"XXpayment_verifyXX\"",
+      "expected_failing_tests": ["test_trigger_wire_literals"],
+      "claimed_count": 2,
+      "test_scope": ["orders.tests_state_vocabulary"]
+    },
+    {
+      "id": "M83",
+      "description": "run 38249016821 mutant 83: TRIGGER_ADMIN_API_FULFIL renamed (REAL[hole], same class as M75)",
+      "path": "backend/orders/state.py",
+      "find": "TRIGGER_ADMIN_API_FULFIL = \"admin_api_fulfil\"",
+      "replace": "TRIGGER_ADMIN_API_FULFIL = \"XXadmin_api_fulfilXX\"",
+      "expected_failing_tests": ["test_trigger_wire_literals"],
+      "claimed_count": 2,
+      "test_scope": ["orders.tests_state_vocabulary"]
+    },
+    {
+      "id": "M85",
+      "description": "run 38249016821 mutant 85: TRIGGER_ADMIN_API_CANCEL renamed (REAL[hole], same class as M75)",
+      "path": "backend/orders/state.py",
+      "find": "TRIGGER_ADMIN_API_CANCEL = \"admin_api_cancel\"",
+      "replace": "TRIGGER_ADMIN_API_CANCEL = \"XXadmin_api_cancelXX\"",
+      "expected_failing_tests": ["test_trigger_wire_literals"],
+      "claimed_count": 2,
+      "test_scope": ["orders.tests_state_vocabulary"]
+    },
+    {
+      "id": "M87",
+      "description": "run 38249016821 mutant 87: TRIGGER_PAYMENT_FAILED renamed (REAL[hole], same class as M75)",
+      "path": "backend/orders/state.py",
+      "find": "TRIGGER_PAYMENT_FAILED = \"payment_failed\"",
+      "replace": "TRIGGER_PAYMENT_FAILED = \"XXpayment_failedXX\"",
+      "expected_failing_tests": ["test_trigger_wire_literals"],
+      "claimed_count": 2,
+      "test_scope": ["orders.tests_state_vocabulary"]
+    },
+    {
+      "id": "M89",
+      "description": "run 38249016821 mutant 89: TRIGGER_PAYMENT_WEBHOOK renamed (REAL[hole], same class as M75)",
+      "path": "backend/orders/state.py",
+      "find": "TRIGGER_PAYMENT_WEBHOOK = \"payment_webhook\"",
+      "replace": "TRIGGER_PAYMENT_WEBHOOK = \"XXpayment_webhookXX\"",
+      "expected_failing_tests": ["test_trigger_wire_literals"],
+      "claimed_count": 2,
+      "test_scope": ["orders.tests_state_vocabulary"]
+    },
+    {
+      "id": "M107",
+      "description": "run 38249016821 mutant 107: WEBHOOK_EVENT_REFUND_DONE = \"refund.processed\" renamed, degrading the provider spelling onto the unhandled fallback (REAL[hole] - the old test pinned only the RECORDED outcome both paths return)",
+      "path": "backend/orders/state.py",
+      "find": "WEBHOOK_EVENT_REFUND_DONE = \"refund.processed\"",
+      "replace": "WEBHOOK_EVENT_REFUND_DONE = \"XXrefund.processedXX\"",
+      "expected_failing_tests": ["test_provider_spelling_of_a_settled_refund_is_also_recorded"],
+      "claimed_count": 1,
+      "test_scope": ["orders.tests_webhooks.RefundEventTests"]
+    },
+    {
+      "id": "M108",
+      "description": "run 38249016821 mutant 108: WEBHOOK_EVENT_REFUND_DONE set to None, same unhandled-degradation as M107",
+      "path": "backend/orders/state.py",
+      "find": "WEBHOOK_EVENT_REFUND_DONE = \"refund.processed\"",
+      "replace": "WEBHOOK_EVENT_REFUND_DONE = None",
+      "expected_failing_tests": ["test_provider_spelling_of_a_settled_refund_is_also_recorded"],
+      "claimed_count": 1,
+      "test_scope": ["orders.tests_webhooks.RefundEventTests"]
+    },
+    {
+      "id": "M121",
+      "description": "run 38249016821 mutant 121: and->or in get_user_roles' None-user short-circuit (REAL[hole] - every existing pin feeds truthy AnonymousUser; claimed_count omitted because the flip raises AttributeError and the run reports errors=1, which is not a failures=N line)",
+      "path": "backend/common/permissions.py",
+      "find": "    if not (user and user.is_authenticated):\n        return frozenset()\n    return frozenset(user.groups.values_list(\"name\", flat=True)) & _ROLE_SET\n",
+      "replace": "    if not (user or user.is_authenticated):\n        return frozenset()\n    return frozenset(user.groups.values_list(\"name\", flat=True)) & _ROLE_SET\n",
+      "expected_failing_tests": ["test_no_user_at_all_resolves_to_no_roles"],
+      "test_scope": ["tests.test_rbac_foundation.CapabilityPermissionMatrixTests"]
+    }
+  ]
+}

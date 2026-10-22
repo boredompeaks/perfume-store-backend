@@ -1,9 +1,9 @@
 "use client";
 
 import Link from "next/link";
-import { useQuery } from "@tanstack/react-query";
 import { useAuth } from "@/lib/auth";
-import { cartCount, getCart } from "@/lib/cart-api";
+import { cartCount } from "@/lib/cart-api";
+import { useCart } from "@/lib/use-cart";
 import { formatINR } from "@/lib/money";
 import { templateConfig } from "@/lib/template.config";
 import CartLineItem from "./CartLineItem";
@@ -96,11 +96,7 @@ function StepRail() {
  */
 export default function CartView() {
   const { status } = useAuth();
-  const { data: cart, isPending, isError, refetch } = useQuery({
-    queryKey: ["cart"],
-    queryFn: getCart,
-    retry: false,
-  });
+  const { data: cart, isPending, isError, refetch } = useCart();
   const unitCount = cart ? cartCount(cart) : 0;
   const subtotal = cart
     ? cart.items.reduce(

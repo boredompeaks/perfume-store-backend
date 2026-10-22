@@ -101,6 +101,16 @@ def _deployment_environment(debug):
 DJANGO_ENV = _deployment_environment(DEBUG)
 
 
+def _host_list(raw):
+    """Split a comma-separated host/origin list, tolerating padding and blanks.
+
+    Padding is a plain typo, not a configured host: an untrimmed entry matches
+    nothing (an Origin header never carries spaces), so it fails closed in the
+    most confusing way available.
+    """
+    return [entry.strip() for entry in raw.split(",") if entry.strip()]
+
+
 def _env_hosts(name, default, debug):
     """Return a comma-separated host/origin list, refusing the dev default
     outside development (SPEC-22-03 [R-22.3]).
@@ -120,7 +130,7 @@ def _env_hosts(name, default, debug):
                 f"never a deployed environment's configuration."
             )
         raw = default
-    return [entry for entry in raw.split(",") if entry]
+    return _host_list(raw)
 
 
 ALLOWED_HOSTS = _env_hosts("DJANGO_ALLOWED_HOSTS", "localhost,127.0.0.1", DEBUG)
@@ -1199,6 +1209,11 @@ REST_FRAMEWORK = {
         # Signature verification is what defends this endpoint; the rate
         # only bounds the parsing work an unsigned caller can ask for.
         "webhook": os.getenv("THROTTLE_WEBHOOK_RATE", "120/min"),
+        # D-08: the customer tracking read is anonymous and carries a
+        # customer's parcel data. Its credential is the 256-bit guest token,
+        # but the order-number half of the lookup is enumerable, so this budget
+        # bounds that enumeration without changing what authorizes a read.
+        "tracking": os.getenv("THROTTLE_TRACKING_RATE", "60/min"),
     },
     # How many reverse proxies stand in front of the app, which decides whose
     # address an anonymous throttle budget is keyed on - for every scope above
@@ -1291,14 +1306,19 @@ JWT_REFRESH_BODY_ACCEPT_DAYS = _env_int("JWT_REFRESH_BODY_ACCEPT_DAYS", 90)
 # above) is the actual gate — this is the same-site belt to its braces.
 SESSION_COOKIE_SAMESITE = os.getenv("SESSION_COOKIE_SAMESITE", "Lax")
 
-CORS_ALLOWED_ORIGINS = [
-    origin
-    for origin in os.getenv("CORS_ALLOWED_ORIGINS", "http://localhost:3000").split(",")
-    if origin
-]
-CSRF_TRUSTED_ORIGINS = _env_hosts(
-    "CSRF_TRUSTED_ORIGINS", "http://localhost:3000", DEBUG
+# Both loopback spellings of the dev storefront. The storefront addresses the
+# API on the host it was served from (frontend/src/lib/config.ts), so a page
+# opened at 127.0.0.1:3000 talks to the API at 127.0.0.1:8000: a single-origin
+# default left that session without CORS or CSRF clearance. These are
+# development conveniences and are refused outside development for CSRF;
+# CORS_ALLOWED_ORIGINS keeps its own default because the image build boots the
+# settings with a non-debug DEBUG=false and does not set it.
+DEV_FRONTEND_ORIGINS = "http://localhost:3000,http://127.0.0.1:3000"
+
+CORS_ALLOWED_ORIGINS = _host_list(
+    os.getenv("CORS_ALLOWED_ORIGINS", DEV_FRONTEND_ORIGINS)
 )
+CSRF_TRUSTED_ORIGINS = _env_hosts("CSRF_TRUSTED_ORIGINS", DEV_FRONTEND_ORIGINS, DEBUG)
 
 CORS_ALLOW_CREDENTIALS = True
 

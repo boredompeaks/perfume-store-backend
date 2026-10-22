@@ -1,0 +1,19 @@
+# GitGuardian configuration: documented TEST FIXTURES only.
+#
+# Every entry below matches a literal that exists solely to exercise a test:
+# a published RFC vector, a locally seeded e2e user, or the guarded
+# `seed_e2e --i-know-this-is-a-test-db` command (which refuses to run outside
+# a test database). None is a credential for any real system. New entries must
+# cite the file and the reason; a production-shaped value must never be added.
+version: 2
+ignored-matches:
+  - name: "RFC 6238 App-B public SHA-1 test vector (not a credential)"
+    match: "GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ"
+  - name: "seed_e2e documented test superadmin password (test-DB guarded command)"
+    match: "SuperAdmin#2026"
+  - name: "seed_e2e documented test customer password (test-DB guarded command)"
+    match: "Customer#2026"
+  - name: "seed_e2e seeded TOTP fixture (test-DB guarded command)"
+    match: "JBSWY3DPEHPK3PXPJBSWY3DPEHPK3PXP"
+  - name: "local e2e fixture passwords (frontend/e2e/helpers.ts)"
+    match: "e2e-(Customer|Staff)-9"

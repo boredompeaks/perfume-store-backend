@@ -39,7 +39,7 @@ class OrderItemSerializer(serializers.ModelSerializer):
 class OrderSerializer(serializers.ModelSerializer):
     """[R-8.5] Identifier-exposure strategy: the sequential ``id`` stays the
     internal key -- it remains the URL/admin primary key and no URL changes.
-    ``order_number`` (ORD-YYYY-NNNNNN, spec 8.3) is the read-only
+    ``order_number`` (ORD-YYYY-XXXXXXXX, spec 8.3) is the read-only
     customer-facing reference, surfaced at checkout and on every order read.
     Guest checkout (SPEC-1-B04) keys on ``order_number`` + the order's own
     ``guest_token``; the pk never leaves server-side routing.

@@ -2,8 +2,9 @@ import { fileURLToPath } from "node:url";
 import { defineConfig } from "vitest/config";
 
 export default defineConfig({
-  // The `@/*` tsconfig path is Next's only; Vite does not read it, so a test
-  // that imports an app module (`@/app/...`) needs the same alias here.
+  // The app resolves every module through `@/…` (tsconfig `paths`). Vitest
+  // does not read that map, so component specs would fail to import the very
+  // component under test without the same alias.
   resolve: {
     alias: {
       "@": fileURLToPath(new URL("./src", import.meta.url)),

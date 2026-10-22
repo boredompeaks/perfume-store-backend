@@ -131,6 +131,18 @@ class ProductListFilterTests(ApiTestCase):
         )
         self.assertEqual({row["id"] for row in res.data["results"]}, {self.p_oud.id})
 
+    def test_zero_price_bounds_are_applied_not_ignored(self):
+        """0 is a real bound: Decimal("0") is falsy, so a truthiness test
+        silently dropped it and a zero ceiling returned every product."""
+        res = self.client.get("/api/products/", {"min_price": "0"})
+        self.assertEqual(res.status_code, 200, res.data)
+        self.assertEqual(res.data["count"], 3)
+
+        res = self.client.get("/api/products/", {"max_price": "0"})
+        self.assertEqual(res.status_code, 200, res.data)
+        self.assertEqual(res.data["count"], 0)
+        self.assertEqual(res.data["results"], [])
+
     def test_invalid_price_filter_returns_400(self):
         for params in (
             {"min_price": "abc"},

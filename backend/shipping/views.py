@@ -22,14 +22,26 @@ therefore the only one that has to answer for a credential.
 """
 
 from django.conf import settings
+from django.utils.cache import patch_vary_headers
 from rest_framework import status
 from rest_framework.permissions import AllowAny
 from rest_framework.response import Response
+from rest_framework.throttling import ScopedRateThrottle
 from rest_framework.views import APIView
 
 from .models import Shipment
 from .pricing import ShippingUnavailable, shipping_options
 from .serializers import ShipmentTrackingSerializer, ShippingOptionSerializer
+
+
+class TrackingRateThrottle(ScopedRateThrottle):
+    """The dedicated 'tracking' budget for the customer tracking read (D-08).
+
+    The endpoint is anonymous by design, so its credential is possession of the
+    order number plus the guest token. The token is 256 bits and unguessable,
+    but the ORDER NUMBER is not a secret and a caller can enumerate it; the
+    throttle bounds that enumeration without changing the credential model.
+    """
 
 
 class ShippingEstimateView(APIView):
@@ -165,8 +177,12 @@ def _trackable_shipments(request, order_number):
     # were dispatched. The model's own ``-created_at`` ordering is the admin
     # grid's (newest activity at the top) and is deliberately not what a
     # tracking timeline should do; ``id`` breaks a same-instant tie.
+    #
+    # ``provider`` rides the join because ``tracking_url`` reads it once per
+    # parcel; without it a split order would be one query per parcel for the
+    # very link the customer came for.
     return list(
-        Shipment.objects.select_related("order")
+        Shipment.objects.select_related("order", "provider")
         .prefetch_related("events")
         .filter(order__order_number=order_number, **owner)
         .order_by("created_at", "id")
@@ -183,11 +199,13 @@ class ShipmentTrackingView(APIView):
     and it is a guard by possession of a credential, not by identity: it can
     only ever return the parcels of an order the caller owns.
 
-    No throttle scope, for the same reason the estimate above has none: this
-    is a read-only endpoint and the convention requires one on public MUTATING
-    endpoints. Brute-forcing order numbers is also not the threat here - the
-    order number is never the credential, so guessing one in a million earns
-    the caller nothing, and the token that IS the credential is 256 bits.
+    No throttle scope was originally declared "because this is a read-only
+    endpoint", and D-08 rejects that reasoning: the endpoint is anonymous, its
+    order-number half is enumerable, and it is the one shipping read that
+    carries customer data. It now rides a dedicated ``tracking`` budget
+    (60/min by default, deployment-tunable). The credential model is unchanged:
+    the throttle limits how many guesses a caller gets, not who may see a
+    parcel.
 
     The body is a LIST of parcels under one key, ``shipments``, because an
     order may have several (spec 6.9 line 2021, "Split shipments, if needed";
@@ -195,7 +213,7 @@ class ShipmentTrackingView(APIView):
     deliberate change of envelope from B06's first cut, which returned one
     bare parcel object and so reported only the newest parcel of a split
     order. The parcel object itself is unchanged -
-    ``ShipmentTrackingSerializer`` still carries exactly its six keys with
+    ``ShipmentTrackingSerializer`` still carries exactly its eight keys with
     exactly their sensitivity, and every one of them is a per-parcel fact, so
     none of them was hoisted or dropped to make room for the envelope.
 
@@ -206,6 +224,25 @@ class ShipmentTrackingView(APIView):
     """
 
     permission_classes = [AllowAny]
+    throttle_classes = [TrackingRateThrottle]
+    throttle_scope = "tracking"
+
+    def finalize_response(self, request, response, *args, **kwargs):
+        """Stamp privacy headers on every answer, including the uniform miss.
+
+        ``Cache-Control: no-store`` because a tracking response is a customer's
+        parcel data, and a shared cache must not retain it. ``Vary`` names the
+        guest credential because the body genuinely depends on that request
+        header: without it a cache keyed only on the URL could serve one guest's
+        parcels to the next caller. Both ride ``finalize_response`` rather than
+        the success branch so the 404 (and a 429) carry the same contract as a
+        hit - the miss is deliberately byte-identical in BODY, not in privacy
+        headers.
+        """
+        response = super().finalize_response(request, response, *args, **kwargs)
+        response["Cache-Control"] = "no-store"
+        patch_vary_headers(response, (GUEST_ORDER_TOKEN_HEADER,))
+        return response
 
     def get(self, request, order_number):
         shipments = _trackable_shipments(request, order_number)

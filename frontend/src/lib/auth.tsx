@@ -19,7 +19,7 @@ import {
   setTokens,
 } from "./tokens";
 
-type AuthStatus = "loading" | "authenticated" | "anonymous";
+export type AuthStatus = "loading" | "authenticated" | "anonymous";
 
 type AuthContextValue = {
   status: AuthStatus;

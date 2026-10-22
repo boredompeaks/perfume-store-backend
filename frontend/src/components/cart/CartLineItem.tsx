@@ -5,7 +5,9 @@ import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { useEffect, useState } from "react";
 import { flushSync } from "react-dom";
 import { ApiError } from "@/lib/api";
+import { useAuth } from "@/lib/auth";
 import { deleteCartItem, patchCartItem } from "@/lib/cart-api";
+import { cartQueryKey } from "@/lib/use-cart";
 import { formatINR } from "@/lib/money";
 import type { Cart, CartItem } from "@/lib/types";
 import ProductImage from "../ProductImage";
@@ -46,6 +48,7 @@ export default function CartLineItem({
   vtName?: string;
 }) {
   const queryClient = useQueryClient();
+  const { status } = useAuth();
   const toast = useToast();
   const [qty, setQty] = useState(item.quantity);
   const [lineError, setLineError] = useState<string | null>(null);
@@ -57,7 +60,10 @@ export default function CartLineItem({
   }, [item.quantity]);
 
   const applyCart = (cart: Cart) => {
-    queryClient.setQueryData(["cart"], cart);
+    // The cart cache is keyed by identity (D-04b): write the server's answer
+    // into the slot this render read from, not an unkeyed ["cart"] entry no
+    // observer would see.
+    queryClient.setQueryData(cartQueryKey(status), cart);
   };
 
   const patch = useMutation({

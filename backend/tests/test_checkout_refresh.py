@@ -20,7 +20,7 @@ payment intent is minted at all).
 from django.db.models import Count
 from django.test import tag
 
-from cart.models import Cart, CartItem
+from cart.models import CartItem
 from common.models import AuditEvent
 from common.testing import ApiTestCase
 from orders.models import Order, OrderItem
@@ -39,7 +39,8 @@ class CheckoutRefreshSafetyTests(ApiTestCase):
     # -- helpers ---------------------------------------------------------
 
     def cart_row(self):
-        return Cart.objects.get(session_id=self.client.session.session_key)
+        # D-04a: an authenticated client owns the account cart.
+        return self.current_cart()
 
     def submit(self, **overrides):
         """Re-issue POST /api/orders/checkout/ with the same form a refresh

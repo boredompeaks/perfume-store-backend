@@ -1,0 +1,32 @@
+{
+  "kind": "frontend-gates",
+  "task": "PR47-MERGE-C1",
+  "tool": "hand-recorded from the commands below (frontend-only consolidation; no backend floor was run)",
+  "measured_at": "2026-10-22T10:27:31+05:30",
+  "pair_complete": false,
+  "note": "The delta is frontend-only: ShipmentPanel and its spec were removed, and the single ShipmentTracking panel carries provider plus the safe http(s) tracking link. The backend tree is unchanged by this task, so no backend floor was measured for it.",
+  "gates": [
+    {
+      "command": "npx vitest run",
+      "cwd": "frontend",
+      "exit": 0,
+      "test_files": 30,
+      "tests": 362
+    },
+    {
+      "command": "npx tsc --noEmit",
+      "cwd": "frontend",
+      "exit": 0
+    },
+    {
+      "command": "npm run build",
+      "cwd": "frontend",
+      "exit": 0,
+      "env_supplied": [
+        "NEXT_PUBLIC_ADMIN_ORIGIN=http://localhost:8000",
+        "NEXT_PUBLIC_API_BASE_URL=http://localhost:8000",
+        "NEXT_PUBLIC_SITE_URL=http://localhost:3000"
+      ]
+    }
+  ]
+}

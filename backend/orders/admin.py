@@ -3,8 +3,11 @@ from decimal import Decimal
 
 from django import forms
 from django.contrib import admin, messages
+from django.core.exceptions import PermissionDenied
 from django.db import transaction
-from django.http import HttpResponse
+from django.http import Http404, HttpResponse, HttpResponseRedirect
+from django.template.response import TemplateResponse
+from django.urls import path, reverse
 from django.utils import timezone
 
 from common.admin import RoleAwareModelAdmin
@@ -15,6 +18,12 @@ from common.saved_filters import SavedFilterMixin
 # [R-12.8] SPEC-12-02: the admin cancel writers release the checkout's
 # stock holds with the same vocabulary the API twin uses.
 from products.models import StockReservation
+
+# [R-1.14] SPEC-1-05: the ONE issuance core. The API seam and this admin
+# action call the same module rather than two copies of the locks, balance
+# gate and gateway call. Bound as a module because ``issue_refund`` is also
+# the action's name on this class, and the domain refusals travel with it.
+from . import refunds as refunds_core
 
 # [R-10.16] SPEC-10-05: the per-transition side-effect contract (one
 # dispatch point, shared with the JSON seam).
@@ -121,6 +130,29 @@ def _append_status_event(order, *, from_status, to_status, actor, trigger):
     )
 
 
+class IssueRefundForm(forms.Form):
+    """The operator's input on the refund interstitial.
+
+    Neither field carries a business rule: ``amount`` is optional and blank
+    means "the remaining balance", and ``reason`` is passed through so the
+    shared core is the ONE authority on whether a refund may be issued and
+    what message a refusal carries. This form only decides whether the input
+    is shaped like a string/decimal at all.
+    """
+
+    amount = forms.DecimalField(
+        required=False,
+        label="Amount",
+        help_text="Leave blank to refund the order's remaining balance.",
+    )
+    reason = forms.CharField(
+        required=False,
+        label="Reason",
+        help_text="Required. Recorded verbatim on the refund row.",
+        widget=forms.Textarea(attrs={"rows": 2}),
+    )
+
+
 @admin.register(Order)
 class OrderAdmin(SavedFilterMixin, RoleAwareModelAdmin):
     # SPEC-20-6 [R-20.11]: the saved-view bar rides first in the bases so it
@@ -208,6 +240,10 @@ class OrderAdmin(SavedFilterMixin, RoleAwareModelAdmin):
         "mark_delivered": "orders.fulfill",
         "cancel_pending": "orders.cancel",
         "export_csv": "orders.read",
+        # [R-1.14] Money movement is finance's call: support may read and
+        # fulfil orders but never issue a refund, so the action is absent
+        # from its dropdown and a directly POSTed name is refused.
+        "issue_refund": "refunds.create",
     }
     # Cancelling orders is the one destructive bulk action here ([6.12.4]):
     # irreversible status change on a financial record, so it must be
@@ -265,6 +301,7 @@ class OrderAdmin(SavedFilterMixin, RoleAwareModelAdmin):
         "mark_delivered",
         "cancel_pending",
         "export_csv",
+        "issue_refund",
     )
     readonly_fields = (
         "created_at",
@@ -367,6 +404,25 @@ class OrderAdmin(SavedFilterMixin, RoleAwareModelAdmin):
             # the swap is a class substitution, not an instance.
             return [OrderItemPackingInline]
         return super().get_inlines(request, obj)
+
+    def get_urls(self):
+        """The refund action's own input page.
+
+        The action opens this page instead of executing, because issuing a
+        refund needs an amount and a reason; the page IS the confirmation
+        step. ``admin_view`` applies Django's staff check, and the capability
+        is re-checked in the view because "is_staff" is not the authority on
+        money movement.
+        """
+        urls = super().get_urls()
+        custom = [
+            path(
+                "<path:object_id>/issue-refund/",
+                self.admin_site.admin_view(self.issue_refund_view),
+                name="orders_order_issue_refund",
+            )
+        ]
+        return custom + urls
 
     def changelist_view(self, request, extra_context=None):
         """The grid a scoped viewer lands on IS the fulfilment queue.
@@ -754,6 +810,102 @@ class OrderAdmin(SavedFilterMixin, RoleAwareModelAdmin):
                 messages.WARNING,
             )
 
+    # ——— the refund action (the operator's entry point) ———
+
+    @admin.action(description="Issue a refund for the selected order")
+    def issue_refund(self, request, queryset):
+        """Route the selection to the amount/reason page.
+
+        One order at a time on purpose: a refund names one order's remaining
+        balance, and a bulk entry point would invite a slip of the selection
+        to move money on an order nobody looked at.
+        """
+        pks = list(queryset.values_list("pk", flat=True))
+        if len(pks) != 1:
+            self.message_user(
+                request,
+                "Select exactly one order to refund.",
+                messages.ERROR,
+            )
+            return None
+        return HttpResponseRedirect(
+            reverse(
+                f"{self.admin_site.name}:orders_order_issue_refund",
+                args=[pks[0]],
+            )
+        )
+
+    def issue_refund_view(self, request, object_id):
+        """The intermediate page: collect the amount and reason, then issue.
+
+        ``refunds.create`` is the authority here, not the model's change
+        capability: finance may read orders without fulfilling them, and
+        support may fulfil without moving money. The issuance itself is the
+        shared core the API seam calls, so a refusal leaves the order exactly
+        as it was and reports the same text on both surfaces.
+        """
+        if not self._holds_capability(request, "refunds.create"):
+            raise PermissionDenied
+        order = self.get_object(request, object_id)
+        if order is None:
+            raise Http404("Order not found")
+
+        if request.method == "POST":
+            form = IssueRefundForm(request.POST)
+            if form.is_valid():
+                try:
+                    receipt = refunds_core.issue_refund(
+                        request,
+                        order_id=order.pk,
+                        amount=form.cleaned_data["amount"],
+                        reason=form.cleaned_data["reason"],
+                        source="admin",
+                    )
+                except refunds_core.RefundRefused as exc:
+                    self.message_user(
+                        request,
+                        f"Order #{order.pk}: {exc.message}.",
+                        messages.ERROR,
+                    )
+                    return HttpResponseRedirect(request.path)
+                except refunds_core.RefundGatewayError:
+                    self.message_user(
+                        request,
+                        "The payment gateway could not complete this refund",
+                        messages.ERROR,
+                    )
+                    return HttpResponseRedirect(request.path)
+                self.message_user(
+                    request,
+                    f"Refund #{receipt.refund.id} of {receipt.refund.amount} "
+                    f"{receipt.order.currency} issued for order #{order.pk}.",
+                    messages.SUCCESS,
+                )
+                return HttpResponseRedirect(
+                    reverse(
+                        f"{self.admin_site.name}:orders_order_change",
+                        args=[order.pk],
+                    )
+                )
+        else:
+            form = IssueRefundForm()
+
+        return TemplateResponse(
+            request,
+            "admin/orders/order/issue_refund.html",
+            {
+                **self.admin_site.each_context(request),
+                "title": f"Issue refund for order #{order.pk}",
+                "order": order,
+                "form": form,
+                "opts": self.model._meta,
+                "cancel_url": reverse(
+                    f"{self.admin_site.name}:orders_order_change",
+                    args=[order.pk],
+                ),
+            },
+        )
+
     @admin.action(description="Export selected to CSV")
     def export_csv(self, request, queryset):
         response = HttpResponse(content_type="text/csv")
@@ -914,9 +1066,10 @@ class RefundAdmin(RoleAwareModelAdmin):
     money (spec 1.1's finance operator) plus admin — support, which may read
     and fulfil orders, gets no refund page at all. No staff role gets
     add/change/delete, and the superuser bypass is refused on add and delete
-    too: a refund is issued by the API seam, the one writer that calls the
-    gateway, so a hand-written row here would be money movement with no
-    payment behind it. Every field renders read-only, so even the change view
+    too: a refund is issued through ``orders.refunds.issue_refund`` (the API
+    endpoint and the order action on this site both call it), the one writer
+    that calls the gateway, so a hand-written row here would be money movement
+    with no payment behind it. Every field renders read-only, so even the change view
     is a read, not an editor.
     """
 

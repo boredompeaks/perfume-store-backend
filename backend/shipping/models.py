@@ -22,7 +22,10 @@ to match against. It belongs to the first task that gives a product a weight
 to weigh.
 """
 
+from urllib.parse import urlsplit
+
 from django.conf import settings
+from django.core.exceptions import ValidationError
 from django.db import models
 
 
@@ -294,11 +297,15 @@ class Shipment(models.Model):
     shipments "if needed", and no order-level status could express two
     parcels leaving on different days, so ``order`` is one-to-many.
 
-    Deliberately NOT wired into ``orders.state``. Spec 10.2 lists shipment as
-    a dimension BESIDE fulfilment, and SPEC-1-B03 scoped that machine for
-    audit; requirement 8 of this task forbids widening it. The two lifecycles
-    stay separate records of separate facts, and the shipment vocabulary is
-    never pushed through the order transition machine.
+    The parcel status drives the order's visible lifecycle through
+    ``shipping.lifecycle`` (SPEC-D-01 owner directive), and it does so by
+    READING ``orders.state`` rather than by widening it: only "dispatched",
+    "in_transit" and "delivered" map to an order move, and every one of them
+    is gated by ``transition_allowed`` and ``precondition_failures``, so a
+    move the order machine refuses (a pending or cancelled order) is skipped
+    instead of forced. The two vocabularies stay separate records of separate
+    facts - "label_created" and "exception" are not order states, and
+    cancellation and returns remain their own actions with their own writers.
     """
 
     class Status(models.TextChoices):
@@ -360,6 +367,26 @@ class Shipment(models.Model):
         default="",
     )
 
+    # [SPEC-B-02] The provider whose tracking page the customer follows.
+    # NULLABLE so a parcel can exist before an operator links it, and PROTECT
+    # rather than SET_NULL because the link is part of what an already-shipped
+    # customer was given: a careless delete must be REFUSED, not silently turn
+    # a live tracking page into a dead end. `is_active` on the provider is the
+    # supported retirement path - the same answer ``ShippingMethod`` gives
+    # above - so retiring one hides it from future picks without rewriting the
+    # history of a parcel already on its way. `carrier` stays for back-compat
+    # and as the human display name; this FK is what makes ``tracking_url``
+    # resolvable rather than a string the storefront has to build itself.
+    provider = models.ForeignKey(
+        # A string reference, not an import: ``ShippingProvider`` is declared
+        # later in this module, and Django resolves an app-local label lazily.
+        "ShippingProvider",
+        on_delete=models.PROTECT,
+        null=True,
+        blank=True,
+        related_name="shipments",
+    )
+
     status = models.CharField(
         max_length=20,
         choices=Status.choices,
@@ -400,6 +427,41 @@ class Shipment(models.Model):
         # export and LogEntry render per row, and an order can be a guest row
         # whose own __str__ already has to be null-safe (SPEC-1-B04).
         return f"Shipment {self.tracking_number} ({self.status})"
+
+    @property
+    def tracking_url(self):
+        """The customer's tracking page for this parcel, or ``None``.
+
+        Renders ``ShippingProvider.tracking_url_template`` with this parcel's
+        own ``tracking_number``. The absences a caller must not have to guard
+        are answered with ``None`` rather than a broken string: no provider
+        linked, a provider whose template is empty, a parcel with no reference,
+        and a template whose rendered URL is not absolute http(s). No network
+        call is made - rendering a URL is not fetching it, and this module has
+        no business reaching the carrier; the browser the customer already has
+        follows the link.
+
+        ``str.replace`` rather than ``str.format`` on purpose: the template is
+        operator-entered text, and a ``{`` the format mini-language would read
+        as a field is URL text here. Only the one documented placeholder is
+        substituted, so every other character survives exactly as typed.
+        """
+        if not self.provider_id or not self.tracking_number:
+            return None
+        template = self.provider.tracking_url_template
+        if not template:
+            return None
+        rendered = template.replace(TRACKING_NUMBER_PLACEHOLDER, self.tracking_number)
+        # Defense in depth, not a duplicate of the provider's validation: a
+        # template written straight through the ORM never runs ``clean()``, and
+        # this string is what the storefront puts in an ``href``. A scheme that
+        # is not http(s) is script execution (``javascript:``) or an arbitrary
+        # document (``data:``) in the customer's browser, so it is answered with
+        # the same absence as every other unrenderable link rather than passed on.
+        parsed = urlsplit(rendered)
+        if parsed.scheme not in _TRACKING_URL_SCHEMES or not parsed.netloc:
+            return None
+        return rendered
 
     def save(self, *args, **kwargs):
         """Refuse a value wider than the column, then write.
@@ -513,3 +575,108 @@ class ShipmentEvent(models.Model):
 
     def __str__(self):
         return f"{self.shipment_id}: {self.from_status}->{self.to_status}"
+
+
+# The one placeholder a tracking template may carry. A module constant because
+# the validator, the renderer on ``Shipment`` and the admin help text all have
+# to agree on its spelling; a literal repeated in three places is a drift.
+TRACKING_NUMBER_PLACEHOLDER = "{tracking_number}"
+
+# The schemes a rendered link may use. ``http`` is admitted only while DEBUG is
+# on (see the validator), so a production template cannot downgrade the link
+# the customer follows to cleartext.
+_TRACKING_URL_SCHEMES = ("http", "https")
+
+# A URL-shaped literal, deliberately not a real parcel's reference: the
+# template is validated on the PROVIDER, where no parcel exists, so the sample
+# only has to prove that the rendered string parses as an absolute URL.
+_SAMPLE_TRACKING_NUMBER = "SAMPLE123"
+
+
+def _tracking_template_error(template):
+    """Why ``template`` cannot be a tracking URL, or ``None`` when it can.
+
+    The template is operator-entered text that reaches the customer's browser
+    inside an ``href``, so this is a security boundary rather than a
+    convenience check: a ``javascript:`` template would run in the customer's
+    session, and a ``data:`` one would serve a document this store never
+    published. Blank is allowed - an unbranded courier still hands out a
+    reference - and renders no link at all.
+
+    "Exactly one placeholder" because zero leaves every parcel pointing at one
+    page (there would be nothing to track), and two makes the substitution
+    ambiguous. Both are operator mistakes the form should say out loud rather
+    than store.
+    """
+    if not template:
+        return None
+    if any(character.isspace() or ord(character) < 32 for character in template):
+        return "must not contain whitespace or control characters"
+    occurrences = template.count(TRACKING_NUMBER_PLACEHOLDER)
+    if occurrences != 1:
+        return (
+            "must contain exactly one {tracking_number} placeholder "
+            f"(found {occurrences})"
+        )
+    rendered = template.replace(TRACKING_NUMBER_PLACEHOLDER, _SAMPLE_TRACKING_NUMBER)
+    parsed = urlsplit(rendered)
+    if parsed.scheme not in _TRACKING_URL_SCHEMES or not parsed.netloc:
+        return "must be an absolute http(s) URL"
+    if parsed.scheme != "https" and not settings.DEBUG:
+        return "must use https:// (http:// is accepted only with DEBUG on)"
+    return None
+
+
+class ShippingProvider(models.Model):
+    """A carrier / shipping provider admin can add, linkable to shipments.
+
+    ``code`` is the slug identifier (unique). ``tracking_url_template`` is a
+    URL template containing a ``{tracking_number}`` placeholder that renders
+    the carrier's tracking page for a given parcel.
+
+    ``clean`` is the only validation of that template, and it lives on the
+    model rather than in a form so every writer that calls ``full_clean``
+    (today the admin, which Django already runs) gets the same answer.
+    """
+
+    name = models.CharField(
+        max_length=100,
+    )
+
+    code = models.SlugField(
+        max_length=40,
+        unique=True,
+    )
+
+    tracking_url_template = models.CharField(
+        max_length=500,
+        blank=True,
+        default="",
+    )
+
+    is_active = models.BooleanField(default=True)
+
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ("code",)
+
+    def __str__(self):
+        return self.name
+
+    def clean(self):
+        """Refuse a template that is not a safe, renderable http(s) URL.
+
+        Runs through the admin change form (Django's ``ModelForm`` calls
+        ``full_clean``), which is the only writer of this field, so an
+        operator learns about a bad scheme or a missing placeholder at entry
+        time instead of a customer meeting it later. The renderer on
+        ``Shipment`` keeps its own scheme guard for templates that arrive
+        through the ORM, where this method is never consulted.
+        """
+        super().clean()
+        error = _tracking_template_error(self.tracking_url_template)
+        if error:
+            raise ValidationError({"tracking_url_template": error})

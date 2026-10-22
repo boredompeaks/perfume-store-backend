@@ -463,10 +463,15 @@ class AuthenticatedCheckoutRegressionTests(GuestRefusalTestBase):
             StockReservation.Status.CONVERTED,
         )
 
-    def test_the_same_client_can_log_in_and_check_out_the_same_cart(self):
+    def test_the_same_client_can_log_in_and_check_out(self):
         """The refusal blocks the GUEST, not the purchase: the same browser,
-        once authenticated, completes the checkout with the same cart it
-        was refused with."""
+        once authenticated, completes a checkout against its ACCOUNT cart.
+
+        D-04a made the authenticated cart the account cart, so the basket is
+        built after the bearer is attached; the pre-login basket's journey
+        into that cart is the storefront-login merge's contract (D-04b), not
+        this refusal pin's.
+        """
         refused = self.guest_post()
         self.assertEqual(refused.status_code, 403, refused.data)
 
@@ -474,6 +479,7 @@ class AuthenticatedCheckoutRegressionTests(GuestRefusalTestBase):
         res, token = self.api_login("buyer", client=self.guest)
         self.assertEqual(res.status_code, 200, res.data)
         self.guest.credentials(HTTP_AUTHORIZATION=f"Bearer {token}")
+        self.seed_session_cart([(self.product, 2)], client=self.guest)
 
         ok = self.guest.post(
             "/api/orders/checkout/", self.checkout_payload(), format="json"
@@ -499,7 +505,10 @@ class AuthenticatedCheckoutRegressionTests(GuestRefusalTestBase):
         )
 
         self.assertEqual(res.status_code, 201, res.data)
-        self.assertEqual(res.data["order_number"], f"ORD-{timezone.now().year}-000001")
+        self.assertRegex(
+            res.data["order_number"],
+            rf"ORD-{timezone.now().year}-[0-9A-F]{{8}}",
+        )
 
     def test_an_account_submission_ignores_a_body_supplied_guest_email(self):
         self.make_user("buyer")

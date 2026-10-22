@@ -2,20 +2,29 @@ import { apiFetch } from "./api";
 import type { Cart } from "./types";
 
 /**
+ * D-04a/D-04b: the cart a request owns follows the credential. Sending the
+ * access token (when one exists) makes these calls resolve the ACCOUNT cart;
+ * a signed-out browser sends none and keeps its session cart. Without this
+ * the post-login refetch would keep reading the — now merged away — guest
+ * cart and render an empty basket.
+ */
+const CART_AUTH = { auth: true } as const;
+
+/**
  * GET /api/cart/ body — the house cart shape plus the persisted coupon
  * field (R-9.3.5; the serializer emits `coupon_code`, a code string or
- * null). Declared here, not in types.ts, to avoid colliding with the
- * pending backend field drops there.
+ * null).
  */
 export type CartWithCoupon = Cart & { coupon_code: string | null };
 
-/** GET creates the session + cart lazily on the backend (documented side effect). */
+/** GET creates the resolved cart lazily on the backend (documented side effect). */
 export function getCart(): Promise<CartWithCoupon> {
-  return apiFetch<CartWithCoupon>("/api/cart/");
+  return apiFetch<CartWithCoupon>("/api/cart/", CART_AUTH);
 }
 
 export function addToCart(product_id: number, quantity: number): Promise<Cart> {
   return apiFetch<Cart>("/api/cart/", {
+    ...CART_AUTH,
     method: "POST",
     body: { product_id, quantity },
   });
@@ -23,13 +32,17 @@ export function addToCart(product_id: number, quantity: number): Promise<Cart> {
 
 export function patchCartItem(itemId: number, quantity: number): Promise<Cart> {
   return apiFetch<Cart>(`/api/cart/${itemId}/`, {
+    ...CART_AUTH,
     method: "PATCH",
     body: { quantity },
   });
 }
 
 export function deleteCartItem(itemId: number): Promise<Cart> {
-  return apiFetch<Cart>(`/api/cart/${itemId}/`, { method: "DELETE" });
+  return apiFetch<Cart>(`/api/cart/${itemId}/`, {
+    ...CART_AUTH,
+    method: "DELETE",
+  });
 }
 
 /**
@@ -41,6 +54,7 @@ export function deleteCartItem(itemId: number): Promise<Cart> {
  */
 export function applyCartCoupon(code: string): Promise<CartWithCoupon> {
   return apiFetch<CartWithCoupon>("/api/cart/coupon/", {
+    ...CART_AUTH,
     method: "POST",
     body: { code },
   });
@@ -52,7 +66,10 @@ export function applyCartCoupon(code: string): Promise<CartWithCoupon> {
  * body so the client can re-render without a follow-up GET.
  */
 export function removeCartCoupon(): Promise<CartWithCoupon> {
-  return apiFetch<CartWithCoupon>("/api/cart/coupon/", { method: "DELETE" });
+  return apiFetch<CartWithCoupon>("/api/cart/coupon/", {
+    ...CART_AUTH,
+    method: "DELETE",
+  });
 }
 
 export function cartCount(cart: Cart | undefined | null): number {

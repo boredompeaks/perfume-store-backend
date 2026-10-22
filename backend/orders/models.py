@@ -38,9 +38,17 @@ def default_currency():
 
 
 class Coupon(models.Model):
+    # The one type that carries NO merchandise discount: it waives the
+    # order's shipping charge instead, applied to the server-side delivery
+    # quote at checkout. Named here so the checkout readers compare against a
+    # single symbol rather than repeating a literal across files, and so the
+    # choice value and the comparison can never drift apart.
+    FREE_SHIPPING = "free_shipping"
+
     DISCOUNT_TYPES = [
         ("percentage", "Percentage"),
         ("fixed", "Fixed Amount"),
+        (FREE_SHIPPING, "Free Shipping"),
     ]
 
     code = models.CharField(max_length=50, unique=True)
@@ -78,7 +86,7 @@ class Order(models.Model):
 
     [R-8.4]/[R-8.5] Identifier-exposure strategy: the sequential ``id`` stays
     the internal key (URL/admin primary key, no URL changes); ``order_number``
-    (ORD-YYYY-NNNNNN, per-year sequence) is the customer-facing reference the
+    (ORD-YYYY-XXXXXXXX, random suffix) is the customer-facing reference the
     serializer exposes read-only. Guest checkout (SPEC-1-B04) keys on
     ``order_number`` plus the ``guest_token`` below -- the pk never leaves
     server-side routing.
@@ -105,7 +113,7 @@ class Order(models.Model):
     # authority for generation (IntegrityError retry) and as the spec 8.3
     # "order number" index.
     order_number = models.CharField(
-        max_length=20,  # 15 for ORD-YYYY-NNNNNN + headroom for format drift
+        max_length=20,  # 17 for ORD-YYYY-XXXXXXXX + headroom for format drift
         null=True,
         blank=True,
         unique=True,

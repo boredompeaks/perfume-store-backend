@@ -12,35 +12,29 @@ idempotency-key header names are imported from `checkout.py`, the one module
 that defines that contract, so the two surfaces cannot drift apart.
 """
 
-import logging
-from decimal import Decimal
-
-from django.contrib.admin.models import ADDITION
-from django.db import transaction
-from django.utils import timezone
 from rest_framework import status
 from rest_framework.decorators import api_view, permission_classes
 from rest_framework.response import Response
 
-from common.audit import log_api_action
-from common.money import quantize_money
 from common.permissions import HasRefundsCreate
 
-from ..models import Order, Refund
+from ..models import Refund
 
-# [R-1.14] SPEC-1-05: the refund row and the gateway seam the refund writer
-# drives. Raising RefundGatewayError out of the atomic block is what discards
-# the PENDING row.
-from ..refunds import RefundGatewayError, refund_payment
-
-# [R-10.1] Eligibility is asked of the machine, not restated here.
-from ..state import payment_transition_allowed
+# [R-1.14] SPEC-1-05: the same issuance core the admin action calls. Transport
+# concerns (headers, response shapes) stay here; every decision about whether
+# money may move lives in the core, so the two surfaces cannot drift.
+from ..refunds import RefundGatewayError, RefundRefused, issue_refund
 
 # The header-keyed idempotency contract is defined once, in checkout, and
 # reused here rather than restated.
 from .checkout import IDEMPOTENCY_KEY_HEADER, IDEMPOTENCY_KEY_MAX_LENGTH
 
-logger = logging.getLogger(__name__)
+# The domain refusal's code -> the HTTP status this endpoint has always used.
+REFUSAL_STATUS = {
+    "invalid": status.HTTP_400_BAD_REQUEST,
+    "not_found": status.HTTP_404_NOT_FOUND,
+    "conflict": status.HTTP_409_CONFLICT,
+}
 
 
 def _object_body(data):
@@ -126,222 +120,47 @@ def admin_order_refund(request, order_id):
             {"error": "Idempotency-Key is too long"}, status=status.HTTP_400_BAD_REQUEST
         )
 
-    reason = (body.get("reason") or "").strip()
-    if not reason:
-        # A refund is a financial action the reconciliation trail has to
-        # explain later, so the operator's words are required input, not an
-        # optional nicety (the admin cancel path asks for the same reason).
-        return Response(
-            {"error": "A refund reason is required"}, status=status.HTTP_400_BAD_REQUEST
-        )
-
     try:
-        with transaction.atomic():
-            try:
-                order = Order.objects.select_for_update().get(id=order_id)
-            except Order.DoesNotExist:
-                return Response(
-                    {"error": "Order not found"}, status=status.HTTP_404_NOT_FOUND
-                )
-
-            # This order's refund rows, locked beside the order row, and
-            # materialized because that is what makes the lock take effect.
-            # What makes the ATTEMPT safe is the Order row lock above: every
-            # refund writer for this order takes it first, so no other writer
-            # can append a refund between this transaction's balance read and
-            # its commit. This list serves the replay probe below; the balance itself
-            # comes from refundable_remaining's aggregate, and the Order lock
-            # is what keeps that read consistent.
-            order_refunds = list(Refund.objects.select_for_update().filter(order=order))
-
-            if idempotency_key is not None:
-                replay = next(
-                    (
-                        row
-                        for row in order_refunds
-                        if row.idempotency_key == idempotency_key
-                    ),
-                    None,
-                )
-                if replay is not None:
-                    # Benign keyed retry, so INFO rather than WARNING: the
-                    # same judgement as checkout's replay-collapse log.
-                    logger.info(
-                        "Refund idempotency: refund %s replayed for order %s "
-                        "(Idempotency-Key)",
-                        replay.id,
-                        order.pk,
-                    )
-                    return Response(
-                        {
-                            "message": "Refund already issued",
-                            "order_id": order.id,
-                            "status": order.status,
-                            "payment_status": order.payment_status,
-                            "refunded_total": Refund.refunded_total(order),
-                            "refundable_remaining": order.refundable_remaining,
-                            "refund": _refund_payload(replay),
-                        }
-                    )
-
-            # The balance gate comes first because it is the reason a fully
-            # refunded order cannot be refunded again; the payment-status gate
-            # below then covers the orders that were never captured.
-            remaining = order.refundable_remaining
-            if remaining <= Decimal("0.00"):
-                return Response(
-                    {"error": "Order has no refundable balance left"},
-                    status=status.HTTP_409_CONFLICT,
-                )
-
-            # [R-10.1] Eligibility is asked of the machine, not restated
-            # here: a refund moves the payment dimension onto one of the two
-            # refund values, so the row's current payment must be one the
-            # machine declares an edge FROM (payment_transition_allowed over
-            # PAYMENT_ALLOWED_TRANSITIONS - captured or partially_refunded
-            # today). pending / authorized / failed declare no refund edge,
-            # so they are refused before anything is written.
-            if not any(
-                payment_transition_allowed(order.payment_status, target)
-                for target in ("refunded", "partially_refunded")
-            ):
-                return Response(
-                    {
-                        "error": f"Order payment is '{order.payment_status}'; "
-                        f"only a captured payment can be refunded."
-                    },
-                    status=status.HTTP_409_CONFLICT,
-                )
-
-            if not order.razorpay_payment_id:
-                # A cash-on-delivery order carries no provider payment to
-                # reverse, and the seam has nothing to call: refuse rather
-                # than write a refund row no money moved behind.
-                return Response(
-                    {"error": "Order has no captured payment to refund at the gateway"},
-                    status=status.HTTP_409_CONFLICT,
-                )
-
-            requested = body.get("amount")
-            if requested is None:
-                # No amount asked for: the rest of the order's money.
-                amount = remaining
-            else:
-                try:
-                    # The value is stringified before it is parsed, so a
-                    # JSON number never becomes binary-float money, and the
-                    # quantization happens inside the guard because a value
-                    # too large for 2-dp money (or not a number at all) must
-                    # be a 400, never a 500 out of the arithmetic.
-                    amount = quantize_money(Decimal(str(requested)))
-                except (ArithmeticError, TypeError, ValueError):
-                    return Response(
-                        {"error": "amount must be a decimal amount"},
-                        status=status.HTTP_400_BAD_REQUEST,
-                    )
-                # NaN/Infinity parse as Decimals but are not money, and
-                # comparing one raises - so they are refused before the
-                # comparisons below (the is_finite() short-circuit is what
-                # makes that safe).
-                if not amount.is_finite() or amount <= Decimal("0.00"):
-                    return Response(
-                        {"error": "amount must be a positive decimal amount"},
-                        status=status.HTTP_400_BAD_REQUEST,
-                    )
-                if amount > remaining:
-                    return Response(
-                        {
-                            "error": f"Refund of {amount} exceeds the "
-                            f"refundable balance of {remaining}"
-                        },
-                        status=status.HTTP_409_CONFLICT,
-                    )
-
-            refund = Refund.objects.create(
-                order=order,
-                amount=amount,
-                reason=reason,
-                # FULL means "this attempt cleared what was left"; the order's
-                # payment dimension below is the authority on what is left.
-                kind=(Refund.Kind.FULL if amount == remaining else Refund.Kind.PARTIAL),
-                status=Refund.Status.PENDING,
-                actor=request.user,
-                idempotency_key=idempotency_key,
-            )
-
-            # Raises RefundGatewayError out of this atomic block, which is what
-            # discards the PENDING row above: a refund the gateway refused
-            # leaves no trace at all.
-            gateway_refund_id = refund_payment(
-                payment_id=order.razorpay_payment_id,
-                amount=amount,
-            )
-
-            refund.gateway_refund_id = gateway_refund_id
-            refund.status = Refund.Status.PROCESSED
-            refund.save(
-                update_fields=[
-                    "gateway_refund_id",
-                    "status",
-                    "updated_at",
-                ]
-            )
-
-            refunded_total = Refund.refunded_total(order)
-            # [R-10.1] The balance gate is what chooses between the two refund
-            # values the eligibility gate above proved reachable: nothing left
-            # to refund -> refunded, some money still refundable ->
-            # partially_refunded. Both are declared edges in
-            # PAYMENT_ALLOWED_TRANSITIONS from every state this writer admits,
-            # and the gate above is what guarantees the order can never
-            # overshoot the captured amount.
-            order.payment_status = (
-                "refunded"
-                if refunded_total >= quantize_money(order.total_amount)
-                else "partially_refunded"
-            )
-            # [R-8.16] The business-event stamp the refund section was named
-            # for; the is-none guard keeps a set event time immutable.
-            order.refunded_at = order.refunded_at or timezone.now()
-            order.save(update_fields=["payment_status", "refunded_at"])
-
-            # [6.12.6] API-side staff write: the privileged-action record the
-            # admin surface would have left, naming the order and the money so
-            # the audit-log route can answer "who refunded what" without
-            # joining the refund row. It rides this same transaction, so a
-            # rolled-back refund leaves no record of itself.
-            log_api_action(
-                request,
-                refund,
-                ADDITION,
-                f"Refund {amount} {order.currency} ({refund.kind}) issued "
-                f"via API for order #{order.id} "
-                f"(gateway refund {gateway_refund_id}).",
-            )
-
-    except RefundGatewayError as exc:
-        # The provider's own text goes to the log; the caller gets the fact
-        # and nothing about the provider's internals.
-        logger.warning(
-            "Refund gateway failure for order %s (amount %s): %s",
-            order_id,
-            body.get("amount"),
-            exc,
+        receipt = issue_refund(
+            request,
+            order_id=order_id,
+            amount=body.get("amount"),
+            reason=body.get("reason") or "",
+            idempotency_key=idempotency_key,
+            source="API",
         )
+    except RefundRefused as exc:
+        return Response({"error": exc.message}, status=REFUSAL_STATUS[exc.code])
+    except RefundGatewayError:
+        # The provider's own text went to the log in the core; the caller
+        # gets the fact and nothing about the provider's internals.
         return Response(
             {"error": "The payment gateway could not complete this refund"},
             status=status.HTTP_502_BAD_GATEWAY,
         )
 
+    if receipt.replayed:
+        return Response(
+            {
+                "message": "Refund already issued",
+                "order_id": receipt.order.id,
+                "status": receipt.order.status,
+                "payment_status": receipt.order.payment_status,
+                "refunded_total": Refund.refunded_total(receipt.order),
+                "refundable_remaining": receipt.order.refundable_remaining,
+                "refund": _refund_payload(receipt.refund),
+            }
+        )
+
     return Response(
         {
             "message": "Refund issued",
-            "order_id": order.id,
-            "status": order.status,
-            "payment_status": order.payment_status,
-            "refunded_total": Refund.refunded_total(order),
-            "refundable_remaining": order.refundable_remaining,
-            "refund": _refund_payload(refund),
+            "order_id": receipt.order.id,
+            "status": receipt.order.status,
+            "payment_status": receipt.order.payment_status,
+            "refunded_total": Refund.refunded_total(receipt.order),
+            "refundable_remaining": receipt.order.refundable_remaining,
+            "refund": _refund_payload(receipt.refund),
         },
         status=status.HTTP_201_CREATED,
     )

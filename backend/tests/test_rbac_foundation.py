@@ -130,6 +130,13 @@ class CapabilityPermissionMatrixTests(TestCase):
         )
         self.assertEqual(get_user_roles(AnonymousUser()), frozenset())
 
+    def test_no_user_at_all_resolves_to_no_roles(self):
+        # Not even AnonymousUser: callers may pass None outright, and the
+        # guard must answer the empty set rather than raise AttributeError
+        # reaching through None (AnonymousUser is truthy and exercises the
+        # other side of the same guard, so it cannot pin this branch).
+        self.assertEqual(get_user_roles(None), frozenset())
+
     def test_unpinned_base_capability_permission_denies_even_admin(self):
         # capability=None base class: denying is the default, so a subclass
         # that forgets to pin a capability can never unlock a view.

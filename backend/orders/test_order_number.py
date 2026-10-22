@@ -1,13 +1,15 @@
 """SPEC-8-01 [R-8.4]/[R-8.5]: customer-facing order numbers.
 
-``order_number`` (ORD-YYYY-NNNNNN, per-year sequence) is minted inside
-create_order's atomic block; the sequential pk stays the internal/URL key.
-The race proof uses the forced collision-retry path (conventions.md:17:
-IntegrityError retry, never check-then-act) plus a unique-constraint pin --
-both deterministic -- instead of wall-clock thread scheduling. Razorpay is
-always mocked; no test touches the network.
+``order_number`` (ORD-YYYY-XXXXXXXX, a random suffix drawn from ``secrets``)
+is minted inside create_order's atomic block; the sequential pk stays the
+internal/URL key. The race proof uses the forced collision-retry path
+(conventions.md:17: IntegrityError retry, never check-then-act) plus a
+unique-constraint pin -- both deterministic -- instead of wall-clock thread
+scheduling. Razorpay is always mocked; no test touches the network.
 """
 
+import contextlib
+import random
 import re
 from decimal import Decimal
 from unittest import mock
@@ -54,8 +56,8 @@ class OrderNumberTestBase(ApiTestCase):
         )
 
     def second_buyer_checkout(self):
-        """The dedup guard is keyed per user, so a second order enters the
-        sequence through a different shopper's identical checkout."""
+        """The dedup guard is keyed per user, so a second order is minted
+        for a different shopper's identical checkout."""
         self.make_user("other")
         other_client = self.fresh_client()
         self.api_login("other", client=other_client)
@@ -69,32 +71,34 @@ class OrderNumberTestBase(ApiTestCase):
 
 @tag("orders")
 class OrderNumberFormatTests(OrderNumberTestBase):
-    """[R-8.4] format pin and per-year sequence semantics."""
+    """[R-8.4] format pin and the year bucket of the random suffix."""
 
     def test_checkout_mints_spec_format_order_number(self):
         res = self.checkout()
 
         self.assertEqual(res.status_code, 201, res.data)
         order = Order.objects.get(id=res.data["id"])
-        match = re.fullmatch(r"ORD-(\d{4})-(\d{6})", order.order_number)
+        match = re.fullmatch(r"ORD-(\d{4})-([0-9A-F]{8})", order.order_number)
         self.assertIsNotNone(match, order.order_number)
         self.assertEqual(int(match.group(1)), timezone.now().year)
         # the customer-facing reference is exposed at creation time
         self.assertEqual(res.data["order_number"], order.order_number)
 
-    def test_sequence_increments_within_a_year(self):
+    def test_order_numbers_are_unique_within_a_year(self):
         first_res = self.checkout()
         second_res = self.second_buyer_checkout()
 
         year = timezone.now().year
         first = Order.objects.get(id=first_res.data["id"])
         second = Order.objects.get(id=second_res.data["id"])
-        self.assertEqual(first.order_number, f"ORD-{year}-000001")
-        self.assertEqual(second.order_number, f"ORD-{year}-000002")
+        self.assertRegex(first.order_number, rf"ORD-{year}-[0-9A-F]{{8}}")
+        self.assertRegex(second.order_number, rf"ORD-{year}-[0-9A-F]{{8}}")
+        self.assertNotEqual(first.order_number, second.order_number)
 
-    def test_sequence_restarts_each_year(self):
-        """The sequence bucket is the creation year: next year's first order
-        starts at 000001 again, and this year's numbers are untouched."""
+    def test_year_bucket_tracks_the_creation_year(self):
+        """The year bucket is the creation year: an order minted under a
+        different clock year carries that year in its prefix, and this
+        year's numbers are untouched (the suffix is random either way)."""
         self.checkout()
         next_year = timezone.now().year + 1
 
@@ -109,15 +113,52 @@ class OrderNumberFormatTests(OrderNumberTestBase):
 
         self.assertEqual(res.status_code, 201, res.data)
         second = Order.objects.get(id=res.data["id"])
-        self.assertEqual(second.order_number, f"ORD-{next_year}-000001")
+        self.assertRegex(second.order_number, rf"ORD-{next_year}-[0-9A-F]{{8}}")
         self.assertEqual(Order.objects.count(), 2)
+
+
+@tag("orders")
+class OrderNumberEntropyTests(OrderNumberTestBase):
+    """[R-8.4] the random suffix is drawn from ``secrets``, never ``random``."""
+
+    def test_suffix_is_secrets_token_hex_and_not_the_random_module(self):
+        """The suffix is the output of ``secrets.token_hex``, not a
+        ``random`` draw.
+
+        Mutation-proven and two-sided: ``secrets.token_hex`` is stubbed, so
+        the minted number is pinned to that stub's exact output (switching
+        to any other entropy source changes the number and fails the
+        equality), and the module-level ``random`` surface is made to raise,
+        so replacing ``secrets.token_hex(4)`` with ``random.getrandbits`` /
+        ``choice`` / ``randint`` / ``randrange`` fails loudly rather than
+        silently minting a predictable number."""
+        year = timezone.now().year
+        with contextlib.ExitStack() as stack:
+            token_hex = stack.enter_context(
+                mock.patch.object(
+                    checkout_views.secrets, "token_hex", return_value="deadbeef"
+                )
+            )
+            for name in ("getrandbits", "choice", "randint", "randrange"):
+                stack.enter_context(
+                    mock.patch.object(
+                        random,
+                        name,
+                        side_effect=AssertionError(f"random.{name} was called"),
+                    )
+                )
+            number = checkout_views._generate_order_number()
+
+        self.assertEqual(number, f"ORD-{year}-DEADBEEF")
+        token_hex.assert_called_once_with(4)
 
 
 @tag("orders")
 class OrderNumberRaceTests(OrderNumberTestBase):
     """conventions.md:17 -- unique generation handles IntegrityError retry.
-    The max+1 lookup is only a fast path; the unique constraint on
-    Order.order_number is the concurrency authority."""
+    A random suffix can collide (birthday-bound across orders), so the
+    unique constraint on Order.order_number is the concurrency authority;
+    the generator only mints candidates and retries on the IntegrityError."""
 
     def test_unique_constraint_is_the_race_authority(self):
         self.raw_order(number="ORD-2026-000001")

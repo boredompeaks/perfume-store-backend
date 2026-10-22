@@ -1,0 +1,37 @@
+{
+  "task": "SPEC-D-01 cycle 1",
+  "title": "The two shipment-to-order lifecycle fixes are each pinned by exactly the test that fails without them",
+  "note": "Both mutations are reverts of this cycle's fixes, replayed against the shipped tree. M1 restores the pre-fix update_fields list, which omits updated_at: save(update_fields=...) leaves auto_now columns out unless they are listed, so the order keeps its stale freshness marker while its status moves. M2 restores the pre-fix delivery gate, which advanced the whole order as soon as ONE parcel reached delivered: with a sibling still at label_created the order read delivered while the customer did not have the second parcel, which is the reported defect. Each replay's scope is the pin written for it, so a green run under the mutation is a survived mutant rather than a pass.",
+  "mutations": [
+    {
+      "id": "M1",
+      "description": "the order write drops updated_at from update_fields again, so a shipment-driven move leaves Order.updated_at at its stale value",
+      "path": "backend/shipping/lifecycle.py",
+      "find": "        order.save(update_fields=[\"status\", \"fulfilment_status\", \"updated_at\"])",
+      "replace": "        order.save(update_fields=[\"status\", \"fulfilment_status\"])",
+      "expected_failing_tests": [
+        "test_a_parcel_driven_move_refreshes_the_order_updated_at"
+      ],
+      "claimed_count": 1,
+      "test_scope": [
+        "shipping.tests_tracking.OrderLifecycleSyncTests.test_a_parcel_driven_move_refreshes_the_order_updated_at"
+      ]
+    },
+    {
+      "id": "M2",
+      "description": "the completeness gate is removed again, so one delivered parcel marks the whole split order delivered while its sibling is still in the warehouse",
+      "path": "backend/shipping/lifecycle.py",
+      "find": "        if precondition_failures(order, target):\n            return None\n        if target == ORDER_DELIVERED and not _every_parcel_delivered(order.pk):\n            return None",
+      "replace": "        if precondition_failures(order, target):\n            return None",
+      "expected_failing_tests": [
+        "test_one_delivered_parcel_does_not_deliver_a_split_order",
+        "test_an_exception_parcel_blocks_the_order_delivery"
+      ],
+      "claimed_count": 2,
+      "test_scope": [
+        "shipping.tests_tracking.OrderLifecycleSyncTests.test_one_delivered_parcel_does_not_deliver_a_split_order",
+        "shipping.tests_tracking.OrderLifecycleSyncTests.test_an_exception_parcel_blocks_the_order_delivery"
+      ]
+    }
+  ]
+}

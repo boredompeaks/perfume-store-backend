@@ -1,9 +1,10 @@
 "use client";
 
-import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { useEffect, useRef, useState } from "react";
 import { ApiError } from "@/lib/api";
-import { applyCartCoupon, getCart, removeCartCoupon } from "@/lib/cart-api";
+import { applyCartCoupon, removeCartCoupon } from "@/lib/cart-api";
+import { useCart } from "@/lib/use-cart";
 import { formatINR } from "@/lib/money";
 import { applyCoupon } from "@/lib/orders-api";
 import type { CouponPreview } from "@/lib/types";
@@ -22,9 +23,10 @@ export default function CouponForm({
   onCodeChange?: (code: string | null) => void;
 }) {
   const queryClient = useQueryClient();
-  // Same query key as CartView/Header — reads the cached cart (which
-  // carries coupon_code) without a second fetch.
-  const { data: cart } = useQuery({ queryKey: ["cart"], queryFn: getCart });
+  // The shared hook: same identity-keyed entry as CartView/Header and gated
+  // on the auth bootstrap, so the coupon block reads the settled account/guest
+  // cart instead of opening a second, unkeyed ["cart"] cache slot (D-04b).
+  const { data: cart } = useCart();
   const [code, setCode] = useState("");
   const [applied, setApplied] = useState<{
     code: string;
@@ -43,11 +45,12 @@ export default function CouponForm({
       const cartBody = await applyCartCoupon(value);
       return { preview, cartBody };
     },
-    onSuccess: ({ preview, cartBody }) => {
+    onSuccess: ({ preview }) => {
       setApplied({ code: preview.coupon, preview });
       setError(null);
       setCode("");
-      queryClient.setQueryData(["cart"], cartBody);
+      // Prefix invalidation reaches the identity-keyed ["cart", status] entry.
+      queryClient.invalidateQueries({ queryKey: ["cart"] });
       onCodeChange?.(preview.coupon);
     },
     onError: (err) => {
@@ -70,11 +73,11 @@ export default function CouponForm({
 
   const remove = useMutation({
     mutationFn: removeCartCoupon,
-    onSuccess: (cartBody) => {
+    onSuccess: () => {
       setApplied(null);
       setError(null);
       setCode("");
-      queryClient.setQueryData(["cart"], cartBody);
+      queryClient.invalidateQueries({ queryKey: ["cart"] });
       onCodeChange?.(null);
     },
     onError: (err) => {

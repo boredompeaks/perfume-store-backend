@@ -20,6 +20,7 @@ around a real checkout session (spec route rule 3) will decide their fate.
 """
 
 import logging
+import secrets
 from datetime import timedelta
 from decimal import Decimal
 
@@ -34,6 +35,7 @@ from rest_framework.permissions import AllowAny
 from rest_framework.response import Response
 
 from cart.models import Cart
+from cart.services import resolve_cart
 from common.models import AuditEvent
 from common.money import quantize_money
 
@@ -300,34 +302,20 @@ ORDER_NUMBER_ATTEMPTS = 5
 
 
 def _current_year():
-    """The order-number year bucket: the sequence restarts each January 1st
+    """The order-number year bucket: the prefix year changes each January 1st
     (R-8.4), so this is the only clock the format depends on."""
     return timezone.now().year
 
 
-def _next_order_sequence(year):
-    """Next sequence for the year's ORD-YYYY- prefix: the highest committed
-    number's sequence plus one. Fixed-width zero padding keeps lexicographic
-    order equal to numeric order. This lookup is check-then-act and
-    deliberately NOT the concurrency authority -- two connections can read
-    the same max before either commits -- the unique constraint on
-    Order.order_number is, and the caller retries on the IntegrityError
-    (conventions.md:17)."""
-    prefix = f"ORD-{year}-"
-    latest = (
-        Order.objects.filter(order_number__startswith=prefix)
-        .order_by("-order_number")
-        .values_list("order_number", flat=True)
-        .first()
-    )
-    if latest is None:
-        return 1
-    return int(latest.rsplit("-", 1)[1]) + 1
-
-
 def _generate_order_number():
+    """Mint a customer-facing order number with a random component.
+
+    The year bucket keeps the display stable (ORD-YYYY-XXXXXXXX); the random
+    suffix comes from ``secrets`` (never ``random``) so it is not
+    predictable. The unique constraint on ``Order.order_number`` remains the
+    concurrency authority and the caller retries on IntegrityError."""
     year = _current_year()
-    return f"ORD-{year}-{_next_order_sequence(year):06d}"
+    return f"ORD-{year}-{secrets.token_hex(4).upper()}"
 
 
 def _mint_order_reservations(order, lines, user):
@@ -426,15 +414,13 @@ def create_order(request):
     guest_email = ""
     owner = {"user": user}
 
-    if not request.session.session_key:
-        return Response({"error": "Cart not found"}, status=status.HTTP_404_NOT_FOUND)
+    # D-04a/D-07: the SAME ownership rule the cart endpoints use. A customer
+    # who signed in checks out their ACCOUNT cart; a legacy guest order read
+    # stays scoped to the caller's session cart. create=False keeps the
+    # documented "Cart not found" 404 instead of minting an empty cart.
+    cart = resolve_cart(request, create=False)
 
-    session_id = request.session.session_key
-
-    try:
-        cart = Cart.objects.get(session_id=session_id)
-
-    except Cart.DoesNotExist:
+    if cart is None:
         return Response({"error": "Cart not found"}, status=status.HTTP_404_NOT_FOUND)
 
     cart_items = cart.items.select_related("product").all()
@@ -608,23 +594,11 @@ def create_order(request):
                 status=status.HTTP_400_BAD_REQUEST,
             )
 
-        if coupon.discount_type == "percentage":
-            # Quantize before any comparison or storage: the raw division
-            # carries extra decimal places, and an unquantized discount
-            # drifts the display, the audit trail and the stored 2-dp
-            # order amount apart (F-11).
-            discount_amount = quantize_money(
-                (subtotal_amount * coupon.discount_value) / Decimal("100")
-            )
-
-            if coupon.maximum_discount is not None:
-                discount_amount = min(discount_amount, coupon.maximum_discount)
-
-        else:
-            discount_amount = coupon.discount_value
-
-        # Never discount more than subtotal
-        discount_amount = min(discount_amount, subtotal_amount)
+        # The coupon-type math lives in one helper so this order row and the
+        # public preview can never disagree about what a coupon is worth
+        # (F-11). A free-shipping coupon returns 0.00 merchandise discount
+        # here; its waiver is applied to the delivery quote below instead.
+        discount_amount = coupon_merchandise_discount(coupon, subtotal_amount)
 
     # [R-1.07] SPEC-1-B05: still the MERCHANDISE total. The shipping charge is
     # added inside the atomic block below, once the collapse guards have had
@@ -735,6 +709,15 @@ def create_order(request):
             shipping_amount = (
                 shipping_quote.amount if shipping_quote is not None else Decimal("0.00")
             )
+            # A free-shipping coupon waives the delivery charge entirely. The
+            # quote above still ran (so an unserviceable destination is still
+            # refused -- free shipping waives the charge, not the service),
+            # but the order is charged nothing for delivery while KEEPING the
+            # quoted method as the record of how it ships. That retained
+            # method is what tells this zero apart from the
+            # no-shipping-configured zero where the method is null.
+            if coupon is not None and coupon.discount_type == Coupon.FREE_SHIPPING:
+                shipping_amount = Decimal("0.00")
             shipping_method_id = (
                 shipping_quote.method_id if shipping_quote is not None else None
             )
@@ -940,7 +923,7 @@ def guest_order_detail(request, order_number=None):
     identifies exactly one order, and the order number is an optional
     cross-check on top of it. A caller who has the token can always find the
     order; a caller who has only the order number cannot, because the number
-    is a guessable per-year sequence and is never the credential.
+    carries a random suffix and is never the credential.
 
     The failure is one answer for every miss - no token, a wrong token, an
     unknown number, or somebody else's number with a valid token - so the
@@ -1021,6 +1004,37 @@ def validate_redeemable_coupon(code, cart):
     return coupon, subtotal, None
 
 
+def coupon_merchandise_discount(coupon, subtotal):
+    """The merchandise discount ``coupon`` grants against ``subtotal``.
+
+    The one place the coupon-type math lives, so the public preview
+    (``apply_coupon``) and the persisted checkout discount can never disagree
+    about what a coupon is worth -- the F-11 quantize parity, and the reason
+    a free-shipping rule added in one caller cannot silently miss the other.
+    Both callers pass their own server-computed subtotal and store exactly
+    what this returns.
+
+    A free-shipping coupon carries NO merchandise discount: it waives the
+    order's delivery charge instead (applied to the server-side quote in
+    ``create_order``). It therefore always returns 0.00 here regardless of
+    ``discount_value``, while still passing every validity and minimum-order
+    check in its callers. The result is never more than the subtotal.
+    """
+    if coupon.discount_type == Coupon.FREE_SHIPPING:
+        return Decimal("0.00")
+
+    if coupon.discount_type == "percentage":
+        discount = quantize_money((subtotal * coupon.discount_value) / Decimal("100"))
+
+        if coupon.maximum_discount is not None:
+            discount = min(discount, coupon.maximum_discount)
+
+    else:
+        discount = coupon.discount_value
+
+    return min(discount, subtotal)
+
+
 @api_view(["POST"])
 @throttle_scope("coupon")
 def apply_coupon(request):
@@ -1035,16 +1049,11 @@ def apply_coupon(request):
     # Resolve the cart before the coupon: otherwise a caller with no cart
     # could still probe code existence by watching for the coupon error
     # instead of the cart error. With the cart first, every cartless caller
-    # gets the same answer for every code.
-    if not request.session.session_key:
-        return Response({"error": "Cart not found"}, status=status.HTTP_404_NOT_FOUND)
+    # gets the same answer for every code. Ownership follows the credential
+    # (D-04a): account cart for a bearer, session cart for a guest.
+    cart = resolve_cart(request, create=False)
 
-    session_id = request.session.session_key
-
-    try:
-        cart = Cart.objects.get(session_id=session_id)
-
-    except Cart.DoesNotExist:
+    if cart is None:
         return Response({"error": "Cart not found"}, status=status.HTTP_404_NOT_FOUND)
 
     # From here on every rejection shares one uniform response: unknown,
@@ -1054,19 +1063,11 @@ def apply_coupon(request):
     if rejection is not None:
         return rejection
 
-    if coupon.discount_type == "percentage":
-        # Same quantize parity as checkout (F-11): the preview must show
-        # the exact 2-dp discount the order will store.
-        discount = quantize_money((subtotal * coupon.discount_value) / Decimal("100"))
-
-        if coupon.maximum_discount is not None:
-            discount = min(discount, coupon.maximum_discount)
-
-    else:
-        discount = coupon.discount_value
-
-    # Never allow discount greater than subtotal
-    discount = min(discount, subtotal)
+    # Same helper and quantize parity as checkout (F-11): the preview shows
+    # the exact 2-dp merchandise discount the order will store. A
+    # free-shipping coupon shows 0.00 here -- its waiver lands on the delivery
+    # charge at checkout, which this merchandise-only preview has no field for.
+    discount = coupon_merchandise_discount(coupon, subtotal)
 
     final_total = subtotal - discount
 

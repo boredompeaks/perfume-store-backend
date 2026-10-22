@@ -1,19 +1,39 @@
 import { initOpenNextCloudflareForDev } from "@opennextjs/cloudflare";
 await initOpenNextCloudflareForDev();
-const apiOrigin = process.env.NEXT_PUBLIC_API_BASE_URL ?? "http://127.0.0.1:8000";
-const { protocol, hostname, port } = new URL(apiOrigin);
+// src/lib/config.ts addresses the API on the host the page was served from,
+// so development has two valid origins (localhost and 127.0.0.1). A single
+// hardcoded origin here would have the CSP block every request from the other
+// spelling.
+const configuredApiOrigin = process.env.NEXT_PUBLIC_API_BASE_URL;
+// Development runs the API on 8000 and the storefront on 3000 (Playwright and
+// `next dev`), with 3001 as the fallback port when 3000 is taken. They are all
+// loopback spellings of the same local stack, so CSP and the image optimizer
+// admit the whole set. A configured origin (staging/production) replaces it.
+const devOrigins = [
+  "http://localhost:8000",
+  "http://127.0.0.1:8000",
+  "http://localhost:3000",
+  "http://127.0.0.1:3000",
+  "http://localhost:3001",
+];
+const apiOrigins = configuredApiOrigin ? [configuredApiOrigin] : devOrigins;
 // Razorpay Checkout loads from checkout.razorpay.com and talks to
 // api.razorpay.com; the payment modal is a frame. Without these hosts the
 // SPA reports "Could not load the payment gateway" (script blocked by CSP).
 const scriptSrc = ["'self'", "'unsafe-inline'", "https://checkout.razorpay.com"];
 const connectSrc = [
   "'self'",
-  apiOrigin,
+  ...apiOrigins,
   "https://api.razorpay.com",
   "https://lumberjack.razorpay.com",
 ];
 const frameSrc = ["'self'", "https://api.razorpay.com"];
-const imgSrc = ["'self'", apiOrigin, "data:", "https://checkout.razorpay.com"];
+const imgSrc = [
+  "'self'",
+  ...apiOrigins,
+  "data:",
+  "https://checkout.razorpay.com",
+];
 const csp = [
   "default-src 'self'",
   `script-src ${scriptSrc.join(" ")}`,
@@ -38,7 +58,14 @@ const securityHeaders = [
 const nextConfig = {
   async headers() { return [{ source: "/:path*", headers: securityHeaders }]; },
   images: {
-    remotePatterns: [{ protocol: protocol.replace(":", ""), hostname, ...(port ? { port } : {}) }],
+    remotePatterns: apiOrigins.map((origin) => {
+      const { protocol, hostname, port } = new URL(origin);
+      return {
+        protocol: protocol.replace(":", ""),
+        hostname,
+        ...(port ? { port } : {}),
+      };
+    }),
     // §10.3 / U-W15-T17 (W9-T3 deferred F2): AVIF first, WebP fallback.
     // Without this key Next's default is ["image/webp"] only, so the
     // optimizer never offers AVIF even to a browser that asks for it.

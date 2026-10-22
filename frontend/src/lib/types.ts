@@ -47,6 +47,8 @@ export type CartItem = {
 
 export type Cart = {
   id: number;
+  /** Exposed by the backend (V-09) — deliberately ignored by the frontend. */
+  session_id: string;
   items: CartItem[];
   created_at: string;
   updated_at: string;
@@ -79,6 +81,8 @@ export type OrderStatus =
 
 export type Order = {
   id: number;
+  /** Customer-facing reference (ORD-YYYY-XXXXXXXX); tracking keys on this. */
+  order_number: string;
   user: number;
   full_name: string;
   phone: string;
@@ -94,6 +98,24 @@ export type Order = {
   items: OrderItem[];
   created_at: string;
   updated_at: string;
+};
+
+export type ShipmentEvent = {
+  status: string;
+  occurred_at: string;
+};
+
+export type Shipment = {
+  order_number: string;
+  status: string;
+  carrier: string;
+  /** Provider slug code, or null when the parcel is unlinked. */
+  provider: string | null;
+  tracking_number: string;
+  /** Operator-configured URL — render only through safeExternalUrl(). */
+  tracking_url: string | null;
+  estimated_delivery: string | null;
+  events: ShipmentEvent[];
 };
 
 export type CouponPreview = {

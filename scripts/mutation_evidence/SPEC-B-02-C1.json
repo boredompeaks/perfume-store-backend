@@ -1,0 +1,19 @@
+{
+  "task": "SPEC-B-02-C1",
+  "title": "The provider link on a shipment stays writable by the role that writes shipments",
+  "note": "Authored from the committed blob at the fix commit, before any replay ran, with claimed_count deliberately absent: this is the FIRST recording, so the replay that follows is the figures' origin, not a re-check. M1 restores the exact pre-fix line: the provider autocomplete widget, whose endpoint resolves through ShippingProviderAdmin's view permission (shipping.manage) and therefore 403s for support, the role that holds shipments.write. The two pins that read the form and the field declaration must both fail; the POST-with-a-provider test alone would pass under the mutation because Django accepts the posted pk whatever widget rendered it.",
+  "mutations": [
+    {
+      "id": "M1",
+      "description": "the provider field becomes an autocomplete again, so the add form for a support holder renders an empty select2 widget fed by an endpoint that answers 403 to that role - the defect the fix cycle closed",
+      "path": "backend/shipping/admin.py",
+      "find": "    list_filter = (\"status\", \"carrier\", \"provider\")\n    # Spec 6.9 line 2013:",
+      "replace": "    list_filter = (\"status\", \"carrier\", \"provider\")\n    autocomplete_fields = (\"provider\",)\n    # Spec 6.9 line 2013:",
+      "expected_failing_tests": [
+        "test_the_provider_field_is_a_plain_select_not_a_gated_autocomplete",
+        "test_a_support_holder_links_a_provider_and_gets_the_tracking_url"
+      ],
+      "test_scope": ["shipping.tests_tracking"]
+    }
+  ]
+}

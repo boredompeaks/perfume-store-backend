@@ -402,6 +402,36 @@ class ApplyCouponTests(OrderTestBase):
         self.assertEqual(res.data["discount"], Decimal("40.00"))
         self.assertEqual(res.data["final_total"], Decimal("960.00"))
 
+    # 33. free-shipping coupons carry no merchandise discount -------------------
+    def test_free_shipping_coupon_grants_no_merchandise_discount(self):
+        """A free-shipping coupon waives the delivery charge, so the
+        merchandise preview is untouched: the discount is 0.00 and the
+        subtotal stands -- never the (irrelevant) discount_value, which would
+        make the cart preview and the checkout order disagree."""
+        self.make_coupon(
+            code="FREESHIP",
+            discount_type="free_shipping",
+            discount_value="50",  # deliberately non-zero: it must be ignored
+        )
+        res = self._preview("FREESHIP")
+        self.assertEqual(res.status_code, 200, res.data)
+        self.assertEqual(res.data["subtotal"], Decimal("1000.00"))
+        self.assertEqual(res.data["discount"], Decimal("0.00"))
+        self.assertEqual(res.data["final_total"], Decimal("1000.00"))
+
+    def test_free_shipping_coupon_still_honours_the_minimum_order_amount(self):
+        """The free-shipping type composes with the redemption rules: a
+        below-minimum cart is refused with the same uniform body as any
+        other coupon."""
+        self.make_coupon(
+            code="FREESHIPBIG",
+            discount_type="free_shipping",
+            minimum_order_amount="5000",
+        )
+        res = self._preview("FREESHIPBIG")
+        self.assertEqual(res.status_code, 400, res.data)
+        self.assertEqual(res.data["error"], "Invalid coupon code")
+
     def test_preview_without_session_or_cart(self):
         self.make_coupon(code="SAVE10", discount_value="10")
         res = self.fresh_client().post(
@@ -468,7 +498,7 @@ class CheckoutTests(OrderTestBase):
         self.seed_session_cart([])  # keep buyer cart; add the expensive item
         product = products.objects.get(name="Grand Cru")
         CartItem.objects.create(
-            cart=Cart.objects.get(session_id=self.client.session.session_key),
+            cart=self.current_cart(),
             product=product,
             quantity=1,
         )
@@ -524,7 +554,7 @@ class CheckoutTests(OrderTestBase):
     def test_item_rows_snapshot_each_cart_line(self):
         other = self.make_product(name="Oud Royale", price="250.00", stock=4)
         self.seed_session_cart([])
-        cart = Cart.objects.get(session_id=self.client.session.session_key)
+        cart = self.current_cart()
         CartItem.objects.create(cart=cart, product=other, quantity=3)
 
         order = self.create_order()
@@ -551,14 +581,17 @@ class CheckoutTests(OrderTestBase):
         self.assertEqual(Order.objects.count(), 0)
 
     def test_checkout_requires_a_cart_and_an_owner(self):
-        """TIER1-GUEST-DEADEND: the session cart still has to exist for an
-        account caller (F-18's documented 404), and an anonymous caller is
-        refused outright with the one uniform guest-checkout refusal --
-        before the cart is even looked at, creating nothing.
+        """TIER1-GUEST-DEADEND: the cart still has to exist for an account
+        caller (F-18's documented 404), and an anonymous caller is refused
+        outright with the one uniform guest-checkout refusal -- before the
+        cart is even looked at, creating nothing.
         """
-        # authenticated, no cart in this session -> documented 404 (F-18)
+        # authenticated, no ACCOUNT cart -> documented 404 (F-18). D-04a
+        # makes that cart per-user, so the buyer's seeded cart is removed
+        # rather than asking for a "session" that no longer owns it.
         client = self.fresh_client()
         self.api_login("buyer", client=client)
+        self.current_cart(client).delete()
         res = client.post(
             "/api/orders/checkout/", self.checkout_payload(), format="json"
         )
@@ -580,7 +613,7 @@ class CheckoutTests(OrderTestBase):
         self.assertEqual(Order.objects.count(), 0)
 
     def test_checkout_with_empty_cart_rejected(self):
-        cart = Cart.objects.get(session_id=self.client.session.session_key)
+        cart = self.current_cart()
         cart.items.all().delete()
         res = self.checkout()
         self.assertEqual(res.status_code, 400, res.data)
@@ -615,7 +648,7 @@ class CheckoutStockGateTests(OrderTestBase):
         # instead of paying for an order that cannot be fulfilled
         self.assertEqual(Order.objects.count(), 0)
         self.assertEqual(OrderItem.objects.count(), 0)
-        cart = Cart.objects.get(session_id=self.client.session.session_key)
+        cart = self.current_cart()
         self.assertEqual(cart.items.get().quantity, 2)  # cart line untouched
         self.product.refresh_from_db()
         self.assertEqual(self.product.stock, 1)  # no decrement at creation
@@ -643,7 +676,7 @@ class CheckoutStockGateTests(OrderTestBase):
     def test_one_bad_line_names_only_the_bad_product(self):
         second = self.make_product(name="Oud Royale", price="250.00", stock=4)
         self.seed_session_cart([])
-        cart = Cart.objects.get(session_id=self.client.session.session_key)
+        cart = self.current_cart()
         CartItem.objects.create(cart=cart, product=second, quantity=1)
         products.objects.filter(pk=self.product.pk).update(stock=1)
 
@@ -661,7 +694,7 @@ class CheckoutStockGateTests(OrderTestBase):
     def test_multiple_bad_lines_listed_in_error(self):
         second = self.make_product(name="Oud Royale", price="250.00", stock=4)
         self.seed_session_cart([])
-        cart = Cart.objects.get(session_id=self.client.session.session_key)
+        cart = self.current_cart()
         CartItem.objects.create(cart=cart, product=second, quantity=3)
         products.objects.filter(pk=self.product.pk).update(stock=1)  # wants 2
         products.objects.filter(pk=second.pk).update(stock=2)  # wants 3
@@ -765,7 +798,7 @@ class CheckoutDedupTests(OrderTestBase):
         first = self.checkout()
         self.assertEqual(first.status_code, 201, first.data)
         other = self.make_product(name="Oud Royale", price="250.00", stock=4)
-        cart = Cart.objects.get(session_id=self.client.session.session_key)
+        cart = self.current_cart()
         CartItem.objects.create(cart=cart, product=other, quantity=1)
 
         res = self.checkout()
@@ -1178,7 +1211,7 @@ class VerifyPaymentTests(OrderTestBase):
     def test_verified_payment_updates_stock_coupon_cart_and_status(self):
         second = self.make_product(name="Oud Royale", price="250.00", stock=4)
         self.seed_session_cart([])
-        cart = Cart.objects.get(session_id=self.client.session.session_key)
+        cart = self.current_cart()
         CartItem.objects.create(cart=cart, product=second, quantity=1)
         coupon = self.make_coupon(code="PCT10", discount_value="10", usage_limit=5)
         order = self.create_order(coupon=coupon)
@@ -1216,13 +1249,51 @@ class VerifyPaymentTests(OrderTestBase):
         cart_items = list(CartItem.objects.filter(cart=cart))
         self.assertEqual(cart_items, [])  # both paid lines removed
 
+    def test_verify_sweeps_a_legacy_session_cart_with_no_order_link(self):
+        """Pre-TIER1-WEBHOOK-CART orders have no Cart.order link, so the
+        browser verify's own session sweep is still the only clear those
+        legacy rows get. D-04a makes that sweep invisible to the ordinary
+        flow (account carts carry no session key), so the legacy shape is
+        built explicitly here: a session cart under this client's cookie
+        that no order points at."""
+        # Mint the browser session cookie through the anonymous boot GET,
+        # then put the legacy line in that session cart and go back to the
+        # bearer for the account checkout.
+        self.auth(None)
+        self.client.get("/api/cart/")
+        legacy = self.current_cart()
+        CartItem.objects.create(cart=legacy, product=self.product, quantity=2)
+        self.auth(self.token)
+
+        _client_mock, order, payload = self._prepare_paid_setup()
+        res = self.client.post("/api/orders/payment/verify/", payload, format="json")
+
+        self.assertEqual(res.status_code, 200, res.data)
+        self.assertEqual(legacy.items.count(), 0)  # the bought line is gone
+
+    def test_verify_succeeds_when_the_session_has_no_cart_row(self):
+        """The legacy sweep is best-effort: a browser that carries a session
+        cookie but no cart row (expired/cleared) must not turn a successful
+        capture into an error."""
+        self.auth(None)
+        self.client.get("/api/cart/")  # mint the session cookie + cart
+        self.current_cart().delete()
+        self.auth(self.token)
+
+        _client_mock, order, payload = self._prepare_paid_setup()
+        res = self.client.post("/api/orders/payment/verify/", payload, format="json")
+
+        self.assertEqual(res.status_code, 200, res.data)
+        order.refresh_from_db()
+        self.assertEqual(order.payment_status, "captured")
+
     def test_verified_payment_writes_one_sale_movement_per_product(self):
         """SPEC-6-02 [6.5.17]: payment-time decrements are inventory
         mutations too — one SALE ledger row per product, system actor (no
         user), the order number as reference, and stock_after equal to the
         real post-decrement stock."""
         second = self.make_product(name="Oud Royale", price="250.00", stock=4)
-        cart = Cart.objects.get(session_id=self.client.session.session_key)
+        cart = self.current_cart()
         CartItem.objects.create(cart=cart, product=second, quantity=1)
         order = self.create_order()
         self.razorpay_mock(order_id="order_LEDGER")
@@ -4517,15 +4588,15 @@ class CartOrderCaptureClearTests(OrderTestBase):
     # re-collect every one of its tests inside this module as well.
     WEBHOOK_SECRET = "TESTINGONLY-WEBHOOK-SECRET-CART-CLEAR"
 
-    def _session_cart(self):
-        """The buyer's session cart, as checkout leaves it."""
-        return Cart.objects.get(session_id=self.client.session.session_key)
+    def _account_cart(self):
+        """The buyer's account cart, as checkout leaves it (D-04a)."""
+        return self.current_cart()
 
     # (e) The link is SET at order creation, inside the checkout transaction.
     def test_checkout_links_the_cart_to_the_created_order(self):
         order = self.create_order()
 
-        cart = self._session_cart()
+        cart = self._account_cart()
         self.assertEqual(cart.order, order)
         self.assertEqual(order.cart, cart)
         # Checkout itself still does not clear: cleanup is capture's job.
@@ -4534,7 +4605,7 @@ class CartOrderCaptureClearTests(OrderTestBase):
     # (a) A successful capture empties the linked cart (cart row survives).
     def test_commit_order_sale_empties_the_linked_cart(self):
         order = self.create_order()
-        cart = self._session_cart()
+        cart = self._account_cart()
         self.assertEqual(cart.items.count(), 1)
 
         commit_order_sale(order)
@@ -4549,7 +4620,7 @@ class CartOrderCaptureClearTests(OrderTestBase):
     # re-clear — a line added AFTER the capture survives the replay.
     def test_a_replayed_capture_does_not_reclear_the_cart(self):
         order = self.create_order()
-        cart = self._session_cart()
+        cart = self._account_cart()
         commit_order_sale(order)
         # Both real writers record the capture in their own transaction;
         # mirror that so the second call meets the payment-dimension gate.
@@ -4594,13 +4665,13 @@ class CartOrderCaptureClearTests(OrderTestBase):
         self.product.refresh_from_db()
         self.assertEqual(self.product.stock, 8)
         # The buyer's (unlinked) session cart is untouched by this capture.
-        self.assertEqual(self._session_cart().items.count(), 1)
+        self.assertEqual(self._account_cart().items.count(), 1)
 
     # (d) on_delete=SET_NULL: deleting the order nulls the link, never
     # cascades the cart away.
     def test_deleting_the_order_nulls_the_link_and_keeps_the_cart(self):
         order = self.create_order()
-        cart = self._session_cart()
+        cart = self._account_cart()
 
         order.delete()
 
