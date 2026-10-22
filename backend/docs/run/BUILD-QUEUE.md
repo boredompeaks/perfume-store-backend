@@ -209,3 +209,56 @@ T2 — Load / stress / resource against the REAL URL (after red team):
   candidates in decisions.md).
 - Client demonstration / production-load as marketing: owner schedules later;
   Phase T data feeds it.
+
+---
+
+## Batch 2026-10-22 — Tracks A-E + S9/S16 gap close
+
+Owner directive: finish the Track A-E list integrated with the S9/S16
+compliance gaps, then **STOP**. No PR merge in this batch; every auditor
+pushes its own lane branch for durability.
+
+### Track A-E audit (checked against tree `03322e2`, not assumed)
+
+| ID | Status | Evidence |
+|---|---|---|
+| SPEC-A-01 | **LEFT (partial)** | `orders/admin.py:258-296` — `address` is in the change-form fieldset (`:211`, `:332`) but absent from `list_display` and `search_fields` (only `city`) |
+| SPEC-A-02 | DONE | `orders/models.py:89,151-152` — `secrets`-derived `ORD-YYYY-XXXXXXXX`, never sequential |
+| SPEC-A-03 | DONE | `orders/state.py:130-143` enums; serializer exposes `payment_status`/`fulfilment_status`; frontend `OrderStatusBadge.tsx`, `OrderDetailView.tsx` consume them |
+| SPEC-B-01 | DONE | `shipping/models.py:630` `ShippingProvider` |
+| SPEC-B-02 | DONE | `shipping/admin.py:286` `ShippingProviderAdmin` (RoleAwareModelAdmin) |
+| SPEC-B-03 | DONE | `shipping/models.py:370-378` `Shipment.provider` FK + `tracking_url`; `carrier` CharField kept back-compat |
+| SPEC-B-04 | DONE | `common/roles.py:79,95` `shipping.manage` (finance/admin), `shipments.write` (support/admin) |
+| SPEC-C-01 | DONE | `orders/views/checkout.py:696-709` `quote_shipping(region, postal, method, lock=True)` |
+| SPEC-C-02 | DONE | `orders/models.py:46` `Coupon.FREE_SHIPPING`; waiver at `checkout.py:715-728` |
+| SPEC-C-03 | **LEFT** | no `Product.free_shipping` anywhere (repo-wide grep) |
+| SPEC-C-04 | **LEFT** | product flag gate absent; coupon admin gate to be verified in the same task |
+| SPEC-D-01 | DONE | `shipping/lifecycle.py` + `OrderSyncResult`; webhook-driven sync |
+| SPEC-D-02 | DONE | `frontend/src/components/orders/ShipmentTracking.tsx` @ `896e84b` |
+| SPEC-E-01 | **LEFT** | no `refund-request` route/model; only `admin_order_refund` |
+| SPEC-E-02 | **LEFT (partial)** | admin refund exists (`orders/views/refund.py:83`); no customer request to approve |
+
+**Remaining from the bug list: 5** — A-01, C-03, C-04, E-01, E-02.
+C-03 + C-04 are one build (the flag and its gate); E-01 + E-02 are two
+sequential builds (request entity, then approval wiring).
+
+### Queue (build order, one builder per lane at a time)
+
+| ID | Task | Lane | Status |
+|---|---|---|---|
+| SPEC-9-T1 | money renders as 2-dp strings on the wire (R-9.3.24) | A | IN-AUDIT `db369cb` |
+| SPEC-9-T4 | owner-scoped addresses CRUD (R-9.2.20) | B | IN-AUDIT `80491c4` |
+| SPEC-A-01 | surface `address` in admin list + search for `orders.read` roles | A | PENDING |
+| SPEC-C-03/04 | `Product.free_shipping` + admin gate + checkout zeroing | A | PENDING |
+| SPEC-E-01 | `POST /api/orders/{id}/refund-request/` (owner + captured) | B | PENDING |
+| SPEC-E-02 | admin approve/reject the customer request | B | PENDING |
+| SPEC-9-T3 | mount inventory adjustment under the admin family (R-9.4.7) | B | PENDING |
+| SPEC-9-T2 | `CheckoutSession` + anonymous checkout path (R-9.3.7/12/20) | A | PENDING |
+| SPEC-9-T5 | api-contract table covers every write endpoint (R-9.5) | A | PENDING |
+| SPEC-16-T4 | `TIME_ZONE`/`LANGUAGE_CODE` env-driven (R-16.4) | B | PENDING |
+| SPEC-16-T2/05 | SiteSettings: name/logo/locale + `maintenance_mode` (R-16.3/15) | B | PENDING |
+| SPEC-16-T1 | retire stale N-A + prefetch claims (R-16.22) | A | PENDING |
+
+Rules for this batch: one task per lane at a time; no file overlap between
+concurrent lanes; every task builder -> auditor -> push that lane; changelog
+row per task; no PR opened or merged. Duplicates are merged, not queued twice.
