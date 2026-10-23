@@ -262,3 +262,16 @@ sequential builds (request entity, then approval wiring).
 Rules for this batch: one task per lane at a time; no file overlap between
 concurrent lanes; every task builder -> auditor -> push that lane; changelog
 row per task; no PR opened or merged. Duplicates are merged, not queued twice.
+
+### Promotion (2026-10-23)
+
+PR #48 `spec-comp -> feat/add-frontend` **MERGED** `47de5c2` (parents
+`8ba6746` + `aeaeb04`), verified independently (`gh pr view 48` state MERGED,
+`origin/feat/add-frontend` = `47de5c2`). CI all-green: backend-tests
+`39961186676` (2468 tests, cov 99.83% CI / 99.84% local, 0 missed),
+secret-scan, ghcr-publish, GitGuardian clean. Deploy run `39961840500`
+success (release gate + release), `RELEASED_SHA=47de5c2`. Live verified:
+`api.boredompeaks.me/health/` 200, `/api/settings/` 200 carrying
+`name/logo/locale/maintenance_mode`, `test.boredompeaks.me` 200.
+Lane tips drained: `lane/a` `4f75886`, `lane/b` `af1722a`; `spec-comp`
+`aeaeb04`. `S9-T2` (guest checkout) remains owner-deferred.
