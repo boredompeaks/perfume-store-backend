@@ -13,7 +13,7 @@ from django.contrib.admin.sites import site
 from django.contrib.auth.models import Group, User
 from django.test import tag
 
-from common.roles import ROLE_CATALOGUE, ROLE_FINANCE, ROLE_INVENTORY, ROLE_SUPPORT
+from common.roles import ROLE_CATALOGUE, ROLE_FINANCE, ROLE_INVENTORY
 from common.testing import ApiTestCase
 from orders.admin import OrderAdmin
 from orders.models import Order
