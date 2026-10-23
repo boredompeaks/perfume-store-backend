@@ -222,9 +222,9 @@ pushes its own lane branch for durability.
 
 | ID | Status | Evidence |
 |---|---|---|
-| SPEC-A-01 | **LEFT (partial)** | `orders/admin.py:258-296` — `address` is in the change-form fieldset (`:211`, `:332`) but absent from `list_display` and `search_fields` (only `city`) |
+| SPEC-A-ADDR (your A-01) | **LEFT (partial)** | `orders/admin.py:258-296` — `address` is in the change-form fieldset (`:211`, `:332`) but absent from `list_display` and `search_fields` (only `city`). **ID collision:** ledger `SPEC-A-01` is the SHIPPED order-number task (2026-10-18, `54c4209`/`6f0e9e3`) — never reuse that ID |
 | SPEC-A-02 | DONE | `orders/models.py:89,151-152` — `secrets`-derived `ORD-YYYY-XXXXXXXX`, never sequential |
-| SPEC-A-03 | DONE | `orders/state.py:130-143` enums; serializer exposes `payment_status`/`fulfilment_status`; frontend `OrderStatusBadge.tsx`, `OrderDetailView.tsx` consume them |
+| SPEC-A-03 | DONE (code) | `orders/state.py:130-143` enums; serializer exposes `payment_status`/`fulfilment_status`; frontend `OrderStatusBadge.tsx:14-15` cites the enum source and `OrderDetailView.tsx` consumes both. No standalone docs page; the enum source is the doc |
 | SPEC-B-01 | DONE | `shipping/models.py:630` `ShippingProvider` |
 | SPEC-B-02 | DONE | `shipping/admin.py:286` `ShippingProviderAdmin` (RoleAwareModelAdmin) |
 | SPEC-B-03 | DONE | `shipping/models.py:370-378` `Shipment.provider` FK + `tracking_url`; `carrier` CharField kept back-compat |
@@ -232,9 +232,9 @@ pushes its own lane branch for durability.
 | SPEC-C-01 | DONE | `orders/views/checkout.py:696-709` `quote_shipping(region, postal, method, lock=True)` |
 | SPEC-C-02 | DONE | `orders/models.py:46` `Coupon.FREE_SHIPPING`; waiver at `checkout.py:715-728` |
 | SPEC-C-03 | **LEFT** | no `Product.free_shipping` anywhere (repo-wide grep) |
-| SPEC-C-04 | **LEFT** | product flag gate absent; coupon admin gate to be verified in the same task |
+| SPEC-C-04 | **PARTIAL** | coupon half DONE — `CouponAdmin` gated by `discounts.write` (`orders/admin.py:985-990`); product-flag gate absent, folded into C-03 |
 | SPEC-D-01 | DONE | `shipping/lifecycle.py` + `OrderSyncResult`; webhook-driven sync |
-| SPEC-D-02 | DONE | `frontend/src/components/orders/ShipmentTracking.tsx` @ `896e84b` |
+| SPEC-D-02 | DONE | changelog `2026-10-21 D-02`; later consolidated into `ShipmentTracking.tsx` @ `896e84b` |
 | SPEC-E-01 | **LEFT** | no `refund-request` route/model; only `admin_order_refund` |
 | SPEC-E-02 | **LEFT (partial)** | admin refund exists (`orders/views/refund.py:83`); no customer request to approve |
 
@@ -246,18 +246,18 @@ sequential builds (request entity, then approval wiring).
 
 | ID | Task | Lane | Status |
 |---|---|---|---|
-| SPEC-9-T1 | money renders as 2-dp strings on the wire (R-9.3.24) | A | IN-AUDIT `db369cb` |
-| SPEC-9-T4 | owner-scoped addresses CRUD (R-9.2.20) | B | IN-AUDIT `80491c4` |
-| SPEC-A-01 | surface `address` in admin list + search for `orders.read` roles | A | PENDING |
-| SPEC-C-03/04 | `Product.free_shipping` + admin gate + checkout zeroing | A | PENDING |
-| SPEC-E-01 | `POST /api/orders/{id}/refund-request/` (owner + captured) | B | PENDING |
-| SPEC-E-02 | admin approve/reject the customer request | B | PENDING |
-| SPEC-9-T3 | mount inventory adjustment under the admin family (R-9.4.7) | B | PENDING |
-| SPEC-9-T2 | `CheckoutSession` + anonymous checkout path (R-9.3.7/12/20) | A | PENDING |
-| SPEC-9-T5 | api-contract table covers every write endpoint (R-9.5) | A | PENDING |
-| SPEC-16-T4 | `TIME_ZONE`/`LANGUAGE_CODE` env-driven (R-16.4) | B | PENDING |
-| SPEC-16-T2/05 | SiteSettings: name/logo/locale + `maintenance_mode` (R-16.3/15) | B | PENDING |
-| SPEC-16-T1 | retire stale N-A + prefetch claims (R-16.22) | A | PENDING |
+| SPEC-9-T1 | money renders as 2-dp strings on the wire (R-9.3.24) | A | **SHIPPED** c2 `11dd76b`, pushed `origin/lane/a` (2369 both engines, cov 99.83%; min-order 400 now `"5000.00"`) |
+| SPEC-9-T4 | owner-scoped addresses CRUD (R-9.2.20) | B | **SHIPPED** c1 `80491c4`, pushed `origin/lane/b` (2379 both engines, cov 99.83%) |
+| SPEC-A-ADDR | surface `address` in admin list + search for `orders.read` roles (renamed from user A-01; ledger SPEC-A-01 is the shipped order-number task) | B | **SHIPPED** c1 `c386806`, pushed `origin/lane/b` (2386 both engines, cov 99.83%; mutations M1/M2 proven) |
+| SPEC-C-03/04 | `Product.free_shipping` + admin gate + checkout zeroing | A | **SHIPPED** c1 `49c1d87`, pushed `origin/lane/a` (2378 both engines, cov 99.83%; any→all and admin-gate mutations proven) |
+| SPEC-E-01 | `POST /api/orders/{id}/refund-request/` (owner + captured) | B | **SHIPPED** c1 `e73824c`, pushed `origin/lane/b` (2414 both engines, cov 99.84%; owner-filter and duplicate-constraint mutations proven) |
+| SPEC-E-02 | admin approve/reject the customer request | B | **SHIPPED** c1 `ba8f0af`, pushed `origin/lane/b` (2433 both engines, cov 99.84%; 4 mutations proven) |
+| SPEC-9-T3 | mount inventory adjustment under the admin family (R-9.4.7) | A | **SHIPPED** c1 `011bbcf`, pushed `origin/lane/a` (2385 both engines, cov 99.83%; anonymous 403 adjudicated as the staff contract) |
+| SPEC-9-T2 | `CheckoutSession` + anonymous checkout path (R-9.3.7/12/20) | A | **DEFERRED (owner)** — guest checkout is the owner-deferred SPEC-3-02 / TIER1-launch decision; do not build without explicit approval |
+| SPEC-9-T5 | api-contract table covers every write endpoint (R-9.5) | A | **SHIPPED** c1 `4f75886`, pushed `origin/lane/a` (doc-only; 26 claims 0 errors, 0 non-.md files) |
+| SPEC-16-T4 | `TIME_ZONE`/`LANGUAGE_CODE` env-driven (R-16.4) | B | **SHIPPED** c1 `af1722a`, pushed `origin/lane/b` (2440 both engines, cov 99.84%; malformed-zone mutation proven) |
+| SPEC-16-T2/05 | SiteSettings: name/logo/locale + `maintenance_mode` (R-16.3/15) | A | **SHIPPED** c1 `d9d55c9`, pushed `origin/lane/a` (2394 both engines, cov 99.83%; logo-URL and maintenance-key mutations proven) |
+| SPEC-16-T1 | retire stale N-A + prefetch claims (R-16.22) | A | **SHIPPED** c1 `4f75886`, pushed `origin/lane/a` (R-16.22 reclassified IMPLEMENTED; DEBUG/currency stale claims retired) |
 
 Rules for this batch: one task per lane at a time; no file overlap between
 concurrent lanes; every task builder -> auditor -> push that lane; changelog
