@@ -57,6 +57,11 @@ from .state import (
     transition_allowed,
 )
 
+# SPEC-A-ADDR: the changelist shows enough of the destination to identify a
+# parcel; the full value stays in the change form. Named once so the display
+# and its test cannot drift to different widths.
+SHORT_ADDRESS_MAX_LENGTH = 40
+
 
 class OrderItemInline(admin.TabularInline):
     model = OrderItem
@@ -195,13 +200,19 @@ class OrderAdmin(SavedFilterMixin, RoleAwareModelAdmin):
         "order_number",
         # Destination only: enough to sort a courier run, not a customer
         # record. Name, phone and email are not on this grid.
+        # SPEC-A-ADDR: the street rides beside the city, previewed -- a
+        # packer has to know where the parcel goes, but this is a column,
+        # never a lookup key (see scoped_search_fields below).
+        "short_address",
         "city",
         "status",
         "created_at",
     )
-    # No phone / email / customer-name search: the operator may find an order
-    # to pack by its reference, not by probing customer records
-    # (``customers.read`` is a capability it does not hold).
+    # Reference-only search, deliberately: no phone, email, customer-name or
+    # delivery-address terms. The operator may find an order to pack by its
+    # reference, not by probing customer records (``customers.read`` is a
+    # capability it does not hold). The address is rendered as a destination
+    # column above, but rendering it is not authorization to search it.
     scoped_search_fields = ("id", "order_number")
     # The change form, narrowed the same way: what is going where, and what
     # state it is in. The user, phone, money and gateway columns stay out.
@@ -261,6 +272,9 @@ class OrderAdmin(SavedFilterMixin, RoleAwareModelAdmin):
         "order_number",
         "user",
         "full_name",
+        # SPEC-A-ADDR: the destination at a glance; the change form keeps
+        # the untruncated value.
+        "short_address",
         "status",
         "total_amount",
         "discount_amount",
@@ -283,6 +297,10 @@ class OrderAdmin(SavedFilterMixin, RoleAwareModelAdmin):
     # only identity a guest row has). It is deliberately NOT in
     # scoped_search_fields: the packing operator may find an order to pack by
     # its reference, not by probing customer records (see B03 above).
+    # SPEC-A-ADDR: ``address`` is searchable for the order-visibility roles
+    # (support/finance resolving a delivery), and for the same reason it
+    # stays OUT of scoped_search_fields: the packing queue may read the
+    # destination as a column, never use it as a customer probe.
     search_fields = (
         "id",
         "user__username",
@@ -290,6 +308,7 @@ class OrderAdmin(SavedFilterMixin, RoleAwareModelAdmin):
         "guest_email",
         "full_name",
         "phone",
+        "address",
     )
     date_hierarchy = "created_at"
     ordering = ("-created_at",)
@@ -360,6 +379,21 @@ class OrderAdmin(SavedFilterMixin, RoleAwareModelAdmin):
             },
         ),
     )
+
+    @admin.display(description="Address")
+    def short_address(self, obj):
+        """A one-line preview of the delivery address for the grid.
+
+        The change form owns the full value; this column exists so a reader
+        can tell two destinations apart without opening each order. Newlines
+        and runs of whitespace are collapsed for the single table cell, and
+        the length is bounded so one long address cannot crowd out the money
+        columns beside it.
+        """
+        address = " ".join((obj.address or "").split())
+        if len(address) <= SHORT_ADDRESS_MAX_LENGTH:
+            return address
+        return f"{address[: SHORT_ADDRESS_MAX_LENGTH - 1].rstrip()}…"
 
     @admin.display(description="Payment ref")
     def payment_ref(self, obj):
