@@ -22,6 +22,7 @@ from orders.views import (
 # above because it authenticates no user at all: its only credential is the
 # provider's signature over the raw request body.
 from orders.webhooks import razorpay_webhook
+from products.views import inventory_adjust
 
 # --- /api/v1/ namespace (spec §9, R-9.0) ---------------------------------
 # Spec §9 prescribes versioned routes under /api/v1/ with four
@@ -80,6 +81,17 @@ v1_admin_patterns = [
     # edges it is the money-movement counterpart of (same admin family, same
     # direct-mount rule).
     path("orders/<int:order_id>/refund/", admin_order_refund, name="orders-refund"),
+    # [R-9.4.7] SPEC-9-T3: the inventory-module adjustment write, mounted in
+    # the family its own contract names (§9.4 row 7, POST
+    # /admin/inventory/adjustments). It previously shipped only through
+    # products.urls, i.e. the store family; this is the same view object, not
+    # a second handler, and products.urls keeps its path alive as a
+    # deprecated alias.
+    path(
+        "inventory/adjustments/",
+        inventory_adjust,
+        name="inventory-adjust",
+    ),
 ]
 
 # [R-1.15] SPEC-1-06: the gateway's own callback, mounted under the family §9
@@ -158,6 +170,14 @@ urlpatterns = [
         "api/admin/orders/<int:order_id>/refund/",
         admin_order_refund,
         name="admin-orders-refund",
+    ),
+    # [R-9.4.7] SPEC-9-T3: legacy alias of the v1:admin inventory-adjust
+    # mount above (same view object, no duplication), kept beside the other
+    # /api/admin/ seams until the frontend base-URL cutover.
+    path(
+        "api/admin/inventory/adjustments/",
+        inventory_adjust,
+        name="admin-inventory-adjust",
     ),
     path("admin/", admin.site.urls),
     path("health/", health, name="health"),

@@ -70,6 +70,14 @@ class products(models.Model):
     # buyable: a False default would silently empty a live catalogue the
     # moment the deploy ran.
     is_active = models.BooleanField(default=True)
+    # SPEC-C-03: a merchant-set delivery rule for this row. Default False so
+    # the migration that adds the column leaves every existing product
+    # charged exactly as it was; checkout applies it to the one order-level
+    # shipping charge, and the public store payload does not carry it: the
+    # storefront's identically named field is the shipping OPTION's
+    # threshold flag, a different column, and a bare product flag would add
+    # no buying information the total does not already show.
+    free_shipping = models.BooleanField(default=False)
     image = models.ImageField(
         upload_to="products/",
         blank=True,

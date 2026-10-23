@@ -1,10 +1,39 @@
 from rest_framework import serializers
 
-from .models import Coupon, Order, OrderItem, ReturnRequest
+from common.money import quantize_money
+
+from .models import Coupon, Order, OrderItem, RefundRequest, ReturnRequest
+
+
+def money_string(value):
+    """Render a money ``Decimal`` as the 2-dp string the JSON wire carries.
+
+    DRF's JSON renderer encodes a bare ``Decimal`` as a float, dropping the
+    trailing zero (``1234.50`` -> ``1234.5``) and handing downstream code a
+    binary amount to round. Every money value in a response therefore leaves
+    through this one formatter, so the wire shape is a string at the same
+    2-dp precision the ``DecimalField`` stores -- while the stored column
+    itself stays a ``Decimal``.
+    """
+    return f"{quantize_money(value):f}"
+
+
+class MoneyField(serializers.DecimalField):
+    """Read-only money field whose representation is :func:`money_string`."""
+
+    def __init__(self, **kwargs):
+        kwargs.setdefault("max_digits", 10)
+        kwargs.setdefault("decimal_places", 2)
+        kwargs.setdefault("read_only", True)
+        super().__init__(**kwargs)
+
+    def to_representation(self, value):
+        return money_string(value)
 
 
 class OrderItemSerializer(serializers.ModelSerializer):
-    subtotal = serializers.ReadOnlyField()
+    price = MoneyField()
+    subtotal = MoneyField()
 
     class Meta:
         model = OrderItem
@@ -62,6 +91,11 @@ class OrderSerializer(serializers.ModelSerializer):
         slug_field="code",
         read_only=True,
     )
+    # [R-9.3.24] The order's money columns as the 2-dp strings the wire
+    # carries; the stored Decimals are untouched.
+    discount_amount = MoneyField()
+    total_amount = MoneyField()
+    shipping_amount = MoneyField()
 
     class Meta:
         model = Order
@@ -155,6 +189,20 @@ class OrderSerializer(serializers.ModelSerializer):
         ]
 
 
+class CouponPreviewSerializer(serializers.Serializer):
+    """[R-9.3.24] The public coupon preview body.
+
+    The view computes the figures as ``Decimal``; this projection is what
+    turns them into the 2-dp strings on the wire, so the preview and the
+    checkout order cannot disagree about how money is spelled.
+    """
+
+    coupon = serializers.CharField(read_only=True)
+    subtotal = MoneyField()
+    discount = MoneyField()
+    final_total = MoneyField()
+
+
 class ReturnRequestSerializer(serializers.ModelSerializer):
     """[R-1.16] SPEC-1-B07b: ONE customer-facing projection of a return request.
 
@@ -207,6 +255,76 @@ class ReturnRequestSerializer(serializers.ModelSerializer):
             "updated_at",
         ]
         read_only_fields = fields
+
+
+class RefundRequestSerializer(serializers.ModelSerializer):
+    """[SPEC-E-01] The one customer-facing projection of a refund request,
+    used both to validate the POST body and to render the 201.
+
+    Explicit fields, never ``'__all__'`` (conventions.md): the model gains
+    columns in E-02 and later, and a projection that follows the table
+    automatically would publish whatever those tasks add. The fields below are
+    the ones a customer's own request needs.
+
+    THE OMISSIONS ARE THE CONTRACT:
+
+    * ``decided_by`` is not exposed. It is a staff account id, useful on the
+      E-02 review surface, not to the customer who filed the ask.
+    * ``order``/``requester`` are read-only server-side facts: the order is
+      the URL's subject and the requester is ``request.user`` (the view binds
+      both), so a client can never file a request against another order or on
+      another customer's behalf.
+    * ``status``/``decided_at``/``created_at`` are read-only: the decision
+      belongs to E-02, and the timestamps are machine-maintained.
+
+    ``items`` is a ListField rather than the inferred JSONField so a body of
+    the wrong shape is a field error (400) instead of unvalidated JSON. Every
+    id is checked against the addressed order; an empty list means the whole
+    order. Duplicates are collapsed while preserving first-seen order so a
+    later approval cannot count one line twice.
+    """
+
+    order_number = serializers.CharField(source="order.order_number", read_only=True)
+    reason = serializers.CharField(trim_whitespace=True, allow_blank=False)
+    items = serializers.ListField(
+        child=serializers.IntegerField(min_value=1),
+        required=False,
+        allow_empty=True,
+    )
+
+    class Meta:
+        model = RefundRequest
+        fields = [
+            "id",
+            "order",
+            "order_number",
+            "requester",
+            "reason",
+            "items",
+            "status",
+            "decided_at",
+            "created_at",
+        ]
+        read_only_fields = [
+            "id",
+            "order",
+            "order_number",
+            "requester",
+            "status",
+            "decided_at",
+            "created_at",
+        ]
+
+    def validate_items(self, value):
+        """Every supplied id must be a line of the order being refunded."""
+        order = self.context.get("order")
+        if order is None:
+            return value
+        supplied = list(dict.fromkeys(value))
+        owned = set(order.items.filter(pk__in=supplied).values_list("id", flat=True))
+        if any(item_id not in owned for item_id in supplied):
+            raise serializers.ValidationError("Every item must belong to this order")
+        return supplied
 
 
 class CouponSerializer(serializers.ModelSerializer):

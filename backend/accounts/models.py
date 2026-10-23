@@ -65,3 +65,39 @@ class TOTPDevice(models.Model):
         return cls.objects.filter(
             user=user, enabled=True, confirmed_at__isnull=False
         ).first()
+
+
+class Address(models.Model):
+    """A saved delivery address owned by exactly one customer (SPEC-9-T4).
+
+    Ownership is the authorization boundary: every read and write goes
+    through a queryset filtered by ``user``, so another customer's id is
+    indistinguishable from a missing one (uniform 404, no existence leak).
+
+    The per-user default is a *view-level* invariant, not a database one:
+    writers clear the previous default inside the same transaction that
+    sets the new one (see ``accounts.views._lock_user_addresses``). The
+    length caps on ``postal_code`` and ``phone`` are the validation
+    surface — absurd values are rejected at the serializer, not stored.
+    """
+
+    user = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.CASCADE,
+        related_name="addresses",
+    )
+    label = models.CharField(max_length=40, blank=True)
+    line1 = models.CharField(max_length=255)
+    line2 = models.CharField(max_length=255, blank=True)
+    city = models.CharField(max_length=100)
+    state = models.CharField(max_length=100, blank=True)
+    postal_code = models.CharField(max_length=20)
+    country = models.CharField(max_length=100)
+    phone = models.CharField(max_length=32, blank=True)
+    is_default = models.BooleanField(default=False)
+
+    class Meta:
+        ordering = ["-is_default", "id"]
+
+    def __str__(self):
+        return f"{self.label or self.line1} ({self.user})"

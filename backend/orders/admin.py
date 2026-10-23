@@ -10,7 +10,11 @@ from django.template.response import TemplateResponse
 from django.urls import path, reverse
 from django.utils import timezone
 
-from common.admin import RoleAwareModelAdmin
+from common.admin import (
+    CONFIRMATION_NOTE_FIELD,
+    ConfirmationNoteForm,
+    RoleAwareModelAdmin,
+)
 from common.audit import log_mutation, model_field_changes
 from common.models import AuditEvent
 from common.saved_filters import SavedFilterMixin
@@ -40,6 +44,7 @@ from .models import (
     OrderItem,
     OrderStatusEvent,
     Refund,
+    RefundRequest,
     ReturnRequest,
     _allowed_from,
     return_transition_allowed,
@@ -56,6 +61,16 @@ from .state import (
     precondition_failures,
     transition_allowed,
 )
+
+# [SPEC-E-02] The amount a request asks for is derived beside the customer
+# seam that writes its ``items`` list, so the staff decision cannot read the
+# list by a second, drifting rule.
+from .views.refund import refund_request_amount
+
+# SPEC-A-ADDR: the changelist shows enough of the destination to identify a
+# parcel; the full value stays in the change form. Named once so the display
+# and its test cannot drift to different widths.
+SHORT_ADDRESS_MAX_LENGTH = 40
 
 
 class OrderItemInline(admin.TabularInline):
@@ -195,13 +210,19 @@ class OrderAdmin(SavedFilterMixin, RoleAwareModelAdmin):
         "order_number",
         # Destination only: enough to sort a courier run, not a customer
         # record. Name, phone and email are not on this grid.
+        # SPEC-A-ADDR: the street rides beside the city, previewed -- a
+        # packer has to know where the parcel goes, but this is a column,
+        # never a lookup key (see scoped_search_fields below).
+        "short_address",
         "city",
         "status",
         "created_at",
     )
-    # No phone / email / customer-name search: the operator may find an order
-    # to pack by its reference, not by probing customer records
-    # (``customers.read`` is a capability it does not hold).
+    # Reference-only search, deliberately: no phone, email, customer-name or
+    # delivery-address terms. The operator may find an order to pack by its
+    # reference, not by probing customer records (``customers.read`` is a
+    # capability it does not hold). The address is rendered as a destination
+    # column above, but rendering it is not authorization to search it.
     scoped_search_fields = ("id", "order_number")
     # The change form, narrowed the same way: what is going where, and what
     # state it is in. The user, phone, money and gateway columns stay out.
@@ -261,6 +282,9 @@ class OrderAdmin(SavedFilterMixin, RoleAwareModelAdmin):
         "order_number",
         "user",
         "full_name",
+        # SPEC-A-ADDR: the destination at a glance; the change form keeps
+        # the untruncated value.
+        "short_address",
         "status",
         "total_amount",
         "discount_amount",
@@ -283,6 +307,10 @@ class OrderAdmin(SavedFilterMixin, RoleAwareModelAdmin):
     # only identity a guest row has). It is deliberately NOT in
     # scoped_search_fields: the packing operator may find an order to pack by
     # its reference, not by probing customer records (see B03 above).
+    # SPEC-A-ADDR: ``address`` is searchable for the order-visibility roles
+    # (support/finance resolving a delivery), and for the same reason it
+    # stays OUT of scoped_search_fields: the packing queue may read the
+    # destination as a column, never use it as a customer probe.
     search_fields = (
         "id",
         "user__username",
@@ -290,6 +318,7 @@ class OrderAdmin(SavedFilterMixin, RoleAwareModelAdmin):
         "guest_email",
         "full_name",
         "phone",
+        "address",
     )
     date_hierarchy = "created_at"
     ordering = ("-created_at",)
@@ -360,6 +389,21 @@ class OrderAdmin(SavedFilterMixin, RoleAwareModelAdmin):
             },
         ),
     )
+
+    @admin.display(description="Address")
+    def short_address(self, obj):
+        """A one-line preview of the delivery address for the grid.
+
+        The change form owns the full value; this column exists so a reader
+        can tell two destinations apart without opening each order. Newlines
+        and runs of whitespace are collapsed for the single table cell, and
+        the length is bounded so one long address cannot crowd out the money
+        columns beside it.
+        """
+        address = " ".join((obj.address or "").split())
+        if len(address) <= SHORT_ADDRESS_MAX_LENGTH:
+            return address
+        return f"{address[: SHORT_ADDRESS_MAX_LENGTH - 1].rstrip()}…"
 
     @admin.display(description="Payment ref")
     def payment_ref(self, obj):
@@ -1115,6 +1159,238 @@ class RefundAdmin(RoleAwareModelAdmin):
 
     def has_delete_permission(self, request, obj=None):
         return False  # money that moved is never deleted
+
+
+class RefundRequestDecisionNoteForm(ConfirmationNoteForm):
+    """[SPEC-E-02] The decision note is REQUIRED on the refund-request surface.
+
+    The shared interstitial treats a note as optional (SPEC-20-5), but a
+    refund decision is a financial act that has to explain itself later, so
+    this surface tightens only its own field: an empty note fails validation
+    on the confirmation page and the action body refuses to decide without
+    one. The base class stays optional for every other action.
+    """
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        field = self.fields[CONFIRMATION_NOTE_FIELD]
+        field.required = True
+        field.help_text = "Required. Recorded verbatim in the admin audit trail."
+
+
+@admin.register(RefundRequest)
+class RefundRequestAdmin(RoleAwareModelAdmin):
+    """[SPEC-E-02] The staff decision over a customer's refund request.
+
+    The customer's ask (SPEC-E-01) is never money. Approval is the one seam
+    allowed to turn it into money, and it does so by calling
+    ``orders.refunds.issue_refund`` - the same writer the API and the order
+    action call - rather than writing a ``Refund`` row by hand or calling the
+    gateway. That is what keeps the balance gate, the idempotency key, the
+    payment-dimension move and the privileged-action record in one place.
+
+    Approval locks the order and the pending request, derives the asked-for
+    amount (line totals, or the remaining balance for a whole-order ask),
+    issues the refund, and only then marks the request approved. A refusal or
+    a gateway failure escapes that atomic block whole, so the request stays
+    pending and no partial state survives.
+
+    ``refunds.create`` gates view and change - finance reconciles the money
+    and support must not move it - and no role gets add or delete: a request
+    is filed by a customer, and the decision trail is never erased. Every
+    field renders read-only; the only two writes are the actions below, both
+    confirmation-gated with a required note.
+    """
+
+    capability_map = {
+        "view": "refunds.create",
+        "add": None,
+        "change": "refunds.create",
+        "delete": None,
+    }
+    actions = ("approve_requests", "reject_requests")
+    action_capabilities = {
+        "approve_requests": "refunds.create",
+        "reject_requests": "refunds.create",
+    }
+    confirmation_required_actions = frozenset(actions)
+    confirmation_reason_actions = frozenset(actions)
+    list_display = (
+        "id",
+        "order",
+        "requester",
+        "status",
+        "item_count",
+        "created_at",
+    )
+    list_filter = ("status", "created_at")
+    search_fields = (
+        "id",
+        "order__id",
+        "order__order_number",
+        "requester__username",
+    )
+    readonly_fields = (
+        "order",
+        "requester",
+        "reason",
+        "items",
+        "status",
+        "decided_by",
+        "decided_at",
+        "created_at",
+    )
+    date_hierarchy = "created_at"
+
+    @admin.display(description="Items")
+    def item_count(self, refund_request):
+        # An empty list is the whole order, so "0" would misread the ask.
+        return len(refund_request.items) if refund_request.items else "All"
+
+    def has_add_permission(self, request):
+        return False  # asked for by the customer, never hand-written
+
+    def has_delete_permission(self, request, obj=None):
+        return False  # the decision trail is never erased
+
+    def confirmation_reason_form(self, action_name, data=None):
+        if action_name not in self.confirmation_reason_actions:
+            return None
+        return RefundRequestDecisionNoteForm(data)
+
+    @admin.action(description="Approve selected refund requests")
+    def approve_requests(self, request, queryset):
+        """Turn pending requests into refunds through the ONE money writer.
+
+        One note covers the selection because it is the operator's written
+        justification for this decision, and it is the reason recorded on
+        every refund it issues. A request that is no longer pending is
+        skipped with a message; the refund writer's idempotency key makes a
+        replay collapse onto the refund it already produced, so a second
+        approval can never double-refund.
+        """
+        note = self.confirmation_note(request, "approve_requests")
+        if not note:
+            self.message_user(
+                request,
+                "A decision reason/note is required to decide a refund request.",
+                messages.ERROR,
+            )
+            return
+
+        for refund_request in queryset:
+            try:
+                self._approve_refund_request(request, refund_request, note)
+            except refunds_core.RefundRefused as exc:
+                self.message_user(
+                    request,
+                    f"Refund request #{refund_request.pk}: {exc.message}.",
+                    messages.ERROR,
+                )
+            except refunds_core.RefundGatewayError:
+                # The provider's own text went to the log in the core; the
+                # operator gets the fact and nothing about its internals.
+                self.message_user(
+                    request,
+                    f"Refund request #{refund_request.pk}: the payment "
+                    "gateway could not complete this refund.",
+                    messages.ERROR,
+                )
+
+    @admin.action(description="Reject selected refund requests")
+    def reject_requests(self, request, queryset):
+        """Decline pending requests without touching money or the order."""
+        note = self.confirmation_note(request, "reject_requests")
+        if not note:
+            self.message_user(
+                request,
+                "A decision reason/note is required to decide a refund request.",
+                messages.ERROR,
+            )
+            return
+
+        for refund_request in queryset:
+            with transaction.atomic():
+                locked = (
+                    RefundRequest.objects.select_for_update()
+                    .filter(
+                        pk=refund_request.pk,
+                        status=RefundRequest.Status.PENDING,
+                    )
+                    .first()
+                )
+                if locked is None:
+                    self._already_decided(request, refund_request.pk)
+                    continue
+                locked.status = RefundRequest.Status.REJECTED
+                locked.decided_by = request.user
+                locked.decided_at = timezone.now()
+                locked.save(update_fields=["status", "decided_by", "decided_at"])
+                self.log_change(
+                    request,
+                    locked,
+                    f"Rejected refund request #{locked.pk}. Note: {note}",
+                )
+
+    def _approve_refund_request(self, request, refund_request, note):
+        """One approval, atomic from the locks to the audit record.
+
+        The lock order is order-then-request, the same order the customer
+        filing seam takes, so a decision and a concurrent filing serialize
+        instead of deadlocking. ``issue_refund`` re-locks the order inside
+        this transaction (a savepoint) and rolls its own gateway failure back
+        to that savepoint; the exception leaves this block too, so the request
+        status change below is never reached.
+        """
+        with transaction.atomic():
+            order = Order.objects.select_for_update().get(pk=refund_request.order_id)
+            locked = (
+                RefundRequest.objects.select_for_update()
+                .filter(
+                    pk=refund_request.pk,
+                    status=RefundRequest.Status.PENDING,
+                )
+                .first()
+            )
+            if locked is None:
+                self._already_decided(request, refund_request.pk)
+                return
+
+            amount = refund_request_amount(order, locked.items)
+            receipt = refunds_core.issue_refund(
+                request,
+                order_id=order.pk,
+                amount=amount,
+                reason=note,
+                # Deterministic per request, so a retry after a crash - or a
+                # request an operator re-opened by hand - collapses onto the
+                # refund it already produced instead of paying twice.
+                idempotency_key=f"refund-request-{locked.pk}",
+                source="admin",
+            )
+
+            locked.status = RefundRequest.Status.APPROVED
+            locked.decided_by = request.user
+            locked.decided_at = timezone.now()
+            locked.save(update_fields=["status", "decided_by", "decided_at"])
+
+            # [6.12.6] The request's own half of the privileged-action trail;
+            # issue_refund records the money's half against the Refund row.
+            self.log_change(
+                request,
+                locked,
+                f"Approved refund request #{locked.pk}: refund "
+                f"#{receipt.refund.id} of {receipt.refund.amount} "
+                f"{receipt.order.currency} issued for order #{order.pk}. "
+                f"Note: {note}",
+            )
+
+    def _already_decided(self, request, request_pk):
+        self.message_user(
+            request,
+            f"Refund request #{request_pk} was already decided; nothing to do.",
+            messages.WARNING,
+        )
 
 
 # [R-1.16] SPEC-1-B07a: the return-request surface (spec 6.8 line 1949's

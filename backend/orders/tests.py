@@ -42,6 +42,7 @@ from orders.models import Coupon, Order, OrderItem, OrderStatusEvent, PaymentEve
 from orders.serializers import OrderItemSerializer, OrderSerializer
 from orders.views import _mint_order_reservations, apply_coupon, create_payment
 from products.models import StockMovement, StockReservation, products
+from shipping.models import ShippingMethod, ShippingRate
 
 
 class OrderTestBase(ApiTestCase):
@@ -376,31 +377,27 @@ class ApplyCouponTests(OrderTestBase):
         self.make_coupon(code="HALFCAP", discount_value="50", maximum_discount="300")
         res = self._preview("HALFCAP")
         self.assertEqual(res.status_code, 200, res.data)
-        self.assertEqual(res.data["subtotal"], Decimal("1000.00"))
-        self.assertEqual(
-            res.data["discount"], Decimal("300.00")
-        )  # 500.00 raw -> capped
-        self.assertEqual(res.data["final_total"], Decimal("700.00"))
+        self.assertEqual(res.data["subtotal"], "1000.00")
+        self.assertEqual(res.data["discount"], "300.00")  # 500.00 raw -> capped
+        self.assertEqual(res.data["final_total"], "700.00")
 
         self.make_coupon(code="HALF", discount_value="50")
         res = self._preview("HALF")
-        self.assertEqual(res.data["discount"], Decimal("500.00"))  # uncapped 50%
-        self.assertEqual(res.data["final_total"], Decimal("500.00"))
+        self.assertEqual(res.data["discount"], "500.00")  # uncapped 50%
+        self.assertEqual(res.data["final_total"], "500.00")
 
     # 32. discount clamped at subtotal -------------------------------------------------------
     def test_fixed_discount_clamped_to_subtotal(self):
         self.make_coupon(code="FLAT1500", discount_type="fixed", discount_value="1500")
         res = self._preview("FLAT1500")
         self.assertEqual(res.status_code, 200, res.data)
-        self.assertEqual(
-            res.data["discount"], Decimal("1000.00")
-        )  # clamped, not negative total
-        self.assertEqual(res.data["final_total"], Decimal("0.00"))
+        self.assertEqual(res.data["discount"], "1000.00")  # clamped, not negative
+        self.assertEqual(res.data["final_total"], "0.00")
 
         self.make_coupon(code="FLAT40", discount_type="fixed", discount_value="40")
         res = self._preview("FLAT40")
-        self.assertEqual(res.data["discount"], Decimal("40.00"))
-        self.assertEqual(res.data["final_total"], Decimal("960.00"))
+        self.assertEqual(res.data["discount"], "40.00")
+        self.assertEqual(res.data["final_total"], "960.00")
 
     # 33. free-shipping coupons carry no merchandise discount -------------------
     def test_free_shipping_coupon_grants_no_merchandise_discount(self):
@@ -415,9 +412,9 @@ class ApplyCouponTests(OrderTestBase):
         )
         res = self._preview("FREESHIP")
         self.assertEqual(res.status_code, 200, res.data)
-        self.assertEqual(res.data["subtotal"], Decimal("1000.00"))
-        self.assertEqual(res.data["discount"], Decimal("0.00"))
-        self.assertEqual(res.data["final_total"], Decimal("1000.00"))
+        self.assertEqual(res.data["subtotal"], "1000.00")
+        self.assertEqual(res.data["discount"], "0.00")
+        self.assertEqual(res.data["final_total"], "1000.00")
 
     def test_free_shipping_coupon_still_honours_the_minimum_order_amount(self):
         """The free-shipping type composes with the redemption rules: a
@@ -481,6 +478,115 @@ class ApplyCouponThrottleTests(OrderTestBase):
             self.assertEqual(self._preview("GHOST404").status_code, 400)
             throttled = self._preview("GHOST404")
         self.assertEqual(throttled.status_code, 429, throttled.data)
+
+
+@tag("orders")
+class MoneyWireFormatTests(OrderTestBase):
+    """[R-9.3.24] Every money value in the coupon preview and checkout
+    responses is a 2-dp string in the RENDERED JSON, never a float.
+
+    ``.data`` alone cannot prove this: DRF's JSON renderer is where a bare
+    ``Decimal`` becomes a float, so each pin renders the response and reads
+    the bytes/parsed body a client would actually receive."""
+
+    TWO_DP = r"^-?\d+\.\d{2}$"
+
+    def _rendered(self, response):
+        response.render()
+        return response.content.decode(), json.loads(response.content)
+
+    def _wire(self, response):
+        """The bytes a client receives, parsed -- never re-rendered.
+
+        An error response has already been rewritten by the envelope
+        middleware, so ``response.content`` IS the wire; calling ``render()``
+        would judge this test's own serialization of ``response.data`` instead
+        of the body the middleware actually emitted."""
+        text = response.content.decode()
+        return text, json.loads(text)
+
+    def test_minimum_order_rejection_details_money_is_two_decimal_strings(self):
+        self.make_coupon(code="BIGSPEND", minimum_order_amount="5000")
+        response = self.checkout(coupon_code="BIGSPEND")
+        self.assertEqual(response.status_code, 400, response.data)
+
+        text, payload = self._wire(response)
+        self.assertEqual(payload["error"], "Minimum order amount is required")
+        value = payload["details"]["minimum_order_amount"]
+        self.assertIsInstance(value, str, f"details value rendered as {type(value)}")
+        self.assertRegex(value, self.TWO_DP)
+        self.assertEqual(value, "5000.00")
+        self.assertIn('"minimum_order_amount":"5000.00"', text)
+        # The defect this closes: the bare Decimal reached the envelope's
+        # encoder as the JSON float 5000.0, losing the second decimal place.
+        self.assertNotIn('"minimum_order_amount":5000.0', text)
+        self.assertEqual(Order.objects.count(), 0)
+
+    def test_preview_money_is_two_decimal_strings_on_the_wire(self):
+        self.make_coupon(code="SAVE10", discount_value="10")
+        response = self.client.post(
+            "/api/orders/apply-coupon/", {"code": "SAVE10"}, format="json"
+        )
+        self.assertEqual(response.status_code, 200, response.data)
+
+        text, payload = self._rendered(response)
+        expected = {
+            "subtotal": "1000.00",
+            "discount": "100.00",
+            "final_total": "900.00",
+        }
+        for key, value in expected.items():
+            self.assertIsInstance(
+                payload[key], str, f"{key} rendered as {type(payload[key])}"
+            )
+            self.assertRegex(payload[key], self.TWO_DP)
+            self.assertEqual(payload[key], value)
+            self.assertIn(f'"{key}":"{value}"', text)
+        # The defect this closes: a raw Decimal renders as a JSON float and
+        # loses the second decimal place.
+        self.assertNotIn('"subtotal":1000.0', text)
+        self.assertNotIn('"final_total":900.0', text)
+
+    def test_checkout_money_is_two_decimal_strings_on_the_wire(self):
+        self.make_coupon(code="SAVE10", discount_value="10")
+        response = self.checkout(coupon_code="SAVE10")
+        self.assertEqual(response.status_code, 201, response.data)
+
+        text, payload = self._rendered(response)
+        order_money = {
+            "discount_amount": "100.00",
+            "total_amount": "900.00",
+            "shipping_amount": "0.00",
+        }
+        for key, value in order_money.items():
+            self.assertIsInstance(
+                payload[key], str, f"{key} rendered as {type(payload[key])}"
+            )
+            self.assertRegex(payload[key], self.TWO_DP)
+            self.assertEqual(payload[key], value)
+            self.assertIn(f'"{key}":"{value}"', text)
+
+        self.assertEqual(len(payload["items"]), 1)
+        item = payload["items"][0]
+        item_money = {"price": "500.00", "subtotal": "1000.00"}
+        for key, value in item_money.items():
+            self.assertIsInstance(
+                item[key], str, f"items[0].{key} rendered as {type(item[key])}"
+            )
+            self.assertRegex(item[key], self.TWO_DP)
+            self.assertEqual(item[key], value)
+            self.assertIn(f'"{key}":"{value}"', text)
+
+        self.assertNotIn('"subtotal":1000.0', text)
+        self.assertNotIn('"total_amount":900.0', text)
+
+        # Only the wire representation moved: the stored money stays Decimal.
+        order = Order.objects.get(id=payload["id"])
+        self.assertIsInstance(order.total_amount, Decimal)
+        self.assertEqual(order.total_amount, Decimal("900.00"))
+        item_row = order.items.get()
+        self.assertIsInstance(item_row.subtotal, Decimal)
+        self.assertEqual(item_row.subtotal, Decimal("1000.00"))
 
 
 @tag("orders")
@@ -4766,3 +4872,100 @@ class CartOrderCaptureClearTests(OrderTestBase):
         cart = Cart.objects.get(session_id=guest.session.session_key)
         self.assertIsNone(cart.order)
         self.assertEqual(cart.items.count(), 1)  # the refusal writes nothing
+
+
+@tag("orders")
+class ProductFreeShippingCheckoutTests(ApiTestCase):
+    """SPEC-C-04: the product-level free-shipping flag on the money path.
+
+    The flag waives the delivery CHARGE, never the service: the quote still
+    runs (so an unserviceable destination is still refused) and the quoted
+    method is retained exactly as the coupon waiver retains it. Any
+    qualifying merchandise line is enough (the spec's first option), and a
+    free-shipping coupon beside the flag converges on the same 0.00 without
+    a second effect.
+    """
+
+    def setUp(self):
+        self.buyer = self.make_user("flagbuyer")
+        _, token = self.api_login("flagbuyer")
+        self.assertTrue(token)
+        self.flagged = self.make_product(
+            name="Complimentary Oud",
+            price="250.00",
+            stock=10,
+            category="Oriental",
+            free_shipping=True,
+        )
+        self.charged = self.make_product(
+            name="Charged Rose", price="500.00", stock=10, category="Floral"
+        )
+        self.standard = ShippingMethod.objects.create(code="standard", name="Standard")
+        ShippingRate.objects.create(method=self.standard, amount=Decimal("49.00"))
+        self.freeship = self.make_coupon(
+            code="FREESHIP", discount_type="free_shipping", discount_value="0"
+        )
+
+    def test_any_qualifying_line_zeroes_the_delivery_charge(self):
+        self.seed_session_cart([(self.charged, 1), (self.flagged, 2)])
+
+        res = self.checkout(shipping_method="standard")
+
+        self.assertEqual(res.status_code, 201, res.data)
+        order = Order.objects.get(id=res.data["id"])
+        self.assertEqual(order.shipping_amount, Decimal("0.00"))
+        self.assertEqual(res.data["shipping_amount"], "0.00")
+        # 500.00 + 2 x 250.00 merchandise, delivery waived.
+        self.assertEqual(order.total_amount, Decimal("1000.00"))
+        # The order keeps the method the destination was quoted as.
+        self.assertEqual(order.shipping_method, self.standard)
+        self.assertEqual(order.shipping_method_code, "standard")
+        trail = AuditEvent.objects.get(
+            order=order, event_type=AuditEvent.EventType.ORDER_CREATED
+        )
+        self.assertEqual(trail.detail["shipping_amount"], "0.00")
+        self.assertEqual(trail.detail["shipping_method"], "standard")
+
+    def test_a_cart_with_no_qualifying_line_is_still_charged(self):
+        self.seed_session_cart([(self.charged, 2)])
+
+        res = self.checkout(shipping_method="standard")
+
+        self.assertEqual(res.status_code, 201, res.data)
+        order = Order.objects.get(id=res.data["id"])
+        self.assertEqual(order.shipping_amount, Decimal("49.00"))
+        self.assertEqual(order.total_amount, Decimal("1049.00"))
+        self.assertEqual(order.shipping_method, self.standard)
+
+    def test_free_shipping_coupon_and_product_flag_converge_on_one_zero(self):
+        self.seed_session_cart([(self.flagged, 2)])
+
+        res = self.checkout(shipping_method="standard", coupon_code="FREESHIP")
+
+        self.assertEqual(res.status_code, 201, res.data)
+        order = Order.objects.get(id=res.data["id"])
+        self.assertEqual(order.coupon, self.freeship)
+        self.assertEqual(order.shipping_amount, Decimal("0.00"))
+        self.assertEqual(order.discount_amount, Decimal("0.00"))
+        # One waiver, not two: the total is the merchandise exactly, never
+        # the merchandise minus a second delivery charge.
+        self.assertEqual(order.total_amount, Decimal("500.00"))
+        self.assertEqual(order.shipping_method, self.standard)
+        self.assertEqual(order.shipping_method_code, "standard")
+
+    def test_unserviceable_destination_is_still_refused(self):
+        # A rate that does not serve the destination below: the flag waives
+        # the charge, not the serviceability rule.
+        ShippingRate.objects.all().delete()
+        ShippingRate.objects.create(
+            method=self.standard, amount=Decimal("49.00"), region="Delhi"
+        )
+        self.seed_session_cart([(self.flagged, 1)])
+
+        res = self.checkout(
+            shipping_method="standard", state="Kerala", pincode="682001"
+        )
+
+        self.assertEqual(res.status_code, 400, res.data)
+        self.assertIn("Shipping is not available", res.data["error"])
+        self.assertFalse(Order.objects.filter(user=self.buyer).exists())
