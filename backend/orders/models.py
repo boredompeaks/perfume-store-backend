@@ -719,6 +719,125 @@ class Refund(models.Model):
 
 
 # ==================================
+# [SPEC-E-01] the customer refund-request lifecycle
+# ==================================
+#
+# A customer request is a different lifecycle from ``Refund`` above, and it is
+# deliberately a separate table rather than a new status on that one. A
+# ``Refund`` PENDING row means "the gateway call is in flight inside the refund
+# writer's transaction"; a customer request pending means "the customer asked
+# and a staff member has not decided yet". Loading both meanings onto one row
+# would make the refund writer's concurrency authority ambiguous and would let
+# a request masquerade as money already moving. Approval is E-02, which is the
+# only seam allowed to call the gateway and write a ``Refund``.
+
+
+class RefundRequestStatus(models.TextChoices):
+    """The decision vocabulary for a customer's refund request.
+
+    Declared at module level so the partial unique index below can be built
+    from the values before the model class exists; the model aliases it
+    (``RefundRequest.Status``) the same way ``ReturnRequest.Status`` aliases
+    ``ReturnStatus``.
+    """
+
+    PENDING = "pending", "Pending"
+    APPROVED = "approved", "Approved"
+    REJECTED = "rejected", "Rejected"
+
+
+REFUND_REQUEST_STATUS_CHOICES = RefundRequestStatus.choices
+
+
+class RefundRequest(models.Model):
+    """[SPEC-E-01] One customer's request for a refund on an order.
+
+    The row is the customer's ASK, never the money: filing one writes no
+    ``Refund`` and moves no ``payment_status`` (spec 6.8 line 1985: "Never
+    equate 'refund requested' with 'refund completed'"). E-02 is the staff
+    decision that may approve it and hand it to the refund writer.
+
+    Ownership is stored as ``requester`` as well as read through ``order``
+    because this is a financial trail: the FK is SET_NULL so deleting a
+    customer account can never erase the record of who asked, which is the
+    same reasoning as ``Refund.actor`` and ``OrderStatusEvent.actor``.
+    ``decided_by`` is nullable until E-02 records the staff decision, and is
+    SET_NULL for the same reason.
+
+    ``items`` holds order-item ids and an empty list means the whole order.
+    It is validated against the order at the write boundary (the view), not
+    trusted as free JSON, so a request can never name a line from someone
+    else's order.
+    """
+
+    Status = RefundRequestStatus
+
+    order = models.ForeignKey(
+        Order,
+        # CASCADE like Refund.order and ReturnRequest.order: a request is a
+        # record OF one order and has no referent once that order is gone.
+        on_delete=models.CASCADE,
+        related_name="refund_requests",
+    )
+
+    requester = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        # SET_NULL, never CASCADE: deleting an account must not cascade into
+        # the financial trail (the rule Refund.actor already follows).
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="refund_requests",
+    )
+
+    reason = models.TextField()
+
+    # JSON list of order-item ids; empty = the whole order. No per-element DB
+    # constraint is possible on SQLite, so the view validates every id against
+    # the order it addresses before the write.
+    items = models.JSONField(default=list, blank=True)
+
+    status = models.CharField(
+        max_length=20,
+        choices=REFUND_REQUEST_STATUS_CHOICES,
+        default=RefundRequestStatus.PENDING,
+    )
+
+    decided_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="decided_refund_requests",
+    )
+
+    decided_at = models.DateTimeField(null=True, blank=True)
+
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ("-created_at", "-id")
+        verbose_name = "refund request"
+        verbose_name_plural = "refund requests"
+        constraints = [
+            # The concurrency authority for "one pending request per order":
+            # the view locks the Order while it probes, and this partial
+            # unique index is the last-resort guarantee that two concurrent
+            # requests cannot both be filed. Scoped to ``pending`` so a
+            # decided request releases the order; the customer may ask again
+            # after a decision (E-02 owns that policy at the staff seam).
+            models.UniqueConstraint(
+                fields=["order"],
+                condition=Q(status=RefundRequestStatus.PENDING),
+                name="orders_refundrequest_pending_uidx",
+            ),
+        ]
+
+    def __str__(self):
+        return f"Refund request #{self.pk} ({self.status})"
+
+
+# ==================================
 # [R-1.16] SPEC-1-B07a: the return-request lifecycle
 # ==================================
 #

@@ -6,24 +6,36 @@ dimension without ever moving the order status - a refund is not a cancel,
 which is why an order whose money is returned stays refundable-eligible rather
 than becoming a `cancelled` row.
 
+It also carries the customer's refund REQUEST (SPEC-E-01). That seam is the
+ask and never the money: it writes no ``Refund`` row and moves no payment
+value, which is what keeps "refund requested" from being read as "refund
+completed"; approval is E-02.
+
 Nothing in this module was rewritten - the bodies moved verbatim - so the
 guarantees documented on the view are the ones the split inherits. The
 idempotency-key header names are imported from `checkout.py`, the one module
 that defines that contract, so the two surfaces cannot drift apart.
 """
 
+from django.db import IntegrityError, transaction
 from rest_framework import status
 from rest_framework.decorators import api_view, permission_classes
+from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
 
 from common.permissions import HasRefundsCreate
 
-from ..models import Refund
+from ..models import Order, Refund, RefundRequest
 
 # [R-1.14] SPEC-1-05: the same issuance core the admin action calls. Transport
 # concerns (headers, response shapes) stay here; every decision about whether
 # money may move lives in the core, so the two surfaces cannot drift.
 from ..refunds import RefundGatewayError, RefundRefused, issue_refund
+from ..serializers import RefundRequestSerializer
+
+# [R-10.1] The money half of a refundable order is the machine's own answer to
+# "can this store still move money back out", never a literal beside it.
+from ..state import CAPTURED_MONEY_PAYMENT_STATUSES
 
 # The header-keyed idempotency contract is defined once, in checkout, and
 # reused here rather than restated.
@@ -162,5 +174,106 @@ def admin_order_refund(request, order_id):
             "refundable_remaining": receipt.order.refundable_remaining,
             "refund": _refund_payload(receipt.refund),
         },
+        status=status.HTTP_201_CREATED,
+    )
+
+
+# ==================================
+# Customer refund request (SPEC-E-01)
+# ==================================
+
+# The refundable set is NOT restated here. ``refunded`` has nothing left to
+# return, so a request against it is a conflict rather than a new ask; that
+# judgement already lives in ``orders/state.py``, where it is derived from the
+# payment machine's own edges. A literal here would be the exact drift B07a
+# was raised for - the returns gate tracked one value while the machine
+# tracked two - and the two seams must answer from one source.
+
+
+def _refund_request_miss():
+    """The one answer for an unknown order and a stranger's order.
+
+    Identical status and body for both, so the seam is not an order-existence
+    oracle: ``order.user == request.user`` is part of the lookup, not a check
+    after it.
+    """
+    return Response(
+        {"error": "Order not found"},
+        status=status.HTTP_404_NOT_FOUND,
+    )
+
+
+@api_view(["POST"])
+@permission_classes([IsAuthenticated])
+def refund_request(request, order_id):
+    """[SPEC-E-01] POST /api/orders/:id/refund-request/.
+
+    The customer's ASK, not the refund. No gateway call is made and no
+    ``Refund`` row is written here - E-02 is the staff approval that may hand
+    the request to the refund writer. Keeping the two apart is what makes
+    "refund requested" and "refund completed" different facts (spec 6.8 line
+    1985), and it is why this seam never touches ``payment_status``.
+
+    The order lookup is ownership-scoped and locked for the attempt. Ownership
+    in the lookup means a foreign order gets the same uniform 404 an unknown
+    one gets; the lock is what serializes concurrent filings for this order,
+    with the partial unique index on ``RefundRequest.order`` as the
+    last-resort authority behind it.
+
+    Body: ``reason`` (required, non-blank) and ``items`` (optional list of
+    this order's item ids; empty or omitted means the whole order). Invalid
+    item ids are a 400, never a silently narrowed request. The 201 body is the
+    explicit-field ``RefundRequestSerializer`` projection.
+
+    No throttle scope: this seam is ``IsAuthenticated`` and the partial unique
+    index bounds the write to one pending request per owned order, so a caller
+    cannot amplify rows the way an anonymous public endpoint could (the
+    throttle rule in conventions.md is aimed at those).
+    """
+    with transaction.atomic():
+        try:
+            order = Order.objects.select_for_update().get(
+                pk=order_id,
+                user=request.user,
+            )
+        except Order.DoesNotExist:
+            return _refund_request_miss()
+
+        if order.payment_status not in CAPTURED_MONEY_PAYMENT_STATUSES:
+            return Response(
+                {"error": "Only a captured payment can be refunded"},
+                status=status.HTTP_409_CONFLICT,
+            )
+
+        already_pending = RefundRequest.objects.filter(
+            order=order,
+            status=RefundRequest.Status.PENDING,
+        ).exists()
+        if already_pending:
+            return Response(
+                {"error": "This order already has a pending refund request"},
+                status=status.HTTP_409_CONFLICT,
+            )
+
+        serializer = RefundRequestSerializer(
+            data=request.data,
+            context={"order": order},
+        )
+        serializer.is_valid(raise_exception=True)
+
+        try:
+            # Savepoint so a racing insert's IntegrityError is a 409 rather
+            # than a poisoned outer transaction (the same shape the returns
+            # seam uses).
+            with transaction.atomic():
+                instance = serializer.save(order=order, requester=request.user)
+        except IntegrityError:
+            return Response(
+                {"error": "This order already has a pending refund request"},
+                status=status.HTTP_409_CONFLICT,
+            )
+
+    return Response(
+        RefundRequestSerializer(instance).data,
         status=status.HTTP_201_CREATED,
     )
