@@ -50,7 +50,7 @@ from products.models import StockReservation
 from shipping.pricing import ShippingUnavailable, quote_shipping
 
 from ..models import Coupon, Order, OrderItem, OrderStatusEvent
-from ..serializers import CouponPreviewSerializer, OrderSerializer
+from ..serializers import CouponPreviewSerializer, OrderSerializer, money_string
 
 # [R-10.12] SPEC-10-02: transition-audit writers. Own import line so every
 # hunk above stays insertion-only.
@@ -589,7 +589,11 @@ def create_order(request):
             return Response(
                 {
                     "error": "Minimum order amount is required",
-                    "minimum_order_amount": coupon.minimum_order_amount,
+                    # The envelope moves this key into details and re-serializes
+                    # with DRF's encoder, which would turn a bare Decimal into
+                    # the float 5000.0; the wire contract for money is the same
+                    # 2-dp string here as everywhere else in the payload.
+                    "minimum_order_amount": money_string(coupon.minimum_order_amount),
                 },
                 status=status.HTTP_400_BAD_REQUEST,
             )

@@ -2,7 +2,7 @@
   "kind": "floor",
   "task": "SPEC-9-T1",
   "tool": "scripts/changelog_figures.py",
-  "measured_at": "2026-10-22T23:12:32+05:30",
+  "measured_at": "2026-10-23T08:11:41+05:30",
   "pair_complete": true,
   "engines": [
     {
@@ -14,7 +14,7 @@
       ],
       "run": {
         "verdict": "OK",
-        "tests": 2368,
+        "tests": 2369,
         "failures": null,
         "errors": null,
         "expected_failures": 2
@@ -31,14 +31,14 @@
     },
     {
       "engine": "postgresql",
-      "database_url": "postgresql://perfume:***@127.0.0.1:5432/perfume_store",
+      "database_url": "postgresql://perfume:***@127.0.0.1:5432/perfume_store_a",
       "commands": [
         "C:\\Users\\Admin\\AppData\\Local\\Temp\\opencode\\spec-comp-wt\\backend\\venv\\Scripts\\python.exe -m coverage run manage.py test --verbosity 0",
         "C:\\Users\\Admin\\AppData\\Local\\Temp\\opencode\\spec-comp-wt\\backend\\venv\\Scripts\\python.exe -m coverage report"
       ],
       "run": {
         "verdict": "OK",
-        "tests": 2368,
+        "tests": 2369,
         "failures": null,
         "errors": null,
         "expected_failures": 2

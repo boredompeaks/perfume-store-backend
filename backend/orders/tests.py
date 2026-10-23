@@ -494,6 +494,33 @@ class MoneyWireFormatTests(OrderTestBase):
         response.render()
         return response.content.decode(), json.loads(response.content)
 
+    def _wire(self, response):
+        """The bytes a client receives, parsed -- never re-rendered.
+
+        An error response has already been rewritten by the envelope
+        middleware, so ``response.content`` IS the wire; calling ``render()``
+        would judge this test's own serialization of ``response.data`` instead
+        of the body the middleware actually emitted."""
+        text = response.content.decode()
+        return text, json.loads(text)
+
+    def test_minimum_order_rejection_details_money_is_two_decimal_strings(self):
+        self.make_coupon(code="BIGSPEND", minimum_order_amount="5000")
+        response = self.checkout(coupon_code="BIGSPEND")
+        self.assertEqual(response.status_code, 400, response.data)
+
+        text, payload = self._wire(response)
+        self.assertEqual(payload["error"], "Minimum order amount is required")
+        value = payload["details"]["minimum_order_amount"]
+        self.assertIsInstance(value, str, f"details value rendered as {type(value)}")
+        self.assertRegex(value, self.TWO_DP)
+        self.assertEqual(value, "5000.00")
+        self.assertIn('"minimum_order_amount":"5000.00"', text)
+        # The defect this closes: the bare Decimal reached the envelope's
+        # encoder as the JSON float 5000.0, losing the second decimal place.
+        self.assertNotIn('"minimum_order_amount":5000.0', text)
+        self.assertEqual(Order.objects.count(), 0)
+
     def test_preview_money_is_two_decimal_strings_on_the_wire(self):
         self.make_coupon(code="SAVE10", discount_value="10")
         response = self.client.post(
