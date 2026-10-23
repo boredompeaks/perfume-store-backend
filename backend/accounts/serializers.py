@@ -13,6 +13,7 @@ from .models import (
     MFA_CODE_INVALID,
     MFA_CODE_REQUIRED,
     MFA_ENROLLMENT_REQUIRED,
+    Address,
     TOTPDevice,
 )
 
@@ -134,6 +135,41 @@ class MFATokenObtainPairSerializer(TokenObtainPairSerializer):
                 device.last_used_counter = counter
                 device.save(update_fields=["last_used_counter"])
         return data
+
+
+class AddressSerializer(serializers.ModelSerializer):
+    """Saved address, explicit fields and explicit caps (SPEC-9-T4).
+
+    ``user`` is deliberately absent: the owner comes from the request, never
+    from the body. The declared ``max_length`` values are the validation
+    contract the spec calls out (absurd postal/phone values are rejected
+    with a 400 instead of being truncated into the column).
+    """
+
+    label = serializers.CharField(max_length=40, required=False, allow_blank=True)
+    line1 = serializers.CharField(max_length=255)
+    line2 = serializers.CharField(max_length=255, required=False, allow_blank=True)
+    city = serializers.CharField(max_length=100)
+    state = serializers.CharField(max_length=100, required=False, allow_blank=True)
+    postal_code = serializers.CharField(max_length=20)
+    country = serializers.CharField(max_length=100)
+    phone = serializers.CharField(max_length=32, required=False, allow_blank=True)
+
+    class Meta:
+        model = Address
+        fields = [
+            "id",
+            "label",
+            "line1",
+            "line2",
+            "city",
+            "state",
+            "postal_code",
+            "country",
+            "phone",
+            "is_default",
+        ]
+        read_only_fields = ["id"]
 
 
 class StorefrontTokenObtainPairSerializer(TokenObtainPairSerializer):

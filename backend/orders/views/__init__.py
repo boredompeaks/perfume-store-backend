@@ -12,7 +12,7 @@ WHAT MOVED WHERE:
   anonymous submission is refused uniformly), the two collapse guards, the
   guest order read, and the coupon preview.
 * `payment`  - the gateway intent and the verify that confirms money.
-* `refund`   - the staff refund seam.
+* `refund`   - the staff refund seam and the customer's refund request.
 * `return`   - the customer's returns family (create, list, detail).
 * `order`    - the customer's own order history and detail.
 * `admin`    - the staff order seam (unscoped list/detail, fulfil, cancel).
@@ -111,7 +111,7 @@ from .order import (
     order_list,
 )
 from .payment import PAYMENT_INTENT_ATTEMPTS, create_payment, verify_payment
-from .refund import _refund_payload, admin_order_refund
+from .refund import _refund_payload, admin_order_refund, refund_request
 
 _return = _import_module(f"{__name__}.return")
 
@@ -190,6 +190,7 @@ __all__ = [
     # refund
     "_refund_payload",
     "admin_order_refund",
+    "refund_request",
     # return
     "RETURN_REFUSAL_BODY_KEY",
     "RETURN_REFUSAL_ERRORS",

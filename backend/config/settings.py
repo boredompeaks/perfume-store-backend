@@ -17,9 +17,11 @@ from datetime import date, timedelta
 from decimal import Decimal
 from pathlib import Path
 from urllib.parse import unquote, urlparse
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from celery.schedules import crontab, schedule
 from corsheaders.defaults import default_headers as _cors_default_headers
+from django.conf.locale import LANG_INFO
 from django.core.exceptions import ImproperlyConfigured
 from dotenv import load_dotenv
 
@@ -416,9 +418,59 @@ AUTH_PASSWORD_VALIDATORS = [
 # Internationalization
 # https://docs.djangoproject.com/en/6.1/topics/i18n/
 
-LANGUAGE_CODE = "en-us"
+# A BCP 47-shaped language tag: a 2- or 3-letter primary subtag followed by
+# optional alphanumeric subtags (region, script).
+_LANGUAGE_TAG = re.compile(r"^[A-Za-z]{2,3}(?:-[A-Za-z0-9]{1,8})*$")
 
-TIME_ZONE = "UTC"
+
+def _env_time_zone(name, default):
+    """Resolve an env-driven IANA time zone, never crashing startup.
+
+    Django resolves TIME_ZONE through zoneinfo when it renders local time, so
+    an unknown or path-shaped value would raise at the first localized read -
+    far from the env file that caused it. Validating at import time means a
+    typo falls back to the documented default with a warning instead, the
+    same fail-safe direction as _env_currency.
+    """
+    raw = (os.getenv(name) or "").strip()
+    if not raw:
+        return default
+    try:
+        ZoneInfo(raw)
+    except (ZoneInfoNotFoundError, ValueError):
+        logging.getLogger(__name__).warning(
+            "Ignoring unknown %s value %r; using %s", name, raw, default
+        )
+        return default
+    return raw
+
+
+def _env_language_code(name, default):
+    """Resolve an env-driven Django language tag, never crashing startup.
+
+    A leading form of the tag must be a language Django ships translations
+    for (LANG_INFO): en-us resolves through en, while zh-hans is itself a
+    LANG_INFO key with no bare zh. A value outside that set cannot change any
+    rendered string, so it falls back to the documented default with a
+    warning - the same fail-safe contract as _env_currency.
+    """
+    raw = (os.getenv(name) or "").strip()
+    if not raw:
+        return default
+    parts = raw.lower().split("-")
+    if _LANGUAGE_TAG.fullmatch(raw) and any(
+        "-".join(parts[:i]) in LANG_INFO for i in range(len(parts), 0, -1)
+    ):
+        return raw
+    logging.getLogger(__name__).warning(
+        "Ignoring unsupported %s value %r; using %s", name, raw, default
+    )
+    return default
+
+
+LANGUAGE_CODE = _env_language_code("LANGUAGE_CODE", "en-us")
+
+TIME_ZONE = _env_time_zone("TIME_ZONE", "UTC")
 
 USE_I18N = True
 

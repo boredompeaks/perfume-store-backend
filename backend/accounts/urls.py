@@ -1,6 +1,7 @@
 from django.urls import path
 
 from .views import (
+    AddressViewSet,
     LoginView,
     LogoutView,
     MFAConfirmView,
@@ -46,4 +47,25 @@ urlpatterns = [
     # SPEC-20-8: the opt-in "trust this device for MFA_TRUST_DAYS days",
     # beside the enrollment surface it belongs to.
     path("mfa/trust/", MFATrustDeviceView.as_view(), name="mfa-trust"),
+    # SPEC-9-T4 [R-9.2.20]: saved addresses. This urlconf is mounted at
+    # both /api/v1/account/ (the spec family) and /api/accounts/ (the legacy
+    # alias), so the two route rows below serve both mounts unchanged - the
+    # viewset itself is the single implementation.
+    path(
+        "addresses/",
+        AddressViewSet.as_view({"get": "list", "post": "create"}),
+        name="address-list",
+    ),
+    path(
+        "addresses/<int:pk>/",
+        AddressViewSet.as_view(
+            {
+                "get": "retrieve",
+                "put": "update",
+                "patch": "partial_update",
+                "delete": "destroy",
+            }
+        ),
+        name="address-detail",
+    ),
 ]

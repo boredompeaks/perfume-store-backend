@@ -82,6 +82,10 @@ _LEAKED_ENV_NAMES = frozenset(
         "DB_LOCAL_URL",
         "JWT_ACCESS_TOKEN_LIFETIME_SECONDS",
         "JWT_REFRESH_TOKEN_LIFETIME_SECONDS",
+        # Outside the DJANGO_ family, and documented defaults this module
+        # pins: an untracked local .env value would defeat the unset-env
+        # assertions below (SPEC-16-T4).
+        "LANGUAGE_CODE",
         "LOW_STOCK_THRESHOLD",
         "MAX_UPLOAD_MB",
         "MFA_TRUST_DAYS",
@@ -99,6 +103,7 @@ _LEAKED_ENV_NAMES = frozenset(
         "SECURE_SSL_REDIRECT",
         "SESSION_COOKIE_SAMESITE",
         "SESSION_COOKIE_SECURE",
+        "TIME_ZONE",
         "USE_X_FORWARDED_HOST",
     }
 )
@@ -237,6 +242,107 @@ class SessionCookieConfigTests(SimpleTestCase):
         )
         self.assertEqual(res.returncode, 0, res.stderr)
         self.assertIn("SAMESITE Strict", res.stdout)
+
+
+class InternationalizationConfigTests(SimpleTestCase):
+    """SPEC-16-T4 [R-16.4]: LANGUAGE_CODE and TIME_ZONE are deployment
+    config, resolved once at import.
+
+    The documented defaults are the values the module hardcoded before this
+    task; a valid env value is used as given, and a malformed one falls back
+    with a warning instead of crashing the boot. Import-time settings, so
+    pinned via the subprocess pattern like every other env knob above."""
+
+    _SNIPPET = (
+        "import config.settings as s; "
+        "print('LANGUAGE_CODE', s.LANGUAGE_CODE); "
+        "print('TIME_ZONE', s.TIME_ZONE)"
+    )
+
+    def test_unset_env_yields_the_documented_defaults(self):
+        res = run_settings_import(dict(_NON_DEBUG_ENV), snippet=self._SNIPPET)
+        self.assertEqual(res.returncode, 0, res.stderr)
+        self.assertIn("LANGUAGE_CODE en-us", res.stdout)
+        self.assertIn("TIME_ZONE UTC", res.stdout)
+
+    def test_valid_values_are_used(self):
+        res = run_settings_import(
+            {
+                **dict(_NON_DEBUG_ENV),
+                "LANGUAGE_CODE": "de",
+                "TIME_ZONE": "Asia/Kolkata",
+            },
+            snippet=self._SNIPPET,
+        )
+        self.assertEqual(res.returncode, 0, res.stderr)
+        self.assertIn("LANGUAGE_CODE de", res.stdout)
+        self.assertIn("TIME_ZONE Asia/Kolkata", res.stdout)
+
+    def test_a_malformed_time_zone_falls_back_to_utc(self):
+        # Both zones the resolver must refuse: an unknown name and a
+        # path-shaped value (zoneinfo raises a different exception for each).
+        for raw in ("Mars/Olympus", "../etc/passwd"):
+            with self.subTest(value=raw):
+                res = run_settings_import(
+                    {**dict(_NON_DEBUG_ENV), "TIME_ZONE": raw},
+                    snippet=self._SNIPPET,
+                )
+                self.assertEqual(res.returncode, 0, res.stderr)
+                self.assertIn("TIME_ZONE UTC", res.stdout)
+
+    def test_a_malformed_language_code_falls_back_to_en_us(self):
+        for raw in ("xx", "not a tag"):
+            with self.subTest(value=raw):
+                res = run_settings_import(
+                    {**dict(_NON_DEBUG_ENV), "LANGUAGE_CODE": raw},
+                    snippet=self._SNIPPET,
+                )
+                self.assertEqual(res.returncode, 0, res.stderr)
+                self.assertIn("LANGUAGE_CODE en-us", res.stdout)
+
+
+class InternationalizationResolverTests(SimpleTestCase):
+    """The resolvers' branches, driven in-process.
+
+    The subprocess pins above observe the import; they cannot cover either
+    refusal branch in this process, so both resolvers are called directly
+    (the EmailTimeoutResolverTests precedent) to keep settings.py at 100%."""
+
+    def test_valid_values_are_returned_unchanged(self):
+        for name, raw, resolver in (
+            ("TIME_ZONE", "America/New_York", config_settings._env_time_zone),
+            ("TIME_ZONE", "Europe/London", config_settings._env_time_zone),
+            ("LANGUAGE_CODE", "pt-br", config_settings._env_language_code),
+            ("LANGUAGE_CODE", "en-us", config_settings._env_language_code),
+            ("LANGUAGE_CODE", "zh-hans", config_settings._env_language_code),
+        ):
+            with self.subTest(name=name, value=raw):
+                with mock.patch.dict(os.environ, {name: raw}):
+                    self.assertEqual(resolver(name, "fallback"), raw)
+
+    def test_an_empty_value_yields_the_default_silently(self):
+        for name, resolver in (
+            ("TIME_ZONE", config_settings._env_time_zone),
+            ("LANGUAGE_CODE", config_settings._env_language_code),
+        ):
+            with self.subTest(name=name):
+                with mock.patch.dict(os.environ, {name: "  "}):
+                    self.assertEqual(resolver(name, "fallback"), "fallback")
+
+    def test_a_malformed_value_falls_back_and_says_so(self):
+        # A silent fallback is how a knob becomes a mystery: the warning has
+        # to name the key and the value it refused.
+        for name, raw, resolver in (
+            ("TIME_ZONE", "Mars/Olympus", config_settings._env_time_zone),
+            ("TIME_ZONE", "../etc/passwd", config_settings._env_time_zone),
+            ("LANGUAGE_CODE", "xx", config_settings._env_language_code),
+            ("LANGUAGE_CODE", "not a tag", config_settings._env_language_code),
+        ):
+            with self.subTest(name=name, value=raw):
+                with mock.patch.dict(os.environ, {name: raw}):
+                    with self.assertLogs("config.settings", level="WARNING") as logs:
+                        self.assertEqual(resolver(name, "fallback"), "fallback")
+                self.assertTrue(any(name in line for line in logs.output), logs.output)
 
 
 class MfaTrustConfigTests(SimpleTestCase):

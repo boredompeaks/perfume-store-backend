@@ -27,6 +27,7 @@ from rest_framework.throttling import ScopedRateThrottle
 from rest_framework_simplejwt.token_blacklist.models import OutstandingToken
 from rest_framework_simplejwt.tokens import RefreshToken
 
+from accounts.models import Address
 from accounts.serializers import RegisterSerializer
 from accounts.urls import urlpatterns as account_urlpatterns
 from accounts.views import (
@@ -888,10 +889,20 @@ class AuthThrottleTests(ApiTestCase):
             # SPEC-20-8: the "trust this device" opt-in spends a TOTP code
             # like its siblings, so it rides the same 'auth' budget.
             "mfa-trust": "auth",
+            # SPEC-9-T4 [R-9.2.20]: saved-address CRUD is authenticated and
+            # mutating, so both rows ride the 'auth' budget.
+            "address-list": "auth",
+            "address-detail": "auth",
         }
         found = {}
         for pattern in account_urlpatterns:
-            scope = getattr(pattern.callback.view_class, "throttle_scope", None)
+            callback = pattern.callback
+            # A plain DRF view exposes ``view_class``; a ViewSet's as_view()
+            # exposes ``cls``. Both shapes must satisfy the same guard.
+            view_class = getattr(callback, "view_class", None) or getattr(
+                callback, "cls", None
+            )
+            scope = getattr(view_class, "throttle_scope", None)
             self.assertTrue(scope, f"/{pattern.name}/ has no throttle_scope")
             found[pattern.name] = scope
         self.assertEqual(found, expected)
@@ -1677,4 +1688,181 @@ class RefreshDualAcceptAndOriginTests(ApiTestCase):
         ) as lock:
             res = self.client.post(self.REFRESH, {}, format="json")
         self.assertEqual(res.status_code, 200, res.data)
+        lock.assert_called_once()
+
+
+# ---------------------------------------------------------------------------
+# SPEC-9-T4 [R-9.2.20]: owner-scoped saved addresses
+# ---------------------------------------------------------------------------
+
+
+@tag("accounts")
+class AddressApiTests(ApiTestCase):
+    """Saved-address CRUD scoped to the authenticated owner.
+
+    Every request goes through the real JWT login, so the 401, the owner
+    filter and the uniform 404 are exercised on the same surface the
+    storefront uses; no test bypasses the viewset's queryset.
+    """
+
+    LIST = "/api/v1/account/addresses/"
+    LEGACY_LIST = "/api/accounts/addresses/"
+
+    def setUp(self):
+        self.user = self.make_user()
+        self.api_login(self.user.username)
+
+    def payload(self, **overrides):
+        data = {
+            "label": "Home",
+            "line1": "12 Rose Lane",
+            "line2": "Apt 4",
+            "city": "Mumbai",
+            "state": "Maharashtra",
+            "postal_code": "400001",
+            "country": "India",
+            "phone": "+91 98765 43210",
+            "is_default": False,
+        }
+        data.update(overrides)
+        return data
+
+    def detail(self, pk, base=None):
+        return f"{base or self.LIST}{pk}/"
+
+    def create(self, data=None, base=None, client=None):
+        return (client or self.client).post(
+            base or self.LIST, data or self.payload(), format="json"
+        )
+
+    def errors(self, res):
+        # SPEC-9-03 envelopes every DRF exception; the field errors the
+        # caller acts on live under "details", not at the top level.
+        return res.data.get("details", res.data)
+
+    def test_anonymous_requests_are_401(self):
+        anon = self.fresh_client()
+        self.assertEqual(anon.get(self.LIST).status_code, 401)
+        self.assertEqual(
+            anon.post(self.LIST, self.payload(), format="json").status_code, 401
+        )
+        self.assertEqual(anon.get(self.LEGACY_LIST).status_code, 401)
+
+    def test_create_read_update_delete_round_trip(self):
+        res = self.create()
+        self.assertEqual(res.status_code, 201, res.data)
+        pk = res.data["id"]
+        self.assertEqual(res.data["line1"], "12 Rose Lane")
+        self.assertFalse(res.data["is_default"])
+        self.assertNotIn("user", res.data)
+
+        res = self.client.get(self.detail(pk))
+        self.assertEqual(res.status_code, 200, res.data)
+        self.assertEqual(str(Address.objects.get(pk=pk)), "Home (buyer)")
+
+        res = self.client.patch(self.detail(pk), {"city": "Pune"}, format="json")
+        self.assertEqual(res.status_code, 200, res.data)
+        self.assertEqual(res.data["city"], "Pune")
+
+        res = self.client.delete(self.detail(pk))
+        self.assertEqual(res.status_code, 204)
+        self.assertEqual(self.client.get(self.detail(pk)).status_code, 404)
+
+    def test_legacy_alias_serves_the_same_surface(self):
+        self.assertEqual(self.fresh_client().get(self.LEGACY_LIST).status_code, 401)
+        res = self.client.get(self.LEGACY_LIST)
+        self.assertEqual(res.status_code, 200, res.data)
+        res = self.create(base=self.LEGACY_LIST)
+        self.assertEqual(res.status_code, 201, res.data)
+        pk = res.data["id"]
+        res = self.client.get(self.detail(pk, base=self.LEGACY_LIST))
+        self.assertEqual(res.status_code, 200, res.data)
+
+    def test_another_users_address_is_404_for_read_update_delete(self):
+        pk = self.create().data["id"]
+        other = self.make_user(username="intruder")
+        intruder = self.fresh_client()
+        self.api_login(other.username, client=intruder)
+        detail = self.detail(pk)
+        self.assertEqual(intruder.get(detail).status_code, 404)
+        self.assertEqual(
+            intruder.patch(detail, {"city": "Pune"}, format="json").status_code, 404
+        )
+        self.assertEqual(intruder.delete(detail).status_code, 404)
+        # The owner's row survived the attempted tampering untouched.
+        row = Address.objects.get(pk=pk)
+        self.assertEqual(row.user, self.user)
+        self.assertEqual(row.city, "Mumbai")
+
+    def test_list_only_contains_the_callers_rows(self):
+        self.create()
+        other = self.make_user(username="browse")
+        Address.objects.create(user=other, **self.payload(line1="Other Road"))
+        res = self.client.get(self.LIST)
+        self.assertEqual(res.status_code, 200, res.data)
+        self.assertEqual([row["line1"] for row in res.data], ["12 Rose Lane"])
+
+    def test_second_default_create_flips_the_first(self):
+        first = self.create(self.payload(is_default=True)).data["id"]
+        second = self.create(self.payload(line1="9 Lily Road", is_default=True)).data[
+            "id"
+        ]
+        self.assertFalse(Address.objects.get(pk=first).is_default)
+        self.assertTrue(Address.objects.get(pk=second).is_default)
+
+    def test_update_to_default_flips_the_previous(self):
+        first = self.create(self.payload(is_default=True)).data["id"]
+        second = self.create(self.payload(line1="9 Lily Road")).data["id"]
+        res = self.client.patch(
+            self.detail(second), {"is_default": True}, format="json"
+        )
+        self.assertEqual(res.status_code, 200, res.data)
+        self.assertFalse(Address.objects.get(pk=first).is_default)
+        self.assertTrue(Address.objects.get(pk=second).is_default)
+
+    def test_non_default_create_keeps_the_existing_default(self):
+        first = self.create(self.payload(is_default=True)).data["id"]
+        self.create(self.payload(line1="9 Lily Road"))
+        self.assertTrue(Address.objects.get(pk=first).is_default)
+
+    def test_default_is_scoped_per_user(self):
+        mine = self.create(self.payload(is_default=True)).data["id"]
+        other = self.make_user(username="neighbour")
+        theirs = Address.objects.create(
+            user=other, **self.payload(line1="2 Oak Avenue", is_default=True)
+        )
+        self.create(self.payload(line1="9 Lily Road", is_default=True))
+        self.assertFalse(Address.objects.get(pk=mine).is_default)
+        self.assertTrue(Address.objects.get(pk=theirs.pk).is_default)
+
+    def test_deleting_the_default_leaves_none(self):
+        pk = self.create(self.payload(is_default=True)).data["id"]
+        self.assertEqual(self.client.delete(self.detail(pk)).status_code, 204)
+        self.assertFalse(
+            Address.objects.filter(user=self.user, is_default=True).exists()
+        )
+
+    def test_blank_required_fields_are_rejected(self):
+        for field in ("line1", "city", "country"):
+            for value in ("", "   "):
+                with self.subTest(field=field, value=value):
+                    res = self.create(self.payload(**{field: value}))
+                    self.assertEqual(res.status_code, 400, res.data)
+                    self.assertIn(field, self.errors(res))
+
+    def test_absurd_postal_and_phone_lengths_are_rejected(self):
+        res = self.create(self.payload(postal_code="1" * 21))
+        self.assertEqual(res.status_code, 400, res.data)
+        self.assertIn("postal_code", self.errors(res))
+        res = self.create(self.payload(phone="1" * 33))
+        self.assertEqual(res.status_code, 400, res.data)
+        self.assertIn("phone", self.errors(res))
+
+    def test_default_flip_locks_the_owners_rows(self):
+        real_lock = Address.objects.select_for_update
+        with mock.patch(
+            "accounts.views.Address.objects.select_for_update", wraps=real_lock
+        ) as lock:
+            res = self.create(self.payload(is_default=True))
+        self.assertEqual(res.status_code, 201, res.data)
         lock.assert_called_once()
