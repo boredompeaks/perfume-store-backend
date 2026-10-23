@@ -37,6 +37,21 @@ class SiteSettingsAdmin(RoleAwareModelAdmin):
     )
     fieldsets = (
         (
+            # [R-16.3] SPEC-16-T2/05. ``fieldsets`` is explicit, so a field
+            # that is not named in one of these tuples is unreachable in the
+            # merchant's only editing surface.
+            "Store identity",
+            {
+                "fields": ("name", "logo", "locale"),
+                "description": (
+                    "<p>The name and mark the storefront shows. A blank name is "
+                    "published as blank, and the frontend falls back to its "
+                    "configured name; a logo is published to "
+                    "<code>/api/settings/</code> as an absolute URL.</p>"
+                ),
+            },
+        ),
+        (
             "Customer contact channels (blank = hidden on the storefront)",
             {
                 "fields": (
@@ -77,6 +92,24 @@ class SiteSettingsAdmin(RoleAwareModelAdmin):
                     "the order and including one made at the very moment of "
                     "delivery, and the customer is told returns are not "
                     "available rather than that the window expired.</p>"
+                ),
+            },
+        ),
+        (
+            # [R-16.15] SPEC-16-T2/05. Its own fieldset because it changes what
+            # every customer sees, not what the store is called. The page and
+            # the gating that acts on the flag are SPEC-3-06's; the description
+            # says so, so nobody expects this switch to take the store down by
+            # itself.
+            "Store availability",
+            {
+                "fields": ("maintenance_mode",),
+                "description": (
+                    "<p><strong>Maintenance mode</strong> publishes "
+                    "<code>maintenance_mode</code> on <code>/api/settings/</code>. "
+                    "The storefront's maintenance page and the gating that sends "
+                    "customers to it are SPEC-3-06; this switch only publishes "
+                    "the flag.</p>"
                 ),
             },
         ),

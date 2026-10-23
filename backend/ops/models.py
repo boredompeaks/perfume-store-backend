@@ -74,10 +74,55 @@ MAX_RETURN_WINDOW_DAYS = 3650
 # 0 is what an admin NumberInput posts.
 CLOSED_RETURN_WINDOW_DAYS = 0
 
+# [R-16.3] SPEC-16-T2/05: the language tag the storefront publishes until a
+# merchant edits it. It MIRRORS the deployment language (``LANGUAGE_CODE`` in
+# config/settings.py) rather than importing it: ``LANGUAGE_CODE`` is deployment
+# configuration that cannot change at runtime, while the storefront locale is a
+# merchant-facing choice an editor may change without a redeploy. It is a
+# literal because a field default is baked into the migration; the agreement of
+# the two is pinned by ``SiteSettingsIdentityTests`` so that making the
+# deployment language env-driven (SPEC-16-2) has to revisit this deliberately
+# instead of letting the store drift from its API.
+DEFAULT_SITE_LOCALE = "en-us"
+
 
 class SiteSettings(models.Model):
     """Singleton store configuration, edited in the admin, served to the
     frontend via GET /api/settings/. Blank fields mean "channel hidden"."""
+
+    # [R-16.3] SPEC-16-T2/05: store identity. ``name`` is blank-able on
+    # purpose - the storefront keeps its env-configured fallback - so a blank
+    # value is a real state ("no override"), not missing data.
+    name = models.CharField(
+        max_length=120,
+        blank=True,
+        default="",
+        help_text=(
+            "Store name shown by the storefront. Leave blank to use the "
+            "frontend's configured name."
+        ),
+    )
+    # Same shape as the catalogue's product image (blank + null): no logo is a
+    # valid state, and NULL is how the column says so rather than an empty
+    # string path that would need special-casing on read.
+    logo = models.ImageField(
+        upload_to="branding/",
+        blank=True,
+        null=True,
+        help_text="Store mark shown beside the name. Leave blank for none.",
+    )
+    locale = models.CharField(
+        max_length=35,
+        default=DEFAULT_SITE_LOCALE,
+        help_text="BCP 47 language tag for the storefront, e.g. en-us.",
+    )
+    # [R-16.15] SPEC-16-T2/05: the availability flag. Publishing it is this
+    # task; the storefront's maintenance page and the gating that redirects
+    # customers to it are SPEC-3-06, so nothing here reads the value.
+    maintenance_mode = models.BooleanField(
+        default=False,
+        help_text="Publish the storefront maintenance flag.",
+    )
 
     support_email = models.EmailField(blank=True, default="")
     support_phone = models.CharField(max_length=32, blank=True, default="")
