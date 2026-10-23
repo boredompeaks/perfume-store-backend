@@ -19,7 +19,6 @@ the wire in the raw DRF shape.
 """
 
 import json
-from decimal import Decimal
 from unittest.mock import patch
 
 from django.http import HttpResponse
@@ -96,9 +95,10 @@ class ErrorEnvelopeTests(ApiTestCase):
         res = self.checkout(coupon_code="BIGSPEND")
         self.assertEqual(res.status_code, 400, res.data)
         self.assertEqual(res.data["error"], "Minimum order amount is required")
-        self.assertEqual(
-            res.data["details"]["minimum_order_amount"], Decimal("5000.00")
-        )
+        # The context still moves into details; the money value keeps the
+        # repo-wide wire contract (a 2-dp string), so the envelope never hands
+        # the client a JSON float.
+        self.assertEqual(res.data["details"]["minimum_order_amount"], "5000.00")
 
     # pass-through guards -----------------------------------------------------
     def test_non_error_json_body_is_untouched(self):

@@ -108,6 +108,20 @@ def health_detail(request):
     return Response(get_health())
 
 
+def _absolute_media_url(request, file_field):
+    """The public absolute URL of an uploaded media file, or None when unset.
+
+    Absolute rather than the storage-relative ``/media/...``: the storefront is
+    served from a different origin than the API, so a relative URL would
+    resolve against the page host and 404. None rather than an empty string
+    because "no logo uploaded" is a state the frontend branches on, and "" is
+    indistinguishable from a broken path.
+    """
+    if not file_field:
+        return None
+    return request.build_absolute_uri(file_field.url)
+
+
 def api_settings(request):
     """Public store settings consumed by the frontend (contact channels)."""
     from .models import SiteSettings
@@ -115,6 +129,15 @@ def api_settings(request):
     row = SiteSettings.load()
     return JsonResponse(
         {
+            # [R-16.3] SPEC-16-T2/05: merchant-editable store identity. Keys
+            # are listed explicitly (never a model dump) so a future column is
+            # not disclosed here by accident.
+            "name": row.name,
+            "logo": _absolute_media_url(request, row.logo),
+            "locale": row.locale,
+            # [R-16.15] SPEC-16-T2/05: the flag only. The maintenance page and
+            # the gating that sends customers to it are SPEC-3-06.
+            "maintenance_mode": row.maintenance_mode,
             "support_email": row.support_email,
             "support_phone": row.support_phone,
             "whatsapp_number": row.whatsapp_number,

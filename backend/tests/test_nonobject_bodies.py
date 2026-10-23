@@ -167,19 +167,27 @@ class CheckoutNonObjectBodyTests(NonObjectBodyRefusalMixin, ApiTestCase):
 
 @tag("products")
 class InventoryAdjustNonObjectBodyTests(NonObjectBodyRefusalMixin, ApiTestCase):
-    """POST /api/products/inventory/adjustments/ — the staff adjust-stock
-    payload reads (product_id/delta/reason/note)."""
+    """POST inventory adjustment — the staff adjust-stock payload reads
+    (product_id/delta/reason/note), on both the canonical admin mount and
+    the deprecated store alias (SPEC-9-T3)."""
 
     URL = "/api/products/inventory/adjustments/"
+    ADMIN_URL = "/api/v1/admin/inventory/adjustments/"
 
     def setUp(self):
         self.invmgr = self._role_user("invmgr", ROLE_INVENTORY)
         self.product = self.make_product(stock=10)
         self.client.force_authenticate(self.invmgr)
 
-    def test_inventory_adjust_refuses_a_non_object_body_like_an_empty_object(self):
-        expected = self._refuse_same_as_empty_object(self.URL)
+    def _assert_refused_without_moving_state(self, url):
+        expected = self._refuse_same_as_empty_object(url)
         self.assertEqual(expected.data["error"], "product_id is required")
         self.product.refresh_from_db()
         self.assertEqual(self.product.stock, 10)  # stock untouched
         self.assertEqual(StockMovement.objects.count(), 0)  # no ledger row
+
+    def test_inventory_adjust_refuses_a_non_object_body_like_an_empty_object(self):
+        self._assert_refused_without_moving_state(self.URL)
+
+    def test_admin_mount_refuses_a_non_object_body_like_an_empty_object(self):
+        self._assert_refused_without_moving_state(self.ADMIN_URL)

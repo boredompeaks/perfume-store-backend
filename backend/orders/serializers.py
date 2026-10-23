@@ -1,10 +1,39 @@
 from rest_framework import serializers
 
+from common.money import quantize_money
+
 from .models import Coupon, Order, OrderItem, ReturnRequest
 
 
+def money_string(value):
+    """Render a money ``Decimal`` as the 2-dp string the JSON wire carries.
+
+    DRF's JSON renderer encodes a bare ``Decimal`` as a float, dropping the
+    trailing zero (``1234.50`` -> ``1234.5``) and handing downstream code a
+    binary amount to round. Every money value in a response therefore leaves
+    through this one formatter, so the wire shape is a string at the same
+    2-dp precision the ``DecimalField`` stores -- while the stored column
+    itself stays a ``Decimal``.
+    """
+    return f"{quantize_money(value):f}"
+
+
+class MoneyField(serializers.DecimalField):
+    """Read-only money field whose representation is :func:`money_string`."""
+
+    def __init__(self, **kwargs):
+        kwargs.setdefault("max_digits", 10)
+        kwargs.setdefault("decimal_places", 2)
+        kwargs.setdefault("read_only", True)
+        super().__init__(**kwargs)
+
+    def to_representation(self, value):
+        return money_string(value)
+
+
 class OrderItemSerializer(serializers.ModelSerializer):
-    subtotal = serializers.ReadOnlyField()
+    price = MoneyField()
+    subtotal = MoneyField()
 
     class Meta:
         model = OrderItem
@@ -62,6 +91,11 @@ class OrderSerializer(serializers.ModelSerializer):
         slug_field="code",
         read_only=True,
     )
+    # [R-9.3.24] The order's money columns as the 2-dp strings the wire
+    # carries; the stored Decimals are untouched.
+    discount_amount = MoneyField()
+    total_amount = MoneyField()
+    shipping_amount = MoneyField()
 
     class Meta:
         model = Order
@@ -153,6 +187,20 @@ class OrderSerializer(serializers.ModelSerializer):
             "cancelled_at",
             "refunded_at",
         ]
+
+
+class CouponPreviewSerializer(serializers.Serializer):
+    """[R-9.3.24] The public coupon preview body.
+
+    The view computes the figures as ``Decimal``; this projection is what
+    turns them into the 2-dp strings on the wire, so the preview and the
+    checkout order cannot disagree about how money is spelled.
+    """
+
+    coupon = serializers.CharField(read_only=True)
+    subtotal = MoneyField()
+    discount = MoneyField()
+    final_total = MoneyField()
 
 
 class ReturnRequestSerializer(serializers.ModelSerializer):

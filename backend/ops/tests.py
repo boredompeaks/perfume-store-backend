@@ -1,5 +1,6 @@
 """Ops tests: /health/, /api/settings/, admin dashboard, services."""
 
+import base64
 import tempfile
 from datetime import timedelta
 from decimal import Decimal
@@ -7,6 +8,7 @@ from pathlib import Path
 
 from django.conf import settings
 from django.contrib.auth.models import User
+from django.db import models
 from django.template import RequestContext, Template
 from django.test import override_settings, tag
 from django.test.client import RequestFactory
@@ -24,6 +26,12 @@ from common.testing import ApiTestCase
 from ops.services import REVENUE_STATUSES, get_health, get_sales_series, get_stats
 
 TEST_PASSWORD = "S3cure-Passphrase!"
+
+# 1x1 transparent PNG so the logo ImageField stores a real image
+TINY_PNG = base64.b64decode(
+    "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk"
+    "YPhfDwAChwGA60e6kgAAAABJRU5ErkJggg=="
+)
 
 
 @tag("ops")
@@ -254,6 +262,150 @@ class SettingsEndpointTests(ApiTestCase):
         self.assertEqual(SiteSettings.load().pk, 1)
         self.assertEqual(first.pk, 1)
         self.assertEqual(str(first), "Site settings")
+
+
+@tag("ops")
+class SiteSettingsIdentityTests(ApiTestCase):
+    """SPEC-16-T2/05 [R-16.3, R-16.15]: merchant-editable store identity and
+    the maintenance flag on the singleton, published on /api/settings/.
+
+    The storefront's consumption of these keys (its env fallback and the
+    maintenance page) is SPEC-16-1's frontend half and SPEC-3-06; this class
+    pins the backend half only: the columns, the defaults, and the payload.
+    """
+
+    def test_defaults_for_identity_and_maintenance(self):
+        from ops.models import SiteSettings
+
+        row = SiteSettings.load()
+
+        self.assertEqual(row.name, "")
+        self.assertFalse(row.logo)
+        self.assertEqual(row.locale, settings.LANGUAGE_CODE)
+        self.assertFalse(row.maintenance_mode)
+        # The pre-existing contract is untouched: the raw column stays NULL and
+        # resolves to the published default.
+        self.assertIsNone(row.return_window_days)
+        self.assertEqual(row.resolved_return_window_days(), 30)
+
+    def test_fields_are_shaped_for_their_jobs(self):
+        from ops.models import SiteSettings
+
+        name = SiteSettings._meta.get_field("name")
+        self.assertIsInstance(name, models.CharField)
+        self.assertTrue(name.blank)
+
+        logo = SiteSettings._meta.get_field("logo")
+        self.assertIsInstance(logo, models.ImageField)
+        self.assertEqual(logo.upload_to, "branding/")
+        self.assertTrue(logo.blank)
+        self.assertTrue(logo.null)
+
+        locale = SiteSettings._meta.get_field("locale")
+        self.assertIsInstance(locale, models.CharField)
+        # Required: a store always publishes a language, and the admin form is
+        # pre-filled from this default, so the merchant never starts empty.
+        self.assertFalse(locale.blank)
+        self.assertEqual(locale.default, settings.LANGUAGE_CODE)
+
+        maintenance = SiteSettings._meta.get_field("maintenance_mode")
+        self.assertIsInstance(maintenance, models.BooleanField)
+        self.assertIs(maintenance.default, False)
+
+    def test_payload_publishes_identity_and_maintenance_without_a_model_dump(self):
+        data = self.client.get("/api/settings/").json()
+
+        self.assertEqual(
+            set(data),
+            {
+                "support_email",
+                "support_phone",
+                "whatsapp_number",
+                "whatsapp_message",
+                "instagram_url",
+                "return_window_days",
+                "name",
+                "logo",
+                "locale",
+                "maintenance_mode",
+            },
+        )
+        self.assertIsInstance(data["name"], str)
+        self.assertEqual(data["locale"], settings.LANGUAGE_CODE)
+        self.assertIs(data["maintenance_mode"], False)
+        self.assertIsNone(data["logo"])
+        self.assertEqual(data["return_window_days"], 30)
+
+    def test_logo_is_null_until_uploaded_and_absolute_after(self):
+        from django.core.files.base import ContentFile
+
+        from ops.models import SiteSettings
+
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        with self.settings(MEDIA_ROOT=Path(tmp.name)):
+            row = SiteSettings.load()
+            self.assertIsNone(self.client.get("/api/settings/").json()["logo"])
+            row.logo.save("wordmark.png", ContentFile(TINY_PNG), save=True)
+            data = self.client.get("/api/settings/").json()
+
+        self.assertEqual(
+            data["logo"],
+            f"http://testserver{settings.MEDIA_URL}branding/wordmark.png",
+        )
+
+    def test_maintenance_flag_round_trips_through_the_payload(self):
+        from ops.models import SiteSettings
+
+        self.assertIs(
+            self.client.get("/api/settings/").json()["maintenance_mode"], False
+        )
+
+        row = SiteSettings.load()
+        row.maintenance_mode = True
+        row.save()
+        self.assertIs(
+            self.client.get("/api/settings/").json()["maintenance_mode"], True
+        )
+
+        row.maintenance_mode = False
+        row.save()
+        self.assertIs(
+            self.client.get("/api/settings/").json()["maintenance_mode"], False
+        )
+
+    def test_identity_does_not_disturb_the_existing_contact_keys(self):
+        from ops.models import SiteSettings
+
+        row = SiteSettings.load()
+        row.name = "Atelier Test"
+        row.locale = "fr"
+        row.maintenance_mode = True
+        row.save()
+
+        data = self.client.get("/api/settings/").json()
+
+        self.assertEqual(data["support_email"], "")
+        self.assertEqual(data["support_phone"], "")
+        self.assertEqual(data["whatsapp_number"], "")
+        self.assertEqual(
+            data["whatsapp_message"], "Hi! I have a question about a fragrance."
+        )
+        self.assertEqual(data["instagram_url"], "")
+        self.assertEqual(data["return_window_days"], 30)
+
+    def test_publishing_zero_still_means_returns_closed(self):
+        """The three-state return-window contract is not folded into the new
+        keys: a published 0 is still served as 0, not defaulted."""
+        from ops.models import SiteSettings
+
+        row = SiteSettings.load()
+        row.return_window_days = 0
+        row.save()
+
+        self.assertEqual(
+            self.client.get("/api/settings/").json()["return_window_days"], 0
+        )
 
 
 @tag("ops")
@@ -919,6 +1071,7 @@ class SiteSettingsAdminTests(ApiTestCase):
                 "whatsapp_number": "919000000000",
                 "whatsapp_message": "Hello from tests",
                 "instagram_url": "https://instagram.com/maison.example",
+                "locale": "en-us",
                 "_save": "Save",
             },
             follow=True,
@@ -926,6 +1079,69 @@ class SiteSettingsAdminTests(ApiTestCase):
         self.assertEqual(res.status_code, 200)
         row = SiteSettings.load()
         self.assertEqual(row.support_email, "ops@maison.example")
+
+    def test_change_form_exposes_identity_and_maintenance(self):
+        from ops.models import SiteSettings
+
+        SiteSettings.load()
+        res = self.client.get("/admin/ops/sitesettings/1/change/")
+
+        self.assertEqual(res.status_code, 200)
+        for field in ("name", "logo", "locale", "maintenance_mode"):
+            self.assertContains(res, f'name="{field}"')
+        self.assertContains(res, "Store identity")
+        self.assertContains(res, "Store availability")
+
+    def test_admin_save_round_trips_identity_and_maintenance(self):
+        from ops.models import SiteSettings
+
+        SiteSettings.load()
+        res = self.client.post(
+            "/admin/ops/sitesettings/1/change/",
+            {
+                "support_email": "",
+                "support_phone": "",
+                "whatsapp_number": "",
+                "whatsapp_message": "",
+                "instagram_url": "",
+                "name": "Atelier Test",
+                "locale": "fr",
+                "maintenance_mode": "on",
+                "_save": "Save",
+            },
+            follow=True,
+        )
+
+        self.assertEqual(res.status_code, 200)
+        row = SiteSettings.load()
+        self.assertEqual(row.name, "Atelier Test")
+        self.assertEqual(row.locale, "fr")
+        self.assertTrue(row.maintenance_mode)
+        data = self.client.get("/api/settings/").json()
+        self.assertEqual(data["name"], "Atelier Test")
+        self.assertEqual(data["locale"], "fr")
+        self.assertIs(data["maintenance_mode"], True)
+
+        # A blank name is allowed and published as blank: the frontend keeps
+        # its configured fallback, so the store does not lose its name.
+        self.client.post(
+            "/admin/ops/sitesettings/1/change/",
+            {
+                "support_email": "",
+                "support_phone": "",
+                "whatsapp_number": "",
+                "whatsapp_message": "",
+                "instagram_url": "",
+                "name": "",
+                "locale": "fr",
+                "_save": "Save",
+            },
+            follow=True,
+        )
+        row = SiteSettings.load()
+        self.assertEqual(row.name, "")
+        self.assertFalse(row.maintenance_mode)
+        self.assertEqual(self.client.get("/api/settings/").json()["name"], "")
 
     def test_api_settings_serves_admin_edited_values(self):
         from ops.models import SiteSettings
@@ -939,6 +1155,7 @@ class SiteSettingsAdminTests(ApiTestCase):
                 "whatsapp_number": "",
                 "whatsapp_message": "",
                 "instagram_url": "",
+                "locale": "en-us",
                 "_save": "Save",
             },
             follow=True,

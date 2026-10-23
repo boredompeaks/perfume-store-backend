@@ -11,6 +11,7 @@ from decimal import Decimal
 from unittest.mock import patch
 
 from django.conf import settings
+from django.contrib.admin.utils import flatten_fieldsets
 from django.contrib.auth.models import AnonymousUser, User
 from django.core.files.uploadedfile import SimpleUploadedFile
 from django.db import (
@@ -21,6 +22,7 @@ from django.db import (
 )
 from django.db.models import Sum
 from django.test import TransactionTestCase, override_settings, tag
+from django.urls import resolve
 from django.utils import timezone
 from rest_framework.exceptions import PermissionDenied
 from rest_framework.request import Request
@@ -944,6 +946,86 @@ class InventoryAdjustApiTests(ApiTestCase):
         )
         self.assertEqual(res.status_code, 201, res.data)
 
+    # admin-family mounts (SPEC-9-T3, R-9.4.7) --------------------------------
+    ADMIN_URLS = (
+        "/api/v1/admin/inventory/adjustments/",
+        "/api/admin/inventory/adjustments/",
+    )
+
+    def test_admin_family_paths_reach_the_one_adjustment_view(self):
+        """The canonical admin mounts and the deprecated store alias are one
+        handler: resolve() returns the same callable for every path, so the
+        mount move did not add a second view, and the admin family registers
+        it exactly once."""
+        from config.urls import v1_admin_patterns
+        from products.views import inventory_adjust
+
+        paths = (
+            *self.ADMIN_URLS,
+            self.URL,
+            "/api/v1/store/products/inventory/adjustments/",
+        )
+        for url in paths:
+            with self.subTest(url=url):
+                self.assertIs(resolve(url).func, inventory_adjust)
+
+        registrations = [
+            pattern
+            for pattern in v1_admin_patterns
+            if getattr(pattern, "callback", None) is inventory_adjust
+        ]
+        self.assertEqual(len(registrations), 1)
+
+    def test_admin_path_enforces_the_inventory_adjust_capability(self):
+        for url in self.ADMIN_URLS:
+            with self.subTest(url=url):
+                self.client.force_authenticate(self.invmgr)
+                res = self.client.post(url, self._payload(), format="json")
+                self.assertEqual(res.status_code, 201, res.data)
+
+    def test_admin_path_refuses_a_staff_role_without_the_capability(self):
+        catmgr = self._user_with_role("catmgr-admin", ROLE_CATALOGUE)
+        for url in self.ADMIN_URLS:
+            with self.subTest(url=url):
+                self.client.force_authenticate(catmgr)
+                res = self.client.post(url, self._payload(), format="json")
+                self.assertEqual(res.status_code, 403, res.data)
+                self.assertEqual(
+                    res.data["error"],
+                    "You do not have permission to perform this action.",
+                )
+        self.product.refresh_from_db()
+        self.assertEqual(self.product.stock, 10)
+        self.assertEqual(StockMovement.objects.count(), 0)
+
+    def test_admin_path_refuses_a_non_staff_caller(self):
+        customer = self.make_user("plain-customer")
+        for url in self.ADMIN_URLS:
+            with self.subTest(url=url):
+                self.client.force_authenticate(customer)
+                res = self.client.post(url, self._payload(), format="json")
+                self.assertEqual(res.status_code, 403, res.data)
+        self.assertEqual(StockMovement.objects.count(), 0)
+
+    def test_admin_path_refuses_an_anonymous_caller(self):
+        """An anonymous caller is denied with the staff API's uniform 403
+        envelope, not a 401: ``HasInventoryAdjust`` raises PermissionDenied
+        for guests too (common/permissions.py). The admin mount must not
+        diverge from the path it replaces."""
+        for url in self.ADMIN_URLS:
+            with self.subTest(url=url):
+                res = self.fresh_client().post(url, self._payload(), format="json")
+                self.assertEqual(res.status_code, 403, res.data)
+                self.assertEqual(res.data["code"], "permission_denied")
+        self.assertEqual(StockMovement.objects.count(), 0)
+
+    def test_deprecated_store_aliases_still_serve_the_write(self):
+        for url in (self.URL, "/api/v1/store/products/inventory/adjustments/"):
+            with self.subTest(url=url):
+                self.client.force_authenticate(self.invmgr)
+                res = self.client.post(url, self._payload(), format="json")
+                self.assertEqual(res.status_code, 201, res.data)
+
 
 @tag("products")
 class ProductAdminTests(ApiTestCase):
@@ -1144,6 +1226,94 @@ class ProductAdminTests(ApiTestCase):
         self.assertIn("Plain Oud", body)
 
 
+@tag("products")
+class ProductFreeShippingFlagTests(ApiTestCase):
+    """SPEC-C-03: the per-product free-shipping flag.
+
+    The flag is a merchant-editable delivery rule. The model default keeps
+    every existing row charged, the admin exposes it through the same
+    ``products.write`` change gate as every other catalogue field, and the
+    public store payload deliberately does NOT carry it: no storefront badge
+    consumes it, and the checkout charge is its only reader.
+    """
+
+    def setUp(self):
+        self.product = self.make_product(name="Free Ship Oud")
+
+    def _change_payload(self, **overrides):
+        payload = {
+            "name": self.product.name,
+            "category": self.product.category,
+            "description": self.product.description,
+            "price": str(self.product.price),
+            "size": str(self.product.size),
+            "stock_movements-TOTAL_FORMS": "0",
+            "stock_movements-INITIAL_FORMS": "0",
+        }
+        payload.update(overrides)
+        return payload
+
+    def _staff_client(self, username, role):
+        user = User.objects.create_user(
+            username,
+            f"{username}@example.com",
+            "S3cure-Passphrase!",
+            is_staff=True,
+        )
+        user.groups.add(sync_role_groups()[role])
+        client = self.client_class()
+        client.force_login(user)
+        return client
+
+    def test_defaults_off_and_round_trips(self):
+        self.assertIs(self.product.free_shipping, False)
+
+        self.product.free_shipping = True
+        self.product.save(update_fields=["free_shipping"])
+
+        self.product.refresh_from_db()
+        self.assertIs(self.product.free_shipping, True)
+
+    def test_public_product_payload_does_not_expose_the_flag(self):
+        res = self.client.get(f"/api/products/{self.product.slug}/")
+        self.assertEqual(res.status_code, 200, res.data)
+        self.assertNotIn("free_shipping", res.data)
+        self.assertNotIn("free_shipping", ProductSerializer.Meta.fields)
+
+    def test_admin_fieldset_exposes_the_flag(self):
+        self.assertIn("free_shipping", flatten_fieldsets(ProductAdmin.fieldsets))
+
+    def test_products_write_role_can_set_the_flag(self):
+        client = self._staff_client("flag-editor", ROLE_CATALOGUE)
+
+        res = client.post(
+            f"/admin/products/products/{self.product.id}/change/",
+            self._change_payload(free_shipping="on"),
+            follow=True,
+        )
+
+        self.assertEqual(res.status_code, 200)
+        self.product.refresh_from_db()
+        self.assertIs(self.product.free_shipping, True)
+
+    def test_role_without_products_write_cannot_edit_the_flag(self):
+        # ROLE_SUPPORT holds products.read but not products.write, so the
+        # change gate renders the whole form read-only and refuses the POST.
+        client = self._staff_client("flag-viewer", ROLE_SUPPORT)
+
+        res = client.get(f"/admin/products/products/{self.product.id}/change/")
+        self.assertEqual(res.status_code, 200)
+        self.assertNotContains(res, 'name="free_shipping"')
+
+        res = client.post(
+            f"/admin/products/products/{self.product.id}/change/",
+            self._change_payload(free_shipping="on"),
+        )
+        self.assertEqual(res.status_code, 403)
+        self.product.refresh_from_db()
+        self.assertIs(self.product.free_shipping, False)
+
+
 # =====================================================================================
 # SPEC-1-01: staff writes via permission_classes + explicit serializer fields
 # =====================================================================================
@@ -1168,7 +1338,11 @@ EXPECTED_PRODUCT_FIELDS = [
 # actions) do not read it through this serializer. A new entry here is a
 # decision that must be justified in place, exactly like the whitelist
 # itself.
-SERIALIZER_EXCLUDED_FIELDS = {"is_active"}
+#
+# SPEC-C-03: ``free_shipping`` stays off the payload because no storefront
+# badge consumes it — its only reader is the checkout pricing path, which
+# reads the model directly — and the total already reflects the waiver.
+SERIALIZER_EXCLUDED_FIELDS = {"is_active", "free_shipping"}
 
 
 @tag("products")

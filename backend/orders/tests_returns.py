@@ -2783,6 +2783,10 @@ class ReturnEligibilityWindowTests(ReturnTestCase):
             "whatsapp_number": "",
             "whatsapp_message": "",
             "instagram_url": "",
+            # Required by SPEC-16-T2/05's locale field: the form must be VALID
+            # for the admin role's 302 to mean "the save was permitted" rather
+            # than "the page re-rendered with an error".
+            "locale": "en-us",
             "return_window_days": 45,
             "_save": "Save",
         }
@@ -2853,6 +2857,9 @@ class ReturnEligibilityWindowTests(ReturnTestCase):
                 "whatsapp_number": "",
                 "whatsapp_message": "",
                 "instagram_url": "",
+                # Required by SPEC-16-T2/05, so the only invalid field below is
+                # the window this test is about.
+                "locale": "en-us",
                 "return_window_days": -1,
                 "_save": "Save",
             },
