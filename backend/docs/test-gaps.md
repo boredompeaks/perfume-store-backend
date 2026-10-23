@@ -21,9 +21,14 @@ sqlite:     Ran 2468 tests, OK (expected failures=2), cov 99.84% (14005 stmts, 0
 postgresql: Ran 2468 tests, OK (expected failures=2), cov 99.84% (14005 stmts, 0 missed, 1750 branches, 25 partial)
 ```
 
-The floor is captured through `scripts/test-evidence.ps1`, which keeps the
-suite's own exit code, refuses stale coverage data, writes exactly one artifact
-per engine and fails a total under `.coveragerc`'s `fail_under`:
+The floor above was measured by `scripts/changelog_figures.py floor --task P0-2`
+onto the committed artifact, not by the wrapper; `scripts/test-evidence.ps1` is
+the per-run evidence wrapper, and it keeps the suite's own exit code, refuses
+stale coverage data, writes exactly one artifact per engine and fails a total
+under `.coveragerc`'s `fail_under`. Re-run at this tip on both engines, it
+writes the same canonical totals to its per-engine artifacts --
+`coverage-sqlite.json` and `coverage-pg.json` each report 14005 statements and
+0 missed at 99.84%, matching `coverage report`:
 
 ```powershell
 # SQLite

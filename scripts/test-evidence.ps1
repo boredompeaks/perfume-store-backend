@@ -18,15 +18,23 @@
          any pipeline between the command and the read is how "FAILED" gets
          recorded next to "exit 0".
       2. It writes EXACTLY ONE artifact per engine -- `coverage-sqlite.json` or
-         `coverage-pg.json` -- through `coverage json`, and it refuses to run if
-         the other engine's artifact was touched. Two engines can never share a
-         file.
+         `coverage-pg.json` -- through `coverage json` with `.coveragerc` passed
+         explicitly as `--rcfile`, and it snapshots BOTH artifacts' existence
+         and hash around the run, so a run that creates, deletes or rewrites
+         the other engine's artifact fails. Two engines can never share a file.
       3. It refuses STALE coverage data: the `.coverage` database must have been
          rewritten by the command it just ran. A `coverage json` over yesterday's
          data is a plausible-looking wrong number, not evidence.
       4. It asserts the total against `[report] fail_under` read from
          `.coveragerc` (and also passes the floor to `coverage json` itself), so
          a sub-floor run exits non-zero even when every test passed.
+      5. It asserts the artifact's statement totals equal the canonical
+         `coverage report` over the same data file and config. `coverage json`
+         locates `.coveragerc` relative to the CURRENT directory, so an artifact
+         written from the caller's cwd silently uses coverage.py's defaults --
+         no `exclude_lines`, so a subprocess-only guard is counted as missed --
+         and its totals stop matching `coverage report`. Both commands now receive the absolute `--rcfile`, and a disagreement
+         between them fails the run rather than being filed as evidence.
 
     Nothing here parses prose. The artifact is produced by coverage.py and the
     numbers printed are read back out of that artifact.
@@ -51,9 +59,9 @@
 
 .PARAMETER Coveragerc
     The coverage config whose `fail_under` is enforced. Defaults to
-    `backend/.coveragerc`. The slow `coverage report` numbers and the JSON
-    totals come from the same `.coverage` database, so only the artifact is
-    written here.
+    `backend/.coveragerc`. It is passed to both `coverage json` and `coverage
+    report` as an absolute `--rcfile`, so both read the same `omit` and
+    `exclude_lines` rules regardless of the caller's working directory.
 
 .EXAMPLE
     # SQLite leg
@@ -68,10 +76,11 @@
 .NOTES
     Exit codes: the test command's own exit code when it fails (preserved, never
     rewritten to 1); 1 when the run failed for another reason (stale coverage
-    data, sub-floor coverage, missing artifact, the other engine's artifact
-    changed); 2 for a usage/environment error (bad paths, unparsable
-    `.coveragerc`). 0 means: the tests exited 0 AND coverage is at or above the
-    floor.
+    data, sub-floor coverage, missing artifact, artifact totals that disagree
+    with `coverage report`, the other engine's artifact created/deleted/changed);
+    2 for a usage/environment error (bad paths, unparsable `.coveragerc`). 0
+    means: the tests exited 0 AND coverage is at or above the floor AND the
+    artifact agrees with the canonical report.
 #>
 [CmdletBinding()]
 param(
@@ -146,12 +155,25 @@ $Artifact = Join-Path $BackendDir $ArtifactNames[$Engine]
 $OtherArtifact = Join-Path $BackendDir $ArtifactNames[$OtherEngine]
 $CoverageData = Join-Path $BackendDir '.coverage'
 
-# Fingerprint the OTHER engine's artifact before this run. If it moves, this
-# script wrote two engines' evidence in one invocation, which is how a copy
-# gets mistaken for a measurement.
-$OtherBefore = $null
-if (Test-Path -LiteralPath $OtherArtifact -PathType Leaf) {
-    $OtherBefore = (Get-FileHash -LiteralPath $OtherArtifact -Algorithm SHA256).Hash
+# Snapshot BOTH artifacts' existence AND content before the run. The guard
+# used to arm only when the other artifact already existed, so a command that
+# created it from nothing -- the exact way one engine's "measurement" becomes a
+# copy of the other's -- slipped through as "no change". An absent file is a
+# state: Exists=False is compared like any hash.
+function Get-ArtifactState {
+    param([string]$Path)
+    if (Test-Path -LiteralPath $Path -PathType Leaf) {
+        return [pscustomobject]@{
+            Exists = $true
+            Hash   = (Get-FileHash -LiteralPath $Path -Algorithm SHA256).Hash
+        }
+    }
+    return [pscustomobject]@{ Exists = $false; Hash = $null }
+}
+
+$ArtifactsBefore = @{}
+foreach ($path in @($Artifact, $OtherArtifact)) {
+    $ArtifactsBefore[$path] = Get-ArtifactState -Path $path
 }
 
 function Get-CoverageDataStamp {
@@ -226,7 +248,13 @@ $CoveragePercent = $null
 if (Test-Path -LiteralPath $Artifact -PathType Leaf) {
     Remove-Item -LiteralPath $Artifact -Force
 }
-& $Python -m coverage json --data-file=$CoverageData --pretty-print --fail-under=$FailUnder -o $Artifact
+# `--rcfile` is load-bearing. `coverage json` looks for `.coveragerc` in the
+# CURRENT directory, and this line runs after the script restored the caller's
+# location: without the flag the artifact silently used coverage.py's defaults
+# (no `omit`, no `exclude_lines`) and counted the subprocess-only guard in
+# config/settings.py as missed. The path is absolute, so the artifact does not
+# depend on where the wrapper was invoked.
+& $Python -m coverage json "--rcfile=$Coveragerc" --data-file=$CoverageData --pretty-print --fail-under=$FailUnder -o $Artifact
 $CoverageExit = $LASTEXITCODE
 
 if (-not (Test-Path -LiteralPath $Artifact -PathType Leaf)) {
@@ -238,7 +266,7 @@ if (-not (Test-Path -LiteralPath $Artifact -PathType Leaf)) {
 # ConvertFrom-Json cannot ingest coverage.py's `files` object: its keys are
 # absolute Windows paths, and 5.1 rejects them as member names. Reading the
 # same artifact through json.load is the same number, without that parser bug.
-$TotalsLine = & $Python -c "import json, sys; t = json.load(open(sys.argv[1], encoding='utf-8'))['totals']; print(str(t['percent_covered']) + '|' + str(t['percent_covered_display']))" $Artifact
+$TotalsLine = & $Python -c "import json, sys; t = json.load(open(sys.argv[1], encoding='utf-8'))['totals']; print('|'.join(str(t[k]) for k in ('percent_covered', 'percent_covered_display', 'num_statements', 'missing_lines')))" $Artifact
 if ($LASTEXITCODE -ne 0 -or -not $TotalsLine) {
     Write-Host "test-evidence: could not read totals out of $Artifact" -ForegroundColor Red
     if ($TestExit -ne 0) { exit $TestExit }
@@ -247,17 +275,54 @@ if ($LASTEXITCODE -ne 0 -or -not $TotalsLine) {
 $TotalParts = ([string]$TotalsLine).Trim().Split('|')
 $CoveragePercent = [double]$TotalParts[0]
 $CoverageDisplay = [string]$TotalParts[1]
+$ArtifactStatements = [int]$TotalParts[2]
+$ArtifactMissed = [int]$TotalParts[3]
 
 # --------------------------------------------------------------------------
-# 4. The other engine's artifact must not have moved.
+# 3b. The artifact must agree with the canonical `coverage report` over the
+#     same data file and the same config. Comparing the two counts, rather than
+#     asserting a remembered total, is what keeps this check honest at every
+#     future tip: a hardcoded 14005 would itself become the next stale figure.
+#     A disagreement means the artifact was produced under a different config,
+#     which is exactly the 14007/1-by-a-default-config defect.
+# --------------------------------------------------------------------------
+$ReportLines = & $Python -m coverage report "--rcfile=$Coveragerc" --data-file=$CoverageData --fail-under=0
+$ReportExit = $LASTEXITCODE
+$TotalRow = @($ReportLines | Where-Object { $_ -match '^TOTAL\s' }) | Select-Object -First 1
+if ($ReportExit -ne 0 -or -not $TotalRow) {
+    # `--fail-under=0` keeps a sub-floor total from exiting 2 here: the floor is
+    # enforced below and by `coverage json`, and this step only compares counts.
+    Write-Host "test-evidence: coverage report could not be read (exit $ReportExit); the artifact totals are unverified" -ForegroundColor Red
+    if ($TestExit -ne 0) { exit $TestExit }
+    exit 1
+}
+Write-Host ("test-evidence: canonical report total: {0}" -f ([string]$TotalRow).Trim())
+$TotalCells = ([string]$TotalRow).Trim() -split '\s+'
+$ReportStatements = [int]$TotalCells[1]
+$ReportMissed = [int]$TotalCells[2]
+if ($ArtifactStatements -ne $ReportStatements -or $ArtifactMissed -ne $ReportMissed) {
+    Write-Host ("test-evidence: artifact totals disagree with coverage report ({0} stmts/{1} missed vs {2} stmts/{3} missed); the artifact was measured with a different config" -f $ArtifactStatements, $ArtifactMissed, $ReportStatements, $ReportMissed) -ForegroundColor Red
+    if ($TestExit -ne 0) { exit $TestExit }
+    exit 1
+}
+
+# --------------------------------------------------------------------------
+# 4. Neither artifact may be created, deleted or rewritten by a run labelled
+#    with ONE engine. Comparing existence as well as content is what catches a
+#    command that creates the other engine's file from scratch; the previous
+#    guard skipped the comparison whenever that file did not already exist.
 # --------------------------------------------------------------------------
 $OtherMoved = $false
-if ($null -ne $OtherBefore) {
-    $OtherAfter = (Get-FileHash -LiteralPath $OtherArtifact -Algorithm SHA256).Hash
-    if ($OtherAfter -ne $OtherBefore) {
-        Write-Host "test-evidence: $($ArtifactNames[$OtherEngine]) changed during a $Engine run; one invocation must write one engine's artifact" -ForegroundColor Red
-        $OtherMoved = $true
-    }
+$OtherBeforeState = $ArtifactsBefore[$OtherArtifact]
+$OtherAfterState = Get-ArtifactState -Path $OtherArtifact
+if ($OtherAfterState.Exists -ne $OtherBeforeState.Exists) {
+    $verb = if ($OtherAfterState.Exists) { 'was created' } else { 'was deleted' }
+    Write-Host "test-evidence: $($ArtifactNames[$OtherEngine]) $verb during a $Engine run; one invocation must write one engine's artifact" -ForegroundColor Red
+    $OtherMoved = $true
+}
+elseif ($OtherAfterState.Exists -and $OtherAfterState.Hash -ne $OtherBeforeState.Hash) {
+    Write-Host "test-evidence: $($ArtifactNames[$OtherEngine]) changed during a $Engine run; one invocation must write one engine's artifact" -ForegroundColor Red
+    $OtherMoved = $true
 }
 
 $ArtifactHash = (Get-FileHash -LiteralPath $Artifact -Algorithm SHA256).Hash

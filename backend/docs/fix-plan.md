@@ -45,7 +45,7 @@ Ordered so that each phase is shippable and doesn't break the last. "Why" is sta
 
 ## Phase 3 — Correctness of money & inventory logic
 
-1. **Extract a coupon service module**: the coupon gate and its discount math currently live in `orders/checkout.py` (`validate_redeemable_coupon`, `coupon_merchandise_discount`) and are called by `create_order` and `apply_coupon`; move that shared math into one service both use, and add Decimal `quantize(0.01)` on all discount math.
+1. **Extract a coupon service module**: the coupon gate (`validate_redeemable_coupon`) and its discount math (`coupon_merchandise_discount`) currently live in `orders/views/checkout.py`; `validate_redeemable_coupon` is called by `apply_coupon` only, while `coupon_merchandise_discount` is called by both `apply_coupon` and `create_order`. Move that shared math into one service both use, and pass every discount through one 2-dp `quantize`.
    **Why:** F-21 (duplication already drifting) + F-11 (runtime-verified: preview said 599.997, checkout stored 600.00 — customers see one total and get charged another).
 2. **Stock re-validation at checkout**: before creating the order, check availability (cheap SELECT); fail fast with 409 and a clear error instead of post-payment.
    **Why:** V-10/F-13 — user currently discovers unavailability after paying.
