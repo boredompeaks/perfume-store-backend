@@ -17,12 +17,15 @@ idempotency-key header names are imported from `checkout.py`, the one module
 that defines that contract, so the two surfaces cannot drift apart.
 """
 
+from decimal import Decimal
+
 from django.db import IntegrityError, transaction
 from rest_framework import status
 from rest_framework.decorators import api_view, permission_classes
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
 
+from common.money import quantize_money
 from common.permissions import HasRefundsCreate
 
 from ..models import Order, Refund, RefundRequest
@@ -201,6 +204,35 @@ def _refund_request_miss():
         {"error": "Order not found"},
         status=status.HTTP_404_NOT_FOUND,
     )
+
+
+def refund_request_amount(order, item_ids):
+    """[SPEC-E-02] The money a filed request actually asks for, in 2 dp.
+
+    Empty ``items`` means the whole order, so the ask is the order's remaining
+    refundable balance - the same figure the refund writer's balance gate
+    reads. A non-empty list is the sum of those lines' ``subtotal``: the
+    frozen line total the customer paid, never ``price * quantity`` recomputed
+    from today's catalogue state.
+
+    Lives beside the customer seam that WRITES ``items`` so the admin decision
+    derives the amount by the same rules the request was filed under, rather
+    than re-interpreting its JSON in a second place.
+
+    Raises :class:`RefundRefused` (code ``invalid``) when the list names a
+    line that is no longer on the order: refunding whatever is left of the
+    list would silently pay less than the request said it was for.
+    """
+    ids = list(dict.fromkeys(item_ids or []))
+    if not ids:
+        return quantize_money(order.refundable_remaining)
+    lines = list(order.items.filter(pk__in=ids))
+    if len(lines) != len(ids):
+        raise RefundRefused(
+            "This request names order items that are no longer on the order",
+            code="invalid",
+        )
+    return quantize_money(sum((line.subtotal for line in lines), Decimal("0.00")))
 
 
 @api_view(["POST"])
