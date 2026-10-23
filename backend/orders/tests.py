@@ -42,6 +42,7 @@ from orders.models import Coupon, Order, OrderItem, OrderStatusEvent, PaymentEve
 from orders.serializers import OrderItemSerializer, OrderSerializer
 from orders.views import _mint_order_reservations, apply_coupon, create_payment
 from products.models import StockMovement, StockReservation, products
+from shipping.models import ShippingMethod, ShippingRate
 
 
 class OrderTestBase(ApiTestCase):
@@ -4871,3 +4872,100 @@ class CartOrderCaptureClearTests(OrderTestBase):
         cart = Cart.objects.get(session_id=guest.session.session_key)
         self.assertIsNone(cart.order)
         self.assertEqual(cart.items.count(), 1)  # the refusal writes nothing
+
+
+@tag("orders")
+class ProductFreeShippingCheckoutTests(ApiTestCase):
+    """SPEC-C-04: the product-level free-shipping flag on the money path.
+
+    The flag waives the delivery CHARGE, never the service: the quote still
+    runs (so an unserviceable destination is still refused) and the quoted
+    method is retained exactly as the coupon waiver retains it. Any
+    qualifying merchandise line is enough (the spec's first option), and a
+    free-shipping coupon beside the flag converges on the same 0.00 without
+    a second effect.
+    """
+
+    def setUp(self):
+        self.buyer = self.make_user("flagbuyer")
+        _, token = self.api_login("flagbuyer")
+        self.assertTrue(token)
+        self.flagged = self.make_product(
+            name="Complimentary Oud",
+            price="250.00",
+            stock=10,
+            category="Oriental",
+            free_shipping=True,
+        )
+        self.charged = self.make_product(
+            name="Charged Rose", price="500.00", stock=10, category="Floral"
+        )
+        self.standard = ShippingMethod.objects.create(code="standard", name="Standard")
+        ShippingRate.objects.create(method=self.standard, amount=Decimal("49.00"))
+        self.freeship = self.make_coupon(
+            code="FREESHIP", discount_type="free_shipping", discount_value="0"
+        )
+
+    def test_any_qualifying_line_zeroes_the_delivery_charge(self):
+        self.seed_session_cart([(self.charged, 1), (self.flagged, 2)])
+
+        res = self.checkout(shipping_method="standard")
+
+        self.assertEqual(res.status_code, 201, res.data)
+        order = Order.objects.get(id=res.data["id"])
+        self.assertEqual(order.shipping_amount, Decimal("0.00"))
+        self.assertEqual(res.data["shipping_amount"], "0.00")
+        # 500.00 + 2 x 250.00 merchandise, delivery waived.
+        self.assertEqual(order.total_amount, Decimal("1000.00"))
+        # The order keeps the method the destination was quoted as.
+        self.assertEqual(order.shipping_method, self.standard)
+        self.assertEqual(order.shipping_method_code, "standard")
+        trail = AuditEvent.objects.get(
+            order=order, event_type=AuditEvent.EventType.ORDER_CREATED
+        )
+        self.assertEqual(trail.detail["shipping_amount"], "0.00")
+        self.assertEqual(trail.detail["shipping_method"], "standard")
+
+    def test_a_cart_with_no_qualifying_line_is_still_charged(self):
+        self.seed_session_cart([(self.charged, 2)])
+
+        res = self.checkout(shipping_method="standard")
+
+        self.assertEqual(res.status_code, 201, res.data)
+        order = Order.objects.get(id=res.data["id"])
+        self.assertEqual(order.shipping_amount, Decimal("49.00"))
+        self.assertEqual(order.total_amount, Decimal("1049.00"))
+        self.assertEqual(order.shipping_method, self.standard)
+
+    def test_free_shipping_coupon_and_product_flag_converge_on_one_zero(self):
+        self.seed_session_cart([(self.flagged, 2)])
+
+        res = self.checkout(shipping_method="standard", coupon_code="FREESHIP")
+
+        self.assertEqual(res.status_code, 201, res.data)
+        order = Order.objects.get(id=res.data["id"])
+        self.assertEqual(order.coupon, self.freeship)
+        self.assertEqual(order.shipping_amount, Decimal("0.00"))
+        self.assertEqual(order.discount_amount, Decimal("0.00"))
+        # One waiver, not two: the total is the merchandise exactly, never
+        # the merchandise minus a second delivery charge.
+        self.assertEqual(order.total_amount, Decimal("500.00"))
+        self.assertEqual(order.shipping_method, self.standard)
+        self.assertEqual(order.shipping_method_code, "standard")
+
+    def test_unserviceable_destination_is_still_refused(self):
+        # A rate that does not serve the destination below: the flag waives
+        # the charge, not the serviceability rule.
+        ShippingRate.objects.all().delete()
+        ShippingRate.objects.create(
+            method=self.standard, amount=Decimal("49.00"), region="Delhi"
+        )
+        self.seed_session_cart([(self.flagged, 1)])
+
+        res = self.checkout(
+            shipping_method="standard", state="Kerala", pincode="682001"
+        )
+
+        self.assertEqual(res.status_code, 400, res.data)
+        self.assertIn("Shipping is not available", res.data["error"])
+        self.assertFalse(Order.objects.filter(user=self.buyer).exists())

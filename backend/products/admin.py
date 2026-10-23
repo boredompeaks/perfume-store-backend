@@ -198,7 +198,10 @@ class ProductAdmin(SavedFilterMixin, RoleAwareModelAdmin):
     # generates it) and prepopulation on a readonly field crashes the template.
     fieldsets = (
         ("Product", {"fields": ("name", "slug", "category", "description")}),
-        ("Pricing & inventory", {"fields": ("price", "size", "stock")}),
+        (
+            "Pricing & inventory",
+            {"fields": ("price", "size", "stock", "free_shipping")},
+        ),
         ("Image", {"fields": ("image", "image_preview")}),
     )
 

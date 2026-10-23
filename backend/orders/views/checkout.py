@@ -713,14 +713,27 @@ def create_order(request):
             shipping_amount = (
                 shipping_quote.amount if shipping_quote is not None else Decimal("0.00")
             )
-            # A free-shipping coupon waives the delivery charge entirely. The
-            # quote above still ran (so an unserviceable destination is still
-            # refused -- free shipping waives the charge, not the service),
-            # but the order is charged nothing for delivery while KEEPING the
-            # quoted method as the record of how it ships. That retained
-            # method is what tells this zero apart from the
-            # no-shipping-configured zero where the method is null.
-            if coupon is not None and coupon.discount_type == Coupon.FREE_SHIPPING:
+            # A free delivery charge comes from either waiver, and both land
+            # on the ONE order-level amount: a merchant-set product flag
+            # (SPEC-C-04) or a free-shipping coupon. Convergence here is what
+            # keeps the pair from double-counting: there is a single charge
+            # to zero, so applying both is byte-identical to applying one.
+            #
+            # ANY qualifying merchandise line is enough (the spec's first
+            # option): the cart has one delivery cost, and a line advertised
+            # as shipping free is the reason to waive it. Flip the predicate
+            # to ``all(...)`` to require every line to qualify; nothing else
+            # in this block changes.
+            #
+            # The quote above still ran, so an unserviceable destination is
+            # still refused -- these waivers waive the charge, not the
+            # service -- and only the AMOUNT is zeroed. The quoted method is
+            # retained exactly as before, which is what tells this zero apart
+            # from the no-shipping-configured zero where the method is null.
+            free_delivery = any(item.product.free_shipping for item in cart_items) or (
+                coupon is not None and coupon.discount_type == Coupon.FREE_SHIPPING
+            )
+            if free_delivery:
                 shipping_amount = Decimal("0.00")
             shipping_method_id = (
                 shipping_quote.method_id if shipping_quote is not None else None
