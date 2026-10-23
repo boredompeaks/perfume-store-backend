@@ -22,6 +22,7 @@ from django.db import (
 )
 from django.db.models import Sum
 from django.test import TransactionTestCase, override_settings, tag
+from django.urls import resolve
 from django.utils import timezone
 from rest_framework.exceptions import PermissionDenied
 from rest_framework.request import Request
@@ -944,6 +945,86 @@ class InventoryAdjustApiTests(ApiTestCase):
             format="json",
         )
         self.assertEqual(res.status_code, 201, res.data)
+
+    # admin-family mounts (SPEC-9-T3, R-9.4.7) --------------------------------
+    ADMIN_URLS = (
+        "/api/v1/admin/inventory/adjustments/",
+        "/api/admin/inventory/adjustments/",
+    )
+
+    def test_admin_family_paths_reach_the_one_adjustment_view(self):
+        """The canonical admin mounts and the deprecated store alias are one
+        handler: resolve() returns the same callable for every path, so the
+        mount move did not add a second view, and the admin family registers
+        it exactly once."""
+        from config.urls import v1_admin_patterns
+        from products.views import inventory_adjust
+
+        paths = (
+            *self.ADMIN_URLS,
+            self.URL,
+            "/api/v1/store/products/inventory/adjustments/",
+        )
+        for url in paths:
+            with self.subTest(url=url):
+                self.assertIs(resolve(url).func, inventory_adjust)
+
+        registrations = [
+            pattern
+            for pattern in v1_admin_patterns
+            if getattr(pattern, "callback", None) is inventory_adjust
+        ]
+        self.assertEqual(len(registrations), 1)
+
+    def test_admin_path_enforces_the_inventory_adjust_capability(self):
+        for url in self.ADMIN_URLS:
+            with self.subTest(url=url):
+                self.client.force_authenticate(self.invmgr)
+                res = self.client.post(url, self._payload(), format="json")
+                self.assertEqual(res.status_code, 201, res.data)
+
+    def test_admin_path_refuses_a_staff_role_without_the_capability(self):
+        catmgr = self._user_with_role("catmgr-admin", ROLE_CATALOGUE)
+        for url in self.ADMIN_URLS:
+            with self.subTest(url=url):
+                self.client.force_authenticate(catmgr)
+                res = self.client.post(url, self._payload(), format="json")
+                self.assertEqual(res.status_code, 403, res.data)
+                self.assertEqual(
+                    res.data["error"],
+                    "You do not have permission to perform this action.",
+                )
+        self.product.refresh_from_db()
+        self.assertEqual(self.product.stock, 10)
+        self.assertEqual(StockMovement.objects.count(), 0)
+
+    def test_admin_path_refuses_a_non_staff_caller(self):
+        customer = self.make_user("plain-customer")
+        for url in self.ADMIN_URLS:
+            with self.subTest(url=url):
+                self.client.force_authenticate(customer)
+                res = self.client.post(url, self._payload(), format="json")
+                self.assertEqual(res.status_code, 403, res.data)
+        self.assertEqual(StockMovement.objects.count(), 0)
+
+    def test_admin_path_refuses_an_anonymous_caller(self):
+        """An anonymous caller is denied with the staff API's uniform 403
+        envelope, not a 401: ``HasInventoryAdjust`` raises PermissionDenied
+        for guests too (common/permissions.py). The admin mount must not
+        diverge from the path it replaces."""
+        for url in self.ADMIN_URLS:
+            with self.subTest(url=url):
+                res = self.fresh_client().post(url, self._payload(), format="json")
+                self.assertEqual(res.status_code, 403, res.data)
+                self.assertEqual(res.data["code"], "permission_denied")
+        self.assertEqual(StockMovement.objects.count(), 0)
+
+    def test_deprecated_store_aliases_still_serve_the_write(self):
+        for url in (self.URL, "/api/v1/store/products/inventory/adjustments/"):
+            with self.subTest(url=url):
+                self.client.force_authenticate(self.invmgr)
+                res = self.client.post(url, self._payload(), format="json")
+                self.assertEqual(res.status_code, 201, res.data)
 
 
 @tag("products")
