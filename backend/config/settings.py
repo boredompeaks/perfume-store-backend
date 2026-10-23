@@ -13,6 +13,7 @@ https://docs.djangoproject.com/en/6.1/ref/settings/
 import logging
 import os
 import re
+import sys
 from datetime import date, timedelta
 from decimal import Decimal
 from pathlib import Path
@@ -394,6 +395,16 @@ def _databases_from_url(url, debug):
 
 
 DATABASES = _databases_from_url(os.getenv("DATABASE_URL"), DEBUG)
+
+# P0-1: one suite per test database. Two suites that create/destroy the SAME
+# test database corrupt each other (measured on pg2a: 1,110 "database does not
+# exist" FATALs, schema drift and deadlocks), so the runner takes an exclusive
+# OS file lock keyed on the resolved test database before touching it and
+# refuses - non-zero, with the holder's PID - while another run owns it. See
+# common/test_isolation.py. In-memory SQLite is process-private and is not
+# locked; --parallel is allowed only where Django gives each worker its own
+# database (PG clones, in-memory SQLite).
+TEST_RUNNER = "common.test_isolation.LockedDiscoverRunner"
 
 
 # Password validation
@@ -1001,17 +1012,60 @@ ALERT_RECIPIENTS = os.getenv("ALERT_RECIPIENTS", "")
 # FileBasedCache treats that as the process CWD and would scatter cache
 # files wherever the app happens to be started, and RedisCache would be
 # handed an empty URL.
+# P0-1: under the test runner the default alias resolves to its OWN Redis DB
+# index (TEST_REDIS_DB, default 13), because cache.clear() on RedisCache is
+# FLUSHDB and must never flush the deployment's / a parallel suite's keys.
 _REDIS_URL = (os.getenv("REDIS_URL") or "").strip()
+
+
+def _is_test_run():
+    """True when this process is a Django test-runner invocation.
+
+    CACHES is built at settings-import time, before the runner object exists,
+    so argv is the only signal available to the cache wiring; an env flag set
+    by the runner would arrive too late. Unlike DEBUG, this never changes what
+    a deployment serves - it only picks a test cache namespace.
+    """
+    return "test" in sys.argv[1:]
+
+
+def _test_redis_location(location):
+    """Point a TEST run's Redis cache at its own DB index (P0-1).
+
+    Django's RedisCache.clear() is FLUSHDB: it ignores KEY_PREFIX and deletes
+    every key in the selected database. A separate index is therefore the only
+    namespace clear() actually honours - a prefixed key would still be flushed
+    by (and would still flush) the deployment's database. TEST_REDIS_DB
+    overrides the default index 13; a non-integer value falls back rather than
+    producing an unconnectable URL.
+    """
+    db = (os.getenv("TEST_REDIS_DB") or "").strip()
+    if not db.isdigit():
+        db = "13"
+    parsed = urlparse(location)
+    if parsed.scheme not in ("redis", "rediss"):
+        return location
+    return parsed._replace(path=f"/{db}").geturl()
+
+
+_default_cache_backend = _env_dotted_path(
+    "CACHE_BACKEND",
+    "django.core.cache.backends.redis.RedisCache"
+    if _REDIS_URL
+    else "django.core.cache.backends.locmem.LocMemCache",
+)
+_default_cache_location = (os.getenv("CACHE_LOCATION") or "").strip() or (
+    _REDIS_URL or "default"
+)
+if _is_test_run() and (
+    _default_cache_backend == "django.core.cache.backends.redis.RedisCache"
+):
+    _default_cache_location = _test_redis_location(_default_cache_location)
+
 CACHES = {
     "default": {
-        "BACKEND": _env_dotted_path(
-            "CACHE_BACKEND",
-            "django.core.cache.backends.redis.RedisCache"
-            if _REDIS_URL
-            else "django.core.cache.backends.locmem.LocMemCache",
-        ),
-        "LOCATION": (os.getenv("CACHE_LOCATION") or "").strip()
-        or (_REDIS_URL or "default"),
+        "BACKEND": _default_cache_backend,
+        "LOCATION": _default_cache_location,
     },
     "alerts": {
         "BACKEND": _env_dotted_path(
