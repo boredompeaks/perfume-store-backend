@@ -286,16 +286,17 @@ authoritative, SQLite nightly**.
 ### Phase 0 — isolation + evidence
 | ID | Task | Lane | Status |
 |---|---|---|---|
-| P0-1 | one suite per test DB (lock keyed by DATABASE_URL), Redis test namespace, stop `FLUSHDB` on shared db0 | A | BUILDING |
-| P0-2 | CI reds (`fix-plan.md:48`, 2 ruff-format files) + exit-code-preserving evidence wrapper + one coverage artifact per engine + refresh `test-gaps.md` | B | BUILDING |
+| P0-1 | one suite per test DB (lock keyed by DATABASE_URL), Redis test namespace, stop `FLUSHDB` on shared db0 | A | SHIPPED |
+| P0-2 | CI reds (`fix-plan.md:48`, 2 ruff-format files) + exit-code-preserving evidence wrapper + one coverage artifact per engine + refresh `test-gaps.md` | B | SHIPPED |
 
 ### Phase 1 — supply chain + observability + CI
 | ID | Task | Lane | Status |
 |---|---|---|---|
-| P1-1 | Renovate (pip/npm/actions, grouped weekly) + `pip-audit`/`npm audit` CI steps | A | PENDING |
-| P1-2 | Sentry backend, free tier, hard hourly quota guard (Redis counter + `before_send` dedupe), PII off, low traces | B | PENDING |
-| P1-3 | Sentry frontend, free tier, `sessionStorage` hourly cap + `ignoreErrors`, no replays | A | PENDING |
-| P1-4 | CI hygiene: action pins (Node 20), `--parallel 4` PG with coverage-combine invariant, SQLite nightly workflow | B | PENDING |
+| P1-1 | Renovate (pip/npm/actions, grouped weekly) + `pip-audit`/`npm audit` CI steps | A | SHIPPED |
+| P1-2 | Sentry backend, free tier, hard hourly quota guard (Redis counter + `before_send` dedupe), PII off, low traces | B | SHIPPED |
+| P1-3 | Sentry frontend, free tier, `sessionStorage` hourly cap + `ignoreErrors`, no replays | A | SHIPPED |
+| P1-4 | CI hygiene: action pins (Node 24), `--parallel 4` PG with coverage-combine invariant, SQLite nightly workflow | B | SHIPPED |
+| P1-5 | dependency remediation: clear pip/npm audit advisories (DRF/Pillow/certifi/next/overrides) | B | SHIPPED |
 
 ### Phase 2 — compliance (read-only first)
 | ID | Task | Lane | Status |
