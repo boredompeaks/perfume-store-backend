@@ -28,6 +28,7 @@ import tempfile
 import threading
 import time
 from pathlib import Path
+from typing import Any, cast
 
 from django.conf import settings
 from django.test.runner import DiscoverRunner
@@ -109,27 +110,37 @@ def _lock_directory():
 
 
 def _try_lock(fd):
+    # ``os.name == "nt"`` is a runtime value, not a type-level one: mypy checks
+    # BOTH branches on every platform, so the module the current OS does not
+    # ship is still resolved and every member of it is reported missing
+    # (msvcrt on Linux, fcntl on Windows). The cast to ``Any`` keeps the runtime
+    # call exactly as it was - same module, same function, same constants - and
+    # takes the platform-gated API out of the type checker's hands.
     if os.name == "nt":
         import msvcrt
 
+        nt = cast(Any, msvcrt)
         os.lseek(fd, 0, os.SEEK_SET)
-        msvcrt.locking(fd, msvcrt.LK_NBLCK, 1)
+        nt.locking(fd, nt.LK_NBLCK, 1)
     else:
         import fcntl
 
-        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        posix = cast(Any, fcntl)
+        posix.flock(fd, posix.LOCK_EX | posix.LOCK_NB)
 
 
 def _unlock(fd):
     if os.name == "nt":
         import msvcrt
 
+        nt = cast(Any, msvcrt)
         os.lseek(fd, 0, os.SEEK_SET)
-        msvcrt.locking(fd, msvcrt.LK_UNLCK, 1)
+        nt.locking(fd, nt.LK_UNLCK, 1)
     else:
         import fcntl
 
-        fcntl.flock(fd, fcntl.LOCK_UN)
+        posix = cast(Any, fcntl)
+        posix.flock(fd, posix.LOCK_UN)
 
 
 class DatabaseSuiteLock:
