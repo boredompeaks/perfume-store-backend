@@ -22,9 +22,9 @@ jobs:
       run:
         working-directory: frontend
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
-      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: "22"
           cache: npm
@@ -44,6 +44,12 @@ jobs:
           NEXT_PUBLIC_SITE_URL: https://test.boredompeaks.me
           NEXT_PUBLIC_ADMIN_ORIGIN: https://api.boredompeaks.me
           NEXTJS_ENV: production
+          # Sentry browser DSN for the client bundle (P1-3). Supplied as a repo
+          # VARIABLE, not a secret: a NEXT_PUBLIC_* value is inlined into the
+          # public bundle by definition, so treating it as a secret would only
+          # mislabel it. The SDK is inert when the value is empty, so a missing
+          # variable degrades to "no error reporting" rather than a broken build.
+          NEXT_PUBLIC_SENTRY_DSN: ${{ vars.NEXT_PUBLIC_SENTRY_DSN }}
         run: npx opennextjs-cloudflare build
 
       # Next 16.4 + OpenNext: loadManifest rejects preview-props.json (upstream

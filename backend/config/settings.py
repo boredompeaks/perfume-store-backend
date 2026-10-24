@@ -13,6 +13,7 @@ https://docs.djangoproject.com/en/6.1/ref/settings/
 import logging
 import os
 import re
+import sys
 from datetime import date, timedelta
 from decimal import Decimal
 from pathlib import Path
@@ -394,6 +395,16 @@ def _databases_from_url(url, debug):
 
 
 DATABASES = _databases_from_url(os.getenv("DATABASE_URL"), DEBUG)
+
+# P0-1: one suite per test database. Two suites that create/destroy the SAME
+# test database corrupt each other (measured on pg2a: 1,110 "database does not
+# exist" FATALs, schema drift and deadlocks), so the runner takes an exclusive
+# OS file lock keyed on the resolved test database before touching it and
+# refuses - non-zero, with the holder's PID - while another run owns it. See
+# common/test_isolation.py. In-memory SQLite is process-private and is not
+# locked; --parallel is allowed only where Django gives each worker its own
+# database (PG clones, in-memory SQLite).
+TEST_RUNNER = "common.test_isolation.LockedDiscoverRunner"
 
 
 # Password validation
@@ -1001,17 +1012,60 @@ ALERT_RECIPIENTS = os.getenv("ALERT_RECIPIENTS", "")
 # FileBasedCache treats that as the process CWD and would scatter cache
 # files wherever the app happens to be started, and RedisCache would be
 # handed an empty URL.
+# P0-1: under the test runner the default alias resolves to its OWN Redis DB
+# index (TEST_REDIS_DB, default 13), because cache.clear() on RedisCache is
+# FLUSHDB and must never flush the deployment's / a parallel suite's keys.
 _REDIS_URL = (os.getenv("REDIS_URL") or "").strip()
+
+
+def _is_test_run():
+    """True when this process is a Django test-runner invocation.
+
+    CACHES is built at settings-import time, before the runner object exists,
+    so argv is the only signal available to the cache wiring; an env flag set
+    by the runner would arrive too late. Unlike DEBUG, this never changes what
+    a deployment serves - it only picks a test cache namespace.
+    """
+    return "test" in sys.argv[1:]
+
+
+def _test_redis_location(location):
+    """Point a TEST run's Redis cache at its own DB index (P0-1).
+
+    Django's RedisCache.clear() is FLUSHDB: it ignores KEY_PREFIX and deletes
+    every key in the selected database. A separate index is therefore the only
+    namespace clear() actually honours - a prefixed key would still be flushed
+    by (and would still flush) the deployment's database. TEST_REDIS_DB
+    overrides the default index 13; a non-integer value falls back rather than
+    producing an unconnectable URL.
+    """
+    db = (os.getenv("TEST_REDIS_DB") or "").strip()
+    if not db.isdigit():
+        db = "13"
+    parsed = urlparse(location)
+    if parsed.scheme not in ("redis", "rediss"):
+        return location
+    return parsed._replace(path=f"/{db}").geturl()
+
+
+_default_cache_backend = _env_dotted_path(
+    "CACHE_BACKEND",
+    "django.core.cache.backends.redis.RedisCache"
+    if _REDIS_URL
+    else "django.core.cache.backends.locmem.LocMemCache",
+)
+_default_cache_location = (os.getenv("CACHE_LOCATION") or "").strip() or (
+    _REDIS_URL or "default"
+)
+if _is_test_run() and (
+    _default_cache_backend == "django.core.cache.backends.redis.RedisCache"
+):
+    _default_cache_location = _test_redis_location(_default_cache_location)
+
 CACHES = {
     "default": {
-        "BACKEND": _env_dotted_path(
-            "CACHE_BACKEND",
-            "django.core.cache.backends.redis.RedisCache"
-            if _REDIS_URL
-            else "django.core.cache.backends.locmem.LocMemCache",
-        ),
-        "LOCATION": (os.getenv("CACHE_LOCATION") or "").strip()
-        or (_REDIS_URL or "default"),
+        "BACKEND": _default_cache_backend,
+        "LOCATION": _default_cache_location,
     },
     "alerts": {
         "BACKEND": _env_dotted_path(
@@ -1528,70 +1582,61 @@ SENTRY_SAMPLE_RATE = _env_float("SENTRY_SAMPLE_RATE", 1.0)
 # Tracing is OFF by default: this app instruments no transactions, and a
 # non-zero trace rate would be a bill nobody asked for.
 SENTRY_TRACES_SAMPLE_RATE = _env_float("SENTRY_TRACES_SAMPLE_RATE", 0.0)
+# The deploy SHA labels a release, so an error can be tied to the build that
+# produced it. Either name is accepted because the two CI systems that build
+# this tree export different ones; neither has a default (a guessed release
+# is worse than an unlabelled event).
+SENTRY_RELEASE = (
+    (os.getenv("RELEASE_SHA") or "").strip()
+    or (os.getenv("GIT_SHA") or "").strip()
+    or None
+)
+# The hard ceiling on the free tier. A per-process limit is not a limit with
+# N workers, so the guard behind these values keeps ONE shared counter when
+# REDIS_URL is declared (the same declaration that moves the throttle cache
+# onto Redis). Both are positive ints; a zero or malformed value keeps the
+# documented default, because a typo must not silently disable the cap.
+SENTRY_MAX_EVENTS_PER_MINUTE = _env_positive_int("SENTRY_MAX_EVENTS_PER_MINUTE", 10)
+SENTRY_MAX_EVENTS_PER_HOUR = _env_positive_int("SENTRY_MAX_EVENTS_PER_HOUR", 200)
 
 
-def _init_error_tracking(dsn, environment, sample_rate, traces_sample_rate):
-    """Initialise the error tracker when a DSN is configured; inert otherwise.
+def _init_error_tracking(
+    dsn,
+    environment,
+    sample_rate,
+    traces_sample_rate,
+    *,
+    release=None,
+    max_per_minute=None,
+    max_per_hour=None,
+    redis_url=None,
+):
+    """Initialise the quota-guarded error tracker; inert without a DSN.
 
-    Returns True when the tracker is live. The SDK is imported INSIDE the
-    DSN gate rather than at module scope, so an unconfigured process never
-    loads it, never imports its transports and never opens a socket at
-    import time. Losing error reporting must not be able to take the
-    storefront down, and the boot-time network is off either way (the SDK
-    sends on the first event, in a background worker). So BOTH ways of
-    failing to report are degraded, not fatal:
+    The implementation lives in ``common.sentry`` because it is a transport
+    decision, not a settings value, and it is imported HERE rather than at
+    module scope so an unconfigured process never loads the SDK. That module
+    owns the DSN gate, the denylist, the 60-second duplicate window and the
+    per-minute/per-hour ceiling; its docstring records why each exists.
 
-    - an SDK that is configured but not installed (ImportError);
-    - a DSN the SDK itself refuses - a typo or a truncated value in `.env`,
-      which the SDK rejects by raising `BadDsn` from `init()`. `init()` is
-      therefore INSIDE the try, not merely the imports: this is a settings
-      module, so an uncaught raise here happens at import time and takes
-      down every worker in the deployment (and the release script's migrate
-      checkpoint) rather than merely the reporting. `except Exception` is
-      deliberate - whatever the SDK raises from a bad configuration is, by
-      that fact, not worth a boot.
-
-    The two integrations are what make the EXISTING logging config the
-    reporting path: `django.request` is pinned at ERROR by _build_logging
-    above, so every unhandled exception and 5xx Django logs there becomes an
-    event (event_level=ERROR) rather than only a line on stdout, and
-    DjangoIntegration captures the exception itself with the request context.
+    Kept as a settings-level wrapper because this module is the boot surface
+    and because its logger name is what a deployment watches. The wrapper
+    passes that logger through, so a refused DSN or a missing package still
+    fails as a warning from ``config.settings`` rather than a dead import.
     """
-    if not dsn:
-        return False
-    try:
-        import sentry_sdk
-        from sentry_sdk.integrations.django import DjangoIntegration
-        from sentry_sdk.integrations.logging import LoggingIntegration
+    from common.sentry import init_sentry
 
-        sentry_sdk.init(
-            dsn=dsn,
-            environment=environment,
-            sample_rate=sample_rate,
-            traces_sample_rate=traces_sample_rate,
-            # Request bodies, cookies, headers and user identifiers stay inside
-            # the process unless an operator deliberately turns this on.
-            send_default_pii=False,
-            integrations=[
-                DjangoIntegration(),
-                LoggingIntegration(level=logging.INFO, event_level=logging.ERROR),
-            ],
-        )
-    except ImportError:
-        logging.getLogger(__name__).warning(
-            "SENTRY_DSN is set but the sentry-sdk package is not installed; "
-            "error tracking stays off for this process."
-        )
-        return False
-    except Exception as error:
-        logging.getLogger(__name__).warning(
-            "SENTRY_DSN was rejected by the sentry-sdk (%s: %s); error "
-            "tracking stays off for this process. Check the value in .env.",
-            type(error).__name__,
-            error,
-        )
-        return False
-    return True
+    return init_sentry(
+        dsn=dsn,
+        environment=environment,
+        release=release,
+        sample_rate=sample_rate,
+        traces_sample_rate=traces_sample_rate,
+        max_per_minute=max_per_minute,
+        max_per_hour=max_per_hour,
+        redis_url=redis_url,
+        log=logging.getLogger(__name__),
+    )
 
 
 ERROR_TRACKING_ENABLED = _init_error_tracking(
@@ -1599,6 +1644,13 @@ ERROR_TRACKING_ENABLED = _init_error_tracking(
     SENTRY_ENVIRONMENT,
     SENTRY_SAMPLE_RATE,
     SENTRY_TRACES_SAMPLE_RATE,
+    release=SENTRY_RELEASE,
+    max_per_minute=SENTRY_MAX_EVENTS_PER_MINUTE,
+    max_per_hour=SENTRY_MAX_EVENTS_PER_HOUR,
+    # Read the env directly rather than settings.REDIS_URL, which carries a
+    # localhost default: a default is not a declaration, and an undeclared
+    # Redis must keep the per-process counter.
+    redis_url=(os.getenv("REDIS_URL") or "").strip() or None,
 )
 
 

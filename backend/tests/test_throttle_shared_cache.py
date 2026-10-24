@@ -35,8 +35,8 @@ from types import SimpleNamespace
 from unittest import mock
 
 from django.contrib.auth.models import AnonymousUser
-from django.core.cache import cache, caches
 from django.core.cache import cache as default_cache
+from django.core.cache import caches
 from django.core.cache.backends.redis import RedisCache
 from django.test import SimpleTestCase
 from rest_framework.settings import api_settings
@@ -179,7 +179,9 @@ class SharedThrottleCountTests(SimpleTestCase):
         self.redis_url = url
         # The suite's own throttle windows are reset per ApiTestCase; this
         # class is a SimpleTestCase, so it resets the alias it writes to.
-        cache.clear()
+        # P0-1 moves the default alias to a test-only DB index, so clear the
+        # EXPLICIT operator DB these workers share instead of the proxy.
+        RedisCache(self.redis_url, {}).clear()
 
     def _anon_request(self):
         request = APIRequestFactory().post("/api/orders/apply-coupon/")

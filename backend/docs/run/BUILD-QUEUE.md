@@ -262,3 +262,45 @@ sequential builds (request entity, then approval wiring).
 Rules for this batch: one task per lane at a time; no file overlap between
 concurrent lanes; every task builder -> auditor -> push that lane; changelog
 row per task; no PR opened or merged. Duplicates are merged, not queued twice.
+
+### Promotion (2026-10-23)
+
+PR #48 `spec-comp -> feat/add-frontend` **MERGED** `47de5c2` (parents
+`8ba6746` + `aeaeb04`), verified independently (`gh pr view 48` state MERGED,
+`origin/feat/add-frontend` = `47de5c2`). CI all-green: backend-tests
+`39961186676` (2468 tests, cov 99.83% CI / 99.84% local, 0 missed),
+secret-scan, ghcr-publish, GitGuardian clean. Deploy run `39961840500`
+success (release gate + release), `RELEASED_SHA=47de5c2`. Live verified:
+`api.boredompeaks.me/health/` 200, `/api/settings/` 200 carrying
+`name/logo/locale/maintenance_mode`, `test.boredompeaks.me` 200.
+Lane tips drained: `lane/a` `4f75886`, `lane/b` `af1722a`; `spec-comp`
+`aeaeb04`. `S9-T2` (guest checkout) remains owner-deferred.
+
+## Post-gate hardening (owner-approved 2026-10-23)
+
+Owner decisions: order Phase 0 -> 1 -> 2; **Renovate** (not Dependabot);
+**Sentry free tier** with a hard client-side quota guard; weak-assertion work
+runs in parallel with compliance, **max 3 subagents**; **PostgreSQL
+authoritative, SQLite nightly**.
+
+### Phase 0 — isolation + evidence
+| ID | Task | Lane | Status |
+|---|---|---|---|
+| P0-1 | one suite per test DB (lock keyed by DATABASE_URL), Redis test namespace, stop `FLUSHDB` on shared db0 | A | SHIPPED |
+| P0-2 | CI reds (`fix-plan.md:48`, 2 ruff-format files) + exit-code-preserving evidence wrapper + one coverage artifact per engine + refresh `test-gaps.md` | B | SHIPPED |
+
+### Phase 1 — supply chain + observability + CI
+| ID | Task | Lane | Status |
+|---|---|---|---|
+| P1-1 | Renovate (pip/npm/actions, grouped weekly) + `pip-audit`/`npm audit` CI steps | A | SHIPPED |
+| P1-2 | Sentry backend, free tier, hard hourly quota guard (Redis counter + `before_send` dedupe), PII off, low traces | B | SHIPPED |
+| P1-3 | Sentry frontend, free tier, `sessionStorage` hourly cap + `ignoreErrors`, no replays | A | SHIPPED |
+| P1-4 | CI hygiene: action pins (Node 24), `--parallel 4` PG with coverage-combine invariant, SQLite nightly workflow | B | SHIPPED |
+| P1-5 | dependency remediation: clear pip/npm audit advisories (DRF/Pillow/certifi/next/overrides) | B | SHIPPED |
+
+### Phase 2 — compliance (read-only first)
+| ID | Task | Lane | Status |
+|---|---|---|---|
+| P2-1 | re-run S9/S12/S16/S17 on the merged tree | C | PENDING |
+| P2-2 | whole-project + spec-level sweep: false SHIPPED claims, stale/incomplete queues, next sections to ship | C | PENDING |
+| P2-3 | weak-assertion batch (wire-contract money, constant oracles, no-assertion tests) | A/B | PENDING |

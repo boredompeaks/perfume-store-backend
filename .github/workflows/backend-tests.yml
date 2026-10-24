@@ -5,6 +5,15 @@
 # `git ls-remote https://github.com/<owner>/<action>.git refs/tags/<tag>^{}`
 # (the `^{}` peel matters for an annotated tag) and replace the SHA - never
 # widen the pin back to a tag.
+#
+# NODE24 (P1-4): every pin in this workflow now targets an action whose
+# `runs.using: node24`. GitHub deprecates the Node 20 runtime, and a Node-20
+# action is what the runner warned about on every job ("actions/checkout@11d5…
+# and actions/setup-python@a26a… target Node.js 20"). The pinned releases:
+# actions/checkout v7.0.1, actions/setup-python v7.1.0, actions/cache v6.1.0,
+# actions/upload-artifact v7.0.2 (v7 majors, resolved 2026-10-24 with the
+# command above). A future bump must keep `runs.using` at node24 or newer --
+# check it, do not assume it.
 name: backend-tests
 
 on:
@@ -174,7 +183,7 @@ jobs:
       # REDIS_URL from every subprocess it boots, so both shapes stay pinned.
       REDIS_URL: redis://localhost:6379/0
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           # Full history, and the remote-tracking refs, because the claim
           # scan below is DIFF-SCOPED: it runs `git diff --unified=0
@@ -249,7 +258,7 @@ jobs:
           echo "The real PostgreSQL suite (migrations, coverage gate, pg_gate, claim scan, changelog gate) is not applicable and did not run."
           echo "Any backend-relevant change still runs the full suite in this same job; owner-directed ruleset fix PROMOTE-39b."
 
-      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
         if: steps.changes.outputs.real == 'true'
         with:
           python-version: "3.14"
@@ -294,6 +303,42 @@ jobs:
             exit 1
           fi
 
+      # PARALLEL-4 (P1-4): MEASURED, NOT ENABLED. `--parallel 4` is NOT wired
+      # here because this suite is not parallel-safe, and the measurement says
+      # so rather than the wiring guessing:
+      #
+      #   * Full suite, SAME tree, SAME database, serial vs `--parallel 4`
+      #     (Linux/Python 3.14.9, coverage combined from every worker): 27 test
+      #     ids are red under parallel that the serial run never reds --
+      #       accounts.tests.AuthThrottleTests (6, the auth throttle budget),
+      #       tests.test_restore_drill (6, dump/restore of the shared test DB),
+      #       products.test_restock (4), tests.test_mfa (3), cart.tests (2),
+      #       shipping.tests_tracking_hardening (2), orders.tests,
+      #       orders.tests_guest, tests.test_audit_trail,
+      #       tests.test_notification_outbox_worker (1 each).
+      #   * Two families carry most of that set and neither is a defect: the
+      #     throttle pins certify a SHARED budget across connections and
+      #     PROCESSES (they are the reason the redis service exists), and the
+      #     restore drill operates on the whole test database. Four workers
+      #     deliberately break exactly the state those pins exist to prove, and
+      #     a drill cannot restore a database three siblings are connected to.
+      #   * No in-workflow exclusion can separate them: they are interleaved
+      #     with parallel-safe siblings inside the same modules (6 of
+      #     accounts/tests.py's 109 tests), and the repo's tags are FEATURE tags
+      #     (`accounts`, `restock`, `ops`), not parallel-safety tags -- so a
+      #     `--exclude-tag` split would drop thousands of safe tests with them.
+      #   * The speed would be real -- measured on Windows, 271s parallel vs
+      #     848s serial (3.1x), with 5 coverage data files combined and the
+      #     statement total still exactly 14005 -- but that run was RED for the
+      #     isolation reasons above, so the speed is not available until they
+      #     are fixed: tag the classes above with one `shared_state` tag, then
+      #     this job can run `--parallel 4 --exclude-tag shared_state` plus a
+      #     serial `--tag shared_state` leg and combine the two. That needs
+      #     test-file edits (not this workflow's to make) and `pip install
+      #     tblib` (Django's parallel runner cannot ship a traceback without it
+      #     -- measured: `TypeError: cannot pickle 'traceback' object` on the
+      #     two expected failures alone).
+      #
       # The suite is expected GREEN on PostgreSQL, but this step still does
       # not fail on the suite's own exit code: `pipefail` is deliberately NOT
       # set, which leaves the pipeline's status as tee's (0), and the gate
@@ -309,9 +354,67 @@ jobs:
         run: |
           python -m coverage run manage.py test 2>&1 | tee pg-suite.log
 
-      - name: Coverage report
+      # `--fail-under=90` is spelled out here as well as in backend/.coveragerc:
+      # the config's fail_under is what a developer's local run honours, and
+      # this flag is what makes the CI gate explicit in the workflow that
+      # depends on it -- a gate whose threshold can only be found in another
+      # file is a gate nobody re-reads.
+      - name: Coverage report (fail_under=90)
         if: steps.changes.outputs.real == 'true'
-        run: python -m coverage report
+        run: python -m coverage report --fail-under=90
+
+      # PARTIAL-DATA GUARD (P1-4). Two independent invariants, both of the same
+      # shape -- "shrank = red, grew = notice" -- so neither turns red on the
+      # day the suite legitimately grows:
+      #
+      #   statements 14005: the size of the measured FILE SET. Measured equal on
+      #     both engines and both hosts (Windows serial 99.84%/14005 stmts; CI
+      #     Linux serial 99.83%/14005 stmts, run 39960450424). Honest limit, so
+      #     nobody trusts it for more than it does: a run that executes fewer
+      #     tests still reports 14005, because Django's discovery IMPORTS every
+      #     measured module either way. What it catches is a data file that
+      #     never arrived or an erased one -- which is exactly the failure the
+      #     parallel path would have introduced (a worker whose `.coverage.*`
+      #     file is missing).
+      #   tests 2468: the runner's own count, which DOES fall when the run is
+      #     truncated or a shard silently stops running. pg_gate judges the
+      #     failure SET; this judges that the set was produced from a complete
+      #     run, which is the other half of the same question.
+      #
+      # An unparseable number is red, never a pass: a guard that cannot read its
+      # input must not report a green.
+      - name: Partial-data invariant (statements + test count)
+        if: steps.changes.outputs.real == 'true'
+        run: |
+          set -euo pipefail
+          statements_baseline=14005
+          tests_baseline=2468
+          # `|| true` inside the substitutions: an unreadable report or a missing
+          # summary line must reach the explicit "could not parse" branch below
+          # with its own message, not abort the step silently at the assignment.
+          statements="$( (python -m coverage report || true) | awk '$1=="TOTAL"{print $2; exit}')"
+          tests="$( (grep -E '^Ran [0-9]+ tests' pg-suite.log || true) | tail -1 | awk '{print $2}')"
+          echo "statements=${statements:-<unparsed>} (baseline ${statements_baseline})"
+          echo "tests=${tests:-<unparsed>} (baseline ${tests_baseline})"
+          for pair in "statements:${statements}:${statements_baseline}" "tests:${tests}:${tests_baseline}"; do
+            name="${pair%%:*}"
+            rest="${pair#*:}"
+            value="${rest%%:*}"
+            baseline="${rest#*:}"
+            case "${value}" in
+              ''|*[!0-9]*)
+                echo "::error::could not parse the ${name} count (${name}=${value:-empty}); refusing to certify a number that was not read."
+                exit 1
+                ;;
+            esac
+            if [ "${value}" -lt "${baseline}" ]; then
+              echo "::error::${name} shrank to ${value} (baseline ${baseline}) -- the run is PARTIAL. If the drop is intended, lower the baseline in this step in the same commit."
+              exit 1
+            fi
+            if [ "${value}" -gt "${baseline}" ]; then
+              echo "::notice::${name} grew to ${value} (baseline ${baseline}) -- raise the baseline in this step in the same commit that grew it."
+            fi
+          done
 
       - name: Certified PostgreSQL failure-set gate (pg_gate)
         if: steps.changes.outputs.real == 'true'
@@ -474,7 +577,7 @@ jobs:
 
       - name: Upload coverage HTML report
         if: always() && steps.changes.outputs.real == 'true'
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: coverage-html-postgres
           path: backend/htmlcov/
@@ -503,7 +606,7 @@ jobs:
       # base, or the push's previous tip, against HEAD, and a shallow clone
       # cannot see that base. ruff still reads only the working tree, so the
       # wider fetch changes no lint verdict.)
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
 
@@ -554,7 +657,7 @@ jobs:
           echo "ruff check, ruff format --check, pre-commit --all-files and mypy are not applicable and did not run."
           echo "Any backend-relevant change still runs the full lint gate in this same job; owner-directed ruleset fix PROMOTE-39b."
 
-      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
         if: steps.changes.outputs.real == 'true'
         with:
           python-version: "3.14"
@@ -594,7 +697,7 @@ jobs:
       # The hook store is cached because each of these revs is installed into
       # its own virtualenv on a cold cache; the config is committed and the
       # revs are commit SHAs, so the cache key tracks the real inputs.
-      - uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         if: steps.changes.outputs.real == 'true'
         with:
           path: ~/.cache/pre-commit
@@ -632,3 +735,104 @@ jobs:
       - name: "mypy (scoped: common/ + orders/state.py)"
         if: steps.changes.outputs.real == 'true'
         run: mypy common/ orders/state.py
+
+      # R-17.27 (P1-1): the dependency vulnerability gate. FAILS on
+      # CRITICAL/HIGH only -- moderate/low are printed and never block, so a
+      # low-severity advisory cannot freeze the pipeline.
+      #
+      # pip-audit carries NO severity in any output format: measured on this
+      # lock, `--format json` reports 41 findings in 4 packages and the same 41
+      # in `--format cyclonedx-json` with ZERO `ratings` entries. A
+      # "high/critical only" gate therefore cannot be built on pip-audit's own
+      # output, and the severity is resolved per advisory from the GitHub
+      # advisory database through the OSV REST API (`database_specific.severity`)
+      # -- the same database `npm audit --audit-level` reads on the frontend
+      # side, so the two halves of R-17.27 agree about what "high" means.
+      #
+      # Fail-closed on what cannot be judged: an advisory whose severity will
+      # not resolve is BLOCKING rather than ignored (an unknown must never read
+      # as a pass), and the printed line says which of the two shapes it was
+      # (UNRATED = the advisory has no severity, UNRESOLVED = the API call
+      # failed). The scan is not a "looks fine" step that exits 0 on an
+      # unreadable report: a missing/unparseable report is an error.
+      - name: Dependency vulnerability audit (pip-audit, high/critical)
+        if: steps.changes.outputs.real == 'true'
+        run: |
+          set -euo pipefail
+          python -m pip install --quiet "pip-audit==2.10.1"
+          # requirements.lock is the resolved, hash-pinned set this job installs,
+          # so the audit reads exactly what would run. pip-audit's own exit
+          # status is not the gate -- the set is this step's INPUT and the
+          # blocking decision belongs to the classification below -- so a
+          # finding must not end the step with a bare unexplained failure.
+          python -m pip_audit -r requirements.lock --format json -o pip-audit.json || true
+          if [ ! -s pip-audit.json ]; then
+            echo "::error::pip-audit produced no report; refusing to report a clean scan that did not happen."
+            exit 1
+          fi
+          python - <<'PY'
+          import json
+          import sys
+          import urllib.request
+
+          BLOCKING = {"CRITICAL", "HIGH"}
+          NON_BLOCKING = {"MODERATE", "MEDIUM", "LOW"}
+
+
+          def severity(candidates):
+              """GitHub severity of one advisory, resolved through OSV."""
+              for advisory_id in candidates:
+                  try:
+                      with urllib.request.urlopen(
+                          f"https://api.osv.dev/v1/vulns/{advisory_id}", timeout=30
+                      ) as response:
+                          payload = json.load(response)
+                  except Exception as exc:  # noqa: BLE001 - reported, never swallowed
+                      return "UNRESOLVED", f"{advisory_id} ({exc})"
+                  level = (payload.get("database_specific") or {}).get("severity")
+                  if level:
+                      return level.upper(), advisory_id
+              return "UNRATED", candidates[0] if candidates else "?"
+
+
+          report = json.load(open("pip-audit.json"))
+          blocking, notices, unjudged = [], [], []
+          for dependency in report.get("dependencies", []):
+              for vuln in dependency.get("vulns", []):
+                  ids = [vuln["id"], *(vuln.get("aliases") or [])]
+                  ids = [i for i in ids if i.startswith("GHSA-")] + [
+                      i for i in ids if not i.startswith("GHSA-")
+                  ]
+                  level, source = severity(ids)
+                  fix = ",".join(vuln.get("fix_versions") or []) or "none"
+                  line = (
+                      f"{dependency['name']}=={dependency['version']} {vuln['id']} "
+                      f"severity={level} fix={fix} via {source}"
+                  )
+                  if level in BLOCKING:
+                      blocking.append(line)
+                  elif level in NON_BLOCKING:
+                      notices.append(line)
+                  else:
+                      unjudged.append(line)
+
+          print(
+              f"pip-audit: {len(blocking) + len(notices) + len(unjudged)} finding(s) "
+              f"({len(blocking)} critical/high, {len(notices)} moderate/low, "
+              f"{len(unjudged)} unresolved)"
+          )
+          for line in notices:
+              print(f"  notice (does not block): {line}")
+          for line in unjudged:
+              print(f"  BLOCKING (severity not resolvable, fail-closed): {line}")
+          for line in blocking:
+              print(f"  BLOCKING: {line}")
+          if blocking or unjudged:
+              print(
+                  "::error::pip-audit found CRITICAL/HIGH (or unresolvable) vulnerabilities; "
+                  "bump the named packages. requirements.lock is hash-pinned, so recompile it "
+                  "in the same change or pip will refuse the install."
+              )
+              sys.exit(1)
+          print("pip-audit: no CRITICAL/HIGH findings.")
+          PY
