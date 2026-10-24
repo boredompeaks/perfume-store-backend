@@ -44,6 +44,12 @@ jobs:
           NEXT_PUBLIC_SITE_URL: https://test.boredompeaks.me
           NEXT_PUBLIC_ADMIN_ORIGIN: https://api.boredompeaks.me
           NEXTJS_ENV: production
+          # Sentry browser DSN for the client bundle (P1-3). Supplied as a repo
+          # VARIABLE, not a secret: a NEXT_PUBLIC_* value is inlined into the
+          # public bundle by definition, so treating it as a secret would only
+          # mislabel it. The SDK is inert when the value is empty, so a missing
+          # variable degrades to "no error reporting" rather than a broken build.
+          NEXT_PUBLIC_SENTRY_DSN: ${{ vars.NEXT_PUBLIC_SENTRY_DSN }}
         run: npx opennextjs-cloudflare build
 
       # Next 16.4 + OpenNext: loadManifest rejects preview-props.json (upstream
