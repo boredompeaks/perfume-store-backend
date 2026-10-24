@@ -1,11 +1,22 @@
 "use client";
 
+import { useEffect } from "react";
+import { captureException } from "@/lib/sentry";
+
 export default function ErrorPage({
+  error,
   reset,
 }: {
   error: Error & { digest?: string };
   reset: () => void;
 }) {
+  // Report once per boundary render. The effect is what keeps telemetry off
+  // the render path: a blocked or slow DSN can never delay the fallback UI,
+  // and `captureException` itself swallows every failure.
+  useEffect(() => {
+    captureException(error);
+  }, [error]);
+
   return (
     <section className="mx-auto max-w-6xl px-4 py-32 text-center sm:px-6">
       <p className="text-xs uppercase tracking-[0.2em] text-bronze">
