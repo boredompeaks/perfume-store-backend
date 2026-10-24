@@ -1,0 +1,57 @@
+{
+  "kind": "floor",
+  "task": "P1-2",
+  "tool": "scripts/changelog_figures.py",
+  "measured_at": "2026-10-24T02:32:54+05:30",
+  "pair_complete": true,
+  "engines": [
+    {
+      "engine": "sqlite",
+      "database_url": "sqlite:///db.sqlite3",
+      "commands": [
+        "C:\\Users\\Admin\\AppData\\Local\\Temp\\opencode\\wt-async\\backend\\venv\\Scripts\\python.exe -m coverage run manage.py test --verbosity 0",
+        "C:\\Users\\Admin\\AppData\\Local\\Temp\\opencode\\wt-async\\backend\\venv\\Scripts\\python.exe -m coverage report"
+      ],
+      "run": {
+        "verdict": "OK",
+        "tests": 2497,
+        "failures": null,
+        "errors": null,
+        "expected_failures": 2
+      },
+      "coverage": {
+        "statements": 14191,
+        "missed": 0,
+        "coverage_percent": "99.84",
+        "branches": 1810,
+        "partial_branches": 25
+      },
+      "test_exit": 0,
+      "coverage_exit": 0
+    },
+    {
+      "engine": "postgresql",
+      "database_url": "postgres://perfume:***@localhost:5433/perfume_store_b",
+      "commands": [
+        "C:\\Users\\Admin\\AppData\\Local\\Temp\\opencode\\wt-async\\backend\\venv\\Scripts\\python.exe -m coverage run manage.py test --verbosity 0",
+        "C:\\Users\\Admin\\AppData\\Local\\Temp\\opencode\\wt-async\\backend\\venv\\Scripts\\python.exe -m coverage report"
+      ],
+      "run": {
+        "verdict": "OK",
+        "tests": 2497,
+        "failures": null,
+        "errors": null,
+        "expected_failures": 2
+      },
+      "coverage": {
+        "statements": 14191,
+        "missed": 0,
+        "coverage_percent": "99.84",
+        "branches": 1810,
+        "partial_branches": 25
+      },
+      "test_exit": 0,
+      "coverage_exit": 0
+    }
+  ]
+}

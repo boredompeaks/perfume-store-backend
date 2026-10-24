@@ -27,6 +27,9 @@ alert_cache/
 .coverage
 .coverage.*
 htmlcov/
+# Written by scripts/test-evidence.ps1, one per engine; evidence, not source.
+coverage-pg.json
+coverage-sqlite.json
 .pytest_cache/
 .tox/
 

@@ -45,7 +45,11 @@
 # is written next to it. Dropping a pin here and letting the compiler choose
 # would make those decisions silently.
 Django==6.1.1
-djangorestframework==3.18.1
+# P1-5 (2026-10-24): 3.18.2 over 3.18.1. The patch release is the fixed version
+# for the three HIGH advisories the dependency gate reports against 3.18.1
+# (CVE-2026-114136/114137/114138); it stays inside the same 3.18 line, so no
+# serializer, view or exception behaviour changes.
+djangorestframework==3.18.2
 djangorestframework-simplejwt==5.5.1
 django-cors-headers==4.9.0
 # SPEC-20-9: scannable MFA enrollment QR from the otpauth:// provisioning
@@ -102,7 +106,11 @@ python-dotenv==1.2.3
 # batching, credential lookup) is version-sensitive, and a floating pin here
 # would change what production uploads do without a commit.
 django-storages[s3]==1.14.6
-Pillow==12.3.0
+# P1-5 (2026-10-24): 13.0.0 over 12.3.0. 12.3.0 is flagged CRITICAL and HIGH by
+# the dependency gate; 13.0.0 is the first release that clears that set. This
+# app only exercises Pillow through ImageField validation (no direct Image
+# manipulation), and the suite's upload pins cover that path.
+Pillow==13.0.0
 coverage==7.16.1
 # GATE-1 (2026-10-04): ruff is both the linter and the FORMATTER OF RECORD
 # for this tree (config: backend/pyproject.toml; gate: the `lint` job in

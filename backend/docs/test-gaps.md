@@ -1,4 +1,4 @@
-# Test gaps — FLAGGED → DELIVERED (enumerated 2026-09-18; delivery measured 2026-09-30; floor cited 2026-10-16)
+# Test gaps — FLAGGED → DELIVERED (enumerated 2026-09-18; delivery measured 2026-09-30; floor cited 2026-10-23)
 
 The enumerated backlog below was written on 2026-09-18 as an open TODO list and
 was implemented in full the same day (see the Phase 5 entry in
@@ -7,26 +7,40 @@ so the file records shipped work instead of advertising an open list: every
 enumerated gap is marked DELIVERED or CLOSED against the shipped tree, and the
 coverage floor carries **0 missed statements**.
 
-**Current floor** — cited from the committed artifact
-`scripts/figures/SPEC-Q-RS1-C2.json` (printed by
-`scripts/changelog_figures.py floor --task SPEC-Q-RS1-C2`, measured
-2026-10-16 on both engines of the two-engine floor), not re-measured in this
-docs-only pass:
+**Current floor** — cited from the committed artifact `scripts/figures/P0-2.json`
+(printed by `scripts/changelog_figures.py floor --task P0-2`, measured
+2026-10-23 on both engines of the two-engine floor, the PostgreSQL leg against
+lane B's `pg2b` container). The promoted PR #48 CI run (backend-tests
+`39961186676`, recorded in `backend/docs/run/BUILD-QUEUE.md`) reported the same
+2468 tests and 2 expected failures at 99.83% on its Linux leg; the earlier
+promotion's row attributes that 0.01 point difference to host-conditional
+branches rather than code drift:
 
 ```text
-sqlite:     Ran 2130 tests, OK (expected failures=2), cov 99.82% (10666 stmts, 0 missed, 1448 branches, 22 partial)
-postgresql: Ran 2130 tests, OK (expected failures=2), cov 99.82% (10666 stmts, 0 missed, 1448 branches, 22 partial)
+sqlite:     Ran 2468 tests, OK (expected failures=2), cov 99.84% (14005 stmts, 0 missed, 1750 branches, 25 partial)
+postgresql: Ran 2468 tests, OK (expected failures=2), cov 99.84% (14005 stmts, 0 missed, 1750 branches, 25 partial)
 ```
 
-```bash
-venv\Scripts\python -m coverage run manage.py test
-venv\Scripts\python -m coverage report
+The floor above was measured by `scripts/changelog_figures.py floor --task P0-2`
+onto the committed artifact, not by the wrapper; `scripts/test-evidence.ps1` is
+the per-run evidence wrapper, and it keeps the suite's own exit code, refuses
+stale coverage data, writes exactly one artifact per engine and fails a total
+under `.coveragerc`'s `fail_under`. Re-run at this tip on both engines, it
+writes the same canonical totals to its per-engine artifacts --
+`coverage-sqlite.json` and `coverage-pg.json` each report 14005 statements and
+0 missed at 99.84%, matching `coverage report`:
+
+```powershell
+# SQLite
+scripts\test-evidence.ps1 -Engine sqlite -Command "venv\Scripts\python -m coverage run manage.py test --verbosity 0"
+# PostgreSQL: export DATABASE_URL and REDIS_URL for the leg first, then
+scripts\test-evidence.ps1 -Engine pg -Command "venv\Scripts\python -m coverage run manage.py test --verbosity 0"
 ```
 
 | Metric | Count |
 |---|---|
-| Tests | **2130 on each engine, OK, 2 expectedFailure** — the two remaining flips are named where they live (the accounts missing-email pin and the F-18 checkout-guidance pin below); figure from the artifact cited above |
-| Code under automated test | **99.82%** (10666 statements, **0 missed**; gate `fail_under = 90`) — same artifact |
+| Tests | **2468 on each engine, OK, 2 expectedFailure** — the two remaining flips are named where they live (the accounts missing-email pin and the F-18 checkout-guidance pin below); figure from the artifact cited above |
+| Code under automated test | **99.84%** (14005 statements, **0 missed**; gate `fail_under = 90`) — same artifact |
 | API routes | mounted in two families from one urlconf — the legacy `/api/...` paths and the `/api/v1/` namespace (`store`, `account`, `admin` sub-families re-mounting the same view objects); exact per-family counts were a 2026-09-30 measurement and were not re-derived in this docs-only pass |
 | Unit tests (app `tests.py` + `test_*.py`) | per-app counts in the section headings are the 2026-09-30 delivery measurement (historical) |
 | E2E / integration tests (`tests/` package) | as above — historical delivery measurement |
@@ -161,8 +175,11 @@ Idempotency-Key replay (SPEC-9-01) and checkout-refresh safety (SPEC-21-5).
 - Mock/fake the Razorpay client (`unittest.mock.patch('orders.views.razorpay.Client')`)
   — no test may hit the live API; the fixture keys in `common/testing.py` are
   recognizably non-credentials so an un-mocked client cannot use `.env` (V-01).
-- `coverage.py` gate: `.coveragerc` `fail_under = 90` (measured 99.82% with 0
-  missed lines, per the floor artifact cited at the top).
+- `coverage.py` gate: `.coveragerc` `fail_under = 90` (measured 99.84% with 0
+  missed lines on both engines, per the floor artifact cited at the top). The
+  capture runs through `scripts/test-evidence.ps1`, which preserves the suite's
+  exit code and writes one artifact per engine — the two things the earlier
+  piped evidence files got wrong.
 - CI (GitHub Actions, `.github/workflows/backend-tests.yml`): pinned reqs →
   `manage.py check` → `makemigrations --check` → `manage.py test` → coverage
   report.
