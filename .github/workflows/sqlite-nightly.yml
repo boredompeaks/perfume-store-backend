@@ -1,0 +1,160 @@
+# Nightly SQLite leg (P1-4 policy change: PostgreSQL is the AUTHORITATIVE CI
+# engine; SQLite is measured here, nightly, and never per PR).
+#
+# Three deliberate properties:
+#
+#  1. NEVER A GATE, same as mutation-weekly.yml. Triggers are schedule +
+#     workflow_dispatch only: there is no pull_request trigger and no push
+#     trigger, so this workflow cannot block a PR and cannot be what turns a
+#     commit red on the branches that matter. It reports; the PostgreSQL job in
+#     backend-tests.yml judges. Scheduled runs execute the repository's DEFAULT
+#     branch (`feat/add-frontend`), i.e. what is actually released, and
+#     workflow_dispatch can run any branch on demand.
+#
+#  2. It is the SERIAL reference. The PostgreSQL job runs `--parallel 4` with
+#     combined coverage and guards against partial data with a statement-count
+#     invariant (baseline 14005). This leg runs the same suite SERIALLY on the
+#     other engine, so the baseline has a second, independent measurement
+#     tonight and every night -- a number that only one job can produce is a
+#     number nobody can check.
+#
+#  3. It asserts the engine it measured. config/settings.py falls back to SQLite
+#     silently when DATABASE_URL is unset, which is the INTENT here, but an
+#     inherited or newly-added DATABASE_URL would silently turn this into a
+#     duplicate PostgreSQL run under a SQLite name -- so the engine is asserted
+#     rather than assumed, exactly as the PostgreSQL job asserts its own.
+name: sqlite-nightly
+
+on:
+  schedule:
+    # 03:41 UTC daily. Off the hour, and off doc-claims-nightly's 03:17, so the
+    # two crons do not queue behind each other on a busy runner pool.
+    - cron: "41 3 * * *"
+  workflow_dispatch:
+
+# Least privilege: the suite only needs to read the checkout.
+permissions:
+  contents: read
+
+concurrency:
+  group: sqlite-nightly-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  sqlite-nightly:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: backend
+    services:
+      # The live-Redis half of the THROTTLE-CACHE pins skips loudly when
+      # REDIS_URL is undeclared, which is how a bare SQLite run behaves: the
+      # cache alias falls back to LocMem. Declaring the service + REDIS_URL is
+      # what makes this leg run the SAME suite shape the PostgreSQL job
+      # certifies (0 skips) instead of a quieter subset of it.
+      redis:
+        image: redis:7-alpine
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      # Same hermetic shape as backend-tests.yml: CI never reads a real .env,
+      # and the dummy Razorpay values prove the suite never depends on live
+      # credentials (V-01 containment).
+      DJANGO_DEBUG: "true"
+      RAZORPAY_KEY_ID: rzp_test_CI_DUMMY
+      RAZORPAY_KEY_SECRET: ci-dummy-secret
+      REDIS_URL: redis://localhost:6379/0
+      # DATABASE_URL is deliberately ABSENT: it is the switch that selects
+      # PostgreSQL, and this leg exists to measure the other engine.
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: "3.14"
+          cache: pip
+          cache-dependency-path: backend/requirements.lock
+
+      # requirements.lock is the compiled, hash-pinned resolution of
+      # requirements.in and the same install source every other job here uses;
+      # a second install path would let this leg disagree with the gate about
+      # what the suite runs against.
+      - name: Install pinned dependencies from the lock
+        run: pip install -r requirements.lock
+
+      # settings.py falls back to SQLite without complaint when DATABASE_URL is
+      # unset or malformed, so "the nightly ran" would otherwise not mean
+      # "SQLite ran" -- and an inherited PostgreSQL URL would make this a
+      # duplicate of the gate under a different name.
+      - name: Assert the engine is SQLite
+        run: |
+          set -euo pipefail
+          engine="$(python -c "import os,django;os.environ.setdefault('DJANGO_SETTINGS_MODULE','config.settings');django.setup();from django.db import connection;print(connection.settings_dict['ENGINE'])")"
+          echo "engine=${engine}"
+          if [ "${engine}" != "django.db.backends.sqlite3" ]; then
+            echo "::error::expected django.db.backends.sqlite3, got ${engine} -- this leg would certify the wrong engine."
+            exit 1
+          fi
+
+      # Serial on purpose (see the header): no --parallel, so no tblib shim and
+      # no coverage combine step are needed, and the statement total this leg
+      # reports is directly comparable to the parallel job's combined total.
+      #
+      # `pipefail` is set so THIS step carries the runner's own exit status: a
+      # bare `| tee` would report tee's 0 and a failing suite would read as a
+      # green nightly. The two steps below run `if: always()` so a red night
+      # still publishes its coverage numbers -- the diagnostic is the point of
+      # a nightly -- and they cannot turn the red green: the step is already
+      # red before they run.
+      - name: Full SQLite suite (serial, coverage)
+        run: |
+          set -euo pipefail
+          python -m coverage run manage.py test --verbosity 0 --noinput 2>&1 | tee sqlite-suite.log
+
+      - name: Coverage report (fail_under=90)
+        if: always()
+        run: python -m coverage report --fail-under=90
+
+      # The same partial-data guard the PostgreSQL job runs, on the SERIAL leg:
+      # 14005 statements is the reference both engines measured (Windows serial
+      # 99.84% and CI Linux serial 99.83% both reported 14005), and 2468 is the
+      # runner's own certified count. Shrank = red, grew = notice, unparseable =
+      # red; the nightly is the second, independent reader of a number the gate
+      # only ever checks against itself.
+      - name: Partial-data invariant (statements + test count)
+        if: always()
+        run: |
+          set -euo pipefail
+          statements_baseline=14005
+          tests_baseline=2468
+          # `|| true` inside the substitutions: an unreadable report or a missing
+          # summary line must reach the explicit "could not parse" branch below
+          # with its own message, not abort the step silently at the assignment.
+          statements="$( (python -m coverage report || true) | awk '$1=="TOTAL"{print $2; exit}')"
+          tests="$( (grep -E '^Ran [0-9]+ tests' sqlite-suite.log || true) | tail -1 | awk '{print $2}')"
+          echo "sqlite statements=${statements:-<unparsed>} (baseline ${statements_baseline})"
+          echo "sqlite tests=${tests:-<unparsed>} (baseline ${tests_baseline})"
+          for pair in "statements:${statements}:${statements_baseline}" "tests:${tests}:${tests_baseline}"; do
+            name="${pair%%:*}"
+            rest="${pair#*:}"
+            value="${rest%%:*}"
+            baseline="${rest#*:}"
+            case "${value}" in
+              ''|*[!0-9]*)
+                echo "::error::could not parse the ${name} count (${name}=${value:-empty}); refusing to certify a number that was not read."
+                exit 1
+                ;;
+            esac
+            if [ "${value}" -lt "${baseline}" ]; then
+              echo "::error::${name} shrank to ${value} (baseline ${baseline}) -- this run is PARTIAL. If the drop is intended, lower the baseline in this step in the same commit."
+              exit 1
+            fi
+            if [ "${value}" -gt "${baseline}" ]; then
+              echo "::notice::${name} grew to ${value} (baseline ${baseline}) -- raise the baseline in this step in the same commit that grew it."
+            fi
+          done

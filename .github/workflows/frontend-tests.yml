@@ -5,6 +5,14 @@
 # `git ls-remote https://github.com/<owner>/<action>.git refs/tags/<tag>^{}`
 # (the `^{}` peel matters for an annotated tag) and replace the SHA - never
 # widen the pin back to a tag.
+#
+# NODE24 (P1-4): every pin here targets an action whose `runs.using: node24`.
+# GitHub deprecates the Node 20 runtime, and these two jobs were warned about it
+# on every run ("actions/checkout@11d5… and actions/setup-node@4993… target
+# Node.js 20"). Pinned releases: actions/checkout v7.0.1, actions/setup-node
+# v7.1.0 (setup-node v7's NODE_AUTH_TOKEN behaviour change does not apply here:
+# this workflow sets no `registry-url`, so no auth token is published). A future
+# bump must keep `runs.using` at node24 or newer -- check it, do not assume it.
 name: frontend-tests
 
 on:
@@ -38,9 +46,9 @@ jobs:
       run:
         working-directory: frontend
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
-      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: "22"
           cache: npm
@@ -62,6 +70,23 @@ jobs:
           NEXT_PUBLIC_ADMIN_ORIGIN: https://api.boredompeaks.me
         run: npm run build
 
+      # R-17.27 (P1-1): the frontend half of the dependency vulnerability gate.
+      # `--audit-level=high` IS the policy, and it is the same rule the backend
+      # applies through pip-audit: npm exits non-zero for high/critical and stays
+      # green for moderate/low, so a low-severity advisory cannot freeze the
+      # pipeline.
+      #
+      # It runs LAST in this job so the functional evidence (vitest + next build)
+      # is always produced first: a red audit must not hide whether the app still
+      # builds, and this job is path-filtered to frontend/**, so it can never
+      # fail a backend-only change.
+      #
+      # Registry caveat, deliberate: `npm audit` reads the registry's advisory
+      # database rather than a checked-in file, so an unreachable registry fails
+      # this step. A scan that could not run must not read as a clean scan.
+      - name: Dependency vulnerability audit (npm audit, high/critical)
+        run: npm audit --audit-level=high
+
   # Playwright e2e is DISABLED-BY-DEFAULT by design: the current suite
   # (frontend/e2e/) drives the REAL Razorpay widget (test-mode keys, wallet
   # flows) against live Django + Next servers with seeded users/products.
@@ -79,9 +104,9 @@ jobs:
       run:
         working-directory: frontend
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
-      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: "22"
           cache: npm
