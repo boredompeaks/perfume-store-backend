@@ -1053,6 +1053,8 @@ def coupon_merchandise_discount(coupon, subtotal):
 
 
 @api_view(["POST"])
+# Public: the coupon is validated against the guest's session cart.
+@permission_classes([AllowAny])
 @throttle_scope("coupon")
 def apply_coupon(request):
 

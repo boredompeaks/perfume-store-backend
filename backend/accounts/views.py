@@ -12,10 +12,10 @@ from django.utils import timezone
 from django.utils.encoding import force_bytes, force_str
 from django.utils.http import urlsafe_base64_decode, urlsafe_base64_encode
 from rest_framework import status, viewsets
-from rest_framework.decorators import api_view, throttle_scope
+from rest_framework.decorators import api_view, permission_classes, throttle_scope
 from rest_framework.exceptions import AuthenticationFailed, PermissionDenied
 from rest_framework.exceptions import ValidationError as DRFValidationError
-from rest_framework.permissions import IsAuthenticated
+from rest_framework.permissions import AllowAny, IsAuthenticated
 from rest_framework.response import Response
 from rest_framework.views import APIView
 from rest_framework_simplejwt.exceptions import TokenError
@@ -117,6 +117,8 @@ class LoginView(TokenObtainPairView):
     logins without any code path that mints tokens skipping the factor.
     """
 
+    # Public: a login door cannot require the credential it issues.
+    permission_classes = [AllowAny]
     throttle_scope = "auth"
     serializer_class = MFATokenObtainPairSerializer
 
@@ -179,6 +181,8 @@ class StorefrontLoginView(LoginView):
     becoming a way around [R-17.9].
     """
 
+    # Public: the customer door, the same credential-free surface as above.
+    permission_classes = [AllowAny]
     serializer_class = StorefrontTokenObtainPairSerializer
 
 
@@ -340,6 +344,8 @@ class RefreshView(TokenRefreshView):
     browser into retrying it - an origin refusal is not a verdict on the
     token, so it never sweeps."""
 
+    # Public: a caller whose access token expired has no credential to present.
+    permission_classes = [AllowAny]
     throttle_scope = "auth"
 
     def post(self, request, *args, **kwargs):
@@ -514,6 +520,8 @@ def _enforce_access_challenge(request):
 
 
 @api_view(["POST"])
+# Public: the account does not exist yet, so there is no credential to present.
+@permission_classes([AllowAny])
 @throttle_scope("register")
 def register(request):
     """POST /api/accounts/register/ — Q-S3 [F3 ACCESS GATE].
@@ -571,6 +579,8 @@ def register(request):
 
 
 @api_view(["GET"])
+# Public: availability is asked before the account exists.
+@permission_classes([AllowAny])
 @throttle_scope("username-probe")
 def username_available(request):
     """Q-S3 [F3 ACCESS GATE]: the public username-existence oracle.
@@ -607,6 +617,8 @@ def username_available(request):
 # bounds identity flows (register/login/refresh), and verify/confirm are
 # bounded further by the entropy of their one-time tokens.
 @api_view(["POST"])
+# Public: the emailed code is the credential this endpoint presents.
+@permission_classes([AllowAny])
 @throttle_scope("auth")
 def verify_email(request):
     # Non-object JSON bodies have no .get; reading them as {} routes every
@@ -642,6 +654,8 @@ def verify_email(request):
 # bound. The uniform 200 bodies below are untouched by throttling — only
 # the extra 429 refusal is added.
 @api_view(["POST"])
+# Public: recovery for a caller who cannot sign in yet.
+@permission_classes([AllowAny])
 @throttle_scope("recovery")
 def resend_verification(request):
     # Non-object JSON bodies have no .get; {} keeps them on the uniform
@@ -665,6 +679,8 @@ def resend_verification(request):
 
 
 @api_view(["POST"])
+# Public: recovery starts from a caller with no usable credential.
+@permission_classes([AllowAny])
 @throttle_scope("recovery")
 def forgot_username(request):
     # Non-object JSON bodies have no .get; {} keeps them on the uniform
@@ -691,6 +707,8 @@ def forgot_username(request):
 
 
 @api_view(["POST"])
+# Public: the reset flow starts from a caller who cannot sign in.
+@permission_classes([AllowAny])
 @throttle_scope("recovery")
 def request_password_reset(request):
     # Non-object JSON bodies have no .get; {} keeps them on the uniform
@@ -727,6 +745,8 @@ def request_password_reset(request):
 
 
 @api_view(["POST"])
+# Public: the single-use reset token is the credential being presented.
+@permission_classes([AllowAny])
 @throttle_scope("auth")
 def reset_password(request):
     # Non-object JSON bodies have no .get; reading them as {} routes every

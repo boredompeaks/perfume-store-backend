@@ -1,7 +1,13 @@
 from django.db import transaction
 from django.views.decorators.csrf import ensure_csrf_cookie
 from rest_framework import status
-from rest_framework.decorators import api_view, throttle_classes, throttle_scope
+from rest_framework.decorators import (
+    api_view,
+    permission_classes,
+    throttle_classes,
+    throttle_scope,
+)
+from rest_framework.permissions import AllowAny
 from rest_framework.response import Response
 from rest_framework.throttling import ScopedRateThrottle
 
@@ -45,6 +51,8 @@ def _object_body(data):
 # (api.ts) replays it on every unsafe method. CSRF enforcement itself lives
 # in common.authentication.SessionCartCSRFAuthentication.
 @api_view(["GET", "POST"])
+# Public: the guest cart is session-scoped, not account-scoped.
+@permission_classes([AllowAny])
 @ensure_csrf_cookie
 @throttle_classes([CartMutationRateThrottle])
 @throttle_scope("cart")
@@ -135,6 +143,8 @@ def cart_detail(request):
 
 
 @api_view(["PATCH", "DELETE"])
+# Public: the guest cart is session-scoped, not account-scoped.
+@permission_classes([AllowAny])
 @throttle_scope("cart")
 def cart_item_detail(request, item_id):
 
@@ -204,6 +214,8 @@ def cart_item_detail(request, item_id):
 
 
 @api_view(["POST", "DELETE"])
+# Public: the coupon rides the session cart a guest owns.
+@permission_classes([AllowAny])
 @throttle_scope("cart")
 def cart_coupon(request):
     """R-9.3.5/R-9.3.6: apply/remove a coupon as persistent cart state.
