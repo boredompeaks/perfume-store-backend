@@ -2654,22 +2654,29 @@ class ReturnEligibilityWindowTests(ReturnTestCase):
         # is filed while it is in date and aged afterwards, which keeps the
         # claim it was written to make and stops it quietly re-testing the
         # window instead.
+        #
+        # The clock is frozen because _placed stamps the order at this class's
+        # fixed NOW while ask() goes through the window gate, which reads the
+        # clock: left unfrozen, the probe turns red on a calendar date (NOW +
+        # the window) instead of on a code change.
         self.login_as(self.buyer)
-        fresh = self._placed("RET-2026-002200", "delivered", timedelta(days=1))
-        created = self.ask(fresh.order_number)
-        self.assertEqual(created.status_code, 201, created.data)
-        pk = created.data["id"]
-        ReturnRequest.objects.filter(pk=pk).update(
-            created_at=timezone.now() - timedelta(days=3650)
-        )
 
-        listed = self.client.get(LIST_URL)
-        opened = self.client.get(detail_url(pk))
+        with self.clock_frozen_at():
+            fresh = self._placed("RET-2026-002200", "delivered", timedelta(days=1))
+            created = self.ask(fresh.order_number)
+            self.assertEqual(created.status_code, 201, created.data)
+            pk = created.data["id"]
+            ReturnRequest.objects.filter(pk=pk).update(
+                created_at=timezone.now() - timedelta(days=3650)
+            )
 
-        self.assertEqual(listed.status_code, 200, listed.data)
-        self.assertIn(pk, [row["id"] for row in listed.data["results"]])
-        self.assertEqual(opened.status_code, 200, opened.data)
-        self.assertEqual(opened.data["id"], pk)
+            listed = self.client.get(LIST_URL)
+            opened = self.client.get(detail_url(pk))
+
+            self.assertEqual(listed.status_code, 200, listed.data)
+            self.assertIn(pk, [row["id"] for row in listed.data["results"]])
+            self.assertEqual(opened.status_code, 200, opened.data)
+            self.assertEqual(opened.data["id"], pk)
 
     def test_no_return_window_setting_is_declared(self):
         # The config half, and it SURVIVES this task: a return-window NUMBER
