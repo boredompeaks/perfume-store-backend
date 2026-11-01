@@ -16,7 +16,7 @@ Separate from the spec-compliance run (`spec-run-state.md`). Every task here is 
 | PRISTINE-09 | ErrorEnvelope: inventory wrapped sites, classify view-fix vs cross-cutting | n/a | PENDING | 0 | audit §2 |
 | PRISTINE-10 | create_order CCN 48 -> <=10 decomposition | n/a | PENDING | 0 | audit §4 |
 | PRISTINE-11 | Split config/settings.py 1720 LOC | n/a | PENDING | 0 | audit §5 |
-| PRISTINE-12 | tmpfs + fsync=off test compose profile | n/a | PENDING | 0 | draft §6 |
+| PRISTINE-12 | tmpfs + fsync=off test compose profile | n/a | BUILDING | 1 | baseline pair measured @91bae2d |
 | PRISTINE-13 | MFA code fixes (finance/support/inventory, encrypt secret, atomic counter, backup codes) | n/a | PENDING | 0 | audit §2; no spec edits |
 | PRISTINE-14 | Docs cut: remove tautology + generated JSON; ADR template | n/a | PENDING | 0 | draft §8 |
 | PRISTINE-15 | Agent prompt shrinkage + anti-shortcut clause | n/a | PENDING | 0 | draft §10 |
