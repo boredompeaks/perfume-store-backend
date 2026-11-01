@@ -152,6 +152,12 @@ Statuses: `PENDING -> IN-COMPLIANCE -> BUILDING -> IN-AUDIT -> BUGS-FOUND -> SHI
 
 ## Baseline
 
+**MEASURED 2026-11-01 on integration tree `c8cc36c` (current code tree `43cf740`; the delta is ledger-only).** This is the current baseline pair.
+
+- **SQLite: CARRIED, not rerun**, from the verified committed `PRISTINE-01` artifact at `43cf740`: 2538 tests `OK`, 2 expected failures, skipped count not recorded; coverage **99.83%** (14,424 statements, 2 missed, 1,862 branches, 26 partial); test and coverage exit 0.
+- **PostgreSQL: measured now** on `c8cc36c`; `manage.py` confirmed `django.db.backends.postgresql`: 2538 tests `OK` (skipped=4, expected failures=2); coverage **99.83%** (14,424 statements, 2 missed, 1,862 branches, 26 partial); test and coverage exit 0.
+- last-promoted SHA remains **`e77e9ca`** (PR #50); this baseline measurement does not change promotion state.
+
 **MEASURED 2026-10-17 (the two post-CORS auditor SHIP reports — quoted per lane as a pair, per the pairing rule; a merged integration figure is the release-engineer's to measure at the gate).**
 
 - **Lane A @ `d5a0e20` (FULL audit, both engines reproduced):** SQLite **2162 tests `OK (skipped=2, expected failures=2)`**; PostgreSQL (pg2a) **2162 `OK` (xf=2)**; coverage **99.81%** (10793 statements, 0 missed, 1472 branches, 23 partial), both legs exit 0. Floor 2154→2162 (+8 pins), xf flat. Mutation-proven: all 6 guard sites removed → 36 errors, restored byte-identical.
