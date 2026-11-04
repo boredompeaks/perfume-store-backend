@@ -1,0 +1,56 @@
+name: perfume-tmpfs-test
+
+# Isolated by an invocation-unique project name in scripts/test-tmpfs.ps1.
+# This file has no env_file, production compose dependency, published port, or
+# named volume. PostgreSQL and test caches exist only for this project run.
+services:
+  db:
+    image: postgres:17-alpine
+    profiles: [tmpfs]
+    environment:
+      POSTGRES_USER: test
+      POSTGRES_PASSWORD: test
+      POSTGRES_DB: test
+      POSTGRES_HOST_AUTH_METHOD: trust
+      PGDATA: /var/lib/postgresql/data
+    command: [postgres, -c, fsync=off]
+    tmpfs:
+      - /var/lib/postgresql/data:rw,size=1g,mode=1777
+    healthcheck:
+      test: [CMD-SHELL, pg_isready -U test -d test]
+      interval: 2s
+      timeout: 2s
+      retries: 30
+
+  runner:
+    profiles: [tmpfs]
+    build:
+      context: ./backend
+      dockerfile: Dockerfile.test
+    depends_on:
+      db:
+        condition: service_healthy
+    working_dir: /workspace/backend
+    environment:
+      DJANGO_DEBUG: "true"
+      DJANGO_SECRET_KEY: test-only-dummy-key
+      DJANGO_ALLOWED_HOSTS: localhost
+      CSRF_TRUSTED_ORIGINS: http://localhost
+      DJANGO_ENV: local
+      DJANGO_MEDIA_ROOT: /tmp/media
+      DATABASE_URL: postgresql://test:test@db:5432/test?sslmode=disable
+      COVERAGE_FILE: /tmp/coverage/.coverage
+      PYTEST_ADDOPTS: --cache-dir=/tmp/pytest
+      PYTEST_CACHE_DIR: /tmp/pytest
+      RUFF_CACHE_DIR: /tmp/ruff
+      PYTHONDONTWRITEBYTECODE: "1"
+    tmpfs:
+      - /tmp/media:rw,size=512m,mode=1777
+      - /tmp/coverage:rw,size=64m,mode=1777
+      - /tmp/pytest:rw,size=64m,mode=1777
+      - /tmp/ruff:rw,size=64m,mode=1777
+      - /tmp/sqlite:rw,size=64m,mode=1777
+    volumes:
+      - ./scripts/changelog_figures.py:/workspace/scripts/changelog_figures.py:ro
+      - ./scripts/figures:/workspace/scripts/figures
+    command: [sleep, infinity]
