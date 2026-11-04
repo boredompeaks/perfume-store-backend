@@ -100,6 +100,7 @@ Duplicates mapped (not rebuilt): #52/#62 -> PRISTINE-13, #58 -> PRISTINE-08, F-0
 ## Carry-forward P3 (do not lose)
 
 - `backend/docs/api-contract.md:57` still says `MFASetupView` declares `permission_classes = []`; the code now declares `[AllowAny]`. Doc-only, outside PRISTINE-02's scope. Fix in the next accounts/docs task.
-- PRISTINE-08 changelog row: dotted `scripts.tests.test_guards` trips `doc_claims`; and "one absolute path per line" should read "one path per line" (`guard_packages` prints relative). Fix in a one-file commit, then delta re-audit.
+- PRISTINE-08 changelog row: the dotted unittest module form tripped `doc_claims`; fixed in a41cbb5 (now the file path), and "one absolute path per line" is now "one path per line".
+- PRISTINE-08b: `scripts/figures/discovery_floor.json` is not committed, so the discovery guard fails closed with exit 2 until the auditor records the measured count after the lanes merge. Record it at the first integration; do not hand-type it.
 - `backend/orders/views/refund.py:159-163`: a replay collapsing onto an unconfirmed PENDING row answers 200 "Refund already issued"; the body does carry `status: "pending"`, so it is prose-only. Fold into the next view touch.
 - Lane DB name is not enforced: the PRISTINE-02 audit probed `perfume_store_a`, the NEW-P0-1 audit probed `perfume_store` on the same pg2a server. Isolation held only because the runs were alone; every future handoff must assert the exact database name.
