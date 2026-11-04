@@ -130,6 +130,26 @@ CAPABILITY_ROLES = {
     "platform.configure": frozenset({ROLE_SUPERADMIN}),
 }
 
+# PRISTINE-13a (#52): capabilities that move money, reach customer PII or
+# change stock, so a password alone must not be enough to exercise them. A
+# capability set, not a role list, is what keeps the MFA population derived:
+# granting one of these to another role widens MFA coverage with no second
+# list to keep in step. Catalogue's and marketing's own write powers
+# (``products.publish``, ``discounts.write``) stay single-factor -- step-up
+# at the moment of publishing or discounting is a separate task -- but
+# marketing is still in the population, because ``reports.read`` is already a
+# capability that exposes the store's money.
+MFA_REQUIRED_CAPABILITIES = frozenset(
+    {
+        "refunds.create",
+        "shipping.manage",
+        "reports.read",
+        "customers.read",
+        "orders.read",
+        "inventory.adjust",
+    }
+)
+
 # Roles whose own grant/revoke is a high-privilege access change, mapped to
 # the capability that authorises it. Minting or unminting the top tier is
 # spec 1.1 line 146 authority ("platform configuration"), so it needs a

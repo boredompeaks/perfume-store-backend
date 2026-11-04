@@ -40,7 +40,7 @@ from xml.etree import ElementTree
 
 import segno
 from django.conf import settings
-from django.contrib.auth.models import Group, User
+from django.contrib.auth.models import AnonymousUser, Group, User
 from django.core import signing
 from django.core.cache import cache
 from django.test import RequestFactory, SimpleTestCase, override_settings
@@ -54,8 +54,19 @@ from accounts.models import TOTPDevice
 from accounts.serializers import StorefrontTokenObtainPairSerializer
 from common import qr, totp
 from common.models import AuditEvent
-from common.permissions import is_privileged
-from common.roles import ROLE_ADMIN, ROLE_SUPPORT
+from common.permissions import is_privileged, requires_mfa
+from common.roles import (
+    CAPABILITY_ROLES,
+    MFA_REQUIRED_CAPABILITIES,
+    ROLE_ADMIN,
+    ROLE_CATALOGUE,
+    ROLE_FINANCE,
+    ROLE_INVENTORY,
+    ROLE_MARKETING,
+    ROLE_SUPERADMIN,
+    ROLE_SUPPORT,
+    STAFF_ROLES,
+)
 from common.testing import TEST_TOTP_SECRET, ApiTestCase
 
 PASSWORD = "S3cure-Passphrase!"
@@ -215,6 +226,138 @@ class PrivilegedPredicateTests(ApiTestCase):
 
     def test_anonymous_not_privileged(self):
         self.assertFalse(is_privileged(None))
+
+
+class MfaRequiredPopulationTests(ApiTestCase):
+    """PRISTINE-13a (#52): the MFA population, read from the catalogue.
+
+    ``is_privileged`` asked whether a user manages staff access, so the roles
+    that move money, read customer data and change stock kept a
+    password-only door. ``requires_mfa`` answers from the capability map
+    instead. These pins fix the per-role answer, then move a capability in
+    and out of the live set to prove the answer is membership-driven rather
+    than a second hardcoded role list.
+    """
+
+    def role_user(self, role, username):
+        user = User.objects.create_user(
+            username=username,
+            email=f"{username}@example.com",
+            password=PASSWORD,
+            is_staff=True,
+        )
+        user.groups.add(Group.objects.get_or_create(name=role)[0])
+        return user
+
+    def role_users(self):
+        return {role: self.role_user(role, f"mfa-{role}") for role in STAFF_ROLES}
+
+    def classification(self, users):
+        return {role: requires_mfa(users[role]) for role in STAFF_ROLES}
+
+    def test_the_declared_set_is_the_money_pii_and_stock_capabilities(self):
+        self.assertEqual(
+            MFA_REQUIRED_CAPABILITIES,
+            frozenset(
+                {
+                    "refunds.create",
+                    "shipping.manage",
+                    "reports.read",
+                    "customers.read",
+                    "orders.read",
+                    "inventory.adjust",
+                }
+            ),
+        )
+
+    def test_every_declared_capability_is_a_catalogue_identifier(self):
+        # A typo here would silently exempt a role instead of failing loudly.
+        self.assertEqual(MFA_REQUIRED_CAPABILITIES - set(CAPABILITY_ROLES), set())
+
+    def test_each_role_classifies_from_the_capabilities_it_holds(self):
+        users = self.role_users()
+        # The expected column is derived capability-by-capability:
+        #   support    orders.read + customers.read
+        #   catalogue  products.* and inventory.read only
+        #   inventory  inventory.adjust
+        #   marketing  reports.read (the role reads the money reports)
+        #   finance    refunds.create + shipping.manage + reports/customers
+        #   admin      every capability in the set
+        #   superadmin staff.manage -- the pre-existing privileged rule
+        expected = {
+            ROLE_SUPPORT: True,
+            ROLE_CATALOGUE: False,
+            ROLE_INVENTORY: True,
+            ROLE_MARKETING: True,
+            ROLE_FINANCE: True,
+            ROLE_ADMIN: True,
+            ROLE_SUPERADMIN: True,
+        }
+        self.assertEqual(set(expected), set(STAFF_ROLES))
+        self.assertEqual(self.classification(users), expected)
+
+    def test_a_superuser_with_no_role_group_still_requires_mfa(self):
+        root = make_privileged("root", is_superuser=True)
+        self.assertEqual(root.groups.count(), 0)
+        self.assertTrue(requires_mfa(root))
+
+    def test_an_unauthenticated_caller_does_not_require_mfa(self):
+        self.assertFalse(requires_mfa(None))
+        self.assertFalse(requires_mfa(AnonymousUser()))
+
+    def test_a_customer_does_not_require_mfa(self):
+        self.assertFalse(requires_mfa(self.make_user("buyer")))
+
+    def test_the_widening_never_narrows_the_existing_privileged_rule(self):
+        # The population must be a superset of is_privileged's, or replacing
+        # that check at the doors would exempt accounts it used to challenge.
+        users = self.role_users()
+        for role in STAFF_ROLES:
+            with self.subTest(role=role):
+                if is_privileged(users[role]):
+                    self.assertTrue(requires_mfa(users[role]))
+        # ...and it reaches the three operational roles the old rule missed.
+        for role in (ROLE_SUPPORT, ROLE_FINANCE, ROLE_INVENTORY):
+            with self.subTest(role=role):
+                self.assertFalse(is_privileged(users[role]))
+                self.assertTrue(requires_mfa(users[role]))
+
+    def test_removing_a_capability_flips_only_the_role_that_holds_it(self):
+        users = self.role_users()
+        before = self.classification(users)
+        narrowed = frozenset(MFA_REQUIRED_CAPABILITIES - {"inventory.adjust"})
+        with mock.patch("common.permissions.MFA_REQUIRED_CAPABILITIES", narrowed):
+            after = self.classification(users)
+        flipped = {role for role in STAFF_ROLES if before[role] != after[role]}
+        self.assertEqual(flipped, {ROLE_INVENTORY})
+        self.assertFalse(after[ROLE_INVENTORY])
+
+    def test_adding_a_capability_flips_the_role_that_holds_it(self):
+        # Promotion into the set is the mechanism a later step-up task uses:
+        # a capability no tested role otherwise needs is added, and only its
+        # holder changes class.
+        users = self.role_users()
+        before = self.classification(users)
+        widened = frozenset(MFA_REQUIRED_CAPABILITIES | {"products.publish"})
+        with mock.patch("common.permissions.MFA_REQUIRED_CAPABILITIES", widened):
+            after = self.classification(users)
+        flipped = {role for role in STAFF_ROLES if before[role] != after[role]}
+        self.assertEqual(flipped, {ROLE_CATALOGUE})
+        self.assertTrue(after[ROLE_CATALOGUE])
+
+    def test_granting_a_money_capability_flips_the_role_that_holds_it(self):
+        # The other direction of the same rule: membership follows the
+        # catalogue, so a map change that gives the single-factor catalogue
+        # role a money capability puts it in the population with no edit here.
+        users = self.role_users()
+        self.assertFalse(requires_mfa(users[ROLE_CATALOGUE]))
+        widened = dict(CAPABILITY_ROLES)
+        widened["refunds.create"] = CAPABILITY_ROLES["refunds.create"] | {
+            ROLE_CATALOGUE
+        }
+        with mock.patch("common.permissions.CAPABILITY_ROLES", widened):
+            self.assertTrue(requires_mfa(users[ROLE_CATALOGUE]))
+        self.assertFalse(requires_mfa(users[ROLE_CATALOGUE]))
 
 
 class MFAEnrollmentTests(ApiTestCase):

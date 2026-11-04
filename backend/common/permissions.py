@@ -17,6 +17,7 @@ from rest_framework.permissions import SAFE_METHODS, BasePermission
 
 from common.roles import (
     CAPABILITY_ROLES,
+    MFA_REQUIRED_CAPABILITIES,
     ROLE_GRANT_CAPABILITY,
     STAFF_ROLES,
 )
@@ -323,6 +324,34 @@ def is_privileged(user):
     if not (user and user.is_authenticated):
         return False
     return user.is_superuser or user_has_capability(user, "staff.manage")
+
+
+def requires_mfa(user):
+    """PRISTINE-13a (#52): the accounts mandatory MFA applies to.
+
+    Widens :func:`is_privileged` from "manages staff access" to "holds any
+    capability that moves money, reaches customer PII or changes stock" --
+    ``MFA_REQUIRED_CAPABILITIES`` -- so the finance, support and inventory
+    roles face the second factor too. Membership is resolved against
+    ``CAPABILITY_ROLES`` for the user's groups: no role name appears here, so
+    granting one of those capabilities to another role widens the population
+    with no second list to keep in step.
+
+    The ``is_privileged`` arm is kept in the union on purpose. It is the
+    pre-existing rule (superuser, or ``staff.manage``) that this predicate may
+    replace at the doors (PRISTINE-13b), and a widening must never narrow:
+    the ``superadmin`` tier holds only privilege-management capabilities, so
+    dropping the arm would silently exempt the highest tier.
+    """
+    if not (user and user.is_authenticated):
+        return False
+    # A capability is HELD when any of the user's roles appears in its
+    # ``CAPABILITY_ROLES`` row; intersecting the role names with the
+    # capability names would compare two different namespaces.
+    return is_privileged(user) or any(
+        user_has_capability(user, capability)
+        for capability in MFA_REQUIRED_CAPABILITIES
+    )
 
 
 class IsPrivilegedRole(BasePermission):
