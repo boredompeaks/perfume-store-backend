@@ -1333,14 +1333,19 @@ class RefundRequestAdmin(RoleAwareModelAdmin):
                 )
 
     def _approve_refund_request(self, request, refund_request, note):
-        """One approval, atomic from the locks to the audit record.
+        """One approval: check, call the provider, then record the decision.
 
-        The lock order is order-then-request, the same order the customer
-        filing seam takes, so a decision and a concurrent filing serialize
-        instead of deadlocking. ``issue_refund`` re-locks the order inside
-        this transaction (a savepoint) and rolls its own gateway failure back
-        to that savepoint; the exception leaves this block too, so the request
-        status change below is never reached.
+        The check locks order-then-request, the same order the customer filing
+        seam takes, so a decision and a concurrent filing serialize instead of
+        deadlocking. It only DECIDES, though: the request stays PENDING across
+        the provider call, which ``issue_refund`` makes with no transaction
+        open and no Order lock held (its own two-phase writer). A failed
+        attempt therefore records no decision and leaves its PENDING refund row
+        as the trace; because the per-request key then collapses a re-approval
+        onto that unconfirmed row instead of calling the provider again, such a
+        re-approval is refused here until the trace is reconciled. The decision
+        itself is written in a second short transaction, after the provider has
+        answered.
         """
         with transaction.atomic():
             order = Order.objects.select_for_update().get(pk=refund_request.order_id)
@@ -1357,18 +1362,39 @@ class RefundRequestAdmin(RoleAwareModelAdmin):
                 return
 
             amount = refund_request_amount(order, locked.items)
-            receipt = refunds_core.issue_refund(
-                request,
-                order_id=order.pk,
-                amount=amount,
-                reason=note,
-                # Deterministic per request, so a retry after a crash - or a
-                # request an operator re-opened by hand - collapses onto the
-                # refund it already produced instead of paying twice.
-                idempotency_key=f"refund-request-{locked.pk}",
-                source="admin",
-            )
 
+        receipt = refunds_core.issue_refund(
+            request,
+            order_id=order.pk,
+            amount=amount,
+            reason=note,
+            # Deterministic per request, so a retry after a crash - or a
+            # request an operator re-opened by hand - collapses onto the
+            # refund it already produced instead of paying twice.
+            idempotency_key=f"refund-request-{locked.pk}",
+            source="admin",
+        )
+
+        if receipt.refund.status != Refund.Status.PROCESSED:
+            # The key collapsed this approval onto a row an earlier attempt
+            # committed and the provider never confirmed (the writer keeps
+            # that PENDING row as its reconciliation trace). Recording
+            # APPROVED here would claim a decision no money backs, so the
+            # request stays pending and the operator is pointed at the trace.
+            self.message_user(
+                request,
+                f"Refund request #{refund_request.pk}: a previous refund "
+                "attempt is still unconfirmed by the gateway; reconcile it "
+                "before approving again.",
+                messages.ERROR,
+            )
+            return
+
+        with transaction.atomic():
+            locked = RefundRequest.objects.select_for_update().get(pk=refund_request.pk)
+            # Written even if a rejection landed while the provider call was in
+            # flight: the money has moved, and an approval whose log entry
+            # follows the rejection in the trail is the honest record of that.
             locked.status = RefundRequest.Status.APPROVED
             locked.decided_by = request.user
             locked.decided_at = timezone.now()

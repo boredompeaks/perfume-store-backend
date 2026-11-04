@@ -37,10 +37,10 @@ from unittest.mock import patch
 import razorpay
 from django.contrib import admin
 from django.contrib.admin.models import CHANGE, LogEntry
-from django.contrib.auth.models import Group
+from django.contrib.auth.models import Group, User
 from django.contrib.contenttypes.models import ContentType
-from django.db import IntegrityError, transaction
-from django.test import RequestFactory, tag
+from django.db import IntegrityError, connection, transaction
+from django.test import RequestFactory, TransactionTestCase, tag
 from rest_framework.test import APIClient
 
 from common.admin import RoleAwareModelAdmin
@@ -504,8 +504,8 @@ class AdminDecisionTests(RefundRequestTestCase):
     itself and never by calling the gateway. These probes hold that boundary:
     an item-scoped request refunds its own line totals, a whole-order ask is
     the remaining balance, a gateway refusal leaves the request pending with
-    nothing written, a rejection moves no money, a decided request is a no-op,
-    and only ``refunds.create`` can decide.
+    its own PENDING refund row as the trace, a rejection moves no money, a
+    decided request is a no-op, and only ``refunds.create`` can decide.
     """
 
     def setUp(self):
@@ -816,7 +816,11 @@ class AdminDecisionTests(RefundRequestTestCase):
         self.assertEqual(self.request_record.status, "pending")
         self.assertIsNone(self.request_record.decided_by)
         self.assertIsNone(self.request_record.decided_at)
-        self.assertEqual(Refund.objects.count(), 0)
+        # The attempt's trace survives the refusal instead of rolling back with
+        # a transaction: exactly one PENDING row, which is what reconciliation
+        # reads.
+        self.assertEqual(Refund.objects.count(), 1)
+        self.assertEqual(Refund.objects.get().status, Refund.Status.PENDING)
         order.refresh_from_db()
         self.assertEqual(order.payment_status, "captured")
         self.assertIsNone(order.refunded_at)
@@ -954,3 +958,134 @@ class AdminDecisionTests(RefundRequestTestCase):
 
         self.request_record.items = [self.line.id]
         self.assertEqual(model_admin.item_count(self.request_record), 1)
+
+    def test_a_gateway_failure_leaves_the_request_pending_and_one_pending_refund(
+        self,
+    ):
+        self.request_record.items = [self.line.id]
+        self.request_record.save(update_fields=["items"])
+        order = self.captured(self.order)
+        client = self.gateway()
+        client.refund.create.side_effect = razorpay.errors.GatewayError(
+            "provider unavailable"
+        )
+
+        response = self.post_action(
+            "approve_requests", [self.request_record], note="Try to refund"
+        )
+
+        self.assertContains(
+            response, "the payment gateway could not complete this refund"
+        )
+        self.request_record.refresh_from_db()
+        self.assertEqual(self.request_record.status, RefundRequest.Status.PENDING)
+        self.assertIsNone(self.request_record.decided_by)
+        self.assertIsNone(self.request_record.decided_at)
+        trace = Refund.objects.get()
+        self.assertEqual(trace.status, Refund.Status.PENDING)
+        self.assertEqual(trace.amount, Decimal("500.00"))
+        self.assertIsNone(trace.gateway_refund_id)
+        self.assertEqual(
+            trace.idempotency_key, f"refund-request-{self.request_record.pk}"
+        )
+        order.refresh_from_db()
+        self.assertEqual(order.payment_status, "captured")
+        self.assertIsNone(order.refunded_at)
+
+    def test_an_unconfirmed_replay_does_not_mark_the_request_approved(self):
+        self.request_record.items = [self.line.id]
+        self.request_record.save(update_fields=["items"])
+        self.captured(self.order)
+        client = self.gateway()
+        client.refund.create.side_effect = razorpay.errors.GatewayError("down")
+        self.post_action("approve_requests", [self.request_record], note="First try")
+
+        # The request is still PENDING, so a second approval runs - and the
+        # deterministic key collapses it onto the unconfirmed row without a
+        # second gateway call. It must not record a decision no money backs.
+        second = self.post_action(
+            "approve_requests", [self.request_record], note="Second try"
+        )
+
+        self.assertContains(second, "still unconfirmed by the gateway")
+        self.request_record.refresh_from_db()
+        self.assertEqual(self.request_record.status, RefundRequest.Status.PENDING)
+        self.assertIsNone(self.request_record.decided_by)
+        self.assertEqual(Refund.objects.count(), 1)
+        self.assertEqual(Refund.objects.get().status, Refund.Status.PENDING)
+        client.refund.create.assert_called_once()
+
+
+@tag("orders")
+class ApprovalTransactionBoundaryTests(TransactionTestCase):
+    """The approval reaches the provider with no transaction and no lock.
+
+    ``AdminDecisionTests`` runs inside a ``TestCase``, where the whole test is
+    one transaction: its blocks would be savepoints and ``in_atomic_block``
+    could never be false. This class commits for real, which is what makes the
+    observation mean "the decision check had already ended when the provider
+    was called".
+    """
+
+    def setUp(self):
+        self.buyer = User.objects.create_user(
+            "approval-buyer", "approval-buyer@example.com", TEST_PASSWORD
+        )
+        self.finance = User.objects.create_user(
+            "approval-finance", "approval-finance@example.com", TEST_PASSWORD
+        )
+        self.order = Order.objects.create(
+            user=self.buyer,
+            order_number="REF-2026-000777",
+            full_name="Refund Buyer",
+            phone="9876500077",
+            address="3 Refund Lane",
+            city="Indore",
+            state="MP",
+            pincode="452001",
+            status="confirmed",
+            total_amount=Decimal("500.00"),
+            payment_status="captured",
+            razorpay_payment_id="pay_APPROVAL",
+        )
+        self.request_record = RefundRequest.objects.create(
+            order=self.order,
+            requester=self.buyer,
+            reason="The bottle arrived damaged.",
+        )
+
+    def test_approval_calls_the_gateway_outside_any_transaction(self):
+        model_admin = admin.site._registry[RefundRequest]
+        seen = {}
+
+        def fake_refund_payment(*, payment_id, amount, idempotency_key):
+            # This connection is in autocommit, so an open block here would be
+            # the defect returning; and the status read is the committed one.
+            seen["in_atomic_block"] = connection.in_atomic_block
+            seen["autocommit"] = connection.get_autocommit()
+            seen["request_status"] = RefundRequest.objects.get(
+                pk=self.request_record.pk
+            ).status
+            return "rfnd_APPROVAL"
+
+        request = RequestFactory().post("/")
+        request.user = self.finance
+
+        with patch("orders.refunds.refund_payment", side_effect=fake_refund_payment):
+            model_admin._approve_refund_request(
+                request, self.request_record, "Approved after inspection"
+            )
+
+        self.assertIs(seen["in_atomic_block"], False)
+        self.assertIs(seen["autocommit"], True)
+        self.assertEqual(seen["request_status"], RefundRequest.Status.PENDING)
+        self.request_record.refresh_from_db()
+        self.assertEqual(self.request_record.status, RefundRequest.Status.APPROVED)
+        self.assertEqual(self.request_record.decided_by, self.finance)
+        self.assertIsNotNone(self.request_record.decided_at)
+        refund = Refund.objects.get()
+        self.assertEqual(refund.status, Refund.Status.PROCESSED)
+        self.assertEqual(refund.gateway_refund_id, "rfnd_APPROVAL")
+        self.assertEqual(
+            refund.idempotency_key, f"refund-request-{self.request_record.pk}"
+        )

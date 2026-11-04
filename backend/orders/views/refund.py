@@ -105,17 +105,19 @@ def admin_order_refund(request, order_id):
     issue refunds, and neither can a support agent who may read and fulfil
     orders.
 
-    Atomic and serialized: the Order row is locked for the whole attempt
+    Serialized, and split at the provider boundary: the Order row is locked
     (this order's refund rows beside it, since they are the other half of the
-    balance being spent), the balance is recomputed under those locks, and the
-    gateway call happens inside the same transaction. So two concurrent
-    refunds can never both pass the balance gate, and a gateway failure rolls
-    the attempt back whole — no refund row, no payment-dimension move, no
-    timestamp, no audit record.
+    balance being spent) while the balance is recomputed and the attempt's
+    PENDING row is committed. The gateway call then runs with no transaction
+    open and no lock held, and a second short transaction writes what the
+    provider confirmed. A gateway failure leaves that PENDING row behind as the
+    reconciliation trace - no payment-dimension move, no timestamp, no audit
+    record - and answers 502.
 
     Idempotent-safe twice over: an ``Idempotency-Key`` collapses a retry onto
-    the refund it already produced (no second gateway call), and without a key
-    the balance gate alone still refuses to hand back the same money twice.
+    the refund row it already produced (no second gateway call, whatever that
+    row's status), and without a key the balance gate alone still refuses to
+    hand back the same money twice.
 
     The payment dimension moves to the choices orders.state already declares
     (``partially_refunded`` / ``refunded``) — this writer is their first
