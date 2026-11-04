@@ -52,10 +52,11 @@ Duplicates mapped (not rebuilt): #52/#62 -> PRISTINE-13, #58 -> PRISTINE-08, F-0
 
 | Task ID | Requirement (<=12 words) | Source | Status | Evidence / scope |
 |---|---|---|---|---|
-| NEW-P0-1a | Refund two-phase + provider idempotency (API/admin-order paths) | #54 | IN-AUDIT | 2 | 44c9cdf+f928d2c; 2557 OK both engines, cov 99.82%; approval caller unwound |
-| NEW-P0-1b | Unwind approval caller + update refund docs | #54 | IN-AUDIT | 1 | f928d2c; 3 new pins mutation-proved; docs + api-contract corrected |
-| NEW-P1-15 | Reserve PENDING refunds + FAILED status (close over-refund window) | #54 residual | PENDING | P1 follow-up; needs model status |
-| NEW-P0-2 | Order.user PROTECT + deidentification, constraint rework | #53 | PENDING | orders/models.py:127-129,386-391 + migration |
+| NEW-P0-1a | Refund two-phase + provider idempotency (API/admin-order paths) | #54 | SHIPPED | 2 | f928d2c; 2557 OK both engines cov 99.82%; pushed origin/lane/a |
+| NEW-P0-1b | Unwind approval caller + update refund docs | #54 | SHIPPED | 1 | f928d2c; all 3 callers proven outside txn; mutations reproduced |
+| NEW-P0-2a | Order.user PROTECT + migration + retention doc | #53 | BUILDING | 0 | dispatched lane/a; models.py:127-129 + migration + tests |
+| NEW-P0-2b | User deidentification/tombstone service (safe erasure) | #53 | PENDING | 0 | new service + tests + retention doc |
+| NEW-P1-15 | Reserve PENDING refunds + FAILED status (close over-refund window) | #54 residual | PENDING | 0 | P1 follow-up; needs model status |
 | NEW-P1-1 | Payment reconciliation job + refund captured-then-refused | #86, F-04, fp1.3 | PENDING | new ops/cmd, ops/alerts.py, payment.py:498-528 |
 | NEW-P1-14 | Fetch payment; assert amount==total*100 and captured | fix-plan 1.2 | PENDING | orders/views/payment.py:211-220 |
 | NEW-P1-2 | Guest-checkout single source of truth (drop flag/branches) | #82 | PENDING | template.config.ts:112, CheckoutView/CartView + test |
@@ -100,3 +101,5 @@ Duplicates mapped (not rebuilt): #52/#62 -> PRISTINE-13, #58 -> PRISTINE-08, F-0
 
 - `backend/docs/api-contract.md:57` still says `MFASetupView` declares `permission_classes = []`; the code now declares `[AllowAny]`. Doc-only, outside PRISTINE-02's scope. Fix in the next accounts/docs task.
 - PRISTINE-08 changelog row: dotted `scripts.tests.test_guards` trips `doc_claims`; and "one absolute path per line" should read "one path per line" (`guard_packages` prints relative). Fix in a one-file commit, then delta re-audit.
+- `backend/orders/views/refund.py:159-163`: a replay collapsing onto an unconfirmed PENDING row answers 200 "Refund already issued"; the body does carry `status: "pending"`, so it is prose-only. Fold into the next view touch.
+- Lane DB name is not enforced: the PRISTINE-02 audit probed `perfume_store_a`, the NEW-P0-1 audit probed `perfume_store` on the same pg2a server. Isolation held only because the runs were alone; every future handoff must assert the exact database name.
