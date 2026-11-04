@@ -81,3 +81,15 @@ Duplicates mapped (not rebuilt): #52/#62 -> PRISTINE-13, #58 -> PRISTINE-08, F-0
 8. NEW-P1-3 (split) · NEW-P1-2 · NEW-P1-4
 9. PRISTINE-12 (tmpfs green) · PRISTINE-19 (tmpfs diagnosis)
 10. Promotions + CI-HYGIENE-2/3
+
+## Escalation (2026-11-04)
+
+**Free-model quota is binding for subagents; verification gate is blocked.**
+
+- 7 subagent runs failed with "Free usage limit reached": PRISTINE-02 builder (x2), PRISTINE-08 builder/resume (x2), FULL auditor (x1), reduced PRISTINE-08 auditor (x1); earlier four-builder batch (x4).
+- Intermittent successes: RE (7567ce1), triage, one general finish pass (b35e2de). The window is short, not lifted.
+- Preserved, not lost: PRISTINE-08 committed b35e2de (unpushed); CI-HYGIENE-1 committed 7567ce1 (unpushed); PRISTINE-02 edits+figure on disk (uncommitted, test_mfa.py scope finding open); ledger c090576.
+- Remote state unchanged: origin/spec-comp = 43cf740; origin/lane/b = 94859d1.
+- No self-audit, no fake SHIP, no unverified commit was performed.
+
+**Decision needed:** name a non-free model for subagents (or top up the quota). Until then the queue is paused at the audit gate.
