@@ -6,14 +6,14 @@ Separate from the spec-compliance run (`spec-run-state.md`). Every task here is 
 |---|---|---|---|---|---|
 | PRISTINE-00 | Fix wall-clock-expiring return-window test (freeze clock) | n/a | SHIPPED | 1 | d7d400e; 2538 OK both engines, cov 99.83%; defect reproduced with freeze removed |
 | PRISTINE-01 | Explicit AllowAny on 14 public views (zero behavior change) | n/a | SHIPPED | 1 | 43cf740; 14/14 ['AllowAny'] runtime-proved; pushed origin/spec-comp |
-| PRISTINE-02 | Flip DEFAULT_PERMISSION_CLASSES to IsAuthenticated + allowlist test | n/a | PENDING | 0 | depends on 01 |
+| PRISTINE-02 | Flip DEFAULT_PERMISSION_CLASSES to IsAuthenticated + allowlist test | n/a | IN-AUDIT | 2 | a27f637; 2548 OK both engines cov 99.82%; test_mfa comment-only deviation |
 | PRISTINE-03 | Move common/testing.py out of product path (batched, 6 subtasks) | n/a | PENDING | 0 | scope >5 files, split |
 | PRISTINE-04 | Import-linter ratchet (baseline violation count) | n/a | PENDING | 0 | config draft only |
 | PRISTINE-05 | Ruff S,B,C90,DJ with corrected globs | n/a | PENDING | 0 | config draft only |
 | PRISTINE-06 | Mypy phase 1 (common+orders+accounts+cart strict) | n/a | PENDING | 0 | config draft only |
 | PRISTINE-07 | SCOPE check wired into CI | n/a | PENDING | 0 | script drafted |
-| PRISTINE-08 | Restore __init__.py CI guard (fail if package dir lacks one) | n/a | BUILDING(partial) | 1 | 3 untracked files in wt-async; quota aborted before commit |
-| PRISTINE-09 | ErrorEnvelope: inventory wrapped sites, classify view-fix vs cross-cutting | n/a | BUILDING(partial) | 1 | return.py+test modified, _inventory_tmp.py in wt-d; quota aborted |
+| PRISTINE-08 | Package-marker guard (fail if a package dir lacks its marker) | n/a | BUILDING(partial) | 1 | 3 untracked files in wt-async; quota aborted before commit |
+| PRISTINE-09 | ErrorEnvelope: inventory wrapped sites, classify view-fix vs cross-cutting | n/a | BUILDING(partial) | 1 | return view + envelope test modified; temp inventory script in wt-d; quota aborted |
 | PRISTINE-10 | create_order CCN 48 -> <=10 decomposition | n/a | PENDING | 1 | quota aborted clean; no files changed |
 | PRISTINE-11 | Split config/settings.py 1720 LOC | n/a | PENDING | 0 | audit §5 |
 | PRISTINE-12 | tmpfs + fsync=off test compose profile | n/a | BUGS-FOUND | 1 | infra RAM-proved (mounts+fsync=off); container suite RED 59F/7E sqlite, 59F/25E pg |
@@ -52,7 +52,7 @@ Duplicates mapped (not rebuilt): #52/#62 -> PRISTINE-13, #58 -> PRISTINE-08, F-0
 
 | Task ID | Requirement (<=12 words) | Source | Status | Evidence / scope |
 |---|---|---|---|---|
-| NEW-P0-1 | Refund: commit PENDING + idempotency key, gateway outside txn | #54 | PENDING | orders/refunds.py:189-300, models.py:631, webhooks.py |
+| NEW-P0-1 | Refund: commit PENDING + idempotency key, gateway outside txn | #54 | PENDING | orders/refunds.py:189-300, backend/orders/models.py:631, orders/webhooks.py |
 | NEW-P0-2 | Order.user PROTECT + deidentification, constraint rework | #53 | PENDING | orders/models.py:127-129,386-391 + migration |
 | NEW-P1-1 | Payment reconciliation job + refund captured-then-refused | #86, F-04, fp1.3 | PENDING | new ops/cmd, ops/alerts.py, payment.py:498-528 |
 | NEW-P1-14 | Fetch payment; assert amount==total*100 and captured | fix-plan 1.2 | PENDING | orders/views/payment.py:211-220 |
@@ -65,7 +65,7 @@ Duplicates mapped (not rebuilt): #52/#62 -> PRISTINE-13, #58 -> PRISTINE-08, F-0
 | NEW-P1-8 | Deploy frontend from protected main, not push to feat | #60 | PENDING(INFRA) | frontend-deploy.yml:4-6,20 + env protection |
 | NEW-P1-9 | CODEOWNERS + branch protection with required checks | #59 | PENDING(INFRA) | .github/CODEOWNERS new; spec-comp unprotected (404) |
 | NEW-P1-10 | Revenue net of refunds (or relabel gross) | #57 | PENDING | ops/services.py:20,53-63 |
-| NEW-P1-11 | Off-host encrypted backup + missing-backup alert | #56 | PENDING(INFRA) | backup.py:68-77, backup.sh:7,12 |
+| NEW-P1-11 | Off-host encrypted backup + missing-backup alert | #56 | PENDING(INFRA) | backend/ops/management/commands/backup_db.py:68-77, scripts/backup.sh:7,12 |
 | NEW-P1-12 | Real pg_restore drill + manifest | #55 | PENDING | restore_drill.py:148-174 |
 | NEW-P1-13 | Prod security defaults (HSTS/SSL/cookies) + deploy check | V-06 remainder | PENDING | settings.py:1670-1713 |
 
