@@ -16,9 +16,11 @@ Two layers, one boundary:
 Credentials are read from settings, which resolve ``RAZORPAY_KEY_ID`` /
 ``RAZORPAY_KEY_SECRET`` from the environment - no credential is written here.
 ``RAZORPAY_TIMEOUT`` bounds the gateway socket for the same reason
-``EMAIL_TIMEOUT`` bounds the mail socket: this call is made while the caller's
-transaction still holds the order lock, so an unbounded wait is a
-checkout-blocking outage rather than a slow request.
+``EMAIL_TIMEOUT`` bounds the mail socket: a stalled provider must fail as one
+typed error rather than hold a request open. The attempt's PENDING row commits
+before that socket opens, and the provider is reached with no transaction and
+no row lock held, so a slow refund costs one response rather than every refund
+queued behind that order's lock.
 The amount is quantized with the shared ``common.money`` helper before it is
 scaled to the provider's minor units, the same rounding rule the capture
 amount uses in ``create_payment``, so paying and refunding cannot disagree
@@ -48,11 +50,12 @@ class RefundGatewayError(Exception):
     """The gateway did not refund the payment.
 
     Raised for a missing payment reference, any provider error, and a 2xx
-    response that carries no refund id. Callers MUST let this escape their
-    transaction (or re-raise it) so the attempt rolls back whole: a store
-    that recorded a refund the gateway never made would be reconciling money
-    it does not have. The provider's own message rides the exception text for
-    the caller's log lines - never for an API response.
+    response that carries no refund id. Callers MUST let this escape so the
+    operator sees a typed failure: the attempt's PENDING row was committed
+    before this call and is deliberately NOT rolled back, because a provider
+    that may have accepted the refund must leave a local record reconciliation
+    can look up. The provider's own message rides the exception text for the
+    caller's log lines - never for an API response.
     """
 
 
@@ -63,12 +66,30 @@ def _minor_units(amount):
     return int(quantize_money(amount) * 100)
 
 
-def refund_payment(*, payment_id, amount):
+def _provider_idempotency_key(refund):
+    """The provider's dedupe key for one attempt, derived from its row.
+
+    Razorpay dedupes a refund on the ``X-Refund-Idempotency`` request header
+    (its documented constraint: at least 10 characters from ``[A-Za-z0-9_-]``),
+    and the installed SDK forwards caller headers untouched to ``requests`` -
+    it has no idempotency parameter of its own, and ``notes`` is free-form
+    metadata with no documented dedupe semantics. Keying on the row makes the
+    key stable for every send belonging to one attempt and different for the
+    next attempt, which is its own row.
+    """
+    return f"refund-{refund.pk}-order-{refund.order_id}"
+
+
+def refund_payment(*, payment_id, amount, idempotency_key):
     """Refund ``amount`` of a captured Razorpay payment; return the refund id.
 
     ``amount`` is the store's Decimal money, not provider units - the scaling
     is this function's job. Raises :class:`RefundGatewayError` for every
     outcome that is not a refund the provider acknowledged.
+
+    ``idempotency_key`` is required rather than optional on purpose: it is the
+    provider-side dedupe key of the attempt that owns this call, and a seam
+    callable without one is how the double-refund hole gets reopened.
     """
     if not payment_id:
         raise RefundGatewayError("no captured payment reference to refund")
@@ -88,14 +109,17 @@ def refund_payment(*, payment_id, amount):
         # untouched to ``requests``. It is NOT a Client option: ``__init__``
         # consumes only base_url and the retry knobs, so a ``timeout=`` passed
         # to the constructor would be silently discarded. Without it the
-        # refund socket waits forever, and this call runs inside the caller's
-        # ``transaction.atomic()`` holding the order's row lock - a stalled
-        # gateway would park every refund for that order behind it. A tripped
-        # timeout raises ``requests.Timeout``, which the handler below already
-        # turns into a typed RefundGatewayError, so the attempt rolls back
-        # whole instead of hanging.
+        # refund socket waits forever; the writer holds no lock while this
+        # runs, so the bound protects this response rather than every other
+        # refund for the order. A tripped timeout raises ``requests.Timeout``,
+        # which the handler below turns into a typed RefundGatewayError.
+        #
+        # The idempotency key rides the provider's documented header; the SDK
+        # has no parameter for it and forwards ``headers`` verbatim, which is
+        # why it is not sent in ``notes``.
         response = client.refund.create(
             {"payment_id": payment_id, "amount": _minor_units(amount)},
+            headers={"X-Refund-Idempotency": idempotency_key},
             timeout=settings.RAZORPAY_TIMEOUT,
         )
     except Exception as exc:
@@ -103,8 +127,9 @@ def refund_payment(*, payment_id, amount):
         # ServerError, SignatureVerificationError) each derive from Exception
         # directly - there is no common base to catch - and the transport can
         # raise anything at all. A refund must never let a raw provider
-        # exception escape as a 500: the caller only rolls the attempt back
-        # when it recognizes a typed error.
+        # exception escape as a 500: the caller only knows to keep the
+        # attempt's PENDING row (and report a typed failure) when it
+        # recognizes one of these.
         raise RefundGatewayError(f"{type(exc).__name__}: {exc}") from exc
 
     refund_id = (response or {}).get("id")
@@ -161,22 +186,43 @@ def issue_refund(
     balance) or any value the API accepted before; it is parsed and
     quantized here so both callers share one money rule.
 
-    Atomic and serialized: the Order row is locked for the whole attempt
-    (this order's refund rows beside it, since they are the other half of the
-    balance being spent), the balance is recomputed under those locks, and the
-    gateway call happens inside the same transaction. Two concurrent refunds
-    therefore cannot both pass the balance gate, and a gateway failure rolls
-    the attempt back whole - no refund row, no payment-dimension move, no
-    timestamp, no audit record.
+    Three phases, and the boundary between them is the point:
+
+    1. A short transaction locks the Order row (this order's refund rows
+       beside it, since they are the other half of the balance being spent),
+       re-checks the replay and the balance under those locks, and creates the
+       PENDING row - which COMMITS before the network call.
+    2. The provider is called with no transaction open and no row lock held,
+       keyed by the attempt's own row (see
+       :func:`_provider_idempotency_key`), so a stalled gateway holds nothing
+       this store needs.
+    3. A second short transaction re-locks the Order and writes what the
+       provider confirmed: the gateway id, PROCESSED, the payment dimension,
+       the timestamp and the privileged-action record.
+
+    A gateway failure therefore leaves its PENDING row behind. That row is the
+    reconciliation trace of a refund the provider may or may not have made; it
+    is the reason nothing here rolls the attempt back.
+
+    Residual window, stated rather than hidden: the balance gate reads
+    PROCESSED rows, so two attempts that overlap inside phase 2 can both clear
+    it and over-refund the order. The old code closed that by holding the lock
+    across the provider call - the defect this split removes. Counting PENDING
+    rows as reserved money would close it again, but this model has no
+    failed/abandoned state, so a definitive gateway refusal would then block
+    every later refund for the order forever. The window is accepted and
+    reconciled from the PENDING rows.
 
     Idempotent-safe twice over: an ``idempotency_key`` collapses a retry onto
-    the refund it already produced (no second gateway call), and without a key
-    the balance gate alone still refuses to hand back the same money twice.
+    the refund row it already produced (no second gateway call, whatever that
+    row's status), and without a key the balance gate alone still refuses to
+    hand back the same money twice.
 
     Raises :class:`RefundRefused` for every domain refusal (no reason, no
     refundable balance, an uncaptured payment, a non-money or over-large
-    amount, an unknown order), and :class:`RefundGatewayError` when the
-    provider did not acknowledge the refund. Neither leaves a trace.
+    amount, an unknown order), which writes nothing, and
+    :class:`RefundGatewayError` when the provider did not acknowledge the
+    refund, which leaves the attempt's PENDING row in place.
     """
     reason = (reason or "").strip() if isinstance(reason, str) else ""
     if not reason:
@@ -293,14 +339,24 @@ def issue_refund(
                 actor=request.user,
                 idempotency_key=idempotency_key,
             )
+            # The locked block ends here on purpose: the PENDING row above
+            # COMMITS before the provider is called.
 
-            # Raises RefundGatewayError out of this atomic block, which is what
-            # discards the PENDING row above: a refund the gateway refused
-            # leaves no trace at all.
-            gateway_refund_id = refund_payment(
-                payment_id=order.razorpay_payment_id,
-                amount=amount,
-            )
+        # Phase 2 - no transaction open, no row lock held. A stalled gateway
+        # costs this response and nothing else, and a failure leaves the
+        # PENDING row as the only local record that the attempt reached the
+        # provider.
+        gateway_refund_id = refund_payment(
+            payment_id=order.razorpay_payment_id,
+            amount=amount,
+            idempotency_key=_provider_idempotency_key(refund),
+        )
+
+        # Phase 3 - write what the provider confirmed, under a fresh Order
+        # lock: the payment dimension is derived from every PROCESSED row, so
+        # two refunds finalizing for one order must not interleave.
+        with transaction.atomic():
+            order = Order.objects.select_for_update().get(pk=order.pk)
 
             refund.gateway_refund_id = gateway_refund_id
             refund.status = Refund.Status.PROCESSED
@@ -318,8 +374,7 @@ def issue_refund(
             # to refund -> refunded, some money still refundable ->
             # partially_refunded. Both are declared edges in
             # PAYMENT_ALLOWED_TRANSITIONS from every state this writer admits,
-            # and the gate above is what guarantees the order can never
-            # overshoot the captured amount.
+            # and the sum is the provider-confirmed (PROCESSED) total.
             order.payment_status = (
                 "refunded"
                 if refunded_total >= quantize_money(order.total_amount)
@@ -333,8 +388,9 @@ def issue_refund(
             # [6.12.6] Staff write: the privileged-action record the admin
             # surface would have left, naming the order and the money so
             # the audit-log route can answer "who refunded what" without
-            # joining the refund row. It rides this same transaction, so a
-            # rolled-back refund leaves no record of itself.
+            # joining the refund row. It rides the finalize transaction, so an
+            # attempt whose provider call failed carries no audit record - only
+            # its PENDING row.
             log_api_action(
                 request,
                 refund,
@@ -347,10 +403,12 @@ def issue_refund(
         return RefundReceipt(refund=refund, order=order, replayed=False)
     except RefundGatewayError as exc:
         # The provider's own text goes to the log; the caller gets the fact
-        # and nothing about the provider's internals.
+        # and nothing about the provider's internals. The attempt's PENDING
+        # row is deliberately left alone: it is what reconciliation reads.
         logger.warning(
-            "Refund gateway failure for order %s (amount %s): %s",
+            "Refund gateway failure for order %s (refund %s, amount %s): %s",
             order_id,
+            refund.pk,
             amount,
             exc,
         )

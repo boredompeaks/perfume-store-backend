@@ -48,6 +48,7 @@ from common.roles import ROLE_FINANCE, ROLE_SUPPORT
 from common.testing import ApiTestCase
 from orders.admin import RefundRequestAdmin
 from orders.models import Order, OrderItem, Refund, RefundRequest
+from orders.refunds import _provider_idempotency_key
 from orders.serializers import RefundRequestSerializer
 from orders.state import CAPTURED_MONEY_PAYMENT_STATUSES, PAYMENT_ALLOWED_TRANSITIONS
 from orders.views.refund import refund_request_amount
@@ -745,7 +746,9 @@ class AdminDecisionTests(RefundRequestTestCase):
         self.assertEqual(refund.actor_id, self.finance.pk)
         self.assertEqual(refund.gateway_refund_id, "rfnd_E02")
         client.refund.create.assert_called_once_with(
-            {"payment_id": "pay_E02", "amount": 10050}, timeout=10
+            {"payment_id": "pay_E02", "amount": 10050},
+            headers={"X-Refund-Idempotency": _provider_idempotency_key(refund)},
+            timeout=10,
         )
 
         self.request_record.refresh_from_db()

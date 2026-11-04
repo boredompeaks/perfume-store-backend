@@ -619,13 +619,14 @@ class Refund(models.Model):
     money still refundable. The order's payment dimension is the derived
     answer to "what is left", never a field stored here.
 
-    ``status`` is written twice inside one transaction by the refund writer:
-    PENDING the moment the attempt starts (so the requested money is a real
-    row under the order's locks while the gateway call is in flight) and
-    PROCESSED once the provider returned a refund id. A failed attempt leaves
-    NO row - the transaction rolls back - so the two values are the whole
-    vocabulary: an outstanding refund is the absence of a row, which the
-    provider's own record is the authority for.
+    ``status`` is written across two commits by the refund writer: PENDING
+    when the attempt's decision is committed (the requested money is a real
+    row before the provider is called) and PROCESSED once the provider
+    returned a refund id and the finalize transaction wrote it. A gateway
+    failure LEAVES the PENDING row in place - it is the reconciliation trace
+    of a refund the provider may or may not have made, and rolling it back is
+    how the local record of that money was lost - so the two values are the
+    whole vocabulary: PENDING means "not provider-confirmed", never "expired".
     """
 
     class Status(models.TextChoices):
@@ -650,9 +651,10 @@ class Refund(models.Model):
         default=Status.PENDING,
     )
 
-    # The provider's own refund reference, nullable only for the in-flight
-    # PENDING write above and unique so one gateway refund can never be
-    # recorded against two rows (the reconciliation join key).
+    # The provider's own refund reference, nullable because a PENDING row - an
+    # attempt in flight, or one whose gateway call failed - has no id yet, and
+    # unique so one gateway refund can never be recorded against two rows
+    # (the reconciliation join key).
     gateway_refund_id = models.CharField(
         max_length=100,
         blank=True,
@@ -704,9 +706,10 @@ class Refund(models.Model):
     def refunded_total(cls, order):
         """Money already refunded against ``order``, quantized to 2 dp.
 
-        Only PROCESSED rows count: a PENDING row is an attempt whose
-        transaction has not settled yet, and a failed attempt left no row at
-        all, so this sum is exactly the money the provider has moved.
+        Only PROCESSED rows count: a PENDING row is an attempt the provider has
+        not confirmed - in flight, or failed and awaiting reconciliation - so
+        this sum is the money the provider has acknowledged moving. A failed
+        attempt keeps its row precisely so this total never has to guess.
         """
         total = cls.objects.filter(
             order=order,
@@ -724,12 +727,13 @@ class Refund(models.Model):
 #
 # A customer request is a different lifecycle from ``Refund`` above, and it is
 # deliberately a separate table rather than a new status on that one. A
-# ``Refund`` PENDING row means "the gateway call is in flight inside the refund
-# writer's transaction"; a customer request pending means "the customer asked
-# and a staff member has not decided yet". Loading both meanings onto one row
-# would make the refund writer's concurrency authority ambiguous and would let
-# a request masquerade as money already moving. Approval is E-02, which is the
-# only seam allowed to call the gateway and write a ``Refund``.
+# ``Refund`` PENDING row means "the gateway has not confirmed this attempt yet
+# - it is in flight, or it failed and this row is the trace"; a customer
+# request pending means "the customer asked and a staff member has not decided
+# yet". Loading both meanings onto one row would make the refund writer's
+# concurrency authority ambiguous and would let a request masquerade as money
+# already moving. Approval is E-02, which is the only seam allowed to call the
+# gateway and write a ``Refund``.
 
 
 class RefundRequestStatus(models.TextChoices):
