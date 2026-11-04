@@ -54,7 +54,7 @@ Duplicates mapped (not rebuilt): #52/#62 -> PRISTINE-13, #58 -> PRISTINE-08, F-0
 |---|---|---|---|---|
 | NEW-P0-1a | Refund two-phase + provider idempotency (API/admin-order paths) | #54 | SHIPPED | 2 | f928d2c; 2557 OK both engines cov 99.82%; pushed origin/lane/a |
 | NEW-P0-1b | Unwind approval caller + update refund docs | #54 | SHIPPED | 1 | f928d2c; all 3 callers proven outside txn; mutations reproduced |
-| NEW-P0-2a | Order.user PROTECT + migration + retention doc | #53 | BUGS-FOUND | 2 | 2f6ee8b; FIX: migration 0023 fails ruff format (CI gate); tests/scope/non-weakening clean |
+| NEW-P0-2a | Order.user PROTECT + migration + retention doc | #53 | IN-AUDIT | 2 | 2f6ee8b+d0c57b1; format fix green, delta re-audit running |
 | NEW-P0-2b | User deidentification/tombstone service (safe erasure) | #53 | PENDING | 0 | new service + tests + retention doc |
 | NEW-P1-15 | Reserve PENDING refunds + FAILED status (close over-refund window) | #54 residual | PENDING | 0 | P1 follow-up; needs model status |
 | NEW-P1-1 | Payment reconciliation job + refund captured-then-refused | #86, F-04, fp1.3 | PENDING | new ops/cmd, ops/alerts.py, payment.py:498-528 |
