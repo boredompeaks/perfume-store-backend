@@ -6,7 +6,7 @@ Separate from the spec-compliance run (`spec-run-state.md`). Every task here is 
 |---|---|---|---|---|---|
 | PRISTINE-00 | Fix wall-clock-expiring return-window test (freeze clock) | n/a | SHIPPED | 1 | d7d400e; 2538 OK both engines, cov 99.83%; defect reproduced with freeze removed |
 | PRISTINE-01 | Explicit AllowAny on 14 public views (zero behavior change) | n/a | SHIPPED | 1 | 43cf740; 14/14 ['AllowAny'] runtime-proved; pushed origin/spec-comp |
-| PRISTINE-02 | Flip DEFAULT_PERMISSION_CLASSES to IsAuthenticated + allowlist test | n/a | IN-AUDIT | 2 | a27f637; 2548 OK both engines cov 99.82%; test_mfa comment-only deviation |
+| PRISTINE-02 | Flip DEFAULT_PERMISSION_CLASSES to IsAuthenticated + allowlist test | n/a | SHIPPED | 2 | a27f637; 2548 OK both engines cov 99.82% (branch artifact); pushed origin/lane/a |
 | PRISTINE-03 | Move common/testing.py out of product path (batched, 6 subtasks) | n/a | PENDING | 0 | scope >5 files, split |
 | PRISTINE-04 | Import-linter ratchet (baseline violation count) | n/a | PENDING | 0 | config draft only |
 | PRISTINE-05 | Ruff S,B,C90,DJ with corrected globs | n/a | PENDING | 0 | config draft only |
@@ -71,8 +71,8 @@ Duplicates mapped (not rebuilt): #52/#62 -> PRISTINE-13, #58 -> PRISTINE-08, F-0
 
 ## Queue order (P0 first, then money, security, ops, arch; max 2 suites)
 
-1. PRISTINE-02 (running, lane/a) · PRISTINE-08 (running, lane/b)
-2. NEW-P0-1 · PRISTINE-13 (after PRISTINE-02; both touch accounts/views.py)
+1. PRISTINE-02 SHIPPED (a27f637) · PRISTINE-08 in audit
+2. NEW-P0-1a (running, lane/a) · PRISTINE-13 (after the lane frees; both touch accounts/views.py)
 3. NEW-P0-2 (after NEW-P0-1; both touch orders/models.py)
 4. NEW-P1-1 · NEW-P1-14 · PRISTINE-18 (one at a time; all touch payment.py)
 5. NEW-P1-10 · PRISTINE-09 · PRISTINE-10
@@ -84,8 +84,6 @@ Duplicates mapped (not rebuilt): #52/#62 -> PRISTINE-13, #58 -> PRISTINE-08, F-0
 
 ## Escalation (2026-11-04)
 
-**Free-model quota is binding for subagents; verification gate is blocked.**
-
 - 7 subagent runs failed with "Free usage limit reached": PRISTINE-02 builder (x2), PRISTINE-08 builder/resume (x2), FULL auditor (x1), reduced PRISTINE-08 auditor (x1); earlier four-builder batch (x4).
 - Intermittent successes: RE (7567ce1), triage, one general finish pass (b35e2de). The window is short, not lifted.
 - Preserved, not lost: PRISTINE-08 committed b35e2de (unpushed); CI-HYGIENE-1 committed 7567ce1 (unpushed); PRISTINE-02 edits+figure on disk (uncommitted, test_mfa.py scope finding open); ledger c090576.
@@ -93,3 +91,10 @@ Duplicates mapped (not rebuilt): #52/#62 -> PRISTINE-13, #58 -> PRISTINE-08, F-0
 - No self-audit, no fake SHIP, no unverified commit was performed.
 
 **Decision needed:** name a non-free model for subagents (or top up the quota). Until then the queue is paused at the audit gate.
+
+**Resolved 2026-11-04:** subagents now run on `opencode-go/deepseek-v4.1-flash#max` (auditors) / `#high` (builders), the same identifier as the orchestrator. No further free-tier failures after the switch.
+
+## Carry-forward P3 (do not lose)
+
+- `backend/docs/api-contract.md:57` still says `MFASetupView` declares `permission_classes = []`; the code now declares `[AllowAny]`. Doc-only, outside PRISTINE-02's scope. Fix in the next accounts/docs task.
+- PRISTINE-08 changelog row: dotted `scripts.tests.test_guards` trips `doc_claims`; and "one absolute path per line" should read "one path per line" (`guard_packages` prints relative). Fix in a one-file commit, then delta re-audit.
