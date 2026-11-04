@@ -52,7 +52,9 @@ Duplicates mapped (not rebuilt): #52/#62 -> PRISTINE-13, #58 -> PRISTINE-08, F-0
 
 | Task ID | Requirement (<=12 words) | Source | Status | Evidence / scope |
 |---|---|---|---|---|
-| NEW-P0-1 | Refund: commit PENDING + idempotency key, gateway outside txn | #54 | PENDING | orders/refunds.py:189-300, backend/orders/models.py:631, orders/webhooks.py |
+| NEW-P0-1a | Refund two-phase + provider idempotency (API/admin-order paths) | #54 | BUILDING(partial) | 44c9cdf; core green 2554 OK both engines; approval caller still nested |
+| NEW-P0-1b | Unwind approval caller + update refund docs | #54 | PENDING | admin.py:1335, views/refund.py docstring, api-contract.md |
+| NEW-P1-15 | Reserve PENDING refunds + FAILED status (close over-refund window) | #54 residual | PENDING | P1 follow-up; needs model status |
 | NEW-P0-2 | Order.user PROTECT + deidentification, constraint rework | #53 | PENDING | orders/models.py:127-129,386-391 + migration |
 | NEW-P1-1 | Payment reconciliation job + refund captured-then-refused | #86, F-04, fp1.3 | PENDING | new ops/cmd, ops/alerts.py, payment.py:498-528 |
 | NEW-P1-14 | Fetch payment; assert amount==total*100 and captured | fix-plan 1.2 | PENDING | orders/views/payment.py:211-220 |
