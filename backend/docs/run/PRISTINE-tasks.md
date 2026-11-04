@@ -29,7 +29,7 @@ Separate from the spec-compliance run (`spec-run-state.md`). Every task here is 
 
 | Task ID | Requirement (<=12 words) | Status | Evidence |
 |---|---|---|---|
-| CI-HYGIENE-1 | mutation-weekly: sandbox working-dir bug | IN-AUDIT | 7567ce1; re-audit with ledger doc fixes 3053951..HEAD |
+| CI-HYGIENE-1 | mutation-weekly: sandbox working-dir bug | SHIPPED | 7567ce1; doc_claims 0; pushed origin/spec-comp 8fe3a18 |
 | CI-HYGIENE-2 | Dependabot pip graph cannot resolve `-r requirements.lock` | PENDING(decision) | Graph Update run 41144517675 |
 | CI-HYGIENE-3 | AI security scan: external monthly LLM quota exceeded | BLOCKED(external) | run 41145581700; not a repo file |
 | CI-HYGIENE-4 | sqlite-nightly clock-bomb | FIXED-BY-PROMOTION | d7d400e on spec-comp, unpromoted |
