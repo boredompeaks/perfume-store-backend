@@ -910,7 +910,9 @@ class MFASetupView(APIView):
     valid confirm.
     """
 
-    permission_classes = []
+    # Public: an unconfirmed device holds no JWT; the enrollment proof is the
+    # credential (_authorize_enrollment refuses everything else).
+    permission_classes = [AllowAny]
     throttle_scope = "auth"
 
     def post(self, request):
@@ -966,7 +968,9 @@ class MFAConfirmView(APIView):
     user just enrolled and never for a still-active previous one.
     """
 
-    permission_classes = []
+    # Public: a pending device cannot hold a JWT yet, so the same enrollment
+    # proof is the credential.
+    permission_classes = [AllowAny]
     throttle_scope = "auth"
 
     def post(self, request):

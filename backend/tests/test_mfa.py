@@ -1779,8 +1779,8 @@ class MfaEnrollmentThrottleTests(ApiTestCase):
 
     The URLConf wiring guard in accounts/tests.py pins that every accounts
     route DECLARES a scope; these pins prove the budget bites on the two
-    bootstrap enrollment paths themselves (they carry permission_classes=[]
-    and gate inside the view, so the throttle is their outer bound), sitting
+    bootstrap enrollment paths themselves (they declare AllowAny and gate
+    inside the view, so the throttle is their outer bound), sitting
     beside the permission pins this module already holds: anonymous ->
     uniform 401, non-privileged session -> 403, privileged JWT or the
     credential bootstrap while no device is active -> served.

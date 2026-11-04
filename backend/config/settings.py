@@ -1258,6 +1258,12 @@ def _env_currency(name, default):
 DEFAULT_CURRENCY = _env_currency("DEFAULT_CURRENCY", "INR")
 
 REST_FRAMEWORK = {
+    # Fail closed: DRF's own default is AllowAny, so an endpoint that forgets
+    # to declare `permission_classes` is open to anonymous callers. Inverting
+    # it makes omission safe and forces every deliberately public view to say
+    # so out loud (tests/test_permission_allowlist.py holds that registry
+    # closed in both directions).
+    "DEFAULT_PERMISSION_CLASSES": ["rest_framework.permissions.IsAuthenticated"],
     "DEFAULT_AUTHENTICATION_CLASSES": (
         "rest_framework_simplejwt.authentication.JWTAuthentication",
         # SPEC-17-03 [R-17.18]: CSRF gate for session-cookie mutations,
