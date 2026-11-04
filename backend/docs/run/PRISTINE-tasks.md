@@ -12,7 +12,7 @@ Separate from the spec-compliance run (`spec-run-state.md`). Every task here is 
 | PRISTINE-05 | Ruff S,B,C90,DJ with corrected globs | n/a | PENDING | 0 | config draft only |
 | PRISTINE-06 | Mypy phase 1 (common+orders+accounts+cart strict) | n/a | PENDING | 0 | config draft only |
 | PRISTINE-07 | SCOPE check wired into CI | n/a | PENDING | 0 | script drafted |
-| PRISTINE-08 | Package-marker guard (fail if a package dir lacks its marker) | n/a | BUILDING(partial) | 1 | 3 untracked files in wt-async; quota aborted before commit |
+| PRISTINE-08 | Package-marker guard (fail if a package dir lacks its marker) | n/a | IN-AUDIT | 2 | b35e2de+a41cbb5; 35 guard tests, suite 2538 OK; doc gates fixed |
 | PRISTINE-09 | ErrorEnvelope: inventory wrapped sites, classify view-fix vs cross-cutting | n/a | BUILDING(partial) | 1 | return view + envelope test modified; temp inventory script in wt-d; quota aborted |
 | PRISTINE-10 | create_order CCN 48 -> <=10 decomposition | n/a | PENDING | 1 | quota aborted clean; no files changed |
 | PRISTINE-11 | Split config/settings.py 1720 LOC | n/a | PENDING | 0 | audit §5 |
@@ -29,7 +29,7 @@ Separate from the spec-compliance run (`spec-run-state.md`). Every task here is 
 
 | Task ID | Requirement (<=12 words) | Status | Evidence |
 |---|---|---|---|
-| CI-HYGIENE-1 | mutation-weekly: sandbox working-dir bug | IN-AUDIT | 7567ce1; new always() mkdir step; static trace 1->0 violations |
+| CI-HYGIENE-1 | mutation-weekly: sandbox working-dir bug | IN-AUDIT | 7567ce1; re-audit with ledger doc fixes 3053951..HEAD |
 | CI-HYGIENE-2 | Dependabot pip graph cannot resolve `-r requirements.lock` | PENDING(decision) | Graph Update run 41144517675 |
 | CI-HYGIENE-3 | AI security scan: external monthly LLM quota exceeded | BLOCKED(external) | run 41145581700; not a repo file |
 | CI-HYGIENE-4 | sqlite-nightly clock-bomb | FIXED-BY-PROMOTION | d7d400e on spec-comp, unpromoted |
