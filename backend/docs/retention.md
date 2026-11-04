@@ -23,7 +23,7 @@ why:
 
 | Field | Purpose | Retention | Erasure |
 |---|---|---|---|
-| `User.username` | Account identity + login credential. Chosen over email as login key so the primary contact channel is not also the enumeration surface. | Life of account. Audit `detail.username` copies: see the [R-17.32] decision below. | Deleted with the account row (see erasure path below). |
+| `User.username` | Account identity + login credential. Chosen over email as login key so the primary contact channel is not also the enumeration surface. | Life of account. Audit `detail.username` copies: see the [R-17.32] decision below. | Deidentified with the account row (see erasure path below). |
 | `User.email` | Order correspondence, email verification, password reset, username reminder. The single contact channel; no marketing mail exists. | Life of account. | Nulled/anonymized with the account (below). |
 | `User.password` | Authentication (PBKDF2 hash only; plaintext never stored or logged). | Life of account; rotated by every password reset. | Dies with the account row. |
 | `TOTPDevice.secret` | Staff MFA second factor (SPEC-17-05, R-17.9). Staff-only; returned once at enrollment, never logged. | Life of enrollment; re-enrollment overwrites. | Dies with the user row (`on_delete=CASCADE`). |
@@ -39,7 +39,7 @@ exists), device fingerprints. No analytics beacons run.
 | `Order.full_name` | Shipping label + courier handover; the courier cannot deliver to a username. | Life of account + legal/invoice window (see below). | Anonymized on erasure. |
 | `Order.phone` | Delivery coordination (courier contact before handover). | Same as `full_name`. | Anonymized on erasure. |
 | `Order.address` / `.city` / `.state` / `.pincode` | Fulfilment + invoice address. | Same as `full_name`. | Anonymized on erasure. |
-| `Order.user` (FK) | Ownership: whose order is this (IDOR scoping). | Life of account + legal window. | On erasure, orders are either retained-deidentified or deleted per the erasure path below. |
+| `Order.user` (FK) | Ownership: whose order is this (IDOR scoping). | Life of account + legal window. | Retained: `on_delete=PROTECT` refuses deleting an account that owns an order, so erasure tombstones the account row in place and the order keeps pointing at it (NEW-P0-2b). |
 | `Order.razorpay_order_id` / `.razorpay_payment_id` | Gateway reconciliation, refunds, dispute evidence. Gateway identifiers only — **no card data, CVV, or card numbers are ever stored** (the gateway holds them; the spec's "avoid storing unnecessary payment information" is met by design). | Same as the order row. | Retained with the deidentified order for audit/reconciliation. |
 | `Order.email`? | **Not collected** — correspondence rides the account email. Guest checkout (SPEC-3-02) MUST add its contact email here and to this register. |
 
@@ -89,23 +89,40 @@ This task therefore does **not** build a parallel request endpoint —
 that would duplicate 6-10's surface. What R-17.33 demands *today* is
 that a deletion right exists and is documented; both hold:
 
-- **Existing erasure path (manual, working today):** a customer writes
-  to the support address (the storefront privacy page names it; staff
-  contact settings env `NEXT_PUBLIC_SUPPORT_EMAIL` / admin Site
-  settings) and support performs the erasure through the admin. The
-  mechanics support relies on, per data class:
-  - account: delete the `User` row — cascades `TOTPDevice` and cart
-    rows, nulls `AuditEvent.actor`/`OrderStatusEvent.actor`, nulls
-    order FK only if orders are deleted with it;
+- **Existing erasure path (manual; the account tombstone half is
+  NEW-P0-2b):** a customer writes to the support address (the storefront
+  privacy page names it; staff contact settings env
+  `NEXT_PUBLIC_SUPPORT_EMAIL` / admin Site settings) and support performs
+  the erasure through the admin. The mechanics support relies on, per data
+  class:
+  - account: the `User` row is **tombstoned and deidentified in place**,
+    never deleted while it owns an order — `Order.user` is
+    `on_delete=PROTECT`, so the database refuses the delete rather than
+    cascading the financial records away. The tombstone removes the
+    personal fields and makes the login unusable; the service that
+    performs it is implemented in NEW-P0-2b, and until it lands support
+    expects the delete to be refused, not to succeed. `TOTPDevice` and
+    cart rows are disposed of by that path; the audit FKs are
+    `SET_NULL`/read-only, so no trail row is lost either way;
   - orders to be erased outright (outside the legal window): delete the
-    `Order` rows (`OrderItem`/`OrderStatusEvent` cascade with them);
+    `Order` rows (`OrderItem`/`OrderStatusEvent` cascade with them); once
+    no order references the account, the account row itself can be
+    deleted;
   - orders inside the legal window: blank the six address fields on
     the `Order` (`full_name`, `phone`, `address`, `city`, `state`,
-    `pincode`) and mark `user` for deletion — the financial columns
-    (amounts, gateway ids, timestamps) stay reconcilable, the person is
-    gone;
+    `pincode`) and leave the `user` FK pointing at the tombstoned account
+    row — the financial columns (amounts, gateway ids, timestamps) stay
+    reconcilable, the person is gone;
   - `email` cannot simply be nulled while the row lives: set it to a
     non-identifying placeholder per the same action.
+
+**The retention boundary is a database constraint, not a convention.**
+`Order.user` is `on_delete=PROTECT`, so deleting an account that owns an
+order raises `ProtectedError` and leaves the order, its payments and its
+refunds intact — the financial record outlives the login by design.
+Deidentification of the retained row is NEW-P0-2b; NEW-P0-2a pins the
+`PROTECT` boundary and the guest/account invariant in
+`backend/orders/tests_retention.py`.
 - **SPEC-6-10's owed surface** (when it lands): a self-service request
   endpoint (throttled, authenticated, uniform responses), a staff
   processing queue, and the data-export half of the access right. This

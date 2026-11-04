@@ -120,13 +120,15 @@ class Order(models.Model):
     )
 
     # [R-1.13] SPEC-1-B04: nullable because a guest checks out without an
-    # account (spec line 74). CASCADE is unchanged and still right: it is the
-    # policy for the rows it applies to (an account's orders die with the
-    # account), and a guest row simply has no account to cascade from - the
-    # store keeps the sale and the fulfilment queue keeps seeing it.
+    # account (spec line 74). PROTECT, never CASCADE: an order is a financial
+    # record under docs/retention.md, so erasing the person must deidentify
+    # the account row and keep the order (with its payments and refunds) the
+    # tax and dispute windows require. Deleting an account that owns an order
+    # is refused rather than silently destroying the sale; a guest row has no
+    # account to protect.
     user = models.ForeignKey(
         User,
-        on_delete=models.CASCADE,
+        on_delete=models.PROTECT,
         related_name="orders",
         null=True,
         blank=True,

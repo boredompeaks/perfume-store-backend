@@ -646,10 +646,12 @@ class OwnershipTests(ShipmentTestCase):
         # the account behind it is deleted. Pinned on the same anti-oracle
         # property, because simplejwt raises "User not found" from the
         # authenticator rather than falling through to the anonymous branch.
-        token = self.login_as(self.buyer)
-        self.assertEqual(self.track(self.order.order_number).status_code, 200)
+        # The account owns no order by design: Order.user is PROTECT, so a
+        # customer that holds a financial record can no longer be deleted.
+        token = self.login_as(self.stranger)
+        self.assertEqual(self.track(self.order.order_number).status_code, 404)
 
-        self.buyer.delete()
+        self.stranger.delete()
 
         self.auth(token)
         known = self.track(self.order.order_number)

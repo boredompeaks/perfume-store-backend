@@ -76,6 +76,10 @@ class AuditEventModelTests(ApiTestCase):
         order_id = res.data["id"]
 
         self.auth(None)
+        # Order.user is PROTECT (financial records outlive the login), so the
+        # two SET_NULLs are exercised separately: the order is deleted on its
+        # own, then the account, which owns nothing by then.
+        Order.objects.filter(pk=order_id).delete()
         User.objects.get(username="buyer").delete()
 
         event = AuditEvent.objects.get(event_type=AuditEvent.EventType.ORDER_CREATED)

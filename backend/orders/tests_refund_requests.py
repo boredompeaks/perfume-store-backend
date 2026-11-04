@@ -448,15 +448,17 @@ class MoneyIsUntouchedTests(RefundRequestTestCase):
 
 class TrailTests(RefundRequestTestCase):
     def test_deleting_the_requester_keeps_the_request(self):
-        # The order belongs to the buyer, so the stranger can be deleted
-        # without the order (and its request) cascading away first.
+        # The requester owns no order by design: Order.user is PROTECT, so a
+        # customer that holds a financial record cannot be deleted. This pins
+        # the other half - the request's SET_NULL outlives the account.
+        requester = self.make_user("refund-gone-requester")
         request = RefundRequest.objects.create(
             order=self.order,
-            requester=self.stranger,
+            requester=requester,
             reason="Filed by a since-deleted account",
         )
 
-        self.stranger.delete()
+        requester.delete()
 
         request.refresh_from_db()
         self.assertIsNone(request.requester)

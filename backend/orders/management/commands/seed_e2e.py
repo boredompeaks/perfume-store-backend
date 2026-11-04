@@ -704,7 +704,8 @@ def clean():
         User.objects.filter(username=SUPERADMIN_USERNAME).delete()
         # The storefront customer goes only while it owns no orders: an order
         # the owner placed during the walk is not this command's row, and
-        # deleting the account would cascade it away.
+        # deleting the account while it owns one is refused (Order.user is
+        # PROTECT, so the financial record cannot cascade away).
         User.objects.filter(username=CUSTOMER_USERNAME, orders__isnull=True).delete()
 
 
