@@ -56,7 +56,9 @@ Duplicates mapped (not rebuilt): #52/#62 -> PRISTINE-13, #58 -> PRISTINE-08, F-0
 | NEW-P0-1a | Refund two-phase + provider idempotency (API/admin-order paths) | #54 | SHIPPED | 2 | f928d2c; 2557 OK both engines cov 99.82%; pushed origin/lane/a |
 | NEW-P0-1b | Unwind approval caller + update refund docs | #54 | SHIPPED | 1 | f928d2c; all 3 callers proven outside txn; mutations reproduced |
 | NEW-P0-2a | Order.user PROTECT + migration + retention doc | #53 | SHIPPED | 2 | d0c57b1; 2563 OK both engines cov 99.82%; pushed origin/lane/a |
-| NEW-P0-2b | User deidentification/tombstone service (safe erasure) | #53 | IN-AUDIT | 1 | 3d9410e; 2543 OK both engines; lane lacks 2a PROTECT; retention.md merge conflict |
+| NEW-P0-2b | User deidentification/tombstone service (safe erasure) | #53 | BUGS-FOUND | 2 | 3d9410e; FIX: Address rows survive (P2), free-text reason leaks PII (P2), stale retention claims |
+| NEW-P1-16 | Register auth.account_erased in AuditEvent.EventType + migration | #53 residual | PENDING | 0 | event type outside choices today |
+| NEW-P1-17 | Operator path (admin action or command) for erase_account | #53 residual | PENDING | 0 | service is shell-only today |
 | PRISTINE-13a | MFA-required capability set + requires_mfa predicate | #52 | SHIPPED | 1 | 93bf798; 2573 OK both engines; pushed origin/lane/a |
 | PRISTINE-13b | Wire requires_mfa at staff login + admin door | #52 | IN-AUDIT | 1 | 65a5a06; 2580 OK both engines; 2 declared out-of-scope files |
 | PRISTINE-13c | Enrollment reach for the MFA-required population | #52 | PENDING | 0 | accounts/views.py + tests |
