@@ -68,6 +68,8 @@ PROD_BOOT_ENV = {
     "DJANGO_ALLOWED_HOSTS": "shop.example.test",
     "CSRF_TRUSTED_ORIGINS": "https://shop.example.test",
     "DATABASE_URL": "postgres://u:p@db.example.com:5432/perfume_store",
+    # PRISTINE-13d2a: the at-rest encryption key every non-debug boot needs.
+    "TOTP_ENCRYPTION_KEY": "QUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUE=",
 }
 
 # Run in the child before importing settings, so a socket call made during
@@ -213,6 +215,9 @@ class ErrorTrackingInertWithoutADsnTests(SimpleTestCase):
                     "DJANGO_ENV": "production",
                     "DJANGO_ALLOWED_HOSTS": "shop.example.test",
                     "CSRF_TRUSTED_ORIGINS": "https://shop.example.test",
+                    "TOTP_ENCRYPTION_KEY": (
+                        "QUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUE="
+                    ),
                     "DATABASE_URL": (
                         "postgres://u:p@db.example.com:5432/perfume_store"
                     ),
@@ -265,6 +270,7 @@ class ErrorTrackingInertWithoutADsnTests(SimpleTestCase):
                 "DATABASE_URL": "postgres://u:p@db.example.com:5432/perfume_store",
                 "DJANGO_ALLOWED_HOSTS": "example.test",
                 "CSRF_TRUSTED_ORIGINS": "https://example.test",
+                "TOTP_ENCRYPTION_KEY": ("QUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUE="),
                 "SENTRY_DSN": FAKE_DSN,
                 # Spelled out rather than inherited: the helper scrubs the
                 # DJANGO_/RAZORPAY_/EMAIL_ families, so a SENTRY_* value in a

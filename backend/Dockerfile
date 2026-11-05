@@ -78,6 +78,12 @@ COPY . ./
 #   DJANGO_ALLOWED_HOSTS /    the localhost values the guard would otherwise
 #   CSRF_TRUSTED_ORIGINS      refuse outright; no request is ever served
 #                             while the image is being built
+#   TOTP_ENCRYPTION_KEY       a build-only placeholder (urlsafe base64 of 32
+#                             zero-value bytes) that decrypts nothing, and NOT
+#                             a deployment's key: the at-rest guard refuses a
+#                             non-debug boot without one (PRISTINE-13d2a), and
+#                             this layer is one. The runtime container gets the
+#                             real key from compose/the platform.
 # backend/tests/test_deployment_contract.py pins this layer by parsing it out
 # of this file and booting the app with exactly this env, and by refusing
 # again when any one key is dropped.
@@ -87,6 +93,7 @@ RUN DJANGO_DEBUG=false \
     DJANGO_ALLOWED_HOSTS=localhost \
     CSRF_TRUSTED_ORIGINS=http://localhost:3000 \
     DATABASE_URL=sqlite:////tmp/build.sqlite3 \
+    TOTP_ENCRYPTION_KEY=QUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUE= \
     DJANGO_STATIC_ROOT=/app/staticfiles \
     python manage.py collectstatic --noinput
 

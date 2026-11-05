@@ -85,12 +85,16 @@ def code_lines(text):
 # import (SPEC-22-03 [R-22.3]). Listed here because the two deployment files
 # below have to carry it: a build layer and a runtime container are both
 # non-debug boots, and the guard is deliberately blind to which one it is.
+# PRISTINE-13d2a adds the at-rest encryption key to that set: a deployment
+# without it could not store a TOTP secret, so the boot is refused rather than
+# serving an app whose second factor cannot be written.
 NON_DEBUG_REQUIRED_KEYS = (
     "DJANGO_SECRET_KEY",
     "DJANGO_ENV",
     "DATABASE_URL",
     "DJANGO_ALLOWED_HOSTS",
     "CSRF_TRUSTED_ORIGINS",
+    "TOTP_ENCRYPTION_KEY",
 )
 
 # Run inside the container's own interpreter and settings, so this is the
@@ -793,6 +797,7 @@ class TlsHardeningDeployContractTests(SimpleTestCase):
                 "DATABASE_URL": "postgres://u:p@db.example.com:5432/perfume_store",
                 "DJANGO_ALLOWED_HOSTS": "shop.example.test",
                 "CSRF_TRUSTED_ORIGINS": "https://shop.example.test",
+                "TOTP_ENCRYPTION_KEY": "QUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUE=",
                 **defaults,
             },
             snippet=snippet,
@@ -874,6 +879,7 @@ class TlsHardeningDeployContractTests(SimpleTestCase):
                 "DJANGO_ENV": "production",
                 "DJANGO_ALLOWED_HOSTS": "shop.example.test",
                 "CSRF_TRUSTED_ORIGINS": "https://shop.example.test",
+                "TOTP_ENCRYPTION_KEY": ("QUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUE="),
                 "DATABASE_URL": "sqlite:///"
                 + (Path(workdir) / "hardened.sqlite3").as_posix(),
                 "DJANGO_MEDIA_ROOT": workdir,
@@ -920,7 +926,12 @@ class ComposeRuntimeEnvContractTests(SimpleTestCase):
         # DJANGO_SECRET_KEY is deliberately absent (it flows in through
         # env_file, and an earlier test pins that it is never set here): these
         # are the keys whose absence made the container refuse to start.
-        for key in ("DJANGO_ENV", "CSRF_TRUSTED_ORIGINS", "DATABASE_URL"):
+        for key in (
+            "DJANGO_ENV",
+            "CSRF_TRUSTED_ORIGINS",
+            "DATABASE_URL",
+            "TOTP_ENCRYPTION_KEY",
+        ):
             with self.subTest(key=key):
                 self.assertIn(key, self.environment)
 
@@ -961,6 +972,7 @@ class ComposeRuntimeEnvContractTests(SimpleTestCase):
                 "DJANGO_ENV": "production",
                 "DJANGO_ALLOWED_HOSTS": "shop.example.test",
                 "CSRF_TRUSTED_ORIGINS": "https://shop.example.test",
+                "TOTP_ENCRYPTION_KEY": ("QUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUE="),
                 "DATABASE_URL": "sqlite:///"
                 + (Path(workdir) / "runtime.sqlite3").as_posix(),
                 "DJANGO_MEDIA_ROOT": workdir,

@@ -44,6 +44,11 @@ _NON_DEBUG_ENV = {
     "DATABASE_URL": "postgres://u:p@db.example.com:5432/perfume_store",
     "DJANGO_ALLOWED_HOSTS": "example.test",
     "CSRF_TRUSTED_ORIGINS": "https://example.test",
+    # PRISTINE-13d2a: a non-debug boot must also carry the Fernet key that
+    # encrypts secrets at rest; the settings module refuses to import without
+    # it. A fixed test key (urlsafe base64 of 32 zero-value bytes), never a
+    # deployment's key.
+    "TOTP_ENCRYPTION_KEY": "QUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUE=",
 }
 
 # The same environment declared as staging: only the name differs.
@@ -105,6 +110,10 @@ _LEAKED_ENV_NAMES = frozenset(
         "SESSION_COOKIE_SECURE",
         "TIME_ZONE",
         "USE_X_FORWARDED_HOST",
+        # PRISTINE-13d2a: the boot-time at-rest key. A developer's .env must
+        # not decide a subprocess pin's key resolution any more than it decides
+        # their DEBUG defaults.
+        "TOTP_ENCRYPTION_KEY",
     }
 )
 
@@ -850,6 +859,8 @@ class NonDebugFailClosedTests(SimpleTestCase):
         "DATABASE_URL": "postgres://u:p@h:5432/db",
         "DJANGO_ALLOWED_HOSTS": "example.test",
         "CSRF_TRUSTED_ORIGINS": "https://example.test",
+        # PRISTINE-13d2a: the at-rest key is part of a complete non-debug boot.
+        "TOTP_ENCRYPTION_KEY": "QUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUE=",
     }
 
     def test_missing_database_url_refuses_to_boot(self):

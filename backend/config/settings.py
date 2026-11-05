@@ -10,6 +10,8 @@ For the full list of settings and their values, see
 https://docs.djangoproject.com/en/6.1/ref/settings/
 """
 
+import base64
+import hashlib
 import logging
 import os
 import re
@@ -22,6 +24,7 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from celery.schedules import crontab, schedule
 from corsheaders.defaults import default_headers as _cors_default_headers
+from cryptography.fernet import Fernet
 from django.conf.locale import LANG_INFO
 from django.core.exceptions import ImproperlyConfigured
 from dotenv import load_dotenv
@@ -1431,6 +1434,84 @@ CORS_ALLOWED_ORIGINS = _host_list(
     os.getenv("CORS_ALLOWED_ORIGINS", DEV_FRONTEND_ORIGINS)
 )
 CSRF_TRUSTED_ORIGINS = _env_hosts("CSRF_TRUSTED_ORIGINS", DEV_FRONTEND_ORIGINS, DEBUG)
+
+# PRISTINE-13d2a (#52 P0 prerequisite): the key that encrypts secrets at rest
+# (common.fields.EncryptedCharField; the first consumer is the TOTP device
+# secret). Fernet wants exactly 32 random bytes in urlsafe base64, so an
+# explicit value is validated HERE: a typo'd key must fail the boot, not the
+# first staff login. With no key, development (DEBUG, or the test runner's
+# argv) derives one deterministically from SECRET_KEY so a row written before
+# a restart still decrypts, and every other boot is REFUSED - a missing key
+# that silently downgraded the column to plaintext is the defect this avoids.
+#
+# Deliberately resolved AFTER the other SPEC-22-03 boot guards: a boot that is
+# missing two keys must still name the one the operator was already looking
+# at, and the deployment-contract pins assert that by name.
+_TOTP_KEY_LABEL = b"perfume-store/totp-encryption-key/v1:"
+
+
+def _derive_development_totp_key(secret_key):
+    """The deterministic development Fernet key, derived from SECRET_KEY.
+
+    Deterministic on purpose: a test database or a long-lived dev database
+    keeps rows written before this process started, and a random per-process
+    key would make every one of them undecryptable. Derived rather than
+    written down so no usable key exists in the repository; it is still only
+    a development convenience, which is why the resolver admits it only where
+    DEBUG or a test run already permits an unconfigured secret.
+    """
+    if not secret_key:
+        raise ImproperlyConfigured(
+            "SECRET_KEY is empty, so a development TOTP encryption key cannot "
+            "be derived; set DJANGO_SECRET_KEY or TOTP_ENCRYPTION_KEY."
+        )
+    digest = hashlib.sha256(_TOTP_KEY_LABEL + secret_key.encode("utf-8")).digest()
+    return base64.urlsafe_b64encode(digest).decode("ascii")
+
+
+def _totp_encryption_key(raw, secret_key, debug, test_run):
+    """Resolve TOTP_ENCRYPTION_KEY, refusing a boot that cannot encrypt.
+
+    A supplied key is shape-checked (Fernet, not merely "non-empty") because a
+    malformed key accepted at boot would fail on the first encrypted write.
+    Without one, DEBUG and the test runner get the derived development key and
+    ONE warning; every other environment is refused by name. The refusal is
+    the point: the field raises on a missing key at use time anyway, and this
+    moves that failure to the boot where an operator can see it.
+    """
+    key = (raw or "").strip()
+    if key:
+        try:
+            Fernet(key)
+        except ValueError as exc:
+            raise ImproperlyConfigured(
+                "TOTP_ENCRYPTION_KEY is not a Fernet key: it must be exactly "
+                "32 random bytes, urlsafe-base64 encoded (44 characters). "
+                'Generate one with: python -c "from cryptography.fernet '
+                'import Fernet; print(Fernet.generate_key().decode())"'
+            ) from exc
+        return key
+    if not (debug or test_run):
+        raise ImproperlyConfigured(
+            "TOTP_ENCRYPTION_KEY must be set when DJANGO_DEBUG is false: "
+            "without it TOTP secrets could only be stored in plaintext, and "
+            "booting with encryption silently off is the defect this refuses. "
+            "Set a Fernet key (see backend/.env.example)."
+        )
+    logging.getLogger(__name__).warning(
+        "TOTP_ENCRYPTION_KEY is unset; deriving a development key from "
+        "DJANGO_SECRET_KEY. Rows written this way cannot be read by a "
+        "deployment with a different SECRET_KEY or a real TOTP_ENCRYPTION_KEY."
+    )
+    return _derive_development_totp_key(secret_key)
+
+
+TOTP_ENCRYPTION_KEY = _totp_encryption_key(
+    os.getenv("TOTP_ENCRYPTION_KEY"),
+    SECRET_KEY,
+    DEBUG,
+    _is_test_run(),
+)
 
 CORS_ALLOW_CREDENTIALS = True
 
