@@ -65,7 +65,7 @@ Duplicates mapped (not rebuilt): #52/#62 -> PRISTINE-13, #58 -> PRISTINE-08, F-0
 | PRISTINE-13d1 | Add cryptography dependency (hash-pinned lock) for TOTP at rest | #62 | IN-AUDIT | 1 | d85da15; 2586 both engines; additive lock, both-platform wheels |
 | PRISTINE-13d2 | Encrypt TOTPDevice.secret at rest + data migration | #62 | PENDING | 0 | models + migration + totp + tests |
 | NEW-P1-15 | Reserve PENDING refunds + FAILED status (close over-refund window) | #54 residual | PENDING | 0 | P1 follow-up; needs model status |
-| NEW-P1-1a | Payment reconciliation job + divergence alerts (read-only) | #86 | IN-AUDIT | 2 | 92af917+e0a113f; 2592 OK both engines; vocabulary+seams fixed; delta audit |
+| NEW-P1-1a | Payment reconciliation job + divergence alerts (read-only) | #86 | SHIPPED | 2 | e0a113f; auditor SHIP (2592 both engines); push withheld by owner hold |
 | NEW-P1-1b | Refund captured-then-refused on stock conflict | F-04, fp1.3 | PENDING | 0 | payment.py + webhooks + tests |
 | NEW-P1-14 | Fetch payment; assert amount==total*100 and captured | fix-plan 1.2 | PENDING | orders/views/payment.py:211-220 |
 | NEW-P1-2 | Guest-checkout single source of truth (drop flag/branches) | #82 | PENDING | template.config.ts:112, CheckoutView/CartView + test |
