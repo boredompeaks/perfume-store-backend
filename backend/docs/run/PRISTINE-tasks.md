@@ -64,7 +64,8 @@ Duplicates mapped (not rebuilt): #52/#62 -> PRISTINE-13, #58 -> PRISTINE-08, F-0
 | PRISTINE-13c | Enrollment reach for the MFA-required population | #52 | BUILDING | 0 | accounts/views.py + test_mfa; make IsPrivilegedRole docstring true |
 | PRISTINE-13d | Encrypt TOTP secret at rest + gate totp_code | #62 | PENDING | 0 | models + migration + command |
 | NEW-P1-15 | Reserve PENDING refunds + FAILED status (close over-refund window) | #54 residual | PENDING | 0 | P1 follow-up; needs model status |
-| NEW-P1-1 | Payment reconciliation job + refund captured-then-refused | #86, F-04, fp1.3 | PENDING | new ops/cmd, ops/alerts.py, payment.py:498-528 |
+| NEW-P1-1a | Payment reconciliation job + divergence alerts (read-only) | #86 | BUILDING | 0 | new ops command + ops/alerts + tests |
+| NEW-P1-1b | Refund captured-then-refused on stock conflict | F-04, fp1.3 | PENDING | 0 | payment.py + webhooks + tests |
 | NEW-P1-14 | Fetch payment; assert amount==total*100 and captured | fix-plan 1.2 | PENDING | orders/views/payment.py:211-220 |
 | NEW-P1-2 | Guest-checkout single source of truth (drop flag/branches) | #82 | PENDING | template.config.ts:112, CheckoutView/CartView + test |
 | NEW-P1-3 | /api/v1 cutover then remove legacy mount | #79 | PENDING(split2) | 90 frontend call sites; config/urls.py:34-60 |
