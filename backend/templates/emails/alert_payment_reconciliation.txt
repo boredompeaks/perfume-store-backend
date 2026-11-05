@@ -1,0 +1,7 @@
+Payment reconciliation found {{ count }} divergence(s) in the "{{ label }}"
+class ({{ divergence_class }}) for the window {{ window_start }} .. {{ window_end }}:
+
+{% for line in lines %}- {{ line }}
+{% endfor %}
+The check is read-only: no order, payment, refund or stock row was changed.
+Investigate at the payment gateway and in the admin before changing anything.
