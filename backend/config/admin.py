@@ -2,8 +2,8 @@
 
 ``MFAAdminConfig`` replaces ``django.contrib.admin`` in INSTALLED_APPS and
 swaps the (lazily built) default site for ``MFAAdminSite``, whose login
-form demands a valid TOTP code from privileged roles
-(:func:`common.permissions.is_privileged`). Registration, URLs and the
+form demands a valid TOTP code from the MFA population
+(:func:`common.permissions.requires_mfa`). Registration, URLs and the
 ``admin:`` namespace are untouched — every ``@admin.register`` and
 ``admin.site._registry`` pin in the suite keeps working because this
 subclass IS the default site now.

@@ -14,7 +14,7 @@ from common import totp
 from common.admin import CONFIRM_FIELD, CONFIRMATION_YES, RoleAwareModelAdmin
 from common.audit import log_mutation
 from common.models import AuditEvent
-from common.permissions import is_privileged, user_may_assign_role
+from common.permissions import requires_mfa, user_may_assign_role
 from common.roles import ROLE_GRANT_CAPABILITY, STAFF_ROLES
 from orders.models import Order
 
@@ -105,17 +105,18 @@ class AdminLoginThrottle(SimpleRateThrottle):
 
 
 class MFAAdminAuthenticationForm(AdminAuthenticationForm):
-    """Admin login + mandatory TOTP for privileged roles (SPEC-17-05).
+    """Admin login + mandatory TOTP for the MFA population (SPEC-17-05).
 
-    The second enforcement surface for R-17.9: ``is_privileged`` users
-    (superusers and ``staff.manage`` holders) must present a valid TOTP
-    code in the login form, and an unenrolled privileged account is
-    refused with the enrollment path named — same semantics as the staff
-    API login. ``user_cache`` is set only after the password validates, so
-    MFA errors appear only for correct credentials (nothing is leaked to
-    a caller who failed the first factor). Non-privileged staff and
-    customers log in exactly as before — the field is optional and unused
-    for them.
+    The second enforcement surface for R-17.9: the accounts
+    :func:`common.permissions.requires_mfa` names (PRISTINE-13b: superusers,
+    ``staff.manage`` holders, and every role holding a money/PII/stock
+    capability) must present a valid TOTP code in the login form, and an
+    unenrolled required account is refused with the enrollment path named —
+    same predicate and same semantics as the staff API login. ``user_cache``
+    is set only after the password validates, so MFA errors appear only for
+    correct credentials (nothing is leaked to a caller who failed the first
+    factor). Accounts outside that population log in exactly as before — the
+    field is optional and unused for them.
 
     SPEC-20-8b: a device this browser was trusted on skips the fresh code
     here too, through :func:`accounts.mfa_trust.is_trusted_device` — the
@@ -167,7 +168,7 @@ class MFAAdminAuthenticationForm(AdminAuthenticationForm):
     def _clean_with_mfa(self):
         cleaned_data = super().clean()
         user = getattr(self, "user_cache", None)
-        if user is None or not is_privileged(user):
+        if user is None or not requires_mfa(user):
             return cleaned_data
         device = TOTPDevice.active_for(user)
         if device is None:
