@@ -23,10 +23,10 @@ why:
 
 | Field | Purpose | Retention | Erasure |
 |---|---|---|---|
-| `User.username` | Account identity + login credential. Chosen over email as login key so the primary contact channel is not also the enumeration surface. | Life of account. Audit `detail.username` copies: see the [R-17.32] decision below. | Deleted with the account row (see erasure path below). |
-| `User.email` | Order correspondence, email verification, password reset, username reminder. The single contact channel; no marketing mail exists. | Life of account. | Nulled/anonymized with the account (below). |
-| `User.password` | Authentication (PBKDF2 hash only; plaintext never stored or logged). | Life of account; rotated by every password reset. | Dies with the account row. |
-| `TOTPDevice.secret` | Staff MFA second factor (SPEC-17-05, R-17.9). Staff-only; returned once at enrollment, never logged. | Life of enrollment; re-enrollment overwrites. | Dies with the user row (`on_delete=CASCADE`). |
+| `User.username` | Account identity + login credential. Chosen over email as login key so the primary contact channel is not also the enumeration surface. | Life of account. Audit `detail.username` copies: see the [R-17.32] decision below. | Replaced with a unique tombstone (`erased-<pk>`) by `accounts.services.erase_account`; the row is retained (see erasure path below). |
+| `User.email` | Order correspondence, email verification, password reset, username reminder. The single contact channel; no marketing mail exists. | Life of account. | Replaced with a non-routable unique tombstone (`erased-<pk>@invalid`) by the same service (below). |
+| `User.password` | Authentication (PBKDF2 hash only; plaintext never stored or logged). | Life of account; rotated by every password reset. | Set unusable by the tombstone; only the hash ever existed. |
+| `TOTPDevice.secret` | Staff MFA second factor (SPEC-17-05, R-17.9). Staff-only; returned once at enrollment, never logged. | Life of enrollment; re-enrollment overwrites. | Customer tombstones hold no device; a tombstoned account cannot authenticate (inactive + unusable password), and the device row is removed only if the account row is finally deleted. |
 
 Not collected: legal name, date of birth, gender, profile photo,
 third-party identifiers, marketing preferences (no marketing surface
@@ -39,7 +39,7 @@ exists), device fingerprints. No analytics beacons run.
 | `Order.full_name` | Shipping label + courier handover; the courier cannot deliver to a username. | Life of account + legal/invoice window (see below). | Anonymized on erasure. |
 | `Order.phone` | Delivery coordination (courier contact before handover). | Same as `full_name`. | Anonymized on erasure. |
 | `Order.address` / `.city` / `.state` / `.pincode` | Fulfilment + invoice address. | Same as `full_name`. | Anonymized on erasure. |
-| `Order.user` (FK) | Ownership: whose order is this (IDOR scoping). | Life of account + legal window. | On erasure, orders are either retained-deidentified or deleted per the erasure path below. |
+| `Order.user` (FK) | Ownership: whose order is this (IDOR scoping). | Life of account + legal window. | Retained; the FK keeps pointing at the tombstoned account row, which erasure never deletes (see erasure path below). |
 | `Order.razorpay_order_id` / `.razorpay_payment_id` | Gateway reconciliation, refunds, dispute evidence. Gateway identifiers only — **no card data, CVV, or card numbers are ever stored** (the gateway holds them; the spec's "avoid storing unnecessary payment information" is met by design). | Same as the order row. | Retained with the deidentified order for audit/reconciliation. |
 | `Order.email`? | **Not collected** — correspondence rides the account email. Guest checkout (SPEC-3-02) MUST add its contact email here and to this register. |
 
@@ -55,7 +55,7 @@ exists), device fingerprints. No analytics beacons run.
 | Field | Purpose | Retention | Erasure |
 |---|---|---|---|
 | `AuditEvent.detail` | JSON payload: gateway ids, amounts, coupon ids, attempted usernames (auth events). Accountability evidence for business events (R-7.20). | Append-only; retained with the store's records. | Immutable by design (append-only ledger, SPEC-6-02 pattern); see the [R-17.32] decision for the username content. |
-| `AuditEvent.actor` (FK) | Who did it. `SET_NULL` so the trail outlives the user. | Append-only. | On account deletion the FK nulls; the row stays. |
+| `AuditEvent.actor` (FK) | Who did it. `SET_NULL` so the trail outlives the user. | Append-only. | `SET_NULL` applies only if the user row is eventually deleted; after a tombstone the FK still names the retained row, so the trail keeps its actor. |
 | `LogEntry` (Django admin) | Privileged-action trail (SPEC-7-01): which staff member changed which row. | Append-only. | Staff accounts are not customer erasure subjects; customer users never write LogEntry rows. |
 | App/log output (`common.audit` logger, SPEC-7-02) | Ops observability of the business trail. | Deployment log rotation policy. | See the [R-17.32] decision below. |
 
@@ -89,23 +89,31 @@ This task therefore does **not** build a parallel request endpoint —
 that would duplicate 6-10's surface. What R-17.33 demands *today* is
 that a deletion right exists and is documented; both hold:
 
-- **Existing erasure path (manual, working today):** a customer writes
-  to the support address (the storefront privacy page names it; staff
-  contact settings env `NEXT_PUBLIC_SUPPORT_EMAIL` / admin Site
-  settings) and support performs the erasure through the admin. The
-  mechanics support relies on, per data class:
-  - account: delete the `User` row — cascades `TOTPDevice` and cart
-    rows, nulls `AuditEvent.actor`/`OrderStatusEvent.actor`, nulls
-    order FK only if orders are deleted with it;
-  - orders to be erased outright (outside the legal window): delete the
-    `Order` rows (`OrderItem`/`OrderStatusEvent` cascade with them);
-  - orders inside the legal window: blank the six address fields on
-    the `Order` (`full_name`, `phone`, `address`, `city`, `state`,
-    `pincode`) and mark `user` for deletion — the financial columns
-    (amounts, gateway ids, timestamps) stay reconcilable, the person is
-    gone;
-  - `email` cannot simply be nulled while the row lives: set it to a
-    non-identifying placeholder per the same action.
+- **Existing erasure path (manual):** a customer writes to the support
+  address (the storefront privacy page names it; staff contact settings
+  env `NEXT_PUBLIC_SUPPORT_EMAIL` / admin Site settings) and support
+  performs the erasure. The account half is a **tombstone in place**, not
+  a deletion: `accounts.services.erase_account(user, actor=...,
+  reason=...)` blanks `email` to a non-routable per-account placeholder
+  (`erased-<pk>@invalid`), replaces `username` with a unique tombstone,
+  empties `first_name`/`last_name`, sets `is_active=False`, makes the
+  password unusable, and appends one `AuditEvent` naming the actor and
+  reason without copying the old identity. The row and its primary key
+  survive, so every order keeps its owner.
+  - A second call raises `AccountAlreadyErased` (a `ValueError`) before
+    changing anything, so a retry cannot rewrite the tombstone or append
+    a second audit row.
+  - Orders are retained. An order is a financial record: it, its gateway
+    payment references, its `PaymentEvent` deliveries and its `Refund`
+    rows all outlive the login. An account with no orders is tombstoned
+    the same way — erasure never deletes the account row.
+  - Orders outside the retention window may still be deleted as a
+    separate order-retention operation; that is not the account-erasure
+    mechanism and does not apply while an order is inside the window.
+  - `Order.full_name`/`phone`/address fields are a separate
+    deidentification step on the retained order: the account tombstone
+    removes the login identity, and support blanks the delivery fields
+    when the legal window allows.
 - **SPEC-6-10's owed surface** (when it lands): a self-service request
   endpoint (throttled, authenticated, uniform responses), a staff
   processing queue, and the data-export half of the access right. This
