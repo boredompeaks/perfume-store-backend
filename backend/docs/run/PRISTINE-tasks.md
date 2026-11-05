@@ -56,7 +56,7 @@ Duplicates mapped (not rebuilt): #52/#62 -> PRISTINE-13, #58 -> PRISTINE-08, F-0
 | NEW-P0-1a | Refund two-phase + provider idempotency (API/admin-order paths) | #54 | SHIPPED | 2 | f928d2c; 2557 OK both engines cov 99.82%; pushed origin/lane/a |
 | NEW-P0-1b | Unwind approval caller + update refund docs | #54 | SHIPPED | 1 | f928d2c; all 3 callers proven outside txn; mutations reproduced |
 | NEW-P0-2a | Order.user PROTECT + migration + retention doc | #53 | SHIPPED | 2 | d0c57b1; 2563 OK both engines cov 99.82%; pushed origin/lane/a |
-| NEW-P0-2b | User deidentification/tombstone service (safe erasure) | #53 | IN-AUDIT | 2 | 3d9410e+9634c75; 2547 OK both engines; Address+reason fixes; delta re-audit |
+| NEW-P0-2b | User deidentification/tombstone service (safe erasure) | #53 | SHIPPED | 2 | 9634c75; 2547 OK both engines; pushed origin/lane/b |
 | NEW-P1-16 | Register auth.account_erased in AuditEvent.EventType + migration | #53 residual | PENDING | 0 | event type outside choices today |
 | NEW-P1-17 | Operator path (admin action or command) for erase_account | #53 residual | PENDING | 0 | service is shell-only today |
 | PRISTINE-13a | MFA-required capability set + requires_mfa predicate | #52 | SHIPPED | 1 | 93bf798; 2573 OK both engines; pushed origin/lane/a |
@@ -113,3 +113,4 @@ Duplicates mapped (not rebuilt): #52/#62 -> PRISTINE-13, #58 -> PRISTINE-08, F-0
 - Lane DB name is not enforced: the PRISTINE-02 audit probed `perfume_store_a`, the NEW-P0-1 audit probed `perfume_store` on the same pg2a server. Isolation held only because the runs were alone; every future handoff must assert the exact database name.
 - PRISTINE-08 row prose: "`scripts/figures/` holds none yet" is false (89 artifacts); the intended claim is "no `discovery_floor.json`". Fold into the next changes.md touch.
 - **PARTITION ERROR (2026-11-05):** NEW-P0-2a and NEW-P0-2b both edit `backend/docs/retention.md` (erasure section) on different lanes. Resolution is a union at integration: 2a's PROTECT paragraph + 2b's service-naming paragraph. The RE owns the merge; the auditor verifies the merged doc names both. Also: lane/b does not contain 2a's PROTECT, so the merged tree must re-run `orders.tests_retention` and `accounts.tests_deidentification` together.
+- **Union verdict (auditor, 2026-11-05):** merge-tree of `2f6ee8b` vs `9634c75` has **4 conflict blocks** in `retention.md`; no mechanical union. Keep 2a's PROTECT paragraph + 2b's account bullet; **drop lane/a's false "TOTPDevice and cart rows are disposed of by that path"** (erase_account touches neither).
