@@ -56,7 +56,7 @@ Duplicates mapped (not rebuilt): #52/#62 -> PRISTINE-13, #58 -> PRISTINE-08, F-0
 | NEW-P0-1a | Refund two-phase + provider idempotency (API/admin-order paths) | #54 | SHIPPED | 2 | f928d2c; 2557 OK both engines cov 99.82%; pushed origin/lane/a |
 | NEW-P0-1b | Unwind approval caller + update refund docs | #54 | SHIPPED | 1 | f928d2c; all 3 callers proven outside txn; mutations reproduced |
 | NEW-P0-2a | Order.user PROTECT + migration + retention doc | #53 | SHIPPED | 2 | d0c57b1; 2563 OK both engines cov 99.82%; pushed origin/lane/a |
-| NEW-P0-2b | User deidentification/tombstone service (safe erasure) | #53 | PENDING | 0 | new service + tests + retention doc |
+| NEW-P0-2b | User deidentification/tombstone service (safe erasure) | #53 | BUILDING | 0 | accounts/services.py + own tests + retention doc; no model change |
 | PRISTINE-13a | MFA-required capability set + requires_mfa predicate | #52 | SHIPPED | 1 | 93bf798; 2573 OK both engines; pushed origin/lane/a |
 | PRISTINE-13b | Wire requires_mfa at staff login + admin door | #52 | BUILDING | 0 | serializers.py + admin.py + tests |
 | PRISTINE-13c | Enrollment reach for the MFA-required population | #52 | PENDING | 0 | accounts/views.py + tests |
