@@ -10,6 +10,7 @@ path); a run with divergences exits non-zero and a clean run exits zero.
 """
 
 from datetime import datetime, timedelta
+from datetime import timezone as dt_timezone
 from decimal import Decimal
 from io import StringIO
 from unittest import mock
@@ -17,6 +18,7 @@ from unittest import mock
 import razorpay
 from django.conf import settings
 from django.core import mail
+from django.core.cache import caches
 from django.core.management import call_command
 from django.core.management.base import CommandError
 from django.db import connection
@@ -27,6 +29,7 @@ from django.utils import timezone
 from common.testing import ApiTestCase
 from ops.management.commands import reconcile_payments as command_module
 from orders.models import Order, Refund
+from orders.webhooks import CAPTURED_PAYMENT_STATES
 
 
 def alert_recipients(value="staff@x.com"):
@@ -109,12 +112,36 @@ class ReconcilePaymentsBase(ApiTestCase):
         options.setdefault("stdout", StringIO())
         return call_command("reconcile_payments", **options)
 
-    def assert_divergence(self, fragment):
+    def reset_alert_channel(self):
+        """Clear the outbox AND the per-class cooldown between matrix rows.
+
+        The cooldown is a production property (pinned in the alert tests), but
+        one test method walking several rows of a classification matrix must
+        not let row N's mail suppress row N+1's and then read the suppression
+        as a classification bug.
+        """
+        mail.outbox.clear()
+        caches["alerts"].clear()
+
+    def assert_divergence(self, fragment, **options):
         with alert_recipients(), self.assertRaises(CommandError):
-            self.run_command()
+            self.run_command(**options)
         self.assertEqual(len(mail.outbox), 1)
         self.assertIn(fragment, mail.outbox[0].subject.lower())
         return mail.outbox[0]
+
+
+@tag("ops")
+class CapturedVocabularyTests(ReconcilePaymentsBase):
+    def test_the_reconciled_vocabulary_matches_the_webhook_reconciler(self):
+        # Two readers of the same provider vocabulary: the webhook reconciler
+        # knows which payment states mean "the money is in", and this command
+        # must not hold a narrower answer -- a narrower one reports every
+        # refunded gateway payment as a capture the provider never made.
+        self.assertEqual(
+            command_module.GATEWAY_CAPTURED_STATUSES,
+            frozenset(CAPTURED_PAYMENT_STATES),
+        )
 
 
 @tag("ops")
@@ -169,6 +196,50 @@ class CleanWindowTests(ReconcilePaymentsBase):
         self.assertEqual(mail.outbox, [])
         client.payment.fetch.assert_not_called()
 
+    def test_the_local_and_gateway_captured_vocabularies_reconcile(self):
+        # The reconciled captured family is the same three values on both
+        # sides: captured, partially_refunded and refunded. A payment the
+        # customer has partially or fully had refunded is still a capture the
+        # two sides must agree on, so no cell of this matrix is a divergence.
+        statuses = ("captured", "partially_refunded", "refunded")
+        client = self.gateway()
+        payments = {}
+        index = 0
+        for local_status in statuses:
+            for gateway_status in statuses:
+                payment_id = f"pay_MATRIX{index}"
+                gateway_order_id = f"order_MATRIX{index}"
+                self.order(
+                    payment_id=payment_id,
+                    gateway_order_id=gateway_order_id,
+                    payment_status=local_status,
+                )
+                payments[payment_id] = self.gateway_payment(
+                    id=payment_id,
+                    order_id=gateway_order_id,
+                    status=gateway_status,
+                )
+                index += 1
+        client.payment.fetch.side_effect = fetch_by_id(payments)
+        with alert_recipients():
+            self.run_command()
+        self.assertEqual(mail.outbox, [])
+
+    def test_the_razorpay_client_is_constructed_with_auth_as_a_keyword(self):
+        # POSITIONAL AUTH IS THE REFUND-SEAM FAILURE: the SDK then reads the
+        # tuple as base_url and every call dies on an AttributeError. The
+        # keyword form is part of the construction contract, not a style
+        # choice, so the call shape is pinned rather than assumed.
+        self.gateway()
+        with alert_recipients():
+            self.run_command()
+        client_class = razorpay.Client
+        self.assertIsInstance(client_class, mock.MagicMock)
+        client_class.assert_called_once_with(
+            auth=(settings.RAZORPAY_KEY_ID, settings.RAZORPAY_KEY_SECRET)
+        )
+        self.assertEqual(client_class.call_args.args, ())
+
     def test_client_is_built_from_settings_and_the_window_is_passed_to_the_gateway(
         self,
     ):
@@ -216,6 +287,47 @@ class LocalCaptureTests(ReconcilePaymentsBase):
         client.payment.fetch.return_value = self.gateway_payment(status="authorized")
         message = self.assert_divergence("local capture without gateway payment")
         self.assertIn("authorized", message.body)
+
+    # One row per gateway status this class can meet. `diverges` is the
+    # classification the captured vocabulary implies: the three captured-family
+    # values reconcile, and only a payment the provider has NOT captured --
+    # absent, merely authorized, or failed -- is a local capture the gateway
+    # has no captured payment for.
+    GATEWAY_STATUS_MATRIX = (
+        ("captured", False),
+        ("partially_refunded", False),
+        ("refunded", False),
+        ("authorized", True),
+        ("failed", True),
+        (None, True),
+    )
+
+    def test_each_gateway_payment_status_is_classified_against_a_local_capture(
+        self,
+    ):
+        client = self.gateway()
+        order = self.order()
+        for gateway_status, diverges in self.GATEWAY_STATUS_MATRIX:
+            with self.subTest(gateway_status=gateway_status):
+                self.reset_alert_channel()
+                payment = self.gateway_payment()
+                if gateway_status is None:
+                    payment.pop("status")
+                else:
+                    payment["status"] = gateway_status
+                client.payment.fetch.return_value = payment
+                if diverges:
+                    message = self.assert_divergence(
+                        "local capture without gateway payment"
+                    )
+                    self.assertIn(f"order #{order.id}", message.body)
+                    # The template HTML-escapes quotes, so pin the status word
+                    # itself rather than its repr.
+                    self.assertIn(str(gateway_status), message.body)
+                else:
+                    with alert_recipients():
+                        self.run_command()
+                    self.assertEqual(mail.outbox, [])
 
     def test_a_fully_refunded_local_capture_is_still_reconciled(self):
         client = self.gateway()
@@ -312,6 +424,60 @@ class GatewayOnlyCaptureTests(ReconcilePaymentsBase):
         with alert_recipients():
             self.run_command()
         self.assertEqual(mail.outbox, [])
+
+    # The gateway-only class is fed by the same captured vocabulary: every
+    # captured-family status is an orphan when no local order records it, and
+    # only the not-captured values are ignored.
+    GATEWAY_ONLY_STATUS_MATRIX = (
+        ("captured", True),
+        ("partially_refunded", True),
+        ("refunded", True),
+        ("authorized", False),
+        ("failed", False),
+        (None, False),
+    )
+
+    def test_each_gateway_payment_status_without_a_local_order_is_classified(self):
+        client = self.gateway()
+        for gateway_status, diverges in self.GATEWAY_ONLY_STATUS_MATRIX:
+            with self.subTest(gateway_status=gateway_status):
+                self.reset_alert_channel()
+                payment = self.gateway_payment(id="pay_ORPHAN", order_id="order_ORPHAN")
+                if gateway_status is None:
+                    payment.pop("status")
+                else:
+                    payment["status"] = gateway_status
+                client.payment.all.return_value = {"items": [payment]}
+                if diverges:
+                    message = self.assert_divergence("gateway capture without local")
+                    self.assertIn("pay_ORPHAN", message.body)
+                else:
+                    with alert_recipients():
+                        self.run_command()
+                    self.assertEqual(mail.outbox, [])
+
+    def test_each_captured_family_status_matching_a_pending_order_alerts(self):
+        client = self.gateway()
+        local = self.order(
+            payment_id="pay_PENDING1",
+            gateway_order_id="order_PENDING1",
+            status="pending",
+            payment_status="pending",
+        )
+        for gateway_status in ("captured", "partially_refunded", "refunded"):
+            with self.subTest(gateway_status=gateway_status):
+                self.reset_alert_channel()
+                client.payment.all.return_value = {
+                    "items": [
+                        self.gateway_payment(
+                            id="pay_PENDING1",
+                            order_id="order_PENDING1",
+                            status=gateway_status,
+                        )
+                    ]
+                }
+                message = self.assert_divergence("gateway capture without local")
+                self.assertIn(f"order #{local.id}", message.body)
 
     def test_gateway_listing_is_paginated(self):
         client = self.gateway()
@@ -583,11 +749,42 @@ class ArgumentTests(ReconcilePaymentsBase):
             )
         self.assertEqual(mail.outbox, [])
 
-    def test_a_naive_window_bound_takes_the_current_timezone(self):
-        self.gateway()
-        with alert_recipients():
-            self.run_command(
-                since=datetime(2026, 11, 1, 0, 0),
-                until=datetime(2026, 11, 2, 0, 0),
-            )
+    @override_settings(TIME_ZONE="Asia/Kolkata")
+    def test_a_naive_window_bound_is_read_in_the_current_timezone(self):
+        # The bounds below are wall-clock in Asia/Kolkata (UTC+05:30), so
+        # 2026-11-01 00:00 naive is 2026-10-31 18:30 UTC. The inside row
+        # (19:00 UTC) is therefore only selected when make_aware uses the
+        # CURRENT timezone; read as UTC, the same bounds select neither row.
+        # This is a real in/out classification, not just "nothing raised".
+        client = self.gateway()
+        inside = self.order(
+            payment_id="pay_INSIDE",
+            gateway_order_id="order_INSIDE",
+            paid_at=datetime(2026, 10, 31, 19, 0, tzinfo=dt_timezone.utc),
+        )
+        outside = self.order(
+            payment_id="pay_OUTSIDE",
+            gateway_order_id="order_OUTSIDE",
+            paid_at=datetime(2026, 10, 31, 17, 0, tzinfo=dt_timezone.utc),
+        )
+        client.payment.fetch.side_effect = razorpay.errors.BadRequestError("gone")
+        naive_since = datetime(2026, 11, 1, 0, 0)
+        naive_until = datetime(2026, 11, 2, 0, 0)
+
+        message = self.assert_divergence(
+            "local capture without gateway payment",
+            since=naive_since,
+            until=naive_until,
+        )
+        self.assertIn(f"order #{inside.id}", message.body)
+        self.assertNotIn(f"order #{outside.id}", message.body)
+        client.payment.fetch.assert_called_once_with(
+            "pay_INSIDE", timeout=settings.RAZORPAY_TIMEOUT
+        )
+
+        # The same naive bounds resolved in UTC select no local row at all:
+        # the timezone, not the wall clock, is what decides the window.
+        self.reset_alert_channel()
+        with override_settings(TIME_ZONE="UTC"), alert_recipients():
+            self.run_command(since=naive_since, until=naive_until)
         self.assertEqual(mail.outbox, [])

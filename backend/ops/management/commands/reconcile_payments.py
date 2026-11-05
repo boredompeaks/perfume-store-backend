@@ -10,9 +10,9 @@ and can double-move funds during the very incident it was built for.
 
 Four classes are checked:
 
-- a local capture the gateway has no captured payment for (including a
-  capture with no ``razorpay_payment_id`` at all);
-- a gateway capture in the window with no locally captured order;
+- a local capture the gateway has no payment in its captured family for
+  (including a capture with no ``razorpay_payment_id`` at all);
+- a gateway payment in the captured family with no locally captured order;
 - an amount/currency disagreement on a payment both sides know;
 - a refund disagreement in either direction (a processed local refund with
   no gateway reference, a local refund the gateway cannot find, a gateway
@@ -54,7 +54,15 @@ DEFAULT_WINDOW_HOURS = 24
 PAGE_SIZE = 100
 MAX_PAGES = 50
 
-GATEWAY_CAPTURED = "captured"
+# The gateway statuses that still mean "the provider captured this money".
+# Razorpay keeps a payment in the captured family after a refund: a fully
+# refunded payment reads "refunded", a partially refunded one reads
+# "partially_refunded", and both are still captures this reconciliation must
+# account for. The webhook reconciler recognises the same three states. A
+# narrower vocabulary ("captured" only) reported every refunded gateway
+# payment as a local capture the provider never made, and dropped the same
+# payments from the gateway-only class.
+GATEWAY_CAPTURED_STATUSES = frozenset({"captured", "partially_refunded", "refunded"})
 
 LOCAL_CAPTURE_WITHOUT_GATEWAY = "local_capture_without_gateway"
 GATEWAY_CAPTURE_WITHOUT_LOCAL = "gateway_capture_without_local"
@@ -242,7 +250,7 @@ class Command(BaseCommand):
                 f"has no payment {reference}"
             )
             return
-        if payment.get("status") != GATEWAY_CAPTURED:
+        if payment.get("status") not in GATEWAY_CAPTURED_STATUSES:
             divergences[LOCAL_CAPTURE_WITHOUT_GATEWAY].append(
                 f"order #{order.id} is {order.payment_status} locally; gateway "
                 f"payment {reference} is {payment.get('status')!r}"
@@ -255,7 +263,9 @@ class Command(BaseCommand):
             )
 
     def _check_gateway_captures(self, gateway_payments, divergences):
-        captured = [p for p in gateway_payments if p.get("status") == GATEWAY_CAPTURED]
+        captured = [
+            p for p in gateway_payments if p.get("status") in GATEWAY_CAPTURED_STATUSES
+        ]
         payment_ids = [p["id"] for p in captured]
         gateway_order_ids = [p["order_id"] for p in captured if p.get("order_id")]
 

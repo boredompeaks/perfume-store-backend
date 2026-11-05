@@ -2,7 +2,7 @@
   "kind": "floor",
   "task": "NEW-P1-1a",
   "tool": "scripts/changelog_figures.py",
-  "measured_at": "2026-11-05T12:45:08+05:30",
+  "measured_at": "2026-11-05T14:42:46+05:30",
   "pair_complete": true,
   "engines": [
     {
@@ -14,16 +14,16 @@
       ],
       "run": {
         "verdict": "OK",
-        "tests": 2586,
+        "tests": 2592,
         "failures": null,
         "errors": null,
         "expected_failures": 2
       },
       "coverage": {
-        "statements": 15138,
+        "statements": 15228,
         "missed": 2,
         "coverage_percent": "99.82",
-        "branches": 1956,
+        "branches": 1974,
         "partial_branches": 29
       },
       "test_exit": 0,
@@ -38,16 +38,16 @@
       ],
       "run": {
         "verdict": "OK",
-        "tests": 2586,
+        "tests": 2592,
         "failures": null,
         "errors": null,
         "expected_failures": 2
       },
       "coverage": {
-        "statements": 15138,
+        "statements": 15228,
         "missed": 2,
         "coverage_percent": "99.82",
-        "branches": 1956,
+        "branches": 1974,
         "partial_branches": 29
       },
       "test_exit": 0,
