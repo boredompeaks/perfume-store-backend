@@ -10,10 +10,18 @@ was.
 
 import json
 from decimal import Decimal
+from unittest import mock
 
 from django.contrib.auth import get_user_model
+from django.db import DatabaseError, connection
+from django.test.utils import CaptureQueriesContext
 
-from accounts.services import AccountAlreadyErased, erase_account
+from accounts.models import Address
+from accounts.services import (
+    AccountAlreadyErased,
+    UnsafeErasureReason,
+    erase_account,
+)
 from common.models import AuditEvent
 from common.testing import ApiTestCase
 from orders.models import Order, PaymentEvent, Refund
@@ -163,3 +171,125 @@ class AccountDeidentificationTests(ApiTestCase):
         ):
             self.assertNotIn(old_value, stored)
             self.assertNotIn(old_value, "\n".join(captured.output))
+
+    def _address_owned_by(self, user, label="Home"):
+        return Address.objects.create(
+            user=user,
+            label=label,
+            line1="12 Rose Lane",
+            city="Mumbai",
+            state="Maharashtra",
+            postal_code="400001",
+            country="India",
+            phone="9876500201",
+        )
+
+    def _account_snapshot(self, pk):
+        return User.objects.values(
+            "username", "email", "first_name", "last_name", "is_active", "password"
+        ).get(pk=pk)
+
+    def test_erasing_an_account_deletes_its_saved_addresses_and_no_one_elses(self):
+        buyer = self.make_user("address-buyer", email="address-buyer@example.com")
+        home = self._address_owned_by(buyer, label="Home")
+        work = self._address_owned_by(buyer, label="Work")
+        other = self.make_user("address-other", email="address-other@example.com")
+        theirs = self._address_owned_by(other, label="Theirs")
+
+        erase_account(buyer, reason="ticket #4403")
+
+        self.assertEqual(Address.objects.filter(user_id=buyer.pk).count(), 0)
+        self.assertFalse(Address.objects.filter(pk=home.pk).exists())
+        self.assertFalse(Address.objects.filter(pk=work.pk).exists())
+        self.assertEqual(Address.objects.filter(pk=theirs.pk).count(), 1)
+
+    def test_a_reason_carrying_the_identity_being_erased_is_refused_and_writes_nothing(
+        self,
+    ):
+        buyer = self.make_user("jane.doe", email="jane.doe@example.com")
+        buyer.first_name = "Jane"
+        buyer.last_name = "Doe"
+        buyer.save(update_fields=["first_name", "last_name"])
+        self._address_owned_by(buyer)
+        before = self._account_snapshot(buyer.pk)
+        reason = "customer jane.doe@example.com rang on 9876500299"
+
+        with CaptureQueriesContext(connection) as queries:
+            with self.assertNoLogs("common.audit", level="INFO"):
+                with self.assertRaises(UnsafeErasureReason) as caught:
+                    erase_account(buyer, reason=reason)
+
+        # The refusal does not merely roll back later: it is raised before the
+        # first write statement, so nothing needs undoing.
+        statements = [
+            query["sql"].strip().upper() for query in queries.captured_queries
+        ]
+        self.assertEqual(
+            [
+                sql
+                for sql in statements
+                if sql.startswith(("INSERT", "UPDATE", "DELETE"))
+            ],
+            [],
+        )
+
+        # The refusal is a value that can cross a boundary safely: it must not
+        # echo the reason it rejected into a handler, a 400 body or a log.
+        self.assertNotIn(reason, str(caught.exception))
+        self.assertNotIn("9876500299", str(caught.exception))
+        self.assertEqual(self._account_snapshot(buyer.pk), before)
+        self.assertEqual(Address.objects.filter(user_id=buyer.pk).count(), 1)
+        self.assertFalse(
+            AuditEvent.objects.filter(event_type="auth.account_erased").exists()
+        )
+
+    def test_every_old_identifier_and_contact_pattern_is_refused_then_a_safe_reason_succeeds(
+        self,
+    ):
+        buyer = self.make_user("jane.doe", email="jane.doe@example.com")
+        buyer.first_name = "Jane"
+        buyer.last_name = "Doe"
+        buyer.save(update_fields=["first_name", "last_name"])
+        unsafe_reasons = (
+            "customer jane.doe@example.com asked",
+            "account jane.doe asked",
+            "call Jane back",
+            "ask Doe about it",
+            "contact Jane Doe",
+            "forward to somebody.else@example.org",
+            "mobile 9876500299",
+            "mobile 98765-00299",
+        )
+
+        for reason in unsafe_reasons:
+            with self.assertRaises(UnsafeErasureReason, msg=reason):
+                erase_account(buyer, reason=reason)
+
+        # Every refusal above is non-destructive, so the account is still the
+        # one the operator was asked to erase.
+        self.assertTrue(User.objects.filter(pk=buyer.pk, username="jane.doe").exists())
+
+        erase_account(buyer, reason="ticket #4401 closed by post")
+
+        row = User.objects.get(pk=buyer.pk)
+        self.assertEqual(row.username, f"erased-{buyer.pk}")
+        event = AuditEvent.objects.get(event_type="auth.account_erased")
+        self.assertEqual(event.detail["reason"], "ticket #4401 closed by post")
+
+    def test_a_failed_audit_write_rolls_back_the_tombstone_and_the_address_deletion(
+        self,
+    ):
+        buyer = self.make_user("rollback-buyer", email="rollback-buyer@example.com")
+        address = self._address_owned_by(buyer)
+
+        with mock.patch.object(
+            AuditEvent, "record", side_effect=DatabaseError("audit store down")
+        ):
+            with self.assertRaises(DatabaseError):
+                erase_account(buyer, reason="ticket #4404")
+
+        self.assertEqual(self._account_snapshot(buyer.pk)["username"], "rollback-buyer")
+        self.assertEqual(
+            self._account_snapshot(buyer.pk)["email"], "rollback-buyer@example.com"
+        )
+        self.assertTrue(Address.objects.filter(pk=address.pk).exists())
