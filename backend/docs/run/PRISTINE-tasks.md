@@ -56,7 +56,7 @@ Duplicates mapped (not rebuilt): #52/#62 -> PRISTINE-13, #58 -> PRISTINE-08, F-0
 | NEW-P0-1a | Refund two-phase + provider idempotency (API/admin-order paths) | #54 | SHIPPED | 2 | f928d2c; 2557 OK both engines cov 99.82%; pushed origin/lane/a |
 | NEW-P0-1b | Unwind approval caller + update refund docs | #54 | SHIPPED | 1 | f928d2c; all 3 callers proven outside txn; mutations reproduced |
 | NEW-P0-2a | Order.user PROTECT + migration + retention doc | #53 | SHIPPED | 2 | d0c57b1; 2563 OK both engines cov 99.82%; pushed origin/lane/a |
-| NEW-P0-2b | User deidentification/tombstone service (safe erasure) | #53 | BUILDING | 0 | accounts/services.py + own tests + retention doc; no model change |
+| NEW-P0-2b | User deidentification/tombstone service (safe erasure) | #53 | IN-AUDIT | 1 | 3d9410e; 2543 OK both engines; lane lacks 2a PROTECT; retention.md merge conflict |
 | PRISTINE-13a | MFA-required capability set + requires_mfa predicate | #52 | SHIPPED | 1 | 93bf798; 2573 OK both engines; pushed origin/lane/a |
 | PRISTINE-13b | Wire requires_mfa at staff login + admin door | #52 | BUILDING | 0 | serializers.py + admin.py + tests |
 | PRISTINE-13c | Enrollment reach for the MFA-required population | #52 | PENDING | 0 | accounts/views.py + tests |
@@ -110,3 +110,4 @@ Duplicates mapped (not rebuilt): #52/#62 -> PRISTINE-13, #58 -> PRISTINE-08, F-0
 - `backend/orders/views/refund.py:159-163`: a replay collapsing onto an unconfirmed PENDING row answers 200 "Refund already issued"; the body does carry `status: "pending"`, so it is prose-only. Fold into the next view touch.
 - Lane DB name is not enforced: the PRISTINE-02 audit probed `perfume_store_a`, the NEW-P0-1 audit probed `perfume_store` on the same pg2a server. Isolation held only because the runs were alone; every future handoff must assert the exact database name.
 - PRISTINE-08 row prose: "`scripts/figures/` holds none yet" is false (89 artifacts); the intended claim is "no `discovery_floor.json`". Fold into the next changes.md touch.
+- **PARTITION ERROR (2026-11-05):** NEW-P0-2a and NEW-P0-2b both edit `backend/docs/retention.md` (erasure section) on different lanes. Resolution is a union at integration: 2a's PROTECT paragraph + 2b's service-naming paragraph. The RE owns the merge; the auditor verifies the merged doc names both. Also: lane/b does not contain 2a's PROTECT, so the merged tree must re-run `orders.tests_retention` and `accounts.tests_deidentification` together.
