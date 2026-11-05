@@ -62,7 +62,7 @@ Duplicates mapped (not rebuilt): #52/#62 -> PRISTINE-13, #58 -> PRISTINE-08, F-0
 | PRISTINE-13a | MFA-required capability set + requires_mfa predicate | #52 | SHIPPED | 1 | 93bf798; 2573 OK both engines; pushed origin/lane/a |
 | PRISTINE-13b | Wire requires_mfa at staff login + admin door | #52 | SHIPPED | 1 | 65a5a06; 2580 OK both engines; pushed origin/lane/a |
 | PRISTINE-13c | Enrollment reach for the MFA-required population | #52 | SHIPPED | 1 | 59e32d4; 2586 OK both engines; pushed origin/lane/a |
-| PRISTINE-13d1 | Add cryptography dependency (hash-pinned lock) for TOTP at rest | #62 | BUILDING | 0 | requirements.in + lock + docs; no hand-rolled crypto |
+| PRISTINE-13d1 | Add cryptography dependency (hash-pinned lock) for TOTP at rest | #62 | IN-AUDIT | 1 | d85da15; 2586 both engines; additive lock, both-platform wheels |
 | PRISTINE-13d2 | Encrypt TOTPDevice.secret at rest + data migration | #62 | PENDING | 0 | models + migration + totp + tests |
 | NEW-P1-15 | Reserve PENDING refunds + FAILED status (close over-refund window) | #54 residual | PENDING | 0 | P1 follow-up; needs model status |
 | NEW-P1-1a | Payment reconciliation job + divergence alerts (read-only) | #86 | BUILDING | 0 | new ops command + ops/alerts + tests |
