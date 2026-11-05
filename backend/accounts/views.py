@@ -15,7 +15,7 @@ from rest_framework import status, viewsets
 from rest_framework.decorators import api_view, permission_classes, throttle_scope
 from rest_framework.exceptions import AuthenticationFailed, PermissionDenied
 from rest_framework.exceptions import ValidationError as DRFValidationError
-from rest_framework.permissions import AllowAny, IsAuthenticated
+from rest_framework.permissions import AllowAny, BasePermission, IsAuthenticated
 from rest_framework.response import Response
 from rest_framework.views import APIView
 from rest_framework_simplejwt.exceptions import TokenError
@@ -30,7 +30,7 @@ from rest_framework_simplejwt.views import TokenObtainPairView, TokenRefreshView
 from cart.services import merge_session_cart_into_user_cart
 from common import notifications, qr, totp
 from common.models import AuditEvent
-from common.permissions import IsPrivilegedRole, is_privileged
+from common.permissions import requires_mfa
 from ops import alerts
 
 from . import mfa_trust
@@ -797,13 +797,36 @@ def reset_password(request):
     return Response({"message": "Password reset successfully. You can now log in."})
 
 
-# --- SPEC-17-05 [R-17.9]: TOTP enrollment for privileged roles ------------
+# --- SPEC-17-05 [R-17.9]: TOTP enrollment for the MFA-required roles -------
 # Every endpoint here serves exactly the population enforcement blocks at
-# login: status/disable/trust are IsPrivilegedRole-gated, and setup/confirm
-# carry their own gate (a JWT session, or the credential bootstrap while no
-# device is active). The 'auth' scope bounds brute-forcing the 6-digit code
-# space like every other identity flow. Secrets leave the server exactly once
-# (setup response) and never again; nothing below returns or logs one.
+# login (PRISTINE-13b asks requires_mfa at all three doors):
+# status/disable/trust are IsMfaRequired-gated, and setup/confirm carry
+# their own gate (a JWT session, or the credential bootstrap while no
+# device is active). The 'auth' scope bounds brute-forcing the 6-digit
+# code space like every other identity flow. Secrets leave the server
+# exactly once (setup response) and never again; nothing below returns or
+# logs one.
+
+
+class IsMfaRequired(BasePermission):
+    """The enrollment gate: exactly the accounts the login doors challenge.
+
+    ``common.permissions.IsPrivilegedRole`` answers the pre-13a question
+    (superuser / ``staff.manage``) and lives in a module this task may not
+    edit. Pinning the adapter here, over the same ``requires_mfa`` the
+    doors call, keeps enrollment and enforcement on ONE predicate -- an
+    account can never be blocked at login with no route to the factor that
+    blocks it. Denials raise ``PermissionDenied`` for the staff API's
+    uniform 403 rather than returning False, which DRF would render as a
+    401 for a guest (same reasoning as ``CapabilityPermission``).
+    """
+
+    message = "Multi-factor authentication management requires a role subject to MFA."
+
+    def has_permission(self, request, view):
+        if requires_mfa(request.user):
+            return True
+        raise PermissionDenied(self.message)
 
 
 def _body_value(request, key):
@@ -814,9 +837,9 @@ def _body_value(request, key):
 
 
 def _authorize_enrollment(request):
-    """Shared setup/confirm gate: privileged JWT caller, or the credential
-    bootstrap while no device is active (see MFASetupView). Returns the
-    target user, or an error response."""
+    """Shared setup/confirm gate: an MFA-required JWT caller, or the
+    credential bootstrap while no device is active (see MFASetupView).
+    Returns the target user, or an error response."""
     user = request.user
     if not user.is_authenticated:
         payload = request.data if isinstance(request.data, dict) else {}
@@ -842,9 +865,9 @@ def _authorize_enrollment(request):
                 },
                 status=status.HTTP_403_FORBIDDEN,
             )
-    if not is_privileged(user):
+    if not requires_mfa(user):
         return None, Response(
-            {"error": IsPrivilegedRole.message},
+            {"error": IsMfaRequired.message},
             status=status.HTTP_403_FORBIDDEN,
         )
     return user, None
@@ -871,7 +894,7 @@ def _consume_code(device, code):
 class MFAStatusView(APIView):
     """GET /api/accounts/mfa/status/ — {enabled} only, never the secret."""
 
-    permission_classes = [IsPrivilegedRole]
+    permission_classes = [IsMfaRequired]
     # The accounts URLConf wiring guard requires a scope on every route;
     # 'auth' matches the sibling MFA endpoints (this one is read-only, but
     # the budget also bounds enabled-state probing).
@@ -892,13 +915,13 @@ class MFASetupView(APIView):
     decision about the factor still reads the secret and the URI, never the
     picture. Two deliberate trust paths:
 
-    - JWT session (privileged): steady-state path. Re-enrolling while a
-      device is enabled must also re-prove the second factor with ``code``
-      — a session thief who could re-enroll freely would own the new
+    - JWT session (MFA-required account): steady-state path. Re-enrolling
+      while a device is enabled must also re-prove the second factor with
+      ``code`` — a session thief who could re-enroll freely would own the new
       secret.
     - Credential bootstrap (anonymous): the rollout path that keeps
-      blocked-at-login enforcement reachable. A privileged account with no
-      active device can never obtain a JWT (login demands the factor it
+      blocked-at-login enforcement reachable. An MFA-required account with
+      no active device can never obtain a JWT (login demands the factor it
       does not have yet), so setup additionally accepts username+password
       — exactly the first-factor-enrollment window every mainstream
       authenticator flow grants a password-proven identity. Once a device
@@ -1014,7 +1037,7 @@ class MFADisableView(APIView):
     verification; re-enrollment mints a fresh one.
     """
 
-    permission_classes = [IsPrivilegedRole]
+    permission_classes = [IsMfaRequired]
     throttle_scope = "auth"
 
     def post(self, request):
@@ -1044,7 +1067,7 @@ class MFATrustDeviceView(APIView):
     """POST /api/accounts/mfa/trust/ {code} — trust THIS device for N days.
 
     SPEC-20-8: the opt-in half of "trust this device for 30 days". It is
-    never reached implicitly — the privileged user asks for it, from a
+    never reached implicitly — the MFA-required user asks for it, from a
     session that already holds a JWT (which itself required the factor), and
     this call re-proves the factor with a FRESH code. That second proof is
     deliberate: a stolen session must not be able to convert itself into
@@ -1052,11 +1075,11 @@ class MFATrustDeviceView(APIView):
     the same replay-guarded ``_consume_code`` as every other code, so
     granting trust spends a one-time code exactly once.
 
-    Gated and throttled exactly like its siblings (IsPrivilegedRole, 'auth'),
+    Gated and throttled exactly like its siblings (IsMfaRequired, 'auth'),
     and it can only ever write to the caller's own device row.
     """
 
-    permission_classes = [IsPrivilegedRole]
+    permission_classes = [IsMfaRequired]
     throttle_scope = "auth"
 
     def post(self, request):

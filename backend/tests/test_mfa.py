@@ -5,9 +5,10 @@ Pins the whole feature end to end:
 - common/totp.py against the public RFC 6238 SHA-1 test vectors and every
   branch of the verification/replay logic (stdlib-only helper — R-17.9
   names no mechanism, so no package was added);
-- the enrollment API (setup/confirm/status/disable) for privileged roles,
-  both trust paths (JWT steady-state and the credential bootstrap that
-  keeps blocked-at-login enforcement reachable);
+- the enrollment API (setup/confirm/status/disable) for the MFA-required
+  population PRISTINE-13b enforces at every door, both trust paths (JWT
+  steady-state and the credential bootstrap that keeps blocked-at-login
+  enforcement reachable);
 - SPEC-20-13 enrollment REACH: the admin login page offers the enrollment
   surface (and says so loudly when MFA is what blocked the attempt), and the
   bootstrap flow the enrollment page drives mints a usable device without a
@@ -46,6 +47,7 @@ from django.core import signing
 from django.core.cache import cache
 from django.test import RequestFactory, SimpleTestCase, override_settings
 from django.utils import timezone
+from rest_framework.exceptions import PermissionDenied
 from rest_framework.settings import api_settings
 from rest_framework.throttling import ScopedRateThrottle
 
@@ -55,7 +57,7 @@ from accounts.models import TOTPDevice
 from accounts.serializers import StorefrontTokenObtainPairSerializer
 from common import qr, totp
 from common.models import AuditEvent
-from common.permissions import is_privileged, requires_mfa
+from common.permissions import IsPrivilegedRole, is_privileged, requires_mfa
 from common.roles import (
     CAPABILITY_ROLES,
     MFA_REQUIRED_CAPABILITIES,
@@ -246,6 +248,19 @@ class PrivilegedPredicateTests(ApiTestCase):
 
     def test_anonymous_not_privileged(self):
         self.assertFalse(is_privileged(None))
+
+    def test_the_legacy_permission_class_answers_the_same_predicate(self):
+        # PRISTINE-13c rewired the MFA endpoints to ``requires_mfa``, so no
+        # view consumes ``IsPrivilegedRole`` today -- but the class stays
+        # exported (common/permissions.py is outside this task's scope).
+        # Pin its answer so the retained surface cannot drift silently from
+        # the predicate it is named for.
+        request = RequestFactory().get("/")
+        request.user = make_privileged("legacy-boss")
+        self.assertTrue(IsPrivilegedRole().has_permission(request, None))
+        request.user = make_role_staff("legacy-finance", ROLE_FINANCE)
+        with self.assertRaises(PermissionDenied):
+            IsPrivilegedRole().has_permission(request, None)
 
 
 class MfaRequiredPopulationTests(ApiTestCase):
@@ -765,6 +780,181 @@ class MFAEnrollmentTests(ApiTestCase):
             "/api/accounts/mfa/disable/", {"code": "000000"}, format="json"
         )
         self.assertEqual(res.status_code, 400)
+
+
+@override_settings(ADMIN_LOGIN_THROTTLE_RATE="1000/min")
+class MFAEnrollmentPopulationTests(ApiTestCase):
+    """PRISTINE-13c (#52): enrollment reaches 13b's enforcement population.
+
+    PRISTINE-13b made every login door ask ``requires_mfa``; the enrollment
+    surfaces still asked ``is_privileged``, so a finance/support/inventory/
+    marketing account blocked at login had no route to the factor blocking
+    it. Setup/confirm (the password-proven bootstrap while no device is
+    active) and status/disable/trust (JWT-authenticated) now ask the SAME
+    predicate as the doors: no wider (catalogue and customers stay
+    single-factor) and no narrower (admin/superuser keep their reach).
+    """
+
+    REQUIRED_ROLES = (ROLE_SUPPORT, ROLE_INVENTORY, ROLE_MARKETING, ROLE_FINANCE)
+    SETUP = "/api/accounts/mfa/setup/"
+    CONFIRM = "/api/accounts/mfa/confirm/"
+    STATUS = "/api/accounts/mfa/status/"
+    DISABLE = "/api/accounts/mfa/disable/"
+    TRUST = "/api/accounts/mfa/trust/"
+
+    def raise_auth_budget(self):
+        # These loops make more anonymous requests than the production
+        # 'auth' budget admits, and the throttle is not what they pin.
+        rates = dict(api_settings.DEFAULT_THROTTLE_RATES)
+        rates["auth"] = "1000/min"
+        return mock.patch.object(ScopedRateThrottle, "THROTTLE_RATES", rates)
+
+    def bootstrap(self, path, username, **extra):
+        payload = {"username": username, "password": PASSWORD}
+        payload.update(extra)
+        return self.client.post(path, payload, format="json")
+
+    def test_the_newly_required_roles_can_enroll_and_log_in(self):
+        with self.raise_auth_budget():
+            for role in self.REQUIRED_ROLES:
+                with self.subTest(role=role):
+                    user = make_role_staff(f"enroll-{role}", role)
+                    res = self.bootstrap(self.SETUP, user.username)
+                    self.assertEqual(res.status_code, 200, res.data)
+                    secret = res.data["secret"]
+                    self.assertIn(secret, res.data["otpauth_uri"])
+                    res = self.bootstrap(
+                        self.CONFIRM,
+                        user.username,
+                        code=totp.hotp(secret, totp.now() // totp.STEP),
+                    )
+                    self.assertEqual(res.status_code, 200, res.data)
+                    device = TOTPDevice.objects.get(user=user)
+                    # The point of the ordering: the enrollment the door
+                    # demands is now reachable, and its output admits login.
+                    res = self.client.post(
+                        "/api/accounts/login/",
+                        login_payload(user.username, totp=code_after(device)),
+                        format="json",
+                    )
+                    self.assertEqual(res.status_code, 200, res.data)
+                    self.assertIn("access", res.data)
+
+    def test_the_newly_required_roles_reach_status_trust_and_disable(self):
+        with self.raise_auth_budget():
+            for role in self.REQUIRED_ROLES:
+                with self.subTest(role=role, surface="status/trust"):
+                    user = make_role_staff(f"manage-{role}", role)
+                    device = enroll_via_model(user)
+                    client = self.fresh_client()
+                    res, token = self.api_login(user.username, client=client)
+                    self.assertIsNotNone(token, res.data)
+                    res = client.get(self.STATUS)
+                    self.assertEqual(res.status_code, 200, res.data)
+                    self.assertEqual(res.data, {"enabled": True})
+                    res = client.post(
+                        self.TRUST, {"code": code_after(device)}, format="json"
+                    )
+                    self.assertEqual(res.status_code, 200, res.data)
+                    self.assertTrue(res.data["trusted"])
+                with self.subTest(role=role, surface="disable"):
+                    user = make_role_staff(f"disable-{role}", role)
+                    device = enroll_via_model(user)
+                    client = self.fresh_client()
+                    res, token = self.api_login(user.username, client=client)
+                    self.assertIsNotNone(token, res.data)
+                    res = client.post(
+                        self.DISABLE, {"code": code_after(device)}, format="json"
+                    )
+                    self.assertEqual(res.status_code, 200, res.data)
+                    self.assertFalse(res.data["enabled"])
+
+    def test_catalogue_and_customers_cannot_reach_the_enrollment_surfaces(self):
+        # The control population: neither holds a money/PII/stock
+        # capability, so 13b never challenges them at login; enrollment
+        # must not become the wider gate.
+        customer = self.make_user("buyer-13c")
+        catalogue = make_role_staff("catalogue-13c", ROLE_CATALOGUE)
+        with self.raise_auth_budget():
+            for user in (customer, catalogue):
+                with self.subTest(username=user.username):
+                    res, token = self.api_login(user.username)
+                    self.assertIsNotNone(token, res.data)
+                    for method, path, body in (
+                        ("get", self.STATUS, None),
+                        ("post", self.TRUST, {}),
+                        ("post", self.DISABLE, {}),
+                        ("post", self.SETUP, {}),
+                        ("post", self.CONFIRM, {}),
+                    ):
+                        res = (
+                            getattr(self.client, method)(path)
+                            if body is None
+                            else getattr(self.client, method)(path, body, format="json")
+                        )
+                        self.assertEqual(res.status_code, 403, path)
+                    # The credential bootstrap answers the same gate.
+                    self.auth(None)
+                    self.assertEqual(
+                        self.bootstrap(self.SETUP, user.username).status_code, 403
+                    )
+                    self.assertEqual(
+                        self.bootstrap(
+                            self.CONFIRM, user.username, code="000000"
+                        ).status_code,
+                        403,
+                    )
+
+    def test_admin_and_superuser_keep_their_existing_reach(self):
+        # The widening may never narrow: the population 13a carried over
+        # from is_privileged still enrolls and still logs in.
+        with self.raise_auth_budget():
+            for username, superuser in (
+                ("reach-admin", False),
+                ("reach-root", True),
+            ):
+                with self.subTest(username=username):
+                    user = make_privileged(username, is_superuser=superuser)
+                    res = self.bootstrap(self.SETUP, username)
+                    self.assertEqual(res.status_code, 200, res.data)
+                    secret = res.data["secret"]
+                    res = self.bootstrap(
+                        self.CONFIRM,
+                        username,
+                        code=totp.hotp(secret, totp.now() // totp.STEP),
+                    )
+                    self.assertEqual(res.status_code, 200, res.data)
+                    device = TOTPDevice.objects.get(user=user)
+                    res = self.client.post(
+                        "/api/accounts/login/",
+                        login_payload(username, totp=code_after(device)),
+                        format="json",
+                    )
+                    self.assertEqual(res.status_code, 200, res.data)
+
+    def test_a_finance_user_can_enroll_then_log_in_with_totp(self):
+        """The ordering dependency 13b declared, end to end: password-proven
+        setup/confirm, then the TOTP login the staff door demands."""
+        user = make_role_staff("finance-pin", ROLE_FINANCE)
+        with self.raise_auth_budget():
+            res = self.bootstrap(self.SETUP, user.username)
+            self.assertEqual(res.status_code, 200, res.data)
+            secret = res.data["secret"]
+            res = self.bootstrap(
+                self.CONFIRM,
+                user.username,
+                code=totp.hotp(secret, totp.now() // totp.STEP),
+            )
+            self.assertEqual(res.status_code, 200, res.data)
+            device = TOTPDevice.objects.get(user=user)
+            self.assertTrue(device.enabled)
+            res = self.client.post(
+                "/api/accounts/login/",
+                login_payload(user.username, totp=code_after(device)),
+                format="json",
+            )
+            self.assertEqual(res.status_code, 200, res.data)
+            self.assertIn("access", res.data)
 
 
 # Q-S4: the classes below post many refused admin logins back to back; the
