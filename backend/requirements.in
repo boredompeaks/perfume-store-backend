@@ -56,6 +56,8 @@ django-cors-headers==4.9.0
 # URI (common/qr.py). Pure Python, no runtime dependencies, emits SVG
 # without an image library.
 segno==1.6.1
+# PRISTINE-13d1: TOTP secrets need encryption at rest; Fernet in `cryptography` is the primitive (not imported yet).
+cryptography==50.0.2
 razorpay==2.0.1
 # SPEC-22-01: production Postgres. Django's postgresql backend loads psycopg3
 # at first connection, so without this the documented postgres DATABASE_URL
