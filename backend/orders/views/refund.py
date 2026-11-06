@@ -105,13 +105,14 @@ def admin_order_refund(request, order_id):
     issue refunds, and neither can a support agent who may read and fulfil
     orders.
 
-    Atomic and serialized: the Order row is locked for the whole attempt
+    Two-phase and serialized: the reservation transaction locks the Order row
     (this order's refund rows beside it, since they are the other half of the
-    balance being spent), the balance is recomputed under those locks, and the
-    gateway call happens inside the same transaction. So two concurrent
-    refunds can never both pass the balance gate, and a gateway failure rolls
-    the attempt back whole — no refund row, no payment-dimension move, no
-    timestamp, no audit record.
+    balance being spent), recomputes the balance, and commits the PENDING row
+    before the gateway is called; the gateway call then runs outside every
+    transaction and outside the lock. Settlement writes PROCESSED and the
+    payment-dimension move in a short atomic block of its own, while a
+    gateway refusal leaves the attempt as a committed FAILED row with its
+    reservation released - never a rollback of the whole attempt.
 
     Idempotent-safe twice over: an ``Idempotency-Key`` collapses a retry onto
     the refund it already produced (no second gateway call), and without a key

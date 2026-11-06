@@ -9,13 +9,16 @@ network or the real keys from ``.env`` (V-01 containment).
 
 What is pinned is behaviour, not prose: the balance gate can never be passed
 twice (a second attempt for the same money is refused whether or not it
-carries an ``Idempotency-Key``), a gateway failure leaves nothing behind at
-all, the money reaching the gateway is quantized the way the codebase
-quantizes money everywhere else, and authority is ``refunds.create`` — a
-support agent who may read and fulfil orders still cannot move money.
+carries an ``Idempotency-Key``), a PENDING reservation is committed before
+the gateway call and reduces the balance while it lives, a gateway failure
+leaves an honest FAILED row that releases its reservation, the money reaching
+the gateway is quantized the way the codebase quantizes money everywhere
+else, and authority is ``refunds.create`` — a support agent who may read and
+fulfil orders still cannot move money.
 """
 
 import itertools
+from datetime import timedelta
 from decimal import Decimal
 from unittest import mock
 
@@ -23,13 +26,14 @@ import razorpay
 from django.contrib.admin.models import ADDITION, LogEntry
 from django.contrib.auth.models import Group, User
 from django.contrib.contenttypes.models import ContentType
-from django.test import SimpleTestCase, override_settings, tag
+from django.db import connection
+from django.test import RequestFactory, SimpleTestCase, override_settings, tag
 from django.utils import timezone
 
 from common.roles import ROLE_FINANCE, ROLE_SUPPORT
 from common.testing import TEST_RAZORPAY_KEY_ID, TEST_RAZORPAY_KEY_SECRET, ApiTestCase
 from orders.models import Order, OrderItem, Refund
-from orders.refunds import RefundGatewayError, refund_payment
+from orders.refunds import RefundGatewayError, issue_refund, refund_payment
 
 
 @tag("orders")
@@ -63,7 +67,11 @@ class RefundGatewaySeamTests(SimpleTestCase):
             RAZORPAY_KEY_ID=f"seam-{TEST_RAZORPAY_KEY_ID}",
             RAZORPAY_KEY_SECRET=f"seam-{TEST_RAZORPAY_KEY_SECRET}",
         ):
-            refund_id = refund_payment(payment_id="pay_1", amount=Decimal("10.00"))
+            refund_id = refund_payment(
+                payment_id="pay_1",
+                amount=Decimal("10.00"),
+                idempotency_key="k-seam-test",
+            )
 
         # No credential is written in the code: the client is built from the
         # settings, which read RAZORPAY_KEY_ID / RAZORPAY_KEY_SECRET from env.
@@ -105,7 +113,11 @@ class RefundGatewaySeamTests(SimpleTestCase):
                 RAZORPAY_KEY_SECRET=f"seam-{TEST_RAZORPAY_KEY_SECRET}",
                 RAZORPAY_TIMEOUT=7,
             ):
-                refund_id = refund_payment(payment_id="pay_1", amount=Decimal("10.00"))
+                refund_id = refund_payment(
+                    payment_id="pay_1",
+                    amount=Decimal("10.00"),
+                    idempotency_key="k-seam-test",
+                )
 
             post = session_cls.return_value.post
 
@@ -119,15 +131,28 @@ class RefundGatewaySeamTests(SimpleTestCase):
         )
         # ...and the env-driven timeout reached the socket alongside them.
         self.assertEqual(post.call_args.kwargs["timeout"], 7)
+        # The idempotency key rides THIS call as the provider's header, so a
+        # retry after a lost response cannot move the same money twice. The
+        # SDK adds Content-type/User-Agent beside it, so assert the key.
+        self.assertEqual(
+            post.call_args.kwargs["headers"]["Idempotency-Key"],
+            "k-seam-test",
+        )
 
     def test_the_money_reaches_the_gateway_in_the_currencies_minor_units(self):
         patcher, _, client = self._patched_client()
         self.addCleanup(patcher.stop)
 
-        refund_payment(payment_id="pay_1", amount=Decimal("10.00"))
+        refund_payment(
+            payment_id="pay_1",
+            amount=Decimal("10.00"),
+            idempotency_key="k-seam-test",
+        )
 
         client.refund.create.assert_called_once_with(
-            {"payment_id": "pay_1", "amount": 1000}, timeout=10
+            {"payment_id": "pay_1", "amount": 1000},
+            headers={"Idempotency-Key": "k-seam-test"},
+            timeout=10,
         )
 
     def test_a_half_paise_amount_is_quantized_before_it_is_scaled(self):
@@ -137,10 +162,16 @@ class RefundGatewaySeamTests(SimpleTestCase):
         # 0.015 rounds HALF_EVEN to 0.02 (the rounding common.money applies
         # everywhere in this codebase), so the provider is asked for 2 units
         # and never for a half-paise it would reject.
-        refund_payment(payment_id="pay_1", amount=Decimal("0.015"))
+        refund_payment(
+            payment_id="pay_1",
+            amount=Decimal("0.015"),
+            idempotency_key="k-seam-test",
+        )
 
         client.refund.create.assert_called_once_with(
-            {"payment_id": "pay_1", "amount": 2}, timeout=10
+            {"payment_id": "pay_1", "amount": 2},
+            headers={"Idempotency-Key": "k-seam-test"},
+            timeout=10,
         )
 
     def test_a_missing_payment_reference_is_a_typed_error(self):
@@ -148,7 +179,11 @@ class RefundGatewaySeamTests(SimpleTestCase):
         self.addCleanup(patcher.stop)
 
         with self.assertRaises(RefundGatewayError):
-            refund_payment(payment_id="", amount=Decimal("10.00"))
+            refund_payment(
+                payment_id="",
+                amount=Decimal("10.00"),
+                idempotency_key="k-seam-test",
+            )
 
         # Refused before any call: there is nothing at the gateway to refund.
         client.refund.create.assert_not_called()
@@ -161,7 +196,11 @@ class RefundGatewaySeamTests(SimpleTestCase):
         )
 
         with self.assertRaises(RefundGatewayError) as caught:
-            refund_payment(payment_id="pay_gone", amount=Decimal("10.00"))
+            refund_payment(
+                payment_id="pay_gone",
+                amount=Decimal("10.00"),
+                idempotency_key="k-seam-test",
+            )
 
         # The provider's own words ride the exception for the caller's log
         # line; the caller decides what may reach an API response.
@@ -172,7 +211,11 @@ class RefundGatewaySeamTests(SimpleTestCase):
         self.addCleanup(patcher.stop)
 
         with self.assertRaises(RefundGatewayError):
-            refund_payment(payment_id="pay_1", amount=Decimal("10.00"))
+            refund_payment(
+                payment_id="pay_1",
+                amount=Decimal("10.00"),
+                idempotency_key="k-seam-test",
+            )
 
 
 @tag("orders")
@@ -281,7 +324,9 @@ class FullRefundTests(RefundTestBase):
         self.assertEqual(refund.gateway_refund_id, "rfnd_TEST1")
         self.assertEqual(refund.actor_id, self.finance.pk)
         client.refund.create.assert_called_once_with(
-            {"payment_id": "pay_CAPTURED1", "amount": 90000}, timeout=10
+            {"payment_id": "pay_CAPTURED1", "amount": 90000},
+            headers={"Idempotency-Key": f"refund-{refund.pk}"},
+            timeout=10,
         )
 
     def test_the_privileged_action_is_audited_against_the_refund(self):
@@ -334,7 +379,9 @@ class PartialRefundTests(RefundTestBase):
         self.assertEqual(refund.kind, Refund.Kind.PARTIAL)
         self.assertEqual(refund.amount, Decimal("300.00"))
         client.refund.create.assert_called_once_with(
-            {"payment_id": "pay_CAPTURED1", "amount": 30000}, timeout=10
+            {"payment_id": "pay_CAPTURED1", "amount": 30000},
+            headers={"Idempotency-Key": f"refund-{refund.pk}"},
+            timeout=10,
         )
 
     def test_partials_accumulate_and_the_last_one_closes_the_order(self):
@@ -393,9 +440,12 @@ class PartialRefundTests(RefundTestBase):
         self.assertEqual(res.status_code, 201, res.data)
         # HALF_EVEN, the rounding the database adapter would apply anyway:
         # 0.015 -> 0.02, and 2 minor units reach the provider.
-        self.assertEqual(Refund.objects.get().amount, Decimal("0.02"))
+        refund = Refund.objects.get()
+        self.assertEqual(refund.amount, Decimal("0.02"))
         client.refund.create.assert_called_once_with(
-            {"payment_id": "pay_CAPTURED1", "amount": 2}, timeout=10
+            {"payment_id": "pay_CAPTURED1", "amount": 2},
+            headers={"Idempotency-Key": f"refund-{refund.pk}"},
+            timeout=10,
         )
         order.refresh_from_db()
         self.assertEqual(order.payment_status, "partially_refunded")
@@ -518,7 +568,9 @@ class RefundEligibilityTests(RefundTestBase):
 
 @tag("orders")
 class GatewayFailureTests(RefundTestBase):
-    def test_a_gateway_failure_rolls_the_whole_attempt_back(self):
+    def test_a_gateway_failure_is_recorded_as_failed_and_releases_the_reservation(
+        self,
+    ):
         order = self.captured_order()
         client = self.gateway()
         client.refund.create.side_effect = razorpay.errors.BadRequestError(
@@ -528,17 +580,28 @@ class GatewayFailureTests(RefundTestBase):
         res = self.refund(order, amount="300.00")
 
         self.assertEqual(res.status_code, 502, res.data)
-        # No partial state anywhere: the in-flight refund row went with the
-        # transaction, the payment dimension did not move, no timestamp was
-        # stamped and nothing was written to the privileged-action trail.
-        self.assertEqual(Refund.objects.count(), 0)
+        # The attempt is durable and honest: one FAILED row, its reservation
+        # released, the payment dimension untouched, no timestamp stamped.
+        refund = Refund.objects.get()
+        self.assertEqual(refund.amount, Decimal("300.00"))
+        self.assertEqual(refund.status, Refund.Status.FAILED)
+        self.assertIsNone(refund.reserved_until)
+        self.assertIsNone(refund.gateway_refund_id)
         order.refresh_from_db()
         self.assertEqual(order.payment_status, "captured")
         self.assertIsNone(order.refunded_at)
-        self.assertEqual(LogEntry.objects.count(), 0)
+        self.assertEqual(order.refundable_remaining, Decimal("900.00"))
+        # A money attempt leaves its trail even when the provider refuses.
+        entry = LogEntry.objects.get(
+            content_type=ContentType.objects.get_for_model(Refund)
+        )
+        self.assertEqual(entry.action_flag, ADDITION)
+        self.assertIn(f"order #{order.id}", entry.change_message)
+        self.assertIn("300.00", entry.change_message)
+        self.assertIn("failed", entry.change_message.lower())
         client.refund.create.assert_called_once()
 
-    def test_a_gateway_response_without_a_refund_id_also_rolls_back(self):
+    def test_a_gateway_response_without_a_refund_id_also_lands_as_failed(self):
         order = self.captured_order()
         client = self.gateway()
         client.refund.create.side_effect = None
@@ -547,9 +610,12 @@ class GatewayFailureTests(RefundTestBase):
         res = self.refund(order)
 
         self.assertEqual(res.status_code, 502, res.data)
-        self.assertEqual(Refund.objects.count(), 0)
+        refund = Refund.objects.get()
+        self.assertEqual(refund.status, Refund.Status.FAILED)
+        self.assertIsNone(refund.reserved_until)
         order.refresh_from_db()
         self.assertEqual(order.payment_status, "captured")
+        self.assertEqual(order.refundable_remaining, Decimal("900.00"))
 
     def test_the_provider_message_stays_out_of_the_response(self):
         order = self.captured_order()
@@ -561,6 +627,11 @@ class GatewayFailureTests(RefundTestBase):
         res = self.refund(order)
 
         self.assertNotIn("secret-ish", str(res.data))
+        # ...and the audit trail records the fact without the provider text.
+        entry = LogEntry.objects.get(
+            content_type=ContentType.objects.get_for_model(Refund)
+        )
+        self.assertNotIn("secret-ish", entry.change_message)
 
 
 @tag("orders")
@@ -632,6 +703,310 @@ class RefundReplayTests(RefundTestBase):
             set(Refund.objects.values_list("order_id", flat=True)),
             {first.id, second.id},
         )
+
+    def test_a_keyed_retry_while_pending_is_refused_without_a_gateway_call(self):
+        order = self.captured_order()
+        Refund.objects.create(
+            order=order,
+            amount=Decimal("300.00"),
+            reason="first attempt still in flight",
+            kind=Refund.Kind.PARTIAL,
+            status=Refund.Status.PENDING,
+            actor=self.finance,
+            idempotency_key="in-flight-key",
+            reserved_until=timezone.now() + timedelta(minutes=5),
+        )
+        client = self.gateway()
+
+        res = self.client.post(
+            self.REFUND_PATH.format(order_id=order.id),
+            {"reason": "Damaged in transit", "amount": "300.00"},
+            format="json",
+            HTTP_IDEMPOTENCY_KEY="in-flight-key",
+        )
+
+        self.assertEqual(res.status_code, 409, res.data)
+        self.assertIn("already in progress", res.data["error"])
+        # No second row and no second gateway call: the first reservation is
+        # still the one promise on that money.
+        self.assertEqual(Refund.objects.count(), 1)
+        client.refund.create.assert_not_called()
+        order.refresh_from_db()
+        self.assertEqual(order.refundable_remaining, Decimal("600.00"))
+
+    def test_a_keyed_retry_after_failed_reuses_the_same_row(self):
+        order = self.captured_order()
+        client = self.gateway(prefix="rfnd_RETRY")
+        client.refund.create.side_effect = razorpay.errors.BadRequestError(
+            "provider was sad"
+        )
+
+        first = self.client.post(
+            self.REFUND_PATH.format(order_id=order.id),
+            {"reason": "Damaged in transit", "amount": "300.00"},
+            format="json",
+            HTTP_IDEMPOTENCY_KEY="retry-in-place",
+        )
+        self.assertEqual(first.status_code, 502, first.data)
+        failed = Refund.objects.get()
+        failed_pk = failed.pk
+        self.assertEqual(failed.status, Refund.Status.FAILED)
+
+        client.refund.create.side_effect = None
+        client.refund.create.return_value = {"id": "rfnd_RETRY_OK"}
+        second = self.client.post(
+            self.REFUND_PATH.format(order_id=order.id),
+            {"reason": "Damaged in transit", "amount": "300.00"},
+            format="json",
+            HTTP_IDEMPOTENCY_KEY="retry-in-place",
+        )
+
+        self.assertEqual(second.status_code, 201, second.data)
+        # One row, the SAME row: the unique index owns the key, so the retry
+        # resets it instead of appending a second attempt.
+        self.assertEqual(Refund.objects.count(), 1)
+        refund = Refund.objects.get()
+        self.assertEqual(refund.pk, failed_pk)
+        self.assertEqual(refund.status, Refund.Status.PROCESSED)
+        self.assertEqual(refund.gateway_refund_id, "rfnd_RETRY_OK")
+        self.assertIsNone(refund.reserved_until)
+        self.assertEqual(Refund.refunded_total(order), Decimal("300.00"))
+        self.assertEqual(client.refund.create.call_count, 2)
+        order.refresh_from_db()
+        self.assertEqual(order.payment_status, "partially_refunded")
+
+    def test_the_same_key_with_a_different_amount_is_refused(self):
+        order = self.captured_order()
+        client = self.gateway()
+        client.refund.create.side_effect = razorpay.errors.BadRequestError(
+            "provider was sad"
+        )
+        first = self.client.post(
+            self.REFUND_PATH.format(order_id=order.id),
+            {"reason": "Damaged in transit", "amount": "300.00"},
+            format="json",
+            HTTP_IDEMPOTENCY_KEY="different-amount",
+        )
+        self.assertEqual(first.status_code, 502, first.data)
+
+        second = self.client.post(
+            self.REFUND_PATH.format(order_id=order.id),
+            {"reason": "Damaged in transit", "amount": "200.00"},
+            format="json",
+            HTTP_IDEMPOTENCY_KEY="different-amount",
+        )
+
+        self.assertEqual(second.status_code, 409, second.data)
+        self.assertIn("different amount", second.data["error"])
+        self.assertEqual(Refund.objects.count(), 1)
+        self.assertEqual(Refund.objects.get().status, Refund.Status.FAILED)
+        client.refund.create.assert_called_once()
+
+
+@tag("orders")
+class ReservationBalanceTests(RefundTestBase):
+    """A PENDING row is a reservation; only PROCESSED money is "refunded"."""
+
+    def _refund(self, order, *, amount, status, reserved_until):
+        return Refund.objects.create(
+            order=order,
+            amount=Decimal(amount),
+            reason="reservation fixture",
+            kind=Refund.Kind.PARTIAL,
+            status=status,
+            actor=self.finance,
+            reserved_until=reserved_until,
+        )
+
+    def test_a_pending_reservation_reduces_the_balance_not_the_refunded_total(self):
+        order = self.captured_order()
+
+        self._refund(
+            order,
+            amount="600.00",
+            status=Refund.Status.PENDING,
+            reserved_until=timezone.now() + timedelta(minutes=5),
+        )
+
+        self.assertEqual(Refund.refunded_total(order), Decimal("0.00"))
+        self.assertEqual(Refund.reserved_total(order), Decimal("600.00"))
+        self.assertEqual(order.refundable_remaining, Decimal("300.00"))
+
+    def test_reserved_total_counts_only_pending_rows(self):
+        order = self.captured_order()
+        future = timezone.now() + timedelta(minutes=5)
+
+        self._refund(
+            order,
+            amount="100.00",
+            status=Refund.Status.PENDING,
+            reserved_until=future,
+        )
+        self._refund(
+            order,
+            amount="200.00",
+            status=Refund.Status.PROCESSED,
+            reserved_until=None,
+        )
+        self._refund(
+            order,
+            amount="50.00",
+            status=Refund.Status.FAILED,
+            reserved_until=None,
+        )
+
+        self.assertEqual(Refund.reserved_total(order), Decimal("100.00"))
+        self.assertEqual(Refund.refunded_total(order), Decimal("200.00"))
+        self.assertEqual(order.refundable_remaining, Decimal("600.00"))
+
+    def test_an_expired_pending_reservation_stops_reducing_the_balance(self):
+        order = self.captured_order()
+
+        self._refund(
+            order,
+            amount="600.00",
+            status=Refund.Status.PENDING,
+            reserved_until=timezone.now() - timedelta(seconds=1),
+        )
+
+        self.assertEqual(Refund.reserved_total(order), Decimal("0.00"))
+        self.assertEqual(order.refundable_remaining, Decimal("900.00"))
+        # Still a row, still forensic: lapsing is not deletion.
+        self.assertEqual(Refund.objects.count(), 1)
+
+    def test_a_null_reserved_until_is_held_indefinitely(self):
+        order = self.captured_order()
+
+        self._refund(
+            order,
+            amount="600.00",
+            status=Refund.Status.PENDING,
+            reserved_until=None,
+        )
+
+        self.assertEqual(Refund.reserved_total(order), Decimal("600.00"))
+        self.assertEqual(order.refundable_remaining, Decimal("300.00"))
+
+    def test_a_failed_row_does_not_reduce_the_balance(self):
+        order = self.captured_order()
+
+        self._refund(
+            order,
+            amount="600.00",
+            status=Refund.Status.FAILED,
+            reserved_until=None,
+        )
+
+        self.assertEqual(Refund.reserved_total(order), Decimal("0.00"))
+        self.assertEqual(Refund.refunded_total(order), Decimal("0.00"))
+        self.assertEqual(order.refundable_remaining, Decimal("900.00"))
+
+
+@tag("orders")
+class SettlementSavepointTests(RefundTestBase):
+    """SQL failures in settle-path guards must never undo a settlement.
+
+    PostgreSQL aborts the whole transaction on a SQL error, so every guard on
+    the success and FAILED paths runs under an inner ``transaction.atomic()``
+    SAVEPOINT. These pins hold that contract on every engine.
+    """
+
+    INVALID_SQL = "SELECT 1 FROM this_table_definitely_does_not_exist"
+
+    def failing_sql(self):
+        with connection.cursor() as cursor:
+            cursor.execute(self.INVALID_SQL)
+
+    def writer_request(self):
+        request = RequestFactory().post("/api/admin/orders/1/refund/")
+        request.user = self.finance
+        return request
+
+    def test_sql_failure_in_on_settled_does_not_roll_back_settlement(self):
+        order = self.captured_order()
+        client = self.gateway()
+
+        def boom(_receipt):
+            self.failing_sql()
+
+        receipt = issue_refund(
+            self.writer_request(),
+            order_id=order.id,
+            reason="Damaged in transit",
+            idempotency_key="savepoint-settle-hook",
+            on_settled=boom,
+        )
+
+        # The hook's SQL error was contained; the provider's money move and
+        # the PROCESSED row survive it.
+        self.assertFalse(receipt.replayed)
+        refund = Refund.objects.get()
+        self.assertEqual(refund.status, Refund.Status.PROCESSED)
+        self.assertIsNone(refund.reserved_until)
+        self.assertEqual(refund.gateway_refund_id, "rfnd_TEST1")
+        order.refresh_from_db()
+        self.assertEqual(order.payment_status, "refunded")
+        self.assertIsNotNone(order.refunded_at)
+        client.refund.create.assert_called_once()
+
+    def test_sql_failure_in_success_audit_does_not_roll_back_settlement(self):
+        order = self.captured_order()
+        client = self.gateway()
+
+        def bad_audit(*_args, **_kwargs):
+            self.failing_sql()
+
+        with mock.patch("orders.refunds.log_api_action", bad_audit):
+            receipt = issue_refund(
+                self.writer_request(),
+                order_id=order.id,
+                reason="Damaged in transit",
+                idempotency_key="savepoint-success-audit",
+            )
+
+        # The audit insert died with its savepoint; the settlement did not.
+        self.assertFalse(receipt.replayed)
+        refund = Refund.objects.get()
+        self.assertEqual(refund.status, Refund.Status.PROCESSED)
+        self.assertIsNone(refund.reserved_until)
+        order.refresh_from_db()
+        self.assertEqual(order.payment_status, "refunded")
+        self.assertFalse(
+            LogEntry.objects.filter(
+                content_type=ContentType.objects.get_for_model(Refund)
+            ).exists()
+        )
+        client.refund.create.assert_called_once()
+
+    def test_sql_failure_in_failed_flip_audit_keeps_failed_row(self):
+        order = self.captured_order()
+        client = self.gateway()
+        client.refund.create.side_effect = razorpay.errors.BadRequestError("boom")
+
+        def bad_audit(*_args, **_kwargs):
+            self.failing_sql()
+
+        with mock.patch("orders.refunds.log_api_action", bad_audit):
+            with self.assertRaises(RefundGatewayError):
+                issue_refund(
+                    self.writer_request(),
+                    order_id=order.id,
+                    amount="300.00",
+                    reason="Damaged in transit",
+                    idempotency_key="savepoint-failed-audit",
+                )
+
+        # The audit failure did not turn the FAILED flip back into a live
+        # reservation, and it did not touch the payment dimension.
+        refund = Refund.objects.get()
+        self.assertEqual(refund.status, Refund.Status.FAILED)
+        self.assertIsNone(refund.reserved_until)
+        self.assertIsNone(refund.gateway_refund_id)
+        order.refresh_from_db()
+        self.assertEqual(order.payment_status, "captured")
+        self.assertIsNone(order.refunded_at)
+        self.assertEqual(order.refundable_remaining, Decimal("900.00"))
+        client.refund.create.assert_called_once()
 
 
 @tag("orders")
@@ -967,7 +1342,9 @@ class RefundAdminActionTests(RefundTestBase):
         self.assertEqual(order.refundable_remaining, Decimal("0.00"))
         self.assertIsNotNone(order.refunded_at)
         client.refund.create.assert_called_once_with(
-            {"payment_id": "pay_CAPTURED1", "amount": 90000}, timeout=10
+            {"payment_id": "pay_CAPTURED1", "amount": 90000},
+            headers={"Idempotency-Key": f"refund-{refund.pk}"},
+            timeout=10,
         )
 
     def test_the_admin_refund_is_audited_against_the_refund(self):
@@ -1063,7 +1440,7 @@ class RefundAdminActionTests(RefundTestBase):
         order.refresh_from_db()
         self.assertEqual(order.payment_status, "captured")
 
-    def test_a_gateway_failure_rolls_the_admin_attempt_back(self):
+    def test_a_gateway_failure_leaves_a_failed_refund_row(self):
         order = self.captured_order()
         client = self.gateway()
         client.refund.create.side_effect = razorpay.errors.BadRequestError(
@@ -1074,10 +1451,15 @@ class RefundAdminActionTests(RefundTestBase):
 
         self.assertContains(res, "The payment gateway could not complete this refund")
         self.assertNotContains(res, "provider internals")
-        self.assertEqual(Refund.objects.count(), 0)
+        # The attempt is durable: the reservation was released, the payment
+        # dimension did not move, and the row records what happened.
+        refund = Refund.objects.get()
+        self.assertEqual(refund.status, Refund.Status.FAILED)
+        self.assertIsNone(refund.reserved_until)
         order.refresh_from_db()
         self.assertEqual(order.payment_status, "captured")
         self.assertIsNone(order.refunded_at)
+        self.assertEqual(order.refundable_remaining, Decimal("900.00"))
 
     def test_a_non_numeric_amount_is_a_form_error_not_a_refund(self):
         order = self.captured_order()

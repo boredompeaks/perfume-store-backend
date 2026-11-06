@@ -1,4 +1,5 @@
 import csv
+import logging
 from decimal import Decimal
 
 from django import forms
@@ -66,6 +67,8 @@ from .state import (
 # seam that writes its ``items`` list, so the staff decision cannot read the
 # list by a second, drifting rule.
 from .views.refund import refund_request_amount
+
+logger = logging.getLogger(__name__)
 
 # SPEC-A-ADDR: the changelist shows enough of the destination to identify a
 # parcel; the full value stays in the change form. Named once so the display
@@ -1333,14 +1336,23 @@ class RefundRequestAdmin(RoleAwareModelAdmin):
                 )
 
     def _approve_refund_request(self, request, refund_request, note):
-        """One approval, atomic from the locks to the audit record.
+        """One approval: lock, reserve/settle, then flip the request.
 
         The lock order is order-then-request, the same order the customer
         filing seam takes, so a decision and a concurrent filing serialize
-        instead of deadlocking. ``issue_refund`` re-locks the order inside
-        this transaction (a savepoint) and rolls its own gateway failure back
-        to that savepoint; the exception leaves this block too, so the request
-        status change below is never reached.
+        instead of deadlocking.
+
+        Phase A holds those locks only long enough to decide the request is
+        still pending and derive its amount; every lock is released before
+        the gateway is called. Phase B calls the one refund writer, whose
+        PENDING reservation is committed before its gateway call and whose
+        settlement is a short transaction of its own. The request is flipped
+        to APPROVED by ``on_settled`` INSIDE that settlement transaction
+        under its own SAVEPOINT, so a gateway failure leaves the request
+        PENDING beside a committed FAILED Refund row rather than erasing
+        either, and a hook failure rolls back only the hook. A request
+        decided concurrently while the gateway was out is logged and left
+        alone.
         """
         with transaction.atomic():
             order = Order.objects.select_for_update().get(pk=refund_request.order_id)
@@ -1357,33 +1369,70 @@ class RefundRequestAdmin(RoleAwareModelAdmin):
                 return
 
             amount = refund_request_amount(order, locked.items)
-            receipt = refunds_core.issue_refund(
-                request,
-                order_id=order.pk,
-                amount=amount,
-                reason=note,
-                # Deterministic per request, so a retry after a crash - or a
-                # request an operator re-opened by hand - collapses onto the
-                # refund it already produced instead of paying twice.
-                idempotency_key=f"refund-request-{locked.pk}",
-                source="admin",
+            request_pk = locked.pk
+            order_pk = order.pk
+
+        def on_settled(receipt):
+            updated = RefundRequest.objects.filter(
+                pk=request_pk,
+                status=RefundRequest.Status.PENDING,
+            ).update(
+                status=RefundRequest.Status.APPROVED,
+                decided_by=request.user,
+                decided_at=timezone.now(),
             )
-
-            locked.status = RefundRequest.Status.APPROVED
-            locked.decided_by = request.user
-            locked.decided_at = timezone.now()
-            locked.save(update_fields=["status", "decided_by", "decided_at"])
-
-            # [6.12.6] The request's own half of the privileged-action trail;
-            # issue_refund records the money's half against the Refund row.
+            if updated != 1:
+                logger.warning(
+                    "refund request %s was decided concurrently while its "
+                    "refund settled; leaving the decision as recorded",
+                    request_pk,
+                )
+                return
+            decided = RefundRequest.objects.get(pk=request_pk)
+            # [6.12.6] The request's own half of the privileged-action
+            # trail; issue_refund records the money's half against the
+            # Refund row. The hook never raises to its caller: the settle
+            # path contains it in a SAVEPOINT (refunds._run_on_settled) and
+            # the replay path in its own transaction below, both logging a
+            # failure. A log_change failure is therefore contained without
+            # swallowing it inside an already-aborted transaction.
             self.log_change(
                 request,
-                locked,
-                f"Approved refund request #{locked.pk}: refund "
+                decided,
+                f"Approved refund request #{request_pk}: refund "
                 f"#{receipt.refund.id} of {receipt.refund.amount} "
-                f"{receipt.order.currency} issued for order #{order.pk}. "
+                f"{receipt.order.currency} issued for order #{order_pk}. "
                 f"Note: {note}",
             )
+
+        # Deterministic per request, so a retry after a crash - or a request
+        # an operator re-opened by hand - collapses onto the refund it
+        # already produced instead of paying twice.
+        receipt = refunds_core.issue_refund(
+            request,
+            order_id=order_pk,
+            amount=amount,
+            reason=note,
+            idempotency_key=f"refund-request-{request_pk}",
+            source="admin",
+            on_settled=on_settled,
+        )
+        if receipt.replayed:
+            # A replay did not settle anything, so the settle hook did not
+            # run; the refund already exists and only the request's own
+            # decision still needs recording. This is its own commit: the
+            # flip cannot ride (or be undone by) a settlement that is not
+            # happening, and a hook failure leaves the request pending and
+            # is logged rather than raised.
+            try:
+                with transaction.atomic():
+                    on_settled(receipt)
+            except Exception:
+                logger.exception(
+                    "Refund request %s replayed but its approval could not be "
+                    "recorded.",
+                    request_pk,
+                )
 
     def _already_decided(self, request, request_pk):
         self.message_user(

@@ -745,7 +745,9 @@ class AdminDecisionTests(RefundRequestTestCase):
         self.assertEqual(refund.actor_id, self.finance.pk)
         self.assertEqual(refund.gateway_refund_id, "rfnd_E02")
         client.refund.create.assert_called_once_with(
-            {"payment_id": "pay_E02", "amount": 10050}, timeout=10
+            {"payment_id": "pay_E02", "amount": 10050},
+            headers={"Idempotency-Key": f"refund-{refund.pk}"},
+            timeout=10,
         )
 
         self.request_record.refresh_from_db()
@@ -813,10 +815,13 @@ class AdminDecisionTests(RefundRequestTestCase):
         self.assertEqual(self.request_record.status, "pending")
         self.assertIsNone(self.request_record.decided_by)
         self.assertIsNone(self.request_record.decided_at)
-        self.assertEqual(Refund.objects.count(), 0)
+        refund = Refund.objects.get()
+        self.assertEqual(refund.status, Refund.Status.FAILED)
+        self.assertIsNone(refund.reserved_until)
         order.refresh_from_db()
         self.assertEqual(order.payment_status, "captured")
         self.assertIsNone(order.refunded_at)
+        self.assertEqual(order.refundable_remaining, Decimal("500.00"))
 
     def test_an_item_request_above_the_remaining_balance_is_refused(self):
         order = self.captured(self.order)
