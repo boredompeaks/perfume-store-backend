@@ -750,6 +750,10 @@ class RefundSeamIntegrationTests(ReturnTestCase):
             self.REFUND_PATH.format(order_id=order.id),
             {"amount": amount, "reason": "Damaged on arrival"},
             format="json",
+            # The refund seam requires the operator action id; this test is
+            # about the return gate, so one deterministic key per order is
+            # enough to drive the real writer.
+            HTTP_IDEMPOTENCY_KEY=f"returns-refund-{order.id}",
         )
 
     def test_a_partly_refunded_order_is_still_returnable(self):

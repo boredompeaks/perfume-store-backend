@@ -26,11 +26,15 @@ The boundary is deliberately split across transactions:
    block; a gateway refusal flips the SAME reservation to FAILED in its own
    atomic block and never touches the payment dimension.
 
-There is therefore no rollback of the attempt: a failed provider call leaves
-an honest FAILED row and releases its reservation, while a crashed process
-leaves a PENDING reservation that stops reserving money when
-``reserved_until`` lapses but remains as forensic evidence (there is no
-sweeper in this change).
+There is therefore no rollback of the attempt: a DEFINITIVE provider refusal
+leaves an honest FAILED row (``failure_code`` says why) and releases its
+reservation; an AMBIGUOUS outcome (timeout, transport error, 2xx without an
+id) leaves the PENDING row exactly as reserved, because money may have moved
+and only a human/reconciliation may release it. A crashed process leaves a
+PENDING reservation that stops reserving money when ``reserved_until``
+lapses; ``orders.management.commands.sweep_refund_reservations`` records that
+lapse as a FAILED ``reservation_expired`` row instead of silently forgetting
+it.
 
 Credentials are read from settings, which resolve ``RAZORPAY_KEY_ID`` /
 ``RAZORPAY_KEY_SECRET`` from the environment - no credential is written here.
@@ -65,20 +69,37 @@ logger = logging.getLogger(__name__)
 
 # A reservation lapses after this if the gateway call or the settlement never
 # completes. A lapsed PENDING row stops reducing the order's refundable
-# balance but is NOT deleted or rewritten: it remains as forensic evidence.
-# There is no sweeper in this change.
+# balance; the sweep command records the lapse as a FAILED row. It is never
+# silently deleted or left dangling.
 RESERVATION_TTL = timedelta(minutes=10)
 
 
 class RefundGatewayError(Exception):
-    """The gateway did not refund the payment.
+    """The gateway OUTCOME IS UNKNOWN: money may or may not have moved.
 
-    Raised for a missing payment reference, any provider error, and a 2xx
-    response that carries no refund id. The writer has already marked the
-    reservation FAILED and committed that fact before raising, so callers
-    MUST surface the failure rather than roll anything back or retry the same
-    attempt blindly. The provider's own message rides the exception text for
-    the caller's log lines - never for an API response.
+    Raised for a missing payment reference (defensive only), every
+    ambiguous provider/transport failure (timeout, connection error, gateway
+    or server error, signature error, anything unexpected), and a 2xx
+    response that carries no refund id. The writer deliberately leaves the
+    PENDING reservation untouched - the reservation is held until its
+    ``reserved_until`` so a possibly-moved refund cannot be issued twice
+    meanwhile - and records the unknown outcome in the audit trail before
+    raising. Callers MUST surface the failure rather than roll anything back
+    or retry the same attempt blindly. The provider's own message rides the
+    exception text for the caller's log lines - never for an API response.
+    """
+
+
+class RefundGatewayRefused(RefundGatewayError):
+    """The provider DEFINITIVELY refused: no money moved.
+
+    Raised when the provider answers with its own business rejection
+    (``razorpay.errors.BadRequestError``): the request was rejected before
+    any money moved, so the writer can release the reservation and settle
+    the row FAILED with ``failure_code=provider_refused``. This is a
+    subclass of :class:`RefundGatewayError`, so every caller that surfaces a
+    gateway failure keeps working; the writer catches it first to tell a
+    definitive refusal from an ambiguous outcome.
     """
 
 
@@ -95,9 +116,10 @@ def refund_payment(*, payment_id, amount, idempotency_key):
     ``amount`` is the store's Decimal money, not provider units - the scaling
     is this function's job. ``idempotency_key`` is required and rides the
     request as the provider's ``Idempotency-Key`` header, so a retry after a
-    lost response cannot move the same money twice. Raises
-    :class:`RefundGatewayError` for every outcome that is not a refund the
-    provider acknowledged.
+    lost response cannot move the same money twice. A provider business
+    rejection raises :class:`RefundGatewayRefused` (definitive, no money
+    moved); every other failure and a 2xx response without an id raise
+    :class:`RefundGatewayError` (ambiguous, money state unknown).
     """
     if not payment_id:
         raise RefundGatewayError("no captured payment reference to refund")
@@ -119,9 +141,9 @@ def refund_payment(*, payment_id, amount, idempotency_key):
         # a ``timeout=`` passed to the constructor would be silently
         # discarded. Without it the refund socket waits forever, parking a
         # worker for as long as the provider stays silent. A tripped timeout
-        # raises ``requests.Timeout``, which the handler below already turns
-        # into a typed RefundGatewayError, so the attempt is settled as FAILED
-        # instead of hanging.
+        # raises ``requests.Timeout``, which the handler below classifies as
+        # AMBIGUOUS: the reservation is left held as PENDING (money may have
+        # moved) instead of being released by a blind rollback.
         #
         # The header rides THIS call only. The SDK's ``_update_request``
         # preserves an existing headers dict and only adds Content-type, so
@@ -131,13 +153,16 @@ def refund_payment(*, payment_id, amount, idempotency_key):
             headers={"Idempotency-Key": idempotency_key},
             timeout=settings.RAZORPAY_TIMEOUT,
         )
+    except razorpay.errors.BadRequestError as exc:
+        # The provider's own business rejection: it explicitly said no and
+        # no money moved, so the caller may release the reservation.
+        raise RefundGatewayRefused(f"BadRequestError: {exc}") from exc
     except Exception as exc:
-        # razorpay's four error classes (BadRequestError, GatewayError,
-        # ServerError, SignatureVerificationError) each derive from Exception
-        # directly - there is no common base to catch - and the transport can
-        # raise anything at all. A refund must never let a raw provider
-        # exception escape as a 500: the caller only settles the reservation
-        # as FAILED when it recognizes a typed error.
+        # Everything else - requests.Timeout / ConnectionError, razorpay's
+        # GatewayError / ServerError / SignatureVerificationError, and any
+        # unexpected transport failure - is AMBIGUOUS: the request may have
+        # reached the provider and money may have moved. The writer must not
+        # touch the reservation for this branch.
         raise RefundGatewayError(f"{type(exc).__name__}: {exc}") from exc
 
     refund_id = (response or {}).get("id")
@@ -374,15 +399,18 @@ def reserve_refund(
         else:
             # Reset the SAME FAILED row into an active reservation. Its
             # amount is fixed by the idempotency contract; the fresh note
-            # and actor describe this retry.
+            # and actor describe this retry. The previous failure's code no
+            # longer explains a PENDING row, so it is cleared here.
             reservation.status = Refund.Status.PENDING
             reservation.reserved_until = reserved_until
+            reservation.failure_code = None
             reservation.reason = reason
             reservation.actor = request.user
             reservation.save(
                 update_fields=[
                     "status",
                     "reserved_until",
+                    "failure_code",
                     "reason",
                     "actor",
                     "updated_at",
@@ -444,9 +472,11 @@ def issue_refund(
     reservation (and its ``reserved_until``) in its own transaction, the
     gateway call runs outside every transaction, and the outcome is applied
     in a short atomic block of its own. Two concurrent refunds therefore
-    cannot both pass the balance gate while one is in flight, and a gateway
-    failure does not roll the attempt away: the row becomes FAILED, its
-    reservation is released, and the payment dimension, ``refunded_at`` and
+    cannot both pass the balance gate while one is in flight. A definitive
+    gateway refusal releases the reservation and records FAILED; an
+    ambiguous outcome neither rolls the attempt away nor releases anything -
+    the row stays PENDING exactly as reserved until reconciliation or the
+    sweep. In both failure cases the payment dimension, ``refunded_at`` and
     the successful-refund audit record are never reached.
 
     ``on_settled(receipt)`` is called inside the settlement transaction
@@ -459,15 +489,29 @@ def issue_refund(
     Idempotent-safe twice over: an ``idempotency_key`` collapses a PROCESSED
     retry onto the refund it already produced (no second gateway call),
     refuses a PENDING retry as "in progress", and retries a FAILED row in
-    place with a stable derived gateway key; without a key the balance gate
-    alone still refuses to hand back the same money twice.
+    place with a stable derived gateway key. The key is REQUIRED, because
+    every production surface names one operator action that must never move
+    the same money twice.
 
     Raises :class:`RefundRefused` for every domain refusal (no reason, no
     refundable balance, an uncaptured payment, a non-money or over-large
-    amount, an unknown order, a key conflict), and
-    :class:`RefundGatewayError` when the provider did not acknowledge the
-    refund. A gateway failure leaves the attempt recorded as FAILED.
+    amount, an unknown order, a key conflict), :class:`RefundGatewayRefused`
+    when the provider explicitly refused (row FAILED, reservation released),
+    and :class:`RefundGatewayError` when the provider's outcome is unknown
+    (row left PENDING with its reservation held so a possibly-moved refund
+    is not issued twice).
     """
+    # A programming error, not a domain refusal: a production caller without
+    # an operator action id cannot promise "never twice", so it is refused
+    # before any database work.
+    idempotency_key = (
+        idempotency_key.strip() if isinstance(idempotency_key, str) else ""
+    )
+    if not idempotency_key:
+        raise ValueError(
+            "issue_refund requires an operator action id (idempotency_key)"
+        )
+
     reason = (reason or "").strip() if isinstance(reason, str) else ""
     if not reason:
         # A refund is a financial action the reconciliation trail has to
@@ -503,16 +547,18 @@ def issue_refund(
             amount=amount,
             idempotency_key=f"refund-{refund.pk}",
         )
-    except RefundGatewayError as exc:
-        # The provider did not move money. Release the reservation in its own
-        # committed transaction (never a rollback of the attempt), and record
-        # the attempt: a money attempt must leave its trail.
+    except RefundGatewayRefused as exc:
+        # Definitive provider refusal: no money moved, so release the
+        # reservation in its own committed transaction (never a rollback of
+        # the attempt) and record why. The subclass is caught first so this
+        # branch cannot be swallowed by the ambiguous handler below.
         with transaction.atomic():
             updated = Refund.objects.filter(
                 pk=refund.pk,
                 status=Refund.Status.PENDING,
             ).update(
                 status=Refund.Status.FAILED,
+                failure_code=Refund.FailureCode.PROVIDER_REFUSED,
                 reserved_until=None,
                 updated_at=timezone.now(),
             )
@@ -522,8 +568,8 @@ def issue_refund(
                 # move, so the RESERVATION is still released above only if it
                 # matched; make the divergence loud rather than silent.
                 logger.critical(
-                    "Refund %s failed at the gateway but its reservation was "
-                    "not PENDING when settling FAILED (matched %s rows).",
+                    "Refund %s was refused at the gateway but its reservation "
+                    "was not PENDING when settling FAILED (matched %s rows).",
                     refund.pk,
                     updated,
                 )
@@ -535,23 +581,59 @@ def issue_refund(
                         refund,
                         ADDITION,
                         f"Refund {amount} {order.currency} for order #{order.pk} "
-                        f"failed at the gateway; no money moved.",
+                        f"failed at the gateway; the provider refused; "
+                        f"no money moved.",
                     )
             except Exception:
                 # The FAILED row is the money invariant; losing the audit
                 # insert must not roll that back into a live reservation.
                 logger.exception(
-                    "Failed to record the audit trail for failed refund %s.",
+                    "Failed to record the audit trail for refused refund %s.",
                     refund.pk,
                 )
         # The provider's own text goes to the log; the caller gets the fact
         # and nothing about the provider's internals.
         logger.warning(
-            "Refund gateway failure for order %s (amount %s): %s",
+            "Refund gateway refusal for order %s (amount %s): %s",
             order_id,
             amount,
             exc,
         )
+        raise
+    except RefundGatewayError as exc:
+        # AMBIGUOUS: the call may have reached the provider and money may have
+        # moved. Do NOT touch the row: it stays PENDING with the exact
+        # reserved_until it was committed with, so the reservation continues
+        # to block a second refund of the same money until it lapses. The
+        # sweep command records a lapse later; only then may the balance be
+        # reused. The audit trail records that the outcome is unknown.
+        held_until = refund.reserved_until
+        logger.warning(
+            "Refund gateway outcome UNKNOWN for refund %s (order %s, "
+            "amount %s): %s. Reservation is held until %s and the row stays "
+            "PENDING for reconciliation.",
+            refund.pk,
+            order_id,
+            amount,
+            exc,
+            held_until,
+        )
+        try:
+            # savepoint: audit failure must not disturb the held reservation
+            with transaction.atomic():
+                log_api_action(
+                    request,
+                    refund,
+                    ADDITION,
+                    f"Refund {amount} {order.currency} for order #{order.pk} "
+                    f"has an unknown gateway outcome; reservation held until "
+                    f"{held_until} and the row stays PENDING.",
+                )
+        except Exception:
+            logger.exception(
+                "Failed to record the audit trail for the unknown-outcome refund %s.",
+                refund.pk,
+            )
         raise
 
     # One short settlement transaction: the money already moved at the

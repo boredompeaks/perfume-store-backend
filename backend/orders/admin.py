@@ -1,5 +1,6 @@
 import csv
 import logging
+import uuid
 from decimal import Decimal
 
 from django import forms
@@ -151,12 +152,19 @@ def _append_status_event(order, *, from_status, to_status, actor, trigger):
 class IssueRefundForm(forms.Form):
     """The operator's input on the refund interstitial.
 
-    Neither field carries a business rule: ``amount`` is optional and blank
-    means "the remaining balance", and ``reason`` is passed through so the
-    shared core is the ONE authority on whether a refund may be issued and
-    what message a refusal carries. This form only decides whether the input
-    is shaped like a string/decimal at all.
+    ``amount`` and ``reason`` carry no business rule: ``amount`` is optional
+    and blank means "the remaining balance", and ``reason`` is passed through
+    so the shared core is the ONE authority on whether a refund may be issued
+    and what message a refusal carries. This form only decides whether the
+    input is shaped like a string/decimal at all.
+
+    ``action_id`` is the operator action's identity, rendered as a hidden
+    field on GET and required on POST. It names the idempotency key the writer
+    receives (``admin-refund-<action_id>``), so a double-submitted page
+    replays the original refund instead of moving the money twice.
     """
+
+    action_id = forms.CharField(widget=forms.HiddenInput)
 
     amount = forms.DecimalField(
         required=False,
@@ -906,6 +914,9 @@ class OrderAdmin(SavedFilterMixin, RoleAwareModelAdmin):
                         order_id=order.pk,
                         amount=form.cleaned_data["amount"],
                         reason=form.cleaned_data["reason"],
+                        idempotency_key=(
+                            f"admin-refund-{form.cleaned_data['action_id']}"
+                        ),
                         source="admin",
                     )
                 except refunds_core.RefundRefused as exc:
@@ -935,7 +946,7 @@ class OrderAdmin(SavedFilterMixin, RoleAwareModelAdmin):
                     )
                 )
         else:
-            form = IssueRefundForm()
+            form = IssueRefundForm(initial={"action_id": uuid.uuid4().hex})
 
         return TemplateResponse(
             request,

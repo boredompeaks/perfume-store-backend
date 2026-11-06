@@ -110,13 +110,15 @@ def admin_order_refund(request, order_id):
     balance being spent), recomputes the balance, and commits the PENDING row
     before the gateway is called; the gateway call then runs outside every
     transaction and outside the lock. Settlement writes PROCESSED and the
-    payment-dimension move in a short atomic block of its own, while a
+    payment-dimension move in a short atomic block of its own, a definitive
     gateway refusal leaves the attempt as a committed FAILED row with its
-    reservation released - never a rollback of the whole attempt.
+    reservation released, and an ambiguous gateway outcome leaves it PENDING
+    with its reservation held (never silently released).
 
-    Idempotent-safe twice over: an ``Idempotency-Key`` collapses a retry onto
-    the refund it already produced (no second gateway call), and without a key
-    the balance gate alone still refuses to hand back the same money twice.
+    ``Idempotency-Key`` is REQUIRED: a missing/blank header is a 400 before
+    any core call, because every refund attempt must name the operator action
+    it belongs to. A keyed retry then collapses onto the refund it already
+    produced (no second gateway call).
 
     The payment dimension moves to the choices orders.state already declares
     (``partially_refunded`` / ``refunded``) — this writer is their first
@@ -124,14 +126,15 @@ def admin_order_refund(request, order_id):
     """
     body = _object_body(request.data)
 
-    idempotency_key = (
-        request.headers.get(IDEMPOTENCY_KEY_HEADER) or ""
-    ).strip() or None
+    idempotency_key = (request.headers.get(IDEMPOTENCY_KEY_HEADER) or "").strip()
 
-    if (
-        idempotency_key is not None
-        and len(idempotency_key) > IDEMPOTENCY_KEY_MAX_LENGTH
-    ):
+    if not idempotency_key:
+        return Response(
+            {"error": "Idempotency-Key header is required"},
+            status=status.HTTP_400_BAD_REQUEST,
+        )
+
+    if len(idempotency_key) > IDEMPOTENCY_KEY_MAX_LENGTH:
         return Response(
             {"error": "Idempotency-Key is too long"}, status=status.HTTP_400_BAD_REQUEST
         )

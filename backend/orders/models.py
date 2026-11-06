@@ -641,12 +641,18 @@ class Refund(models.Model):
     * PENDING - a COMMITTED reservation. The row is written and committed
       before the gateway is called, so its amount reserves refundable
       balance while the provider call is in flight. A process that dies
-      before settling leaves this value behind as forensic evidence (there
-      is no sweeper in this change); once ``reserved_until`` passes, the
-      reservation stops reducing the balance but the row still exists.
-    * FAILED - the provider did not move money. The reservation is released
-      (its row deducts nothing) and the row remains as the attempt's trail.
+      before settling leaves this value behind as forensic evidence; once
+      ``reserved_until`` passes, the reservation stops reducing the balance
+      and ``sweep_refund_reservations`` records the lapse as FAILED
+      ``reservation_expired`` (the row is never deleted).
+    * FAILED - no money moved. ``failure_code`` explains how the attempt
+      failed; the reservation is released (its row deducts nothing) and the
+      row remains as the attempt's trail.
     * PROCESSED - the provider acknowledged the refund; the money moved.
+
+    ``failure_code`` explains a FAILED row (a definitive provider refusal or
+    an expired reservation); it is NULL for rows that failed before the field
+    existed and for rows that are not FAILED.
 
     ``reserved_until`` bounds a PENDING reservation. NULL means the
     reservation is held indefinitely (legacy or never-expire rows).
@@ -658,6 +664,10 @@ class Refund(models.Model):
         PENDING = "pending", "Pending"
         PROCESSED = "processed", "Processed"
         FAILED = "failed", "Failed"
+
+    class FailureCode(models.TextChoices):
+        PROVIDER_REFUSED = "provider_refused", "Provider refused"
+        RESERVATION_EXPIRED = "reservation_expired", "Reservation expired"
 
     class Kind(models.TextChoices):
         FULL = "full", "Full"
@@ -683,6 +693,11 @@ class Refund(models.Model):
     # Cleared on the FAILED/PROCESSED transitions, so only active
     # reservations occupy this index.
     reserved_until = models.DateTimeField(null=True, blank=True)
+
+    # Why a FAILED row failed. NULL for rows that failed before this field
+    # existed (and for rows that are not FAILED), so an operator can tell a
+    # definitive provider refusal from a swept expired reservation.
+    failure_code = models.CharField(max_length=32, blank=True, null=True)
 
     # The provider's own refund reference, nullable only for the in-flight
     # PENDING write above and unique so one gateway refund can never be
@@ -766,9 +781,10 @@ class Refund(models.Model):
         A reservation counts while it has no expiry (NULL = held
         indefinitely, the conservative legacy default) or while its expiry
         is still in the future. A lapsed PENDING row stops reducing the
-        balance but is NOT deleted or rewritten here: there is no sweeper in
-        this change, so it remains as forensic evidence while its promise
-        no longer competes for the order's money.
+        balance and is settled FAILED by
+        ``sweep_refund_reservations``; it is never deleted, so it remains
+        as forensic evidence while its promise no longer competes for the
+        order's money.
         """
         now = timezone.now()
         total = (
