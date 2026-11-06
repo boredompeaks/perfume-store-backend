@@ -471,7 +471,10 @@ def issue_refund(
     Durability boundary: :func:`reserve_refund` commits the PENDING
     reservation (and its ``reserved_until``) in its own transaction, the
     gateway call runs outside every transaction, and the outcome is applied
-    in a short atomic block of its own. Two concurrent refunds therefore
+    in a short atomic block of its own. The settlement itself (row lock plus
+    writes) lives in :func:`_settle_refund`; the gateway call runs before it,
+    outside every transaction, so no function mixes the row lock with a
+    network call. Two concurrent refunds therefore
     cannot both pass the balance gate while one is in flight. A definitive
     gateway refusal releases the reservation and records FAILED; an
     ambiguous outcome neither rolls the attempt away nor releases anything -
@@ -636,10 +639,32 @@ def issue_refund(
             )
         raise
 
-    # One short settlement transaction: the money already moved at the
-    # provider, so the row becomes PROCESSED and the order's payment
-    # dimension/timestamp move with it. The hook (when supplied) and the
-    # audit record run inside it, each under its own SAVEPOINT.
+    return _settle_refund(
+        reservation=reservation,
+        gateway_refund_id=gateway_refund_id,
+        request=request,
+        source=source,
+        on_settled=on_settled,
+    )
+
+
+def _settle_refund(
+    *,
+    reservation,
+    gateway_refund_id,
+    request,
+    source,
+    on_settled,
+):
+    """Apply a gateway-settled refund: row lock plus writes, no network call.
+
+    One short settlement transaction: the money already moved at the
+    provider, so the row becomes PROCESSED and the order's payment
+    dimension/timestamp move with it. The hook (when supplied) and the
+    audit record run inside it, each under its own SAVEPOINT.
+    """
+    refund = reservation.refund
+    amount = refund.amount
     with transaction.atomic():
         order = Order.objects.select_for_update().get(pk=reservation.order.pk)
         now = timezone.now()
