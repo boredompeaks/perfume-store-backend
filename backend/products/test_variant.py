@@ -246,3 +246,79 @@ class ProductVariantAdminTests(ApiTestCase):
         res = self.client.get("/admin/products/productvariant/")
         self.assertEqual(res.status_code, 200)
         self.assertContains(res, "RA-STD-001")
+
+
+@tag("products")
+class ProductVariantAdminStockVisibilityTests(ApiTestCase):
+    """#65 [option (b)]: the admin must not present variant stock as inventory.
+
+    ``ProductVariant.stock`` is inert — checkout/verify_payment read only
+    ``products.stock`` (pinned by ``ProductVariantStockBoundaryTests``), so an
+    editable admin box for it would advertise inventory the store does not
+    enforce. The column stays in the schema for SPEC-6-13; this surface hides
+    it, and a posted value must not reach the column either.
+    """
+
+    def setUp(self):
+        self.product = self.make_product(name="Rose Aurum")
+        self.variant = ProductVariant.objects.create(
+            product=self.product,
+            name="Standard 50ml",
+            sku="RA-STD-001",
+            stock=5,
+        )
+        User.objects.create_superuser(
+            "vadmin", "vadmin@example.com", "S3cure-Passphrase!"
+        )
+        self.assertTrue(
+            self.client.login(username="vadmin", password="S3cure-Passphrase!")
+        )
+
+    def test_stock_is_hidden_from_the_add_and_change_forms(self):
+        add = self.client.get("/admin/products/productvariant/add/")
+        change = self.client.get(
+            f"/admin/products/productvariant/{self.variant.pk}/change/"
+        )
+        self.assertEqual(add.status_code, 200)
+        self.assertEqual(change.status_code, 200)
+        for response in (add, change):
+            self.assertNotContains(response, 'name="stock"')
+            self.assertNotContains(response, 'id="id_stock"')
+
+    def test_changelist_has_no_stock_column(self):
+        res = self.client.get("/admin/products/productvariant/")
+        self.assertEqual(res.status_code, 200)
+        self.assertContains(res, "RA-STD-001")
+        self.assertNotContains(res, 'class="column-stock"')
+
+    def test_admin_change_post_cannot_write_the_inert_stock(self):
+        res = self.client.post(
+            f"/admin/products/productvariant/{self.variant.pk}/change/",
+            {
+                "product": self.product.pk,
+                "name": self.variant.name,
+                "sku": self.variant.sku,
+                "price": "",
+                "stock": "99",
+                "_save": "Save",
+            },
+        )
+        self.assertEqual(res.status_code, 302, res.content[:2000])
+        self.variant.refresh_from_db()
+        self.assertEqual(self.variant.stock, 5)
+
+    def test_admin_add_post_creates_with_the_zero_default_not_posted_stock(self):
+        res = self.client.post(
+            "/admin/products/productvariant/add/",
+            {
+                "product": self.product.pk,
+                "name": "Deluxe 100ml",
+                "sku": "RA-DLX-002",
+                "price": "",
+                "stock": "99",
+                "_save": "Save",
+            },
+        )
+        self.assertEqual(res.status_code, 302, res.content[:2000])
+        created = ProductVariant.objects.get(sku="RA-DLX-002")
+        self.assertEqual(created.stock, 0)
