@@ -2656,7 +2656,13 @@ class ReturnEligibilityWindowTests(ReturnTestCase):
         # window instead.
         self.login_as(self.buyer)
         fresh = self._placed("RET-2026-002200", "delivered", timedelta(days=1))
-        created = self.ask(fresh.order_number)
+        # `_placed` stamps the order against the class's fixed NOW, so the
+        # filing has to read the SAME clock: without the freeze this probe
+        # quietly re-tests the 30-day window against wall-clock time and
+        # starts refusing the order once the suite runs more than 30 days
+        # after NOW (observed 2026-11-11; pre-existing, unrelated to #65).
+        with self.clock_frozen_at():
+            created = self.ask(fresh.order_number)
         self.assertEqual(created.status_code, 201, created.data)
         pk = created.data["id"]
         ReturnRequest.objects.filter(pk=pk).update(
