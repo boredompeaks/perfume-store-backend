@@ -260,6 +260,7 @@ class ProductVariantAdminStockVisibilityTests(ApiTestCase):
     """
 
     def setUp(self):
+        """One variant with a non-zero inert count, plus an admin session."""
         self.product = self.make_product(name="Rose Aurum")
         self.variant = ProductVariant.objects.create(
             product=self.product,
@@ -275,6 +276,7 @@ class ProductVariantAdminStockVisibilityTests(ApiTestCase):
         )
 
     def test_stock_is_hidden_from_the_add_and_change_forms(self):
+        """Neither form renders the inert count as an input."""
         add = self.client.get("/admin/products/productvariant/add/")
         change = self.client.get(
             f"/admin/products/productvariant/{self.variant.pk}/change/"
@@ -286,12 +288,16 @@ class ProductVariantAdminStockVisibilityTests(ApiTestCase):
             self.assertNotContains(response, 'id="id_stock"')
 
     def test_changelist_has_no_stock_column(self):
+        """The changelist header carries no stock column."""
         res = self.client.get("/admin/products/productvariant/")
         self.assertEqual(res.status_code, 200)
         self.assertContains(res, "RA-STD-001")
-        self.assertNotContains(res, 'class="column-stock"')
+        # The token, not the exact class attribute: a sortable or otherwise
+        # classed header would still carry ``column-stock``.
+        self.assertNotContains(res, "column-stock")
 
     def test_admin_change_post_cannot_write_the_inert_stock(self):
+        """The form has no stock field, so a posted value cannot land."""
         res = self.client.post(
             f"/admin/products/productvariant/{self.variant.pk}/change/",
             {
@@ -308,6 +314,7 @@ class ProductVariantAdminStockVisibilityTests(ApiTestCase):
         self.assertEqual(self.variant.stock, 5)
 
     def test_admin_add_post_creates_with_the_zero_default_not_posted_stock(self):
+        """A new variant gets the model default, not the posted stock."""
         res = self.client.post(
             "/admin/products/productvariant/add/",
             {
