@@ -1,0 +1,57 @@
+{
+  "kind": "floor",
+  "task": "GH-65",
+  "tool": "scripts/changelog_figures.py",
+  "measured_at": "2026-11-11T17:25:08+00:00",
+  "pair_complete": true,
+  "engines": [
+    {
+      "engine": "sqlite",
+      "database_url": "sqlite:///db.sqlite3",
+      "commands": [
+        "/home/boredompeaks/backend-worktrees/spec-comp-wt/backend/venv/bin/python -m coverage run manage.py test --verbosity 0",
+        "/home/boredompeaks/backend-worktrees/spec-comp-wt/backend/venv/bin/python -m coverage report"
+      ],
+      "run": {
+        "verdict": "OK",
+        "tests": 2542,
+        "failures": null,
+        "errors": null,
+        "expected_failures": 2
+      },
+      "coverage": {
+        "statements": 14440,
+        "missed": 8,
+        "coverage_percent": "99.77",
+        "branches": 1864,
+        "partial_branches": 29
+      },
+      "test_exit": 0,
+      "coverage_exit": 0
+    },
+    {
+      "engine": "postgresql",
+      "database_url": "postgres://perfume:***@127.0.0.1:55432/perfume_store",
+      "commands": [
+        "/home/boredompeaks/backend-worktrees/spec-comp-wt/backend/venv/bin/python -m coverage run manage.py test --verbosity 0",
+        "/home/boredompeaks/backend-worktrees/spec-comp-wt/backend/venv/bin/python -m coverage report"
+      ],
+      "run": {
+        "verdict": "OK",
+        "tests": 2542,
+        "failures": null,
+        "errors": null,
+        "expected_failures": 2
+      },
+      "coverage": {
+        "statements": 14440,
+        "missed": 8,
+        "coverage_percent": "99.77",
+        "branches": 1864,
+        "partial_branches": 29
+      },
+      "test_exit": 0,
+      "coverage_exit": 0
+    }
+  ]
+}
