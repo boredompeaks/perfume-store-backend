@@ -2077,18 +2077,32 @@ class ReturnListTests(ReturnTestCase):
         self.assertEqual(len(res.data["results"]), 1)
 
     def test_reading_the_listing_moves_no_money(self):
-        before = Order.objects.filter(user=self.buyer).values_list(
-            "payment_status", "total_amount", "refunded_at"
+        # MATERIALIZE the snapshot: a lazy queryset re-evaluates at
+        # ``list(...)`` time, so evaluating both sides AFTER the requests made
+        # this pin compare the post-read database with itself and pass even if
+        # a GET wrote money. ``order_by`` makes the comparison deterministic
+        # instead of trusting the database's row order.
+        def snapshot():
+            return list(
+                Order.objects.filter(user=self.buyer)
+                .order_by("pk")
+                .values_list("payment_status", "total_amount", "refunded_at")
+            )
+
+        before = snapshot()
+        # The fixture is three orders with a known money shape: two captured
+        # (confirmed + delivered) and the cancelled one still pending. An
+        # empty or changed snapshot must fail here, not silently compare.
+        self.assertEqual(len(before), 3)
+        self.assertEqual(
+            [row[0] for row in before], ["captured", "captured", "pending"]
         )
         refunds_before = Refund.objects.count()
 
         self.client.get(LIST_URL)
         self.client.get(detail_url(self.mine[0].pk))
 
-        after = Order.objects.filter(user=self.buyer).values_list(
-            "payment_status", "total_amount", "refunded_at"
-        )
-        self.assertEqual(list(before), list(after))
+        self.assertEqual(snapshot(), before)
         self.assertEqual(Refund.objects.count(), refunds_before)
 
 
@@ -2657,10 +2671,16 @@ class ReturnEligibilityWindowTests(ReturnTestCase):
         self.login_as(self.buyer)
         fresh = self._placed("RET-2026-002200", "delivered", timedelta(days=1))
         # `_placed` stamps the order against the class's fixed NOW, so the
+<<<<<<< HEAD
         # filing has to read the SAME clock: without the freeze this probe
         # quietly re-tests the 30-day window against wall-clock time and
         # starts refusing the order once the suite runs more than 30 days
         # after NOW (observed 2026-11-11; pre-existing, unrelated to #65).
+=======
+        # filing has to read the SAME clock: otherwise this probe quietly
+        # re-tests the 30-day window against wall-clock time and starts
+        # refusing the order once the suite runs more than 30 days after NOW.
+>>>>>>> origin/feat/add-frontend
         with self.clock_frozen_at():
             created = self.ask(fresh.order_number)
         self.assertEqual(created.status_code, 201, created.data)

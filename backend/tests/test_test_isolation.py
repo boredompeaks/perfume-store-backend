@@ -192,9 +192,11 @@ class DatabaseIdentityTests(SimpleTestCase):
     }
 
     def test_same_database_yields_the_same_key(self):
-        self.assertEqual(
-            test_database_identity(self._PG), test_database_identity(self._PG)
-        )
+        # A literal key, not identity(x) == identity(x): every pure function -
+        # including one that hashes the wrong fields - is equal to itself on
+        # two calls, so the old assertion could not see a changed composition.
+        # The key is SHA-256("engine:host:port:test name")[:16].
+        self.assertEqual(test_database_identity(self._PG), "0f1b75ebb67d345f")
 
     def test_different_databases_yield_different_keys(self):
         other = {"default": {**self._PG["default"], "NAME": "perfume_store_b"}}
