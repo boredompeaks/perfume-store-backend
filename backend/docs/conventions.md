@@ -167,7 +167,7 @@ The policy:
 ## Style
 
 - Black-compatible formatting (88 cols), no tabs.
-- No commented-out code blocks; remove dead code (e.g. `orders/views.py:280-282`).
+- No commented-out code blocks; remove dead code.
 - Comments explain *why*; the code explains *how*. Comment the WHY and the
   invariant, never the WHAT: a comment that restates the next line (`#
   Check stock` above a stock check, a banner naming the function beneath

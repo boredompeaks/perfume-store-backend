@@ -174,7 +174,7 @@ export default function OrderDetailView({
                       {item.product_name} × {item.quantity}
                     </span>
                     {/* sku / variant_name are the frozen checkout snapshot
-                        (models.py:440-456): rendered from this row, never a
+                        (models.py:325-333): rendered from this row, never a
                         live product read — the item cannot change after the
                         order. Empty today (no variant input yet), so both stay
                         out of the way until the backend fills them. */}
