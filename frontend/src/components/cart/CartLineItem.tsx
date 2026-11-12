@@ -14,12 +14,8 @@ import ProductImage from "../ProductImage";
 import { useToast } from "../toast";
 
 /**
- * §3 "Cart - line removed": the removal View Transition. The browser
- * re-lays-out and cross-fades the named lines — R1 forbids the hand-written
- * `height` animation this replaces. Instant reflow whenever the browser has
- * no `startViewTransition`, and always under `prefers-reduced-motion`: the
- * UA's transition animations read no `--motion-*` token, so the media query
- * in this wrapper is the layer that can reach them.
+ * View Transition for row removal. The UA's transition animation reads no
+ * `--motion-*` token, so the reduced-motion check has to live here.
  */
 function withRemovalTransition(update: () => void): void {
   const doc = document as Document & {
@@ -31,8 +27,8 @@ function withRemovalTransition(update: () => void): void {
     return;
   }
   try {
-    // flushSync so the new DOM exists before the snapshot is taken; without
-    // it the transition would capture the row that is about to disappear.
+    // flushSync so the new DOM exists before the snapshot is taken; otherwise
+    // the transition captures the row that is about to disappear.
     doc.startViewTransition(() => flushSync(update));
   } catch {
     update();
@@ -44,7 +40,7 @@ export default function CartLineItem({
   vtName,
 }: {
   item: CartItem;
-  /** Unique `view-transition-name` for this row; absent above the §3 cap. */
+  /** Unique `view-transition-name`; absent above the snapshot cap. */
   vtName?: string;
 }) {
   const queryClient = useQueryClient();
@@ -53,16 +49,14 @@ export default function CartLineItem({
   const [qty, setQty] = useState(item.quantity);
   const [lineError, setLineError] = useState<string | null>(null);
 
-  // Resync the stepper whenever server truth changes (incl. after an
-  // over-stock rejection rolls us back).
+  // Resync the local stepper whenever server truth changes.
   useEffect(() => {
     setQty(item.quantity);
   }, [item.quantity]);
 
   const applyCart = (cart: Cart) => {
-    // The cart cache is keyed by identity (D-04b): write the server's answer
-    // into the slot this render read from, not an unkeyed ["cart"] entry no
-    // observer would see.
+    // The cart cache is keyed by identity: write into the slot this render
+    // read from, not an unkeyed ["cart"] entry no observer would see.
     queryClient.setQueryData(cartQueryKey(status), cart);
   };
 
@@ -78,7 +72,7 @@ export default function CartLineItem({
           ? error.message
           : "Could not update quantity.",
       );
-      // Reconcile against the server — the local stepper may have drifted.
+      // Reconcile against the server; the local stepper may have drifted.
       queryClient.invalidateQueries({ queryKey: ["cart"] });
     },
   });
@@ -101,26 +95,12 @@ export default function CartLineItem({
   const busy = patch.isPending || remove.isPending;
 
   return (
-    // Screen row anatomy (U-W12-T7, design override D1: maison_ther_votre_
-    // panier): thumbnail plate left, serif name + variant line + money
-    // right, then the stepper/Remove row beneath - stacked on phones and
-    // side-by-side from sm, exactly as the screen's flex-col/sm:flex-row
-    // does. py-8 matches the screen's line rhythm; the ledger's top rule
-    // comes from the list container (CartView), so no first-row exception
-    // is needed. Equal-height defence per xias components.md "Form rows:
-    // equal controls, unequal content": the stepper group's cells share the
-    // h-11 floor, and the money figure is shrink-0 so a long name cannot
-    // stretch the row past its neighbour's height.
     <div
       className="flex flex-col gap-4 py-8 sm:flex-row sm:items-center"
       style={vtName ? { viewTransitionName: vtName } : undefined}
     >
-      {/* Screen plate: 96x128 mobile, 112x144 at sm (D1 overrides §5.3's
-          96x120 - "thumbnail plate" is an enumerated parity target), with
-          the screen's hairline frame on the canonical --color-hairline
-          plate. No hover zoom: the screen's scale-1.04/500ms exceeds the
-          system's hover cap (<=240ms, <=1.03 - ui-motion), so it is cut as
-          decoration rather than shipped. */}
+      {/* No hover zoom: the screen's 500ms scale exceeds the system's
+          hover-motion cap, so it is deliberately cut. */}
       <Link
         href={`/products/${item.product.slug}`}
         className="relative h-32 w-24 shrink-0 border border-hairline bg-hairline sm:h-36 sm:w-28"
@@ -136,14 +116,8 @@ export default function CartLineItem({
       <div className="flex min-w-0 flex-1 flex-col">
         <div className="flex items-start justify-between gap-3">
           <div className="min-w-0">
-            {/* Screen headline-sm is 20px Playfair = the --text-h3 step;
-                the screen's hover-to-secondary is our bronze. The variant
-                line keeps §5.3's KEEP'd "{size} ml · ₹x each" - the
-                screen's concentration word ("Extrait de Parfum") has no API
-                field (ProductSerializer exposes category, a scent family,
-                not a concentration), the same degrade ProductCard made in
-                U-W11-T5, already logged as BACKEND_REQUESTS P2 "Product lot
-                code + concentration". */}
+            {/* The API exposes category (scent family), not concentration, so
+                the variant line degrades to size and unit price. */}
             <Link
               href={`/products/${item.product.slug}`}
               className="font-display text-h3 tracking-tight transition-colors hover:text-bronze"
@@ -167,9 +141,6 @@ export default function CartLineItem({
             role="group"
             aria-label={`Quantity for ${item.product.name}`}
           >
-            {/* §7.5 — same 44px touch floor as the PDP stepper: `px-3 py-1.5`
-                was ~32×32, under the system's 44px convention (WCAG's own
-                24px minimum still passed). */}
             <button
               type="button"
               onClick={() => {
@@ -183,10 +154,8 @@ export default function CartLineItem({
             >
               −
             </button>
-            {/* §5.3 "stepper value cross-fade": the key remounts the value so
-                the enter-token fade replays on every step. Reduced motion
-                drops the rule at the media layer, so the number is simply
-                there. */}
+            {/* Keyed so the cross-fade replays on every step; reduced motion
+                drops the rule at the media layer. */}
             <span
               key={qty}
               className="qty-crossfade w-8 text-center text-sm tabular-nums"

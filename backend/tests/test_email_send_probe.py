@@ -1,18 +1,3 @@
-"""SPEC-22-10 [R-22.18]: the send-probe's safety pins.
-
-The command exists to prove mail leaves the deployment, so the properties
-worth pinning are the ones that keep it from harming anyone: it is dry-run by
-default, it can only ever address the deployment's own operator mailboxes,
-it never reads or prints a customer's address, it refuses a backend that
-cannot actually deliver, and a refused probe is loud.
-
-Hermetic by construction: every send is attempted through a **faked**
-``smtplib.SMTP``, so no test opens a socket, and no test can reach a real
-mail server even if the backend override below were wrong. The suite's own
-backend is the locmem one, which the command refuses outright - so a test that
-forgot the override cannot send mail, it gets a refusal.
-"""
-
 import io
 import smtplib
 from unittest.mock import patch
@@ -21,9 +6,6 @@ from django.core import mail
 from django.core.management import CommandError, call_command
 from django.test import TestCase, override_settings
 
-# A deployment with the SMTP keys an operator would really set, plus an
-# operator mailbox allowlist. The credential is a recognisably fake fixture
-# string (conventions.md: no credential-shaped value that looks like one).
 PROBE_ENV = {
     "ALERT_RECIPIENTS": "ops@example.test, oncall@example.test",
     "EMAIL_BACKEND": "django.core.mail.backends.smtp.EmailBackend",
@@ -40,7 +22,6 @@ SMTP_BACKEND = override_settings(**PROBE_ENV)
 
 
 def run_probe(*args):
-    """Call the command with the SMTP connection faked; return (out, smtp)."""
     out = io.StringIO()
     with patch("smtplib.SMTP") as smtp:
         call_command("email_send_probe", *args, stdout=out)
@@ -49,8 +30,6 @@ def run_probe(*args):
 
 @SMTP_BACKEND
 class EmailSendProbeSafetyTests(TestCase):
-    """The gates, in the order the command applies them."""
-
     def test_dry_run_by_default_delivers_nothing(self):
         out, smtp = run_probe()
         self.assertIn("dry run: nothing was sent", out)
@@ -69,7 +48,6 @@ class EmailSendProbeSafetyTests(TestCase):
     def test_send_delivers_one_message_per_allowlisted_recipient(self):
         out, smtp = run_probe("--send")
         connection = smtp.return_value
-        # One SMTP conversation, two messages - one per allowlisted mailbox.
         self.assertEqual(connection.sendmail.call_count, 2)
         recipients = [call.args[1] for call in connection.sendmail.call_args_list]
         self.assertEqual(
@@ -115,7 +93,6 @@ class EmailSendProbeSafetyTests(TestCase):
                     stdout=out,
                 )
         self.assertIn("is not in ALERT_RECIPIENTS", str(caught.exception))
-        # ...and nothing was sent while refusing: no connection, no message.
         smtp.assert_not_called()
         self.assertEqual(mail.outbox, [])
 
@@ -132,15 +109,11 @@ class EmailSendProbeSafetyTests(TestCase):
             ALERT_RECIPIENTS="ops@example.test, , ops@example.test, oncall@"
         ):
             out, smtp = run_probe()
-        # Two real addresses, de-duplicated; the blank and the truncated entry
-        # are reported as given rather than silently repaired.
         self.assertIn("recipients:  ops@example.test, oncall@", out)
         smtp.assert_not_called()
 
     def test_refuses_a_backend_that_never_speaks_smtp(self):
-        # The suite's own backend: locmem accepts and reports success, so a
-        # probe against it would be a false green. It must be refused, and it
-        # must be refused even with --send.
+        # The suite's locmem backend accepts and reports success, so probing it would be a false green: it must be refused even with --send.
         for backend in (
             "django.core.mail.backends.locmem.EmailBackend",
             "django.core.mail.backends.console.EmailBackend",
@@ -173,8 +146,6 @@ class EmailSendProbeSafetyTests(TestCase):
 
 @SMTP_BACKEND
 class EmailSendProbePrivacyTests(TestCase):
-    """The command cannot become a way to reach a customer."""
-
     def test_it_refuses_a_customers_address_even_when_it_exists(self):
         from django.contrib.auth.models import User
 

@@ -1,10 +1,7 @@
 """Shared DRF permission classes.
 
-conventions.md: authorize via ``permission_classes`` — never inline
-``request.user.is_staff`` checks. ``capability_required`` is the
-plain-Django twin for admin-chrome routes that are not DRF views, and it
-reuses that same staff flag as a second gate (SPEC-20-6b): its routes live
-inside ``/admin/``, which is staff-only everywhere else.
+Authorization goes through ``permission_classes``, never inline ``is_staff`` checks;
+``capability_required`` is the plain-Django twin for admin-chrome routes.
 """
 
 from functools import wraps
@@ -23,17 +20,10 @@ from common.roles import (
 
 
 class IsAdminUserOrReadOnly(BasePermission):
-    """Read-only for everyone, staff-only for write methods.
+    """Read-only for everyone, staff-only for writes.
 
-    DRF ships no admin-or-read-only permission, and a blanket ``IsAdminUser``
-    on the multi-method product views would also block anonymous catalogue
-    GETs. Writes therefore mirror ``IsAdminUser`` (``is_staff``) while safe
-    methods stay public — the exact legacy behaviour of the inline checks.
-
-    Subclasses may pin ``write_capability`` to source write authority from
-    the RBAC roles map instead of the blanket ``is_staff`` flag (see
-    ``capability_or_read_only``); the legacy flag remains the default so
-    existing deployments keep their contract.
+    Subclasses may pin ``write_capability`` to source writes from the roles map
+    instead of the blanket ``is_staff`` flag.
     """
 
     # Keeps the 403 body byte-identical to the legacy inline gate.
@@ -48,10 +38,8 @@ class IsAdminUserOrReadOnly(BasePermission):
                 return True
         elif request.user and request.user.is_staff:
             return True
-        # Raised directly rather than returning False: with a JWT
-        # authenticator attached, DRF turns a plain failed check into
-        # 401 NotAuthenticated for guests, while the legacy contract (and
-        # the pinned tests) is 403 "Administrator access is required."
+        # Raised rather than returning False: with a JWT authenticator DRF would
+        # turn a failed check into 401 for guests; the pinned contract is 403.
         raise PermissionDenied(self.message)
 
 
@@ -59,41 +47,24 @@ _ROLE_SET = frozenset(STAFF_ROLES)
 
 
 def get_user_roles(user):
-    """Staff roles a user holds, derived from Group membership.
-
-    ``sync_role_groups`` keeps exactly one Group per staff role, so the
-    group set is the role set; intersecting with ``STAFF_ROLES`` stops
-    unrelated groups from accidentally granting staff authority. Anonymous
-    and unauthenticated users hold no roles.
-    """
+    """Staff roles a user holds from Group membership, intersected with
+    ``STAFF_ROLES`` so unrelated groups grant nothing."""
     if not (user and user.is_authenticated):
         return frozenset()
     return frozenset(user.groups.values_list("name", flat=True)) & _ROLE_SET
 
 
 def user_has_capability(user, capability):
-    """True when one of the user's roles grants ``capability``.
-
-    Authority flows solely through ``CAPABILITY_ROLES`` — the map already
-    grants ``admin`` every capability, so full staff authority needs no
-    separate staff/superuser branch. Unknown capability identifiers deny
-    by default (least privilege): adding a capability to the map without
-    wiring it must never silently open access.
-    """
+    """True when one of the user's roles grants ``capability``; unknown
+    identifiers deny by default."""
     return bool(get_user_roles(user) & CAPABILITY_ROLES.get(capability, frozenset()))
 
 
 class CapabilityPermission(BasePermission):
     """Deny unless the user's staff role grants the pinned ``capability``.
 
-    Subclasses/factory set ``capability`` to an identifier from
-    ``CAPABILITY_ROLES``; the unpinned base class therefore denies everyone.
-
-    Denials raise ``PermissionDenied`` instead of returning ``False``: with
-    a JWT authenticator attached DRF turns a plain failed check into 401
-    for guests, while the staff API contract is a uniform 403 for both
-    anonymous and merely unprivileged callers (same reasoning as
-    ``IsAdminUserOrReadOnly`` above).
+    The unpinned base denies everyone. Denials raise so DRF answers 403, not 401,
+    for guests (same reasoning as ``IsAdminUserOrReadOnly``).
     """
 
     capability = None
@@ -108,26 +79,9 @@ class CapabilityPermission(BasePermission):
 def capability_required(capability):
     """Decorator: the plain-Django twin of ``CapabilityPermission``.
 
-    The spec-6.12 admin-chrome routes (e.g. the audit-log page) are not DRF
-    views, so ``permission_classes`` cannot reach them; this applies the
-    same ``CAPABILITY_ROLES`` authority to a session view. Django's own
-    superuser bypass is preserved here, mirroring the admin surfaces'
-    trust anchor (``RoleAwareModelAdmin._holds_capability``) — the DRF
-    classes deliberately have none. Anonymous callers follow the
-    admin-chrome contract: send them to the admin login, while an
-    authenticated caller without the capability gets a visible 403 (never
-    a login redirect they can already pass, never a silent empty page).
-
-    Staff membership is required in addition to the capability (SPEC-20-6b):
-    every view inside ``/admin/`` is ``staff_member_required``, and the
-    admin chrome itself only renders for staff, so a capability-gated chrome
-    route that admits a non-staff caller hands out page chrome — and, on the
-    global search, live change-form links — for a link the destination itself
-    would refuse. Matching ``staff_member_required`` keeps the whole area on
-    one gate instead of leaving each route to re-derive it. A non-staff
-    account cannot be given a role through the product UI, so this closes a
-    database-tamper reach rather than a live escalation — but the admin area
-    should not have to lean on that invariant holding.
+    Anonymous callers go to the admin login and an authenticated caller without
+    the capability gets 403. Staff membership is required too, matching every
+    other view inside ``/admin/``; the superuser bypass is preserved.
     """
 
     def decorator(view):
@@ -152,22 +106,8 @@ def capability_required(capability):
 
 
 def capability_required_any(capabilities):
-    """Decorator: the disjunction twin of :func:`capability_required`.
-
-    Some admin-chrome routes have no single capability behind them: SPEC-5-10's
-    unified global search spans three models with three different view
-    capabilities, so the honest gate is "may open the page if you may view
-    at least one of the models it searches" — the per-model results are
-    then gated individually by each ModelAdmin. A blanket ``is_staff`` would
-    be the alternative and is exactly what SPEC-17-10 closed on the
-    dashboard route, so this decorator keeps the contract of
-    :func:`capability_required` in every respect: anonymous callers are sent
-    to the admin login, an authenticated caller without any of the
-    capabilities gets a visible 403, Django's own superuser bypass is
-    preserved, and staff membership is required on top of the capabilities
-    (SPEC-20-6b) — the same staff gate its singular twin applies, so the
-    three chrome routes cannot drift apart again.
-    """
+    """Decorator: like :func:`capability_required` but passes when the caller
+    holds any one of ``capabilities``; each surface still gates its own results."""
 
     def decorator(view):
         @wraps(view)
@@ -210,20 +150,9 @@ def capability_permission(capability):
 def user_may_assign_role(user, role):
     """Whether ``user`` may add or remove ``role`` on a staff account.
 
-    This is the escalation guard for role assignment itself (spec 1.1 lines
-    142-146). ``staff.manage`` answers "may this caller work roles at all",
-    which the assignment surfaces already enforce; this answers the narrower
-    question the map cannot: may this caller touch the tier ABOVE admin?
-
-    A role listed in ``ROLE_GRANT_CAPABILITY`` needs its own capability —
-    ``platform.configure`` for ``superadmin``, granted to that tier alone — so
-    an Admin can reassign the operational roles all day and still cannot
-    promote anyone, or itself, above its own tier. Every other role answers
-    ``True`` here: the guard adds no second gate on the operational six.
-
-    Django's ``is_superuser`` bypass is preserved verbatim, mirroring
-    ``capability_required`` and ``RoleAwareModelAdmin._holds_capability``: the
-    trust anchor keeps working exactly as it does on every other surface.
+    The escalation guard: roles in ``ROLE_GRANT_CAPABILITY`` need their own
+    capability, so an Admin can never promote above its tier. The superuser
+    bypass is preserved.
     """
     required = ROLE_GRANT_CAPABILITY.get(role)
     if required is None:
@@ -234,15 +163,8 @@ def user_may_assign_role(user, role):
 
 
 def capability_or_read_only(capability):
-    """Factory: SAFE_METHODS stay public, writes need the pinned capability.
-
-    The product endpoints mix a public catalogue read with staff writes in
-    one view, so a plain ``CapabilityPermission`` (which denies safe methods
-    too) cannot express them. Pinning ``write_capability`` on the
-    ``IsAdminUserOrReadOnly`` seam reuses its public-read handling and legacy
-    403 body while write authority moves from the blanket ``is_staff`` flag
-    to ``CAPABILITY_ROLES`` — a tightening, never a downgrade.
-    """
+    """Factory: public reads, writes gated by the pinned capability, reusing
+    ``IsAdminUserOrReadOnly``'s 403 body."""
     return type(
         _permission_class_name(capability) + "OrReadOnly",
         (IsAdminUserOrReadOnly,),
@@ -250,10 +172,7 @@ def capability_or_read_only(capability):
     )
 
 
-# One named class per capability so views can declare e.g.
-# ``permission_classes = [HasOrdersFulfill]``. The set is pinned against
-# ``CAPABILITY_ROLES`` in tests/test_rbac_foundation.py so it cannot drift
-# from the roles map.
+# One named class per capability; a test pins the set to ``CAPABILITY_ROLES``.
 HasProductsRead = capability_permission("products.read")
 HasProductsWrite = capability_permission("products.write")
 HasProductsPublish = capability_permission("products.publish")
@@ -263,29 +182,15 @@ HasOrdersRead = capability_permission("orders.read")
 HasOrdersFulfill = capability_permission("orders.fulfill")
 HasOrdersCancel = capability_permission("orders.cancel")
 HasRefundsCreate = capability_permission("refunds.create")
-# [R-1.07] SPEC-1-B05: the shipping rate table's admin gate. No customer-
-# facing endpoint uses it (the storefront estimate is public and read-only,
-# and prices server-side), but the one-named-class-per-capability invariant
-# this module documents - and tests/test_rbac_foundation.py pins - is why it
-# exists: a capability in CAPABILITY_ROLES always has its named gate, so a
-# future shipping write endpoint cannot be bolted on without one.
+# The shipping rate admin gate; required by the one-class-per-capability
+# invariant even though the public estimate is read-only.
 HasShippingManage = capability_permission("shipping.manage")
-# [R-1.08] SPEC-1-B06: the shipment tracking surface's gates. No
-# customer-facing endpoint uses them -- a customer reads their own tracking
-# trail by account or by the guest credential B04 minted, never by staff
-# capability -- but the one-named-class-per-capability invariant this module
-# documents is what makes the pair mandatory the moment the capabilities
-# exist: without them `tests/test_rbac_foundation.py` goes red, and a future
-# staff shipment endpoint could not be wired at all.
+# Shipment tracking gates; no customer endpoint uses them, but the
+# one-class-per-capability invariant requires them.
 HasShipmentsRead = capability_permission("shipments.read")
 HasShipmentsWrite = capability_permission("shipments.write")
-# [R-1.16] SPEC-1-B07a: the return-request surface's gates. The customer-facing
-# half of a return is NOT gated by them - a customer requests against their own
-# order by account and reads only their own requests - so as with the shipment
-# pair these exist for the staff review queue (spec 6.8 line 1957) and for the
-# one-named-class-per-capability invariant this module documents, which
-# tests/test_rbac_foundation.py pins: without them the capabilities could not
-# exist in the map at all.
+# Return-request staff gates for the review queue; required by the
+# one-class-per-capability invariant.
 HasReturnsRead = capability_permission("returns.read")
 HasReturnsWrite = capability_permission("returns.write")
 HasCustomersRead = capability_permission("customers.read")
@@ -293,47 +198,25 @@ HasDiscountsWrite = capability_permission("discounts.write")
 HasReportsRead = capability_permission("reports.read")
 HasStaffManage = capability_permission("staff.manage")
 HasSettingsManage = capability_permission("settings.manage")
-# SPEC-1-B03: the one capability the ``superadmin`` tier holds and ``admin``
-# does not (spec 1.1 line 146, "platform configuration"). It authorises
-# granting the tier itself — see ``user_may_assign_role``.
+# The one capability superadmin holds and admin does not; authorises granting
+# that tier itself (see ``user_may_assign_role``).
 HasPlatformConfigure = capability_permission("platform.configure")
 
-# SPEC-6-03c: the product views are the read/write split shape — public
-# catalogue reads, writes gated by ``products.write`` (catalogue + admin).
+# Public catalogue reads, writes gated by ``products.write``.
 HasProductsWriteOrReadOnly = capability_or_read_only("products.write")
 
 
 def is_privileged(user):
-    """SPEC-17-05 [R-17.9]: the accounts mandatory MFA applies to.
-
-    The ``staff.manage`` capability holders (the ``admin`` and ``superadmin``
-    roles per ``CAPABILITY_ROLES`` — the two tiers that manage access, spec
-    1.1 lines 137/146) plus Django superusers — the trust anchor every admin
-    surface deliberately preserves a bypass for, which therefore must not be
-    able to slip past the factor that anchors it. Everything else (customers,
-    the five operational staff roles, role-less staff) is unaffected by MFA
-    enforcement.
-
-    SPEC-1-B03 note: the bypass itself is byte-for-byte unchanged and the new
-    tier is covered by the existing rule rather than a widened one — the top
-    tier holds ``staff.manage`` because it manages access, so it is privileged
-    the moment it exists, with no second privileged-population definition to
-    keep in step with this one.
-    """
+    """The accounts mandatory-MFA population: ``staff.manage`` holders plus
+    Django superusers, so the trust anchor cannot slip past the factor."""
     if not (user and user.is_authenticated):
         return False
     return user.is_superuser or user_has_capability(user, "staff.manage")
 
 
 class IsPrivilegedRole(BasePermission):
-    """Permission twin of :func:`is_privileged` for the MFA endpoints.
-
-    Superuser bypass is preserved here on purpose, mirroring
-    ``capability_required``: the enrollment surface must reach exactly the
-    population enforcement blocks, and a superuser without the admin role
-    group is still blocked at login (superusers are privileged) — denying
-    them enrollment would dead-lock the trust anchor.
-    """
+    """Permission twin of :func:`is_privileged` for the MFA endpoints; the
+    superuser bypass keeps enrollment from dead-locking the trust anchor."""
 
     message = "Multi-factor authentication management requires privileged staff access."
 

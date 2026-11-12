@@ -16,7 +16,6 @@
     {# a non-bulk step re-drives the very submission it interrupted #}
     {% for name, value in pending_fields %}<input type="hidden" name="{{ name }}" value="{{ value }}" />{% endfor %}
     <p><strong>{{ description }}</strong> {{ warning }}</p>
-    {# SPEC-20-1 [R-20.20]: what the action actually costs, not just which rows #}
     {% if details.summary %}<p><strong>{{ details.summary }}</strong></p>{% endif %}
     {% for row in details.rows %}
       <p><strong>{{ row.label }}</strong></p>
@@ -36,7 +35,6 @@
     <ul>
       {% for obj in objects %}<li>{{ obj }}</li>{% endfor %}
     </ul>
-    {# SPEC-20-5 [R-20.28]: optional reason, offered only where declared #}
     {% if note_form %}
       <fieldset class="module aligned">
         {{ note_form.confirmation_note }}

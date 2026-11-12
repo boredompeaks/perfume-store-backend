@@ -22,61 +22,39 @@ import PaymentLauncher from "./PaymentLauncher";
 
 type Step = "details" | "review" | "pay";
 
-/** Spec 5.4: the three steps, in order — Delivery -> Review -> Payment. */
 const STEPS: { id: Step; label: string }[] = [
   { id: "details", label: "Delivery" },
   { id: "review", label: "Review" },
   { id: "pay", label: "Payment" },
 ];
 
-/** One delivery option priced by `GET /api/shipping/estimate/` (5.4). */
+/** One delivery option priced by the server. */
 export type EstimateOption = {
-  /** Method CODE (slug) — the only thing this client may ever choose. */
   method: string;
   name: string;
-  /** Decimal STRING from the server; formatted with formatINR, never summed. */
+  /** Decimal string from the server; format, never sum. */
   amount: string;
   free_shipping: boolean;
 };
 
-/**
- * 5.4's step-indicator fill: `stepsCompleted / 2` — 0 on Delivery, half on
- * Review, full on Payment. Exported so the arithmetic is pinned by a test
- * rather than by the pixels.
- */
+/** `stepsCompleted / 2`: exported so a test pins the arithmetic, not pixels. */
 export function stepFraction(step: Step): number {
   const index = STEPS.findIndex((s) => s.id === step);
   return (index < 0 ? 0 : index) / (STEPS.length - 1);
 }
 
 /**
- * D1 (U-W12-T8, screen `maison_ther_commande_r_glement`): the rule's ink fill
- * covers the ACTIVE tab's share of the rule — thirds, so 1/3, 2/3, 1 — which
- * is what the screen draws (pixel probe of screen.png: at Delivery the ink
- * runs 80→359 of a rule spanning 80→919). Spec 5.4's fill is the completed
- * prefix instead (0 / half / full); the owner's screen overrides that layout
- * detail, so this maps the pinned `stepFraction` arithmetic onto the active
- * segment rather than redefining it — `checkout.test.ts` still pins the
- * arithmetic that reaches the pixels.
+ * The screen fills the active tab's third of the rule, not the completed
+ * prefix; this maps `stepFraction` onto it without redefining that arithmetic.
  */
 export function activeFraction(step: Step): number {
   return (stepFraction(step) * (STEPS.length - 1) + 1) / STEPS.length;
 }
 
 /**
- * The flag-gated guest wall (CHANGE-11 / TIER1-GUEST-DEADEND), decided in one
- * place so the audited branch cannot drift from the render: flag OFF restores
- * the pre-guest sign-in wall for anonymous visitors exactly as it was; flag ON
- * drops the wall and leaves every further decision — including the 403 the
- * server answers create-order with — to the backend. Nothing here mints,
- * guesses or stores a credential.
- *
- * Since owner directive D2 (U-W10-T2) the component short-circuits an
- * anonymous signal to the register door (`/register?next=/checkout`) before
- * any of these branches paints, so the function is now the gate CONTRACT
- * (pinned by test) rather than a path every visitor walks. It is
- * deliberately not rewritten: the flag's meaning, and the wall behind it,
- * stay auditable.
+ * One place for the guest-wall decision: flag off restores the sign-in wall,
+ * flag on defers to the backend and mints no credential. The redirect now
+ * precedes it, but the branch remains the audited contract.
  */
 export function checkoutGate(
   authStatus: "loading" | "authenticated" | "anonymous",
@@ -88,10 +66,8 @@ export function checkoutGate(
 }
 
 /**
- * 5.4: a 400 from the estimate reads "We cannot deliver there yet" followed by
- * the backend's own refusal message VERBATIM (it is customer-shaped —
- * `shipping/pricing.py` UNSERVICEABLE_MESSAGE). Any other ApiError is rendered
- * as the server said it; only a transport failure gets local copy.
+ * A 400 estimate reads "We cannot deliver there yet" plus the backend's own
+ * refusal verbatim; only a transport failure gets local copy.
  */
 export function estimateErrorCopy(err: unknown): string {
   if (err instanceof ApiError) {
@@ -102,11 +78,7 @@ export function estimateErrorCopy(err: unknown): string {
   return "We could not fetch delivery options. Check your connection and try again.";
 }
 
-/**
- * 5.4: "the cheapest preselected, because shipping/pricing.py states the
- * precedence explicitly". This is a SELECTION over server-quoted amounts —
- * it decides which server number is shown, and computes no figure of its own.
- */
+/** Preselects the cheapest server quote; computes no figure itself. */
 export function cheapestOption(
   options: EstimateOption[],
 ): EstimateOption | null {
@@ -116,18 +88,14 @@ export function cheapestOption(
   );
 }
 
-/** One order attempt = one key (5.4 step 2; server cap is 128 chars). */
+/** One order attempt = one key; the server caps it at 128 chars. */
 export function newAttemptKey(): string {
   return typeof crypto !== "undefined" && "randomUUID" in crypto
     ? crypto.randomUUID()
     : `ck-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 12)}`;
 }
 
-/**
- * What POST /api/orders/checkout/ answers with, beyond `Order`: the
- * customer-facing reference and the server-priced shipping line (5.4 step 3,
- * orders/serializers.py). Read off the response only — never derived here.
- */
+/** Response fields beyond `Order`, read off the response, never derived. */
 type CreatedOrder = Order & {
   order_number: string;
   shipping_amount: string;
@@ -136,20 +104,11 @@ type CreatedOrder = Order & {
 export default function CheckoutView() {
   const router = useRouter();
   const { status: authStatus } = useAuth();
-  // The signal exactly as this render reads it. D2's early return below
-  // narrows `authStatus` to "loading" | "authenticated" for the rest of the
-  // render, so the two audited hand-off branches that still speak in the RAW
-  // signal — the 403 refusal hand-off and the guest pay hand-off, both pinned
-  // by testid — read this snapshot instead of fighting the narrowing. With
-  // the redirect armed they are unreachable at runtime; they stay because
-  // they are contract, not decoration (TIER1-GUEST-DEADEND).
+  // Raw signal kept for the two audited hand-off branches below: D2's early
+  // return narrows `authStatus` to loading/authenticated for the render.
   const rawAuthStatus = authStatus;
-  // featureFlags.guestCheckout still gates the guest path (default true):
-  // off = the sign-in wall below; on = the wall is down and the backend's own
-  // answer decides what a guest may do. D2 (U-W10-T2) sits in front of both:
-  // an anonymous visitor is replaced to /register?next=/checkout, so the flag
-  // now only shapes the gate contract and any flow the redirect does not
-  // cover (an authenticated visitor is never gated at all).
+  // The flag shapes the gate contract; D2 sends anonymous visitors to the
+  // register door, so an authenticated visitor is never gated.
   const guestCheckoutEnabled = templateConfig.featureFlags.guestCheckout;
   const gate = checkoutGate(authStatus, guestCheckoutEnabled);
 
@@ -170,28 +129,19 @@ export default function CheckoutView() {
   const [refused, setRefused] = useState(false);
   const [creating, setCreating] = useState(false);
 
-  // 5.4 CHANGE-12: the delivery estimate, fetched on blur of pincode and
-  // state. One slot per destination: a repeat blur of the same destination
-  // never refetches, a failure clears the slot so the next blur retries, and
-  // a response for a destination the customer has already left is dropped.
+  // One slot per destination: a repeat blur does not refetch, a failure
+  // clears the slot, and a response for an abandoned destination is dropped.
   const [estimate, setEstimate] = useState<EstimateOption[] | null>(null);
   const [estimateError, setEstimateError] = useState<string | null>(null);
   const [selectedMethod, setSelectedMethod] = useState<string | null>(null);
   const destinationKey = useRef<string | null>(null);
   const loadedDestination = useRef<string | null>(null);
   const inFlightDestination = useRef<string | null>(null);
-  // The Idempotency-Key for the CURRENT attempt: minted when the customer
-  // enters review, stable across every "Create order" retry of that attempt,
-  // replaced when they go Back and start a new one (5.4 step 2).
+  // Stable across retries of this attempt; replaced on Back.
   const attemptKey = useRef<string>("");
 
-  // §7.2 — a step change replaces the panel, so without this the focus is
-  // left on the button that just disappeared (the gap the spec names as real
-  // and absent). Focus moves to the new step's `<h2 tabindex="-1">`: -1 is
-  // not a tab stop, so §7.2's "no tabindex above 0" still holds, and the
-  // heading is what a screen reader announces as the new location. The ref
-  // tracks the heading of whichever step is mounted; the guard keeps the
-  // first render from stealing focus from wherever the customer was.
+  // A step change replaces the panel, so focus moves to the new `<h2
+  // tabindex="-1">`; the guard keeps the first render from stealing focus.
   const stepHeading = useRef<HTMLHeadingElement | null>(null);
   const previousStep = useRef<Step>(step);
 
@@ -201,16 +151,9 @@ export default function CheckoutView() {
     stepHeading.current?.focus();
   }, [step]);
 
-  // Owner directive D2 (U-W10-T2): an anonymous visitor never sees this
-  // route — /checkout hands them to /register?next=/checkout instead of the
-  // guest wall or the guest flow. `replace`, never `push`, so Back from
-  // /register cannot bounce-land on checkout. The ref makes it fire ONCE per
-  // mount: a state update (or StrictMode's double-invoke) cannot loop it.
-  // Only a RESOLVED "anonymous" is a decision — "loading" has no signal yet,
-  // so it falls through to the existing loading state below (no probe, no
-  // guessed credential, no new endpoint call: the auth context the page
-  // already reads is the whole signal). The target carries `next=/checkout`
-  // for both auth doors, which take it through `safeNext`.
+  // Anonymous visitors go to the register door before any guest branch paints.
+  // `replace` keeps Back from bounce-landing here; the ref fires once per
+  // mount so StrictMode cannot loop it.
   const redirected = useRef(false);
   useEffect(() => {
     if (authStatus !== "anonymous" || redirected.current) return;
@@ -218,9 +161,8 @@ export default function CheckoutView() {
     router.replace("/register?next=/checkout");
   }, [authStatus, router]);
 
-  // Anonymous is a redirect, not a render state (D2): the replace above is
-  // already in flight, so the wall and the guest flow must not paint for a
-  // route the customer is leaving. One loading frame, never a dead end.
+  // Redirect is in flight: never paint the wall or guest flow at a route the
+  // customer is leaving.
   if (gate === "loading" || authStatus === "anonymous" || cartLoading) {
     return (
       <div className="border border-hairline p-10 text-ink-secondary" role="status">
@@ -229,15 +171,8 @@ export default function CheckoutView() {
     );
   }
 
-  // The sign-in wall (flag OFF, CHANGE-11 / TIER1-GUEST-DEADEND). D2
-  // (U-W10-T2) replaces every anonymous visitor with the register door above,
-  // so this branch no longer paints — it is kept, not deleted, because
-  // checkoutGate's flag-off decision is an audited contract
-  // (checkout.test.ts "guest wall flag gate") and the render must still
-  // answer that gate rather than silently diverge from it. The backend's
-  // verified refusal (one uniform 403 that mints nothing) still surfaces at
-  // submit as the sign-in hand-off below — never faked as success, never
-  // pre-judged here.
+  // Kept as audited gate contract even though the redirect above means this
+  // branch no longer paints.
   if (gate === "wall") {
     return (
       <div className="border border-hairline p-10 text-center">
@@ -259,7 +194,6 @@ export default function CheckoutView() {
     );
   }
 
-  // API down / cart unreadable: the designed error state, never a blank page.
   if (cartError || !cart) {
     return (
       <div className="border border-hairline p-10 text-center">
@@ -277,7 +211,6 @@ export default function CheckoutView() {
     );
   }
 
-  // Empty cart: the designed stub (A-6 keeps it) — one click back to the shelf.
   if (cart.items.length === 0 && !order) {
     return (
       <div className="border border-hairline p-10 text-center">
@@ -306,14 +239,8 @@ export default function CheckoutView() {
   const chosenOption =
     estimate?.find((option) => option.method === selectedMethod) ?? null;
 
-  /**
-   * The summary's courier figure, from server truth only: the created
-   * order's shipping_amount, else the server-quoted option the customer
-   * picked in step 1. Nothing known yet renders no row — the screen's
-   * static "₹ 0 / complimentary over ₹ 15,000" line would be a price this
-   * client is not allowed to invent (P5), so the estimate block carries
-   * that information instead.
-   */
+  // Courier figure from server truth only; unknown renders no row rather than
+  // inventing the screen's static ₹0/complimentary line.
   const courierValue = order
     ? Number(order.shipping_amount) > 0
       ? formatINR(order.shipping_amount)
@@ -382,14 +309,13 @@ export default function CheckoutView() {
       .then((created) => {
         setOrder(created as CreatedOrder);
         setShipping(details);
-        saveShipping(details); // PII save — the moment a working order exists.
+        saveShipping(details); // saves PII only once a working order exists
         setStep("pay");
       })
       .catch((err: unknown) => {
         if (err instanceof ApiError) {
-          // The backend's uniform guest refusal (403, one body for every
-          // reason) becomes a sign-in hand-off rather than a retry loop; its
-          // own message is the copy — nothing is invented on top of it.
+          // The backend's uniform guest 403 becomes a sign-in hand-off; its
+          // own message is the copy.
           setRefused(rawAuthStatus === "anonymous" && err.status === 403);
           setCreationError(
             err.status === 404
@@ -445,14 +371,8 @@ export default function CheckoutView() {
   return (
     <div className="grid gap-10 lg:grid-cols-[1fr_380px]">
       <div>
-        {/* 5.4's step indicator, in the D1 screen's tabbed form (U-W12-T8):
-            numbered tabs ABOVE the 1px rule, both inside max-w-2xl, the active
-            tab in ink and the rest muted, and the rule's ink fill covering the
-            active tab's third (the screen's own pixels: 80→359 of a rule
-            spanning 80→919 at Delivery). Still this page's one motion — an
-            --color-ink scaleX fill answering "which step am I on, and how many
-            are left"; duration and easing are the progress-intent tokens and
-            the reduced-motion layer zeroes their duration at the token layer. */}
+        {/* Numbered tabs above the rule; the ink fill covers the active tab's
+            third and is the page's one motion. */}
         <div className="mb-8 max-w-2xl">
           <ol className="flex justify-between">
             {STEPS.map((item, index) => (
@@ -660,10 +580,8 @@ export default function CheckoutView() {
 
             <div className="mt-6">
               {rawAuthStatus === "anonymous" ? (
-                /* Verified contract: create_payment and verify_payment are
-                   IsAuthenticated, so a guest is never routed into the Razorpay
-                   flow — no JWT is faked and no payment call is attempted.
-                   The order exists; signing in is where their path resumes. */
+                /* Payment calls require a JWT: a guest gets this hand-off, so
+                   no session is faked and their order is left payable. */
                 <div
                   className="border border-hairline p-5"
                   role="status"
@@ -695,12 +613,8 @@ export default function CheckoutView() {
         )}
       </div>
 
-      {/* D1 screen's ledger rail: ruled summary card — thumbnailed line
-          items, a server-figure breakdown, one big serif total, and the
-          provider note. Nothing here invents money: subtotal is the display
-          sum of server item prices (reconciled at order creation), delivery
-          shows only a server quote or the created order's shipping_amount,
-          and the big total reads "Confirmed" only once the server has one. */}
+      {/* Summary shows only server figures; subtotal is the display sum of
+          server item prices and "Confirmed" waits for a server total. */}
       <aside
         aria-labelledby="order-summary"
         className="self-start border border-hairline bg-surface p-6 lg:sticky lg:top-24"

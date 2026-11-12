@@ -1,44 +1,25 @@
-# GHCR publish path (owner decision 2026-10): the backend image is published
-# to the GitHub Container Registry under the owner's own namespace, so the
-# deployment is WHITE-LABEL - the store's runtime is a generic
-# `ghcr.io/<owner>/<repo>-backend` image that any host (compose, Render,
-# a VPS) can pull without this repository's deploy machinery, and the owner
-# controls visibility and pulls with their own GitHub credentials.
-# GHCR was chosen over GCR so no cloud-specific registry secret is needed:
-# the job authenticates with the built-in GITHUB_TOKEN and the
-# `packages: write` permission declared on the job - no PAT, no JSON key.
+# Publishes the backend image to GHCR under the owner's namespace, keeping the
+# deployment white-label: any host can pull a generic image. GHCR avoids a
+# cloud-specific registry secret - the job uses GITHUB_TOKEN plus
+# `packages: write`.
 #
-# The image is the MULTI-STAGE slim build of backend/Dockerfile (builder
-# stage discarded; runtime carries only installed packages on
-# python:3.14-slim, non-root, with the SPEC-22-04 healthcheck). The frontend
-# is deliberately absent: it is owner-owned and ships through its own
-# pipeline, so this image is backend-only by design.
+# Backend-only by design (the frontend ships through its own pipeline); the
+# image is backend/Dockerfile's multi-stage slim, non-root build. deploy.yml
+# remains the documented BACKUP release path, dormant behind DEPLOY_ENABLED.
+# Neither workflow runs tests: publishing is triggered only by pushes
+# backend-tests already covered on the same SHA.
 #
-# RELATIONSHIP TO deploy.yml: deploy.yml (one ssh call running
-# scripts/release.sh on the deploy host) remains the DOCUMENTED BACKUP
-# release path, still dormant behind the DEPLOY_ENABLED variable and still
-# gated by backend-tests + secret-scan. This workflow ADDS the registry
-# publish leg; it does not replace or gate it. Neither workflow runs tests:
-# publishing an image whose tests are red is deploy.yml's job to prevent on
-# the release path, and here the publish is only ever triggered by pushes
-# that backend-tests has already covered on the same SHA.
-#
-# Tag discipline: every publish is tagged with its branch and its full
-# commit SHA (type=sha,format=long), so a running deployment can always be
-# traced back to the exact commit that produced it, and a rollback is a
-# retag to a previous sha- tag rather than a rebuild.
-#
-# PULL REQUESTS BUILD BUT NEVER PUBLISH: a PR that breaks the image build
-# must go red here, but a PR event has no registry credentials issue and
-# `push: false` below guarantees no image lands in the registry from an
-# unmerged head.
+# Tag discipline: branch + full commit SHA, so a deployment traces to its exact
+# commit and a rollback is a retag to a previous sha- tag. Pull requests build
+# but never publish (`push: false` below), so no unmerged head reaches the
+# registry.
 name: ghcr-publish
 
 on:
   push:
     branches: [spec-comp, feat/add-frontend]
     # Frontend-only or root-doc-only pushes skip; backend/docs/** matches
-    # backend/** below, so a backend docs-only change DOES spend a build.
+    # backend/**, so a backend docs-only change still spends a build.
     paths:
       - "backend/**"
       - "docker-compose.yml"
@@ -55,11 +36,10 @@ on:
       - ".github/workflows/ghcr-publish.yml"
   workflow_dispatch:
 
-# Least privilege baseline; the job below widens only what publishing needs.
+# Least privilege; the job below widens only what publishing needs.
 permissions:
   contents: read
 
-# One build per ref; a new push to the same ref cancels the stale build.
 concurrency:
   group: ghcr-publish-${{ github.ref }}
   cancel-in-progress: true
@@ -75,9 +55,8 @@ jobs:
 
       - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
 
-      # ghcr.io rejects uppercase image paths. GITHUB_REPOSITORY is already
-      # lowercase here, but the expansion makes the workflow portable to a
-      # rename without a silent registry 403.
+      # ghcr.io rejects uppercase paths; the lowercase expansion keeps a repo
+      # rename from causing a silent registry 403.
       - name: Compute the lowercase image name
         id: image
         run: echo "name=ghcr.io/${GITHUB_REPOSITORY,,}-backend" >> "$GITHUB_OUTPUT"

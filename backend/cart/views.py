@@ -16,9 +16,9 @@ from .services import resolve_cart
 class CartMutationRateThrottle(ScopedRateThrottle):
     """Applies the 'cart' scope to mutating methods only.
 
-    The cart view mixes GET (read) and POST (add) in one endpoint; reads
-    must not consume the mutation budget that guards write abuse, so safe
-    methods bypass the throttle."""
+    Reads must not consume the budget that guards write abuse, so safe methods
+    bypass the throttle.
+    """
 
     def allow_request(self, request, view):
         if request.method in ("GET", "HEAD", "OPTIONS"):
@@ -29,30 +29,23 @@ class CartMutationRateThrottle(ScopedRateThrottle):
 def _object_body(data):
     """The write body as a dict, or ``{}`` when it is not a JSON object.
 
-    A JSON array / scalar / null body parses fine but has no ``.get`` to
-    call, so reading keys off it raised AttributeError — a 500 on a public
-    write endpoint (F7-B1). Reading it as the empty object routes every
-    such body into the endpoint's own missing-key 400, byte-identical to
-    posting ``{}``; form posts are QueryDict (a dict subclass) and are
-    unaffected."""
+    A list/scalar/null body parses fine but has no ``.get``, so reading keys off
+    it 500s; as ``{}`` it falls into the endpoint's own missing-key 400 instead.
+    """
     return data if isinstance(data, dict) else {}
 
 
-# SPEC-17-03 [R-17.18]: this GET is the SPA's boot call (the header's cart
-# badge runs it on every page load), so it is the natural surface to issue
-# the csrftoken cookie from: the browser has the double-submit cookie in
-# hand before the first gated mutation, and the SPA's X-CSRFToken slot
-# (api.ts) replays it on every unsafe method. CSRF enforcement itself lives
-# in common.authentication.SessionCartCSRFAuthentication.
+# This GET is the SPA's boot call (the header cart badge runs it on page load),
+# so it issues the csrftoken cookie before the first gated mutation; enforcement
+# itself lives in common.authentication.SessionCartCSRFAuthentication.
 @api_view(["GET", "POST"])
 @ensure_csrf_cookie
 @throttle_classes([CartMutationRateThrottle])
 @throttle_scope("cart")
 def cart_detail(request):
 
-    # D-04a: ownership lives in one place. A signed-in caller gets the
-    # account cart; a guest gets the session cart, whose session key is
-    # minted lazily so a first-time boot GET finds its row instead of failing.
+    # Ownership lives in one place: a signed-in caller gets the account cart, a
+    # guest the session cart, whose key is minted lazily for a first boot GET.
     cart = resolve_cart(request)
 
     if request.method == "GET":
@@ -79,13 +72,9 @@ def cart_detail(request):
                 {"error": "Product not found"}, status=status.HTTP_404_NOT_FOUND
             )
 
-        # MERCHANT-DELIST: the buying surface treats a delisted product
-        # exactly like an unknown one — this same 404, byte-identical body
-        # — so a cart add is refused without becoming an oracle that
-        # distinguishes "never existed" from "taken off sale" (the public
-        # detail endpoint does the same). The customer's cart is untouched;
-        # a line already holding a delisted product is checkout's problem,
-        # refused there with a message that names it.
+        # A delisted product is answered exactly like an unknown one — same 404,
+        # same body — so cart add is not an oracle distinguishing "never existed"
+        # from "taken off sale".
         if not product.is_active:
             return Response(
                 {"error": "Product not found"}, status=status.HTTP_404_NOT_FOUND
@@ -106,9 +95,7 @@ def cart_detail(request):
                 status=status.HTTP_400_BAD_REQUEST,
             )
 
-        # Advisory only: stock can drop between here and capture, so the
-        # authority for "enough stock" is commit_order_sale's summed
-        # re-check at payment time, not this unlocked read.
+        # Advisory only: the summed re-check at payment time is the authority.
         if quantity > product.stock:
             return Response(
                 {"error": "Not enough stock"}, status=status.HTTP_400_BAD_REQUEST
@@ -138,11 +125,8 @@ def cart_detail(request):
 @throttle_scope("cart")
 def cart_item_detail(request, item_id):
 
-    # Uniform cart-family 404 (conventions.md: no existence leaks): no cart
-    # for this caller is answered exactly like a missing item. Resolution
-    # goes through the helper so the item can only ever be looked up inside
-    # the caller's OWN cart — an account cart and a guest cart can never
-    # share an item id space.
+    # Uniform 404 (no existence leaks): no cart for this caller answers exactly
+    # like a missing item, and lookup is scoped to the caller's own cart.
     cart = resolve_cart(request, create=False)
 
     if cart is None:
@@ -179,8 +163,7 @@ def cart_item_detail(request, item_id):
                 status=status.HTTP_400_BAD_REQUEST,
             )
 
-        # Advisory like the add path: payment's summed re-check is the
-        # authority; this keeps an impossible quantity out of the row.
+        # Advisory like the add path: payment's summed re-check is the authority.
         if quantity > cart_item.product.stock:
             return Response(
                 {"error": "Not enough stock"}, status=status.HTTP_400_BAD_REQUEST
@@ -206,12 +189,12 @@ def cart_item_detail(request, item_id):
 @api_view(["POST", "DELETE"])
 @throttle_scope("cart")
 def cart_coupon(request):
-    """R-9.3.5/R-9.3.6: apply/remove a coupon as persistent cart state.
+    """Apply/remove a coupon as persistent cart state.
 
-    The coupon rides the Cart as a FK, so it survives across requests; the
-    checkout flow re-validates it through its pre-existing coupon path, so
-    a coupon invalidated between apply and checkout can never reach an
-    order."""
+    The coupon rides the Cart as a FK, so it survives across requests; checkout
+    re-validates it, so a coupon invalidated between apply and checkout can never
+    reach an order.
+    """
 
     cart = resolve_cart(request, create=False)
 
@@ -219,10 +202,8 @@ def cart_coupon(request):
         return Response({"error": "Cart not found"}, status=status.HTTP_404_NOT_FOUND)
 
     if request.method == "DELETE":
-        # Idempotent by contract: removing when no coupon is applied still
-        # succeeds (the caller's end state already holds), returning the
-        # cart-family 200 with the cart body so the client can re-render
-        # without a follow-up GET.
+        # Idempotent by contract: removing with no coupon applied still succeeds
+        # and returns the cart body so the client can re-render without a GET.
         with transaction.atomic():
             locked = Cart.objects.select_for_update().get(pk=cart.pk)
             if locked.coupon_id:
@@ -239,19 +220,16 @@ def cart_coupon(request):
             {"error": "Coupon code is required"}, status=status.HTTP_400_BAD_REQUEST
         )
 
-    # Delegated redemption check: the same gate the public preview uses,
-    # so an unknown/inactive/expired/limit-hit/below-minimum coupon is
-    # refused here with the one uniform body (V-11) and never stored.
+    # Same gate as the public preview: an unknown/inactive/expired/limit-hit/
+    # below-minimum coupon is refused with the same uniform body and never stored.
     coupon, _subtotal, rejection = validate_redeemable_coupon(code, cart)
 
     if rejection is not None:
         return rejection
 
     with transaction.atomic():
-        # Lock the cart row around the write: apply and remove are
-        # user-scoped single-row mutations, and the lock serializes a
-        # concurrent apply/remove pair (double-submit) on the cart
-        # (conventions.md: side-effectful flows run under a row lock).
+        # Lock the cart row around the write: this serializes a concurrent
+        # apply/remove pair (double submit) on the cart.
         locked = Cart.objects.select_for_update().get(pk=cart.pk)
         locked.coupon = coupon
         locked.save(update_fields=["coupon"])

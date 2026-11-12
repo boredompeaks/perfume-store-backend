@@ -12,10 +12,9 @@ import { formatINR } from "@/lib/money";
 import type { Order, PaymentSession } from "@/lib/types";
 
 /**
- * Payment phases. Structural rule: a 409 from verify means money was
- * captured but the order cannot be fulfilled — the ONLY reachable UI from
- * that state is the contact-support dead end. There is deliberately no
- * retry affordance on it, and no code path re-enters payment/verify from it.
+ * A 409 from verify means money was captured but the order cannot be
+ * fulfilled; its only reachable UI is the contact-support dead end, with no
+ * retry and no path back into payment/verify.
  */
 export type PayPhase =
   | { kind: "ready" }
@@ -70,10 +69,8 @@ export default function PaymentLauncher({
             email: contact.email,
             contact: contact.phone,
           },
-          // A literal, not a Tailwind class: Razorpay's checkout iframe is
-          // outside this document, so it cannot read the cascade. `#8A5A24`
-          // was the pre-refs bronze and is void (§2.1.1); this is
-          // `--color-bronze` #8C5338 spelled out.
+          // Razorpay's checkout iframe is outside this document and cannot
+          // read CSS custom properties, so the bronze token is a literal.
           theme: { color: "#8C5338" },
           handler: (response) => {
             void confirmPayment(response);
@@ -121,14 +118,13 @@ export default function PaymentLauncher({
       .catch((err: unknown) => {
         if (err instanceof ApiError) {
           if (err.status === 409) {
-            // Money captured, fulfillment failed, backend cannot reconcile.
-            // Dead end: no retry, no further payment/verify calls. Ever.
+            // Money captured, fulfilment failed: dead end, never retry.
             setPhase({ kind: "captured-dead-end" });
           } else if (
             err.status === 400 &&
             /already been processed/i.test(err.message)
           ) {
-            // A previous verify may have succeeded — never re-open payment.
+            // A previous verify may have succeeded; never re-open payment.
             setPhase({ kind: "maybe-processed" });
           } else {
             setPhase({ kind: "verify-error", message: err.message });
@@ -248,7 +244,6 @@ export default function PaymentLauncher({
     );
   }
 
-  // ready
   return (
     <div>
       <button

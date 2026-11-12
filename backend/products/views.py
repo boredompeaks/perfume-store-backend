@@ -21,17 +21,12 @@ from .models import StockMovement, products
 from .serializers import ProductSerializer
 
 
-# Staff-gated writes via permission_classes (conventions.md: never inline
-# is_staff). SPEC-6-03c: write authority comes from the ``products.write``
-# capability (catalogue + admin roles) — at least as restricted as the
-# legacy blanket is_staff gate — while catalogue reads stay public.
+# Writes are staff/capability-gated via permission_classes (never inline
+# is_staff); catalogue reads stay public.
 @api_view(["GET", "POST"])
 @permission_classes([HasProductsWriteOrReadOnly])
 def product_list(request):
 
-    # =========================
-    # GET - List Products
-    # =========================
     if request.method == "GET":
         search = request.query_params.get("search")
         category = request.query_params.get("category")
@@ -39,13 +34,10 @@ def product_list(request):
         max_price = request.query_params.get("max_price")
         ordering = request.query_params.get("ordering")
 
-        # MERCHANT-DELIST: the base queryset is the on-sale catalogue, so
-        # no downstream filter/search can reintroduce a delisted row. The
-        # staff surfaces (Django admin) do not go through this view and
-        # keep seeing every row.
+        # Base queryset is the on-sale catalogue, so no downstream filter or
+        # search can reintroduce a delisted row; staff surfaces keep every row.
         products_data = products.objects.filter(is_active=True)
 
-        # Search
         if search:
             products_data = products_data.filter(
                 Q(name__icontains=search)
@@ -53,7 +45,6 @@ def product_list(request):
                 | Q(category__icontains=search)
             )
 
-        # Category filter
         if category:
             products_data = products_data.filter(category__iexact=category)
 
@@ -68,18 +59,12 @@ def product_list(request):
                 status=status.HTTP_400_BAD_REQUEST,
             )
 
-        # Minimum price. Tested against None rather than truthiness: "0" is a
-        # valid floor and Decimal("0") is falsy, which silently ignored it.
+        # Tested against None, not truthiness: "0" is a valid floor and is falsy.
         if min_price is not None:
             products_data = products_data.filter(price__gte=min_price)
 
-        # Maximum price (same None test: a zero ceiling must filter everything).
         if max_price is not None:
             products_data = products_data.filter(price__lte=max_price)
-
-        # =========================
-        # Ordering
-        # =========================
 
         allowed_ordering = [
             "price",
@@ -93,16 +78,9 @@ def product_list(request):
         if ordering in allowed_ordering:
             products_data = products_data.order_by(ordering)
         else:
-            # F-12: an unordered queryset makes Paginator unstable (and
-            # emits UnorderedObjectListWarning). When no valid ``ordering``
-            # is requested, newest-first is the storefront default, and the
-            # unique ``-id`` tiebreaker makes the sort total, so identical
-            # requests always partition the catalogue into identical pages.
+            # Paginator needs ordering: newest-first, with ``-id`` as the
+            # tiebreaker so identical requests partition identically.
             products_data = products_data.order_by("-created_at", "-id")
-
-        # =========================
-        # Pagination
-        # =========================
 
         page_number = request.query_params.get("page", 1)
 
@@ -123,24 +101,17 @@ def product_list(request):
             }
         )
 
-    # =========================
-    # POST - Create Product
-    # =========================
-
     elif request.method == "POST":
         serializer = ProductSerializer(data=request.data)
 
         if serializer.is_valid():
-            # [6.12.6] Log privileged actions: the write and its LogEntry
-            # commit together, so an audit trail can never lag the row it
-            # describes (an unlogged product write is a spec violation).
+            # [6.12.6] Write and LogEntry commit together, so the audit trail
+            # can never lag the row it describes.
             with transaction.atomic():
                 product = serializer.save()
                 log_api_action(request, product, ADDITION, "Created via API.")
-                # SPEC-20-4 [R-20.27]: the LogEntry above says only that a
-                # catalogue item appeared. This records what it was created
-                # with, as real before (None) -> after values, and states the
-                # surface the write arrived through.
+                # Structured mutation event: real before (None) -> after values
+                # plus the surface the write arrived through.
                 log_mutation(
                     request,
                     product,
@@ -155,20 +126,12 @@ def product_list(request):
         return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
 
 
-# ==================================
-# Single Product Operations
-# ==================================
-
-
 def _save_product_update(request, serializer):
     """Apply a validated PUT/PATCH and record what actually changed.
 
-    The pre-write snapshot is taken here, before ``save()``, because after
-    the save the old values are gone — that snapshot is what makes the
-    recorded before -> after pairs real rather than reconstructed. Both the
-    privileged-action LogEntry ([6.12.6]) and the structured mutation event
-    (SPEC-20-4 [R-20.27]) are written from this one place, so PUT and PATCH
-    cannot drift apart.
+    The pre-write snapshot is taken before ``save()`` because the old values
+    are gone after it; both the LogEntry and the mutation event are written
+    from this one place so PUT and PATCH cannot drift apart.
     """
     product = serializer.instance
     before = {name: getattr(product, name, None) for name in serializer.validated_data}
@@ -189,7 +152,6 @@ def _save_product_update(request, serializer):
 @permission_classes([HasProductsWriteOrReadOnly])
 def product_detail(request, slug):
 
-    # Find product
     try:
         product = products.objects.get(slug=slug)
 
@@ -198,21 +160,9 @@ def product_detail(request, slug):
             {"error": "Product not found"}, status=status.HTTP_404_NOT_FOUND
         )
 
-    # =========================
-    # GET - Get One Product
-    # =========================
-
     if request.method == "GET":
-        # MERCHANT-DELIST: the public read must not serve a delisted row,
-        # and the refusal is this same 404 the unknown slug gets — the
-        # bodies are byte-identical — so the endpoint cannot be used to
-        # tell "never existed" from "taken off sale". Reads of delisted
-        # rows live on the staff admin surface, which lists every row.
-        # PUT/PATCH/DELETE deliberately still address delisted rows: they
-        # are already capability-gated (403 for everyone else, so no
-        # existence oracle opens up), and "delist → fix the price → relist"
-        # is the natural staff workflow — hiding the row from its own edit
-        # path would force a relist just to change a number.
+        # Delisted rows 404 byte-identically here, so no existence oracle;
+        # writes still address them (gated) for delist -> edit -> relist.
         if not product.is_active:
             return Response(
                 {"error": "Product not found"}, status=status.HTTP_404_NOT_FOUND
@@ -221,10 +171,6 @@ def product_detail(request, slug):
         serializer = ProductSerializer(product)
 
         return Response(serializer.data)
-
-    # =========================
-    # PUT - Full Update
-    # =========================
 
     elif request.method == "PUT":
         serializer = ProductSerializer(product, data=request.data)
@@ -238,10 +184,6 @@ def product_detail(request, slug):
 
         return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
 
-    # =========================
-    # PATCH - Partial Update
-    # =========================
-
     elif request.method == "PATCH":
         serializer = ProductSerializer(product, data=request.data, partial=True)
 
@@ -254,22 +196,13 @@ def product_detail(request, slug):
 
         return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
 
-    # =========================
-    # DELETE - Delete Product
-    # =========================
-
     elif request.method == "DELETE":
         with transaction.atomic():
-            # [6.12.6] Logged before the delete: Django's collector clears
-            # the instance pk afterwards, so the record must capture the
-            # identity first (the admin's own log_deletion does the same).
-            # The record stores the repr and pk (never a FK), so it
-            # survives the row it describes.
+            # Logged before the delete: Django's collector clears the pk, and
+            # the record stores repr + pk so it survives the row it names.
             log_api_action(request, product, DELETION, "Deleted via API.")
-            # SPEC-20-4: a deletion has no "after" to record, but it still
-            # needs its surface stated and its target identified on a row
-            # that outlives the object. Written before the delete for the
-            # same pk-clearing reason as the LogEntry above.
+            # A deletion has no "after", but still records its surface and
+            # target on a row that outlives the object.
             log_mutation(
                 request,
                 product,
@@ -282,43 +215,30 @@ def product_detail(request, slug):
         return Response(status=status.HTTP_204_NO_CONTENT)
 
 
-# ==================================
-# Inventory Adjustment (SPEC-9-06 [R-9.4.7])
-# ==================================
-
-# Valid reasons for a manual adjustment, straight from the ledger model —
-# a value outside this set must be a 400 here, never a 500 at insert time.
+# Out-of-set reasons must be a 400 here, never a 500 at insert time.
 _VALID_ADJUSTMENT_REASONS = frozenset(StockMovement.Reason.values)
 
 
 def _object_body(data):
     """The write body as a dict, or ``{}`` when it is not a JSON object.
 
-    A JSON array / scalar / null body parses fine but has no ``.get`` to
-    call, so reading keys off it raised AttributeError — a 500 on this
-    staff stock-write endpoint (F7-B1). Reading it as the empty object
-    routes every such body into the endpoint's own missing-key 400 below
-    (product_id required), byte-identical to posting ``{}``; form posts
-    are QueryDict (a dict subclass) and are unaffected. The body of
-    ``cart.views._object_body`` (T1F1's pattern) is duplicated rather
-    than imported: importing that module here would couple the products
-    view layer to the whole cart + orders view stack for a one-liner,
-    which is a worse trade than the line it saves."""
+    A JSON array/scalar/null parses but has no ``.get``, which raised a 500;
+    the empty object routes it into the normal missing-key 400. Duplicated
+    from ``cart.views`` rather than importing that whole view stack for a
+    one-liner.
+    """
     return data if isinstance(data, dict) else {}
 
 
 @api_view(["POST"])
 @permission_classes([HasInventoryAdjust])
 def inventory_adjust(request):
-    """POST /admin/inventory/adjustments (spec 9.4 Inventory module):
-    a thin REST wrapper around the shipped ``products.adjust_stock``
-    service. Reuse is deliberate — the service already owns the whole
-    contract (atomic + select_for_update, the below-zero ValueError guard,
-    the StockMovement ledger row with stock_after and created_by), so the
-    view only maps HTTP onto it: permission via ``HasInventoryAdjust``
-    (conventions.md: never inline is_staff), payload validation, and the
-    service's outcomes as status codes. The movement row IS the audit
-    record, per the no-silent-inventory-edits rule [6.5.17]."""
+    """POST /admin/inventory/adjustments: thin REST wrapper over ``adjust_stock``.
+
+    The service owns the contract (atomic + select_for_update, below-zero
+    guard, ledger row); this only maps HTTP onto it, and the movement row is
+    the audit record.
+    """
     body = _object_body(request.data)
 
     product_id = body.get("product_id")
@@ -367,8 +287,8 @@ def inventory_adjust(request):
     try:
         product.adjust_stock(request.user, delta, reason, note)
     except ValueError as error:
-        # The service's below-zero guard: rejected before anything was
-        # written, so the message is safe to surface verbatim.
+        # Below-zero guard rejects before any write, so the message is safe
+        # to surface verbatim.
         return Response({"error": str(error)}, status=status.HTTP_400_BAD_REQUEST)
 
     movement = product.stock_movements.first()

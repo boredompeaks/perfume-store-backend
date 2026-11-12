@@ -17,15 +17,11 @@ admin.site.index_title = "Store operations"
 class SiteSettingsAdmin(RoleAwareModelAdmin):
     """Singleton settings row — no add/delete, only edit."""
 
-    # Store settings are the sensitive surface ``settings.manage`` guards
-    # (spec 6.12), so both seeing and editing them is privilege-tier
-    # territory: spec 1.1 gives settings to Admin (line 137) and to the
-    # superadmin tier above it (line 146), and to no one else.
+    # Settings are the sensitive surface ``settings.manage`` guards:
+    # Admin and the superadmin tier above it, and no one else.
     capability_map = {
         "view": "settings.manage",
         "change": "settings.manage",
-        # add/delete: the subclass overrides below keep them impossible for
-        # everyone (singleton), as before.
     }
     list_display = (
         "support_email",
@@ -37,9 +33,8 @@ class SiteSettingsAdmin(RoleAwareModelAdmin):
     )
     fieldsets = (
         (
-            # [R-16.3] SPEC-16-T2/05. ``fieldsets`` is explicit, so a field
-            # that is not named in one of these tuples is unreachable in the
-            # merchant's only editing surface.
+            # ``fieldsets`` is explicit: a field not named here is unreachable
+            # in the merchant's only editing surface.
             "Store identity",
             {
                 "fields": ("name", "logo", "locale"),
@@ -64,22 +59,13 @@ class SiteSettingsAdmin(RoleAwareModelAdmin):
             },
         ),
         (
-            # SPEC-1-B07d. Its own fieldset rather than a sixth field on the
-            # contact row: this is store POLICY and the gate reads it, while
-            # every field above is a channel the storefront merely displays.
-            # ``fieldsets`` is explicit here, so without this entry the column
-            # would exist, be writable through the ORM, and be UNREACHABLE in
-            # the one surface the merchant has for editing settings.
+            # Store POLICY the returns gate reads, not a storefront display
+            # channel; without its own fieldset the column would be unreachable.
             "Store policy (read by the returns gate; blank = store default)",
             {
                 "fields": ("return_window_days",),
-                # SPEC-1-B07f-a: what 0 DOES, in the one form the merchant
-                # reads. The fieldset DESCRIPTION rather than the field's
-                # ``help_text`` because ``help_text`` is a model field
-                # attribute and restating it writes a migration - a poor price
-                # for prose. Both render on this same change page and this one
-                # sits directly above the input, so the merchant who types 0 is
-                # not left to infer it from the field's name.
+                # The fieldset description, not the field's ``help_text``:
+                # editing ``help_text`` would write a migration for prose.
                 "description": (
                     "<p><strong>Return window.</strong> The days a customer has "
                     "to request a return, counted from delivery where the goods "
@@ -96,11 +82,8 @@ class SiteSettingsAdmin(RoleAwareModelAdmin):
             },
         ),
         (
-            # [R-16.15] SPEC-16-T2/05. Its own fieldset because it changes what
-            # every customer sees, not what the store is called. The page and
-            # the gating that acts on the flag are SPEC-3-06's; the description
-            # says so, so nobody expects this switch to take the store down by
-            # itself.
+            # Its own fieldset because it changes what every customer sees;
+            # the gating that acts on the flag lives elsewhere.
             "Store availability",
             {
                 "fields": ("maintenance_mode",),
@@ -125,8 +108,7 @@ class SiteSettingsAdmin(RoleAwareModelAdmin):
         return super().get_queryset(request).filter(pk=1)
 
     def changelist_view(self, request, extra_context=None):
-        # Singleton: the changelist would show a single row — send editors
-        # straight to the change form.
+        # Singleton: send editors straight to the change form.
         from django.shortcuts import redirect
 
         obj = self.get_queryset(request).first()

@@ -9,7 +9,7 @@ export const ORDERINGS = [
 
 export type Ordering = (typeof ORDERINGS)[number];
 
-/** UI default when the URL carries no ordering (the backend has none — F-12). */
+/** UI default when the URL carries no ordering; the backend has none. */
 export const DEFAULT_ORDERING: Ordering = "-created_at";
 
 export type ProductFilters = {

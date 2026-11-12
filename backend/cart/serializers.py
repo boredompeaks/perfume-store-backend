@@ -25,9 +25,8 @@ class CartSerializer(serializers.ModelSerializer):
 
     class Meta:
         model = Cart
-        # V-09/F-15 (Q-S1): no `session_id` here. The client already owns
-        # the session cookie; echoing the raw key back only widens who can
-        # capture it (logs, proxies, XSS exfil) with zero benefit.
+        # No `session_id`: the client already owns the session cookie, and
+        # echoing the raw key back only widens who can capture it.
         fields = [
             "id",
             "items",
@@ -37,7 +36,6 @@ class CartSerializer(serializers.ModelSerializer):
         ]
 
     def get_coupon_code(self, obj):
-        # The code is all the frontend needs to render the applied coupon
-        # (R-9.3.5); a method field keeps the nullable FK traversal explicit
-        # instead of relying on DRF's source-chain None handling.
+        # A method field keeps the nullable FK traversal explicit instead of
+        # relying on DRF's source-chain None handling.
         return obj.coupon.code if obj.coupon_id else None

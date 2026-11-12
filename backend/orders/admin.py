@@ -19,25 +19,21 @@ from common.audit import log_mutation, model_field_changes
 from common.models import AuditEvent
 from common.saved_filters import SavedFilterMixin
 
-# [R-12.8] SPEC-12-02: the admin cancel writers release the checkout's
-# stock holds with the same vocabulary the API twin uses.
+# The admin cancel writers release the checkout's stock holds with the same
+# vocabulary the API twin uses.
 from products.models import StockReservation
 
-# [R-1.14] SPEC-1-05: the ONE issuance core. The API seam and this admin
-# action call the same module rather than two copies of the locks, balance
-# gate and gateway call. Bound as a module because ``issue_refund`` is also
-# the action's name on this class, and the domain refusals travel with it.
+# The ONE issuance core, bound as a module because ``issue_refund`` is also the
+# action's name on OrderAdmin; the API seam and this admin action call the same
+# locks, balance gate and gateway call.
 from . import refunds as refunds_core
 
-# [R-10.16] SPEC-10-05: the per-transition side-effect contract (one
-# dispatch point, shared with the JSON seam).
+# The per-transition side-effect contract, shared with the JSON seam.
 from .events import notify_transition
 
-# [R-10.1] The order machine lives in orders.state (single source); this
-# module only consumes it.
-# [R-1.16] SPEC-1-B07a: the return-request row and its own machine. Kept on
-# its own import line so every hunk above stays insertion-only, and kept out
-# of orders.state on purpose (that module is capability-scoped and audited).
+# The order machine lives in orders.state; the return row and its own machine
+# stay here, out of orders.state on purpose (that module is audited and holds
+# the order dimensions only).
 from .models import (
     Coupon,
     Order,
@@ -50,8 +46,7 @@ from .models import (
     return_transition_allowed,
 )
 
-# [R-10.1] SPEC-10-01b: the fulfilment-dimension mapping for the writers.
-# [R-10.12] SPEC-10-02: the trigger vocabulary for the audit writers.
+# The fulfilment-dimension mapping and the trigger vocabulary for the writers.
 from .state import (
     ALLOWED_TRANSITIONS,
     FULFILMENT_QUEUE_STATUSES,
@@ -62,14 +57,13 @@ from .state import (
     transition_allowed,
 )
 
-# [SPEC-E-02] The amount a request asks for is derived beside the customer
-# seam that writes its ``items`` list, so the staff decision cannot read the
-# list by a second, drifting rule.
+# The amount a request asks for is derived beside the customer seam that writes
+# ``items``, so the staff decision cannot read the list by a drifting second
+# rule.
 from .views.refund import refund_request_amount
 
-# SPEC-A-ADDR: the changelist shows enough of the destination to identify a
-# parcel; the full value stays in the change form. Named once so the display
-# and its test cannot drift to different widths.
+# The grid shows enough of the destination to identify a parcel; named once so
+# the display and its test cannot drift to different widths.
 SHORT_ADDRESS_MAX_LENGTH = 40
 
 
@@ -77,10 +71,9 @@ class OrderItemInline(admin.TabularInline):
     model = OrderItem
     extra = 0
     can_delete = False
-    # [R-8.13] Explicit order: the frozen sku/variant_name snapshots render
-    # beside the product name they were taken from. The permission overrides
-    # below keep every snapshot column read-only -- admin edits would
-    # falsify purchase history.
+    # The frozen sku/variant_name snapshots render beside the product name they
+    # were taken from; the overrides below keep every column read-only, since an
+    # admin edit would falsify purchase history.
     fields = (
         "product",
         "product_name",
@@ -106,16 +99,10 @@ class OrderItemInline(admin.TabularInline):
 class OrderItemPackingInline(OrderItemInline):
     """The item lines as the PACKING operator needs them.
 
-    Spec 1.1 line 110 gives packing and shipping to the inventory/fulfilment
-    operator, which does not hold ``orders.read`` (order visibility) — so the
-    per-line ``price``/``subtotal`` are the store's money, not its packing
-    list, and this inline shows what to pick and how many of it.
-
+    Packing does not hold ``orders.read``, so the per-line money is withheld.
     ``has_view_permission`` is the one thing it adds: Django skips an inline
-    whose view, change, add and delete are all false (which is why the
-    money-bearing parent never renders), and "what is in this parcel" is the
-    whole point of the fulfilment surface. It stays a READ — the parent's
-    add/change/delete denials are inherited unchanged.
+    whose permissions are all false, and "what is in this parcel" is the point
+    of the surface - it stays a read.
     """
 
     fields = ("product_name", "sku", "variant_name", "quantity")
@@ -126,16 +113,11 @@ class OrderItemPackingInline(OrderItemInline):
         return True
 
 
-# The legal status flow (ALLOWED_TRANSITIONS) and its gate
-# (transition_allowed) live in orders.state — [R-10.1] single source. The
-# cancelling-a-paid-order rationale is documented beside the table there.
-
-
 def _append_status_event(order, *, from_status, to_status, actor, trigger):
-    """[R-10.12]/[R-10.17] SPEC-10-02: one immutable audit row per
-    transition. Callers MUST run this inside the transaction that persists
-    the transition, so the two commit and roll back together ([R-10.18]) —
-    the rollback pins in the test suite hold every writer to it."""
+    """One immutable audit row per transition.
+
+    Callers MUST run this inside the transaction that persists the transition,
+    so the two commit and roll back together."""
     return OrderStatusEvent.objects.create(
         order=order,
         from_status=from_status,
@@ -148,11 +130,9 @@ def _append_status_event(order, *, from_status, to_status, actor, trigger):
 class IssueRefundForm(forms.Form):
     """The operator's input on the refund interstitial.
 
-    Neither field carries a business rule: ``amount`` is optional and blank
-    means "the remaining balance", and ``reason`` is passed through so the
-    shared core is the ONE authority on whether a refund may be issued and
-    what message a refusal carries. This form only decides whether the input
-    is shaped like a string/decimal at all.
+    Neither field carries a business rule: blank ``amount`` means the remaining
+    balance, and ``reason`` is passed through so the shared core is the ONE
+    authority on whether a refund may be issued and what a refusal says.
     """
 
     amount = forms.DecimalField(
@@ -170,62 +150,43 @@ class IssueRefundForm(forms.Form):
 
 @admin.register(Order)
 class OrderAdmin(SavedFilterMixin, RoleAwareModelAdmin):
-    # SPEC-20-6 [R-20.11]: the saved-view bar rides first in the bases so it
-    # wraps whichever changelist_view branch runs (this admin's transition
-    # guards are on save_model, not on the view, so the merge is the only
-    # thing in front of the grid).
-    # Role-aware least privilege (spec 6.12): support fulfils and cancels,
-    # finance reads. Add/delete stay capability-less on purpose — orders
-    # originate from checkout (manual rows would bypass payment), and hard
-    # delete would bypass the legal status flow; the sanctioned paths are
-    # the status actions and the cancel action below.
+    # The saved-view bar rides first in the bases so it wraps whichever
+    # changelist_view branch runs.
+    # Least privilege: support fulfils and cancels, finance reads. Add/delete
+    # stay capability-less because orders originate from checkout and a hard
+    # delete would bypass the legal status flow.
     capability_map = {
         "view": "orders.read",
         "add": None,
         "change": "orders.fulfill",
         "delete": None,
     }
-    # [R-1-B03] Spec 1.1 line 110 puts packing and shipping on the
-    # inventory/fulfilment operator, which holds ``orders.fulfill`` and
-    # deliberately NOT ``orders.read`` (least privilege: it is not "see every
-    # order"). Without this second door the operator's grid answers 200 on a
-    # URL it can only guess, because its change capability is what Django
-    # gates the changelist on, while the admin index hid the module and no
-    # page listed the orders awaiting packing. The scoped viewer is therefore
-    # admitted to the FULFILMENT queue below — a narrowed listing, not a wider
-    # capability: ``orders.read`` itself stays where spec 1.1 puts it, so
-    # ``export_csv`` (gated on it) is still refused.
+    # Packing holds ``orders.fulfill`` and deliberately not ``orders.read``;
+    # without this second door the operator's grid answers 200 on a URL it can
+    # only guess. The scoped viewer is admitted to the FULFILMENT queue below -
+    # a narrowed listing, not a wider capability, so ``export_csv`` stays
+    # refused.
     scoped_view_capability = "orders.fulfill"
-    # The queue: statuses the fulfilment walk can still advance (spec line
-    # 110's "packing, shipping"), read from orders.state so the listing can
-    # never drift from the transitions it offers. Anything else (delivered,
-    # cancelled) is not this operator's work and is not listed.
+    # The statuses the fulfilment walk can still advance, read from orders.state
+    # so the listing cannot drift from the transitions it offers.
     scoped_queryset = FULFILMENT_QUEUE_STATUSES
-    # Columns packing needs and nothing else. No total, discount, currency,
-    # coupon or payment reference: those are the money columns orders.read
-    # withholds, and a packer has no use for them.
+    # Only what packing needs: no total, discount, currency, coupon or payment
+    # reference.
     scoped_list_display = (
         "id",
-        # [R-8.5] the customer-facing reference beside the internal pk
         "order_number",
-        # Destination only: enough to sort a courier run, not a customer
-        # record. Name, phone and email are not on this grid.
-        # SPEC-A-ADDR: the street rides beside the city, previewed -- a
-        # packer has to know where the parcel goes, but this is a column,
-        # never a lookup key (see scoped_search_fields below).
+        # Destination only: enough to sort a courier run, never a lookup key
+        # (see scoped_search_fields below).
         "short_address",
         "city",
         "status",
         "created_at",
     )
-    # Reference-only search, deliberately: no phone, email, customer-name or
-    # delivery-address terms. The operator may find an order to pack by its
-    # reference, not by probing customer records (``customers.read`` is a
-    # capability it does not hold). The address is rendered as a destination
-    # column above, but rendering it is not authorization to search it.
+    # Reference-only search: rendering the address as a destination column is
+    # not authorization to search it.
     scoped_search_fields = ("id", "order_number")
-    # The change form, narrowed the same way: what is going where, and what
-    # state it is in. The user, phone, money and gateway columns stay out.
+    # The change form, narrowed the same way: the user, phone, money and gateway
+    # columns stay out.
     scoped_fieldsets = (
         (
             "Shipping",
@@ -234,26 +195,15 @@ class OrderAdmin(SavedFilterMixin, RoleAwareModelAdmin):
         ("Fulfilment", {"fields": ("status",)}),
         ("Timestamps", {"fields": ("created_at", "shipped_at", "delivered_at")}),
     )
-    # [R-1-B03] cycle 3: what this door may WRITE. Declared, not derived, and
-    # deny-by-default in the base — the grid above decides what a packer can
-    # read, these two decide what it can commit, so a scoped fieldset can
-    # never hand out a write by growing a field.
-    #
-    # Fulfilment state is the one editable field: advancing a packed order is
-    # the whole point of this surface. Everything else it renders — the
-    # checkout-minted reference and the delivery address included — is
-    # read-only, so a packer cannot redirect a parcel: re-pointing where a
-    # parcel goes is not packing or shipping authority (spec line 110), and it
-    # is the destructive kind of edit nobody on this surface is here to make.
+    # What this door may WRITE: declared, not derived, and deny-by-default in
+    # the base, so a scoped fieldset can never hand out a write by growing a
+    # field. Fulfilment state is the one editable field; everything else is
+    # read-only, so a packer cannot redirect a parcel.
     scoped_writable_fields = frozenset({"status"})
-    # And of the statuses, the one that belongs to somebody else. Cancelling
-    # is [6.12.4]'s destructive authority on a financial record — confirmation
-    # interstitial plus a captured reason on the sanctioned path — and it is
-    # gated on ``orders.cancel``, which this role deliberately does not hold.
-    # It is named here with the same capability the bulk ``cancel_pending``
-    # action answers on (pinned equal by the test suite), so the change form,
-    # the list-edit cell and the bulk action are one authority rather than
-    # three that can drift.
+    # Cancelling is destructive authority on a financial record, gated on
+    # ``orders.cancel`` which this role does not hold; named with the same
+    # capability the bulk ``cancel_pending`` action answers on, so the change
+    # form, the list-edit cell and the bulk action cannot drift.
     scoped_value_capabilities = {"status": {"cancelled": "orders.cancel"}}
     action_capabilities = {
         "mark_confirmed": "orders.fulfill",
@@ -261,56 +211,40 @@ class OrderAdmin(SavedFilterMixin, RoleAwareModelAdmin):
         "mark_delivered": "orders.fulfill",
         "cancel_pending": "orders.cancel",
         "export_csv": "orders.read",
-        # [R-1.14] Money movement is finance's call: support may read and
-        # fulfil orders but never issue a refund, so the action is absent
-        # from its dropdown and a directly POSTed name is refused.
+        # Money movement is finance's call: absent from support's dropdown and a
+        # directly POSTed name is refused.
         "issue_refund": "refunds.create",
     }
-    # Cancelling orders is the one destructive bulk action here ([6.12.4]):
-    # irreversible status change on a financial record, so it must be
-    # explicitly confirmed before it executes.
+    # Irreversible status change on a financial record, so it must be explicitly
+    # confirmed.
     confirmation_required_actions = frozenset({"cancel_pending"})
-    # SPEC-20-5 [R-20.28]: the only confirmed action that asks why. The
-    # reason rides the interstitial and is merged into the cancel's change
-    # message, mirroring the inventory path's reason/note capture
-    # (AdjustStockForm) so a cancellation is audited with the operator's own
-    # words instead of only the fact that it happened.
+    # The only confirmed action that asks why, mirroring AdjustStockForm's
+    # reason capture so a cancellation is audited with the operator's words.
     confirmation_reason_actions = frozenset({"cancel_pending"})
     list_display = (
         "id",
-        # [R-8.5] the customer-facing reference beside the internal pk
         "order_number",
         "user",
         "full_name",
-        # SPEC-A-ADDR: the destination at a glance; the change form keeps
-        # the untruncated value.
+        # The destination at a glance; the change form keeps the full value.
         "short_address",
         "status",
         "total_amount",
         "discount_amount",
-        # [R-8.11] the denomination beside the money columns it labels
         "currency",
         "coupon",
         "payment_ref",
         "created_at",
-        # [R-8.16] the two live business-event stamps beside the row;
-        # refunded_at (written by the SPEC-1-05 refund seam) and the
-        # still-unwritten fulfilled/shipped/delivered events stay off the
-        # changelist until their writers land.
+        # The two live business-event stamps; the still-unwritten events stay
+        # off the changelist until their writers land.
         "paid_at",
         "cancelled_at",
     )
     list_editable = ("status",)
     list_filter = ("status", "created_at")
-    # [R-1.13] guest_email joins the customer search terms so a guest order is
-    # findable by the same handle a customer order is (guest_email is the
-    # only identity a guest row has). It is deliberately NOT in
-    # scoped_search_fields: the packing operator may find an order to pack by
-    # its reference, not by probing customer records (see B03 above).
-    # SPEC-A-ADDR: ``address`` is searchable for the order-visibility roles
-    # (support/finance resolving a delivery), and for the same reason it
-    # stays OUT of scoped_search_fields: the packing queue may read the
-    # destination as a column, never use it as a customer probe.
+    # guest_email and address join the customer search terms, but deliberately
+    # stay out of scoped_search_fields: the packing queue may read the
+    # destination, never use it as a customer probe.
     search_fields = (
         "id",
         "user__username",
@@ -335,8 +269,8 @@ class OrderAdmin(SavedFilterMixin, RoleAwareModelAdmin):
     readonly_fields = (
         "created_at",
         "updated_at",
-        # [R-8.16] the business-event timeline: admin edits would falsify
-        # the lifecycle record, so every event stamp renders read-only.
+        # Admin edits would falsify the lifecycle record, so every event stamp
+        # renders read-only.
         "paid_at",
         "fulfilled_at",
         "shipped_at",
@@ -353,9 +287,8 @@ class OrderAdmin(SavedFilterMixin, RoleAwareModelAdmin):
     fieldsets = (
         (
             "Customer",
-            # [R-1.13] guest_email rides the Customer group so staff read the
-            # same field that identifies a guest order, next to the account it
-            # replaces (empty on a customer order, the address on a guest's).
+            # guest_email rides the Customer group so staff read the same field
+            # that identifies a guest order, next to the account it replaces.
             {"fields": ("user", "guest_email", "full_name", "phone")},
         ),
         ("Delivery address", {"fields": ("address", "city", "state", "pincode")}),
@@ -394,11 +327,9 @@ class OrderAdmin(SavedFilterMixin, RoleAwareModelAdmin):
     def short_address(self, obj):
         """A one-line preview of the delivery address for the grid.
 
-        The change form owns the full value; this column exists so a reader
-        can tell two destinations apart without opening each order. Newlines
-        and runs of whitespace are collapsed for the single table cell, and
-        the length is bounded so one long address cannot crowd out the money
-        columns beside it.
+        Newlines and whitespace runs are collapsed for the single table cell,
+        and the length is bounded so one long address cannot crowd out the
+        money columns beside it.
         """
         address = " ".join((obj.address or "").split())
         if len(address) <= SHORT_ADDRESS_MAX_LENGTH:
@@ -409,16 +340,9 @@ class OrderAdmin(SavedFilterMixin, RoleAwareModelAdmin):
     def payment_ref(self, obj):
         return obj.razorpay_payment_id or "—"
 
-    # ——— the scoped fulfilment surface (a scoped viewer, see above) ———
-
-    # Each hook narrows ONE thing for a scoped viewer and defers to Django's
-    # own accessor otherwise, so the full-surface behaviour of every other
-    # role (and the superuser bypass) is byte-identical to before: the same
-    # method, not a second code path. Declared state, never derived from the
-    # request's role mid-flight. What the door may WRITE is not narrowed here
-    # at all — it is declared once, above (``scoped_writable_fields`` /
-    # ``scoped_value_capabilities``) and enforced by the base, which is where
-    # the change form and the list-edit cell are both built from.
+    # Each hook narrows ONE thing for a scoped viewer and defers to Django
+    # otherwise, so every other role's behaviour is byte-identical. What the
+    # door may WRITE is declared above and enforced by the base.
 
     def get_queryset(self, request):
         queryset = super().get_queryset(request)
@@ -443,20 +367,18 @@ class OrderAdmin(SavedFilterMixin, RoleAwareModelAdmin):
 
     def get_inlines(self, request, obj=None):
         if self.is_scoped_viewer(request):
-            # The money half of the item snapshot is withheld with the rest of
-            # it. get_inlines yields CLASSES (Django instantiates them), so
-            # the swap is a class substitution, not an instance.
+            # The money half of the snapshot is withheld too; get_inlines
+            # yields CLASSES, so the swap is a class substitution.
             return [OrderItemPackingInline]
         return super().get_inlines(request, obj)
 
     def get_urls(self):
         """The refund action's own input page.
 
-        The action opens this page instead of executing, because issuing a
-        refund needs an amount and a reason; the page IS the confirmation
-        step. ``admin_view`` applies Django's staff check, and the capability
-        is re-checked in the view because "is_staff" is not the authority on
-        money movement.
+        The action opens this page instead of executing because a refund needs
+        amount and reason - the page IS the confirmation step; the capability is
+        re-checked in the view because "is_staff" is not the authority on money
+        movement.
         """
         urls = super().get_urls()
         custom = [
@@ -471,20 +393,14 @@ class OrderAdmin(SavedFilterMixin, RoleAwareModelAdmin):
     def changelist_view(self, request, extra_context=None):
         """The grid a scoped viewer lands on IS the fulfilment queue.
 
-        ``get_queryset`` above already restricts the rows to the statuses the
-        packing walk can advance, and every surface that reads rows through
-        this admin (``get_actions``' querysets, the saved-filter merge, the
-        change view's ``get_object``) inherits that narrowing — so the actions
-        cannot be pointed at an order outside the queue either. This override
-        exists only to skip ``SavedFilterMixin`` for a scoped viewer: its write
-        endpoints gate on ``has_view_permission``, which this role deliberately
-        does not hold, so the bar would offer a form that can only ever 404.
+        ``get_queryset`` already restricts the rows, and every surface reading
+        through this admin inherits that narrowing. This override only skips
+        ``SavedFilterMixin``, whose write endpoints gate on a view permission
+        this role deliberately lacks.
         """
         if not self.is_scoped_viewer(request):
             return super().changelist_view(request, extra_context)
         return RoleAwareModelAdmin.changelist_view(self, request, extra_context)
-
-    # ——— single-object guard (covers the inline status editor) ———
 
     def save_model(self, request, obj, form, change):
         old = None
@@ -505,11 +421,9 @@ class OrderAdmin(SavedFilterMixin, RoleAwareModelAdmin):
                     messages.ERROR,
                 )
                 return  # abort the save; status unchanged
-            # [R-10.19]/[R-10.14] SPEC-10-03: the machine gate above says
-            # the edge exists; the preconditions say the row qualifies for
-            # it (shipped: payment captured + items present). An unmet
-            # precondition aborts the save exactly like an illegal edge —
-            # message + return, status unchanged, no audit event.
+            # The machine gate says the edge exists; the preconditions say the
+            # row qualifies. An unmet precondition aborts the save like an
+            # illegal edge.
             precondition_reasons = precondition_failures(obj, obj.status)
             if precondition_reasons:
                 self.message_user(
@@ -520,24 +434,17 @@ class OrderAdmin(SavedFilterMixin, RoleAwareModelAdmin):
                     messages.ERROR,
                 )
                 return  # abort the save; status unchanged
-            # [R-8.16] The change form can legally move pending -> cancelled;
-            # stamp the business-event timestamp beside the transition (the
-            # bulk twin is cancel_pending below). The is-none guard keeps an
-            # existing value: a set event time is never mutated.
+            # The is-none guard keeps an existing value: a set event time is
+            # never mutated.
             if obj.status == "cancelled" and obj.cancelled_at is None:
                 obj.cancelled_at = timezone.now()
-        # [R-10.1] SPEC-10-01b: the fulfilment dimension rides every legal
-        # status change through this form — the transition guard above is
-        # the gate, fulfilment_for_status is the mapping. Admin never
-        # touches payment_status: that dimension moves only with payment
-        # events (verify_payment; SPEC-10-04 owns the rest).
+        # The fulfilment dimension rides every legal status change; admin never
+        # touches payment_status, which moves only with payment events.
         obj.fulfilment_status = fulfilment_for_status(obj.status)
-        # [R-10.12]/[R-10.18] SPEC-10-02: the transition and its audit row
-        # commit together. The admin changeform view already wraps this in
-        # transaction.atomic; the explicit block keeps the rollback-together
-        # guarantee local even if a future caller invokes save_model
-        # outside it. Self-transitions (old == obj.status) are replays,
-        # not transitions — no event.
+        # The transition and its audit row commit together; the explicit block
+        # keeps rollback-together local even if a future caller invokes
+        # save_model outside the admin's own atomic. Self-transitions are
+        # replays, not transitions - no event.
         with transaction.atomic():
             super().save_model(request, obj, form, change)
             if change and old != obj.status:
@@ -548,48 +455,29 @@ class OrderAdmin(SavedFilterMixin, RoleAwareModelAdmin):
                     actor=request.user,
                     trigger=TRIGGER_ADMIN_CHANGE_FORM,
                 )
-                # [R-12.8] SPEC-12-02 §12.1 step 6: a cancelled checkout
-                # releases its holds in this same transaction — cancelled
-                # units return to available-to-sell immediately, not at
-                # the TTL sweep. This is the admin twin of the release in
-                # views.admin_order_cancel; the active-only filter is a
+                # A cancelled checkout releases its holds in this same
+                # transaction, so units return to available-to-sell immediately
+                # rather than at the TTL sweep; the active-only filter is a
                 # no-op on already-released holds.
                 if obj.status == "cancelled":
                     obj.stock_reservations.filter(
                         status=StockReservation.Status.ACTIVE
                     ).update(status=StockReservation.Status.RELEASED)
-                # [R-10.16] SPEC-10-05: the side-effect hook rides the
-                # same atomic block, after the transition + its audit row.
+                # The side-effect hook rides the same atomic block, after the
+                # transition and its audit row.
                 notify_transition(obj, old, obj.status)
-
-    # ——— bulk actions (respect the same guards) ———
 
     @staticmethod
     def _locked_orders(queryset, pks):
         """The bulk writers' locked read of the snapshot pks.
 
-        Both bulk writers hand their snapshot to this so the locked
-        statement is built in one place: the writes below touch Order rows
-        and nothing else, so the Order row is the only row that needs
-        locking, and the locked query carries no join.
-
         The joins are stripped with ``select_related(None)`` because the
-        queryset arrives from the changelist, where Django 6.1's
-        ``ChangeList.get_select_related_fields`` adds a join for every
-        ForeignKey named in ``list_display`` - and ``user`` and ``coupon``
-        are both nullable here, so those joins are LEFT OUTER JOINs.
-        FOR UPDATE over the nullable side of an outer join is rejected by
-        PostgreSQL ("FOR UPDATE cannot be applied to the nullable side of
-        an outer join") and silently dropped by SQLite, so without this
-        every bulk action raised on Postgres and none of them could fail
-        on SQLite.
-
-        Stripping the join costs no extra query: the loop reads Order
-        columns, ``order.items`` (a reverse FK, never covered by
-        ``select_related``) and the transition preconditions, which are
-        ``payment_method`` / ``payment_status`` scalars - the lifecycle
-        notifications these writers fire have no registered handler, so
-        nothing here dereferences ``order.user`` or ``order.coupon``.
+        changelist's select_related adds a join for every FK in
+        ``list_display``, and ``user``/``coupon`` are nullable, so those are
+        LEFT OUTER JOINs: PostgreSQL rejects FOR UPDATE over the nullable side
+        of an outer join and SQLite silently drops it. Stripping costs no query
+        (the loop reads Order columns, ``order.items`` and scalar preconditions
+        only).
         """
         return (
             queryset.filter(pk__in=pks)
@@ -606,34 +494,21 @@ class OrderAdmin(SavedFilterMixin, RoleAwareModelAdmin):
             queryset.filter(status__in=allowed_from).values_list("pk", flat=True)
         )
         count = 0
-        # [R-10.19]/[R-10.14] SPEC-10-03: rows skipped for unmet
-        # transition preconditions, kept separate from status skips so
-        # each skip message reports its own true reason.
+        # Rows skipped for unmet preconditions, kept separate from status skips
+        # so each message reports its own true reason.
         precondition_skipped = []
         if matched_pks:
             with transaction.atomic():
-                # SPEC-6-04 audit advisory, hardened in SPEC-9-07: the pk
-                # snapshot above and the writes below are two steps — a row
-                # whose status changes in between (e.g. a concurrent cancel
-                # of a pending order) must never be swept to the new status.
-                # The 9-07 fix made the transition predicate the final
-                # authority via the UPDATE's WHERE clause; [R-10.12]
-                # SPEC-10-02 reworks the same sweep into per-row saves (one
-                # audit event per row), and each row's status is re-checked
-                # here at write time under the row lock — the same
-                # final-authority predicate, one row at a time. An
-                # out-of-set row can never be written, only counted as
-                # skipped. Per-row saves (unlike .update()) also fire
-                # auto_now, fixing the stale updated_at the bulk path
-                # shipped with.
+                # The pk snapshot and the writes are two steps, so each row's
+                # status is re-checked at write time under the row lock: an
+                # out-of-set row can never be written, only counted as skipped.
+                # Per-row saves also append one audit event each and fire
+                # auto_now.
                 for order in self._locked_orders(queryset, matched_pks):
                     if order.status not in allowed_from:
-                        continue  # flipped between snapshot and save: skip
-                    # [R-10.19]/[R-10.14] SPEC-10-03: the per-row
-                    # precondition check under the row lock — the same
-                    # final-authority shape as the status re-check above.
-                    # A row that qualified at snapshot time but not at
-                    # write time is skipped, never swept.
+                        continue
+                    # The precondition check under the row lock: a row that
+                    # qualified at snapshot time but not now is skipped.
                     reasons = precondition_failures(order, new_status)
                     if reasons:
                         precondition_skipped.append(reasons)
@@ -648,17 +523,13 @@ class OrderAdmin(SavedFilterMixin, RoleAwareModelAdmin):
                     previous_status = order.status
                     order.status = new_status
                     order.fulfilment_status = fulfilment_for_status(new_status)
-                    # updated_at rides update_fields explicitly: on this
-                    # Django, save(update_fields=...) leaves auto_now
-                    # columns out unless listed, and the whole point of the
-                    # per-row rework is that the row's freshness moves with
-                    # the transition (pinned in tests).
+                    # updated_at rides update_fields explicitly: this Django
+                    # leaves auto_now columns out unless listed.
                     order.save(
                         update_fields=["status", "fulfilment_status", "updated_at"]
                     )
-                    # [R-10.16] SPEC-10-05: the side-effect hook rides the
-                    # same atomic block, after the transition + its audit
-                    # row; skips never reach it.
+                    # The side-effect hook rides the same atomic block; skips
+                    # never reach it.
                     notify_transition(order, previous_status, new_status)
                     count += 1
         skipped = queryset.count() - count
@@ -701,25 +572,20 @@ class OrderAdmin(SavedFilterMixin, RoleAwareModelAdmin):
     def mark_delivered(self, request, queryset):
         self._bulk_set_status(request, queryset, "delivered")
 
-    # ——— the confirmation detail payload (SPEC-20-1 [R-20.20]) ———
-
     def confirmation_details(self, request, action_name, objects):
         """What cancelling this selection actually costs, before it happens.
 
-        The amount and its currency, the lines affected and the state each
-        selected row ends in. Rows the action will *not* touch (paid orders
-        — cancelling those is a separate, refund-backed decision, see the
-        refund seam) are spelled out too: skipping them is part of what the
-        operator is confirming, and "3 orders, only 1 cancelled" is exactly
-        the surprise this payload exists to prevent.
+        The amount and currency, the lines affected and the state each row ends
+        in; rows the action will NOT touch are spelled out too, because "3
+        orders, only 1 cancelled" is the surprise this payload prevents.
         """
         if action_name != "cancel_pending":
             return {}
         orders = list(objects)
         cancelable = [order for order in orders if order.status == "pending"]
-        # Money stays Decimal end to end (conventions.md:15) and the
-        # roll-up is quantized before it is rendered. Currencies are listed
-        # rather than assumed: the denomination is a setting, not a constant.
+        # Money stays Decimal end to end and is quantized before rendering;
+        # currencies are listed rather than assumed (the denomination is a
+        # setting, not a constant).
         total = sum(
             (order.total_amount for order in cancelable), Decimal("0")
         ).quantize(Decimal("0.01"))
@@ -734,11 +600,9 @@ class OrderAdmin(SavedFilterMixin, RoleAwareModelAdmin):
 
     def _cancel_confirmation_row(self, order):
         pending = order.status == "pending"
-        # SPEC-20-1b: a row is skipped because it is NOT pending, and only
-        # one of those reasons is "it is paid". An already-cancelled order
-        # used to be told "paid, never cancelled here", which is false on
-        # screen and in the operator's decision. The resulting state
-        # ("-> unchanged") was always right; only the reason clause moves.
+        # A row is skipped because it is NOT pending, and only one of those
+        # reasons is "it is paid": an already-cancelled order must not be told
+        # it was paid.
         unchanged_reason = (
             "(already cancelled)"
             if order.status == "cancelled"
@@ -762,11 +626,8 @@ class OrderAdmin(SavedFilterMixin, RoleAwareModelAdmin):
     def _cancel_change_message(self, request):
         """The audit change message for a cancelled selection.
 
-        SPEC-20-5 [R-20.28]: the operator's optional reason from the
-        interstitial is merged in, so the trail carries WHY an order was
-        cancelled and not only that it was. With no reason typed the message
-        is exactly the one shipped since SPEC-6-04 — the capture is additive
-        and never rewrites the audit contract.
+        The operator's optional reason from the interstitial is merged in so the
+        trail carries WHY; with no reason typed the message is the original one.
         """
         message = "Bulk action: order cancelled."
         note = self.confirmation_note(request, "cancel_pending")
@@ -782,17 +643,13 @@ class OrderAdmin(SavedFilterMixin, RoleAwareModelAdmin):
         count = 0
         if unpaid_pks:
             with transaction.atomic():
-                # [R-10.12] SPEC-10-02: per-row saves in one atomic block,
-                # each row's status re-checked at write time under the row
-                # lock (same final-authority pattern as _bulk_set_status) —
-                # a row that flipped pending→confirmed between the snapshot
-                # and this write is a PAID order now, and cancelling paid
-                # orders is impossible by design, so it is skipped, never
-                # swept. Per-row saves also fire auto_now (no stale
-                # updated_at) and carry the audit event per row.
+                # Per-row saves in one atomic block, each status re-checked
+                # under the row lock: a row that flipped pending->confirmed is a
+                # PAID order now, and cancelling paid orders is impossible by
+                # design, so it is skipped, never swept.
                 for order in self._locked_orders(queryset, unpaid_pks):
                     if order.status != "pending":
-                        continue  # flipped between snapshot and save: skip
+                        continue
                     _append_status_event(
                         order,
                         from_status=order.status,
@@ -802,18 +659,14 @@ class OrderAdmin(SavedFilterMixin, RoleAwareModelAdmin):
                     )
                     previous_status = order.status
                     order.status = "cancelled"
-                    # [R-8.16] The stamp rides the same save as the status
-                    # transition. A pending order's cancelled_at is
-                    # necessarily NULL (only a cancel writes it), so the
-                    # is-none guard never overwrites an existing stamp, and
-                    # a re-run skips already-cancelled rows.
+                    # The stamp rides the same save; a pending order's
+                    # cancelled_at is NULL, so the is-none guard never
+                    # overwrites one and a re-run skips already-cancelled rows.
                     order.cancelled_at = order.cancelled_at or timezone.now()
-                    # [R-10.1] SPEC-10-01b: the fulfilment dimension rides
-                    # the same save (a cancelled order was never fulfilled).
+                    # A cancelled order was never fulfilled.
                     order.fulfilment_status = fulfilment_for_status("cancelled")
                     # updated_at rides update_fields explicitly (see
-                    # _bulk_set_status): the freshness must move with the
-                    # transition.
+                    # _bulk_set_status).
                     order.save(
                         update_fields=[
                             "status",
@@ -822,17 +675,14 @@ class OrderAdmin(SavedFilterMixin, RoleAwareModelAdmin):
                             "updated_at",
                         ]
                     )
-                    # [R-12.8] SPEC-12-02 §12.1 step 6: a cancelled checkout
-                    # releases its holds in this same per-row transaction —
-                    # the admin surface must behave exactly like the API
-                    # twin (views.admin_order_cancel); the active-only
+                    # A cancelled checkout releases its holds in this same
+                    # transaction, exactly like the API twin; the active-only
                     # filter is a no-op on already-released holds.
                     order.stock_reservations.filter(
                         status=StockReservation.Status.ACTIVE
                     ).update(status=StockReservation.Status.RELEASED)
-                    # [R-10.16] SPEC-10-05: the side-effect hook rides the
-                    # same atomic block, after the transition + its audit
-                    # row; skipped rows never reach it.
+                    # The side-effect hook rides the same atomic block; skipped
+                    # rows never reach it.
                     notify_transition(order, previous_status, "cancelled")
                     count += 1
         skipped = queryset.count() - count
@@ -854,15 +704,12 @@ class OrderAdmin(SavedFilterMixin, RoleAwareModelAdmin):
                 messages.WARNING,
             )
 
-    # ——— the refund action (the operator's entry point) ———
-
     @admin.action(description="Issue a refund for the selected order")
     def issue_refund(self, request, queryset):
         """Route the selection to the amount/reason page.
 
-        One order at a time on purpose: a refund names one order's remaining
-        balance, and a bulk entry point would invite a slip of the selection
-        to move money on an order nobody looked at.
+        One order at a time on purpose: a bulk entry point would invite a slip
+        of the selection to move money on an order nobody looked at.
         """
         pks = list(queryset.values_list("pk", flat=True))
         if len(pks) != 1:
@@ -883,10 +730,8 @@ class OrderAdmin(SavedFilterMixin, RoleAwareModelAdmin):
         """The intermediate page: collect the amount and reason, then issue.
 
         ``refunds.create`` is the authority here, not the model's change
-        capability: finance may read orders without fulfilling them, and
-        support may fulfil without moving money. The issuance itself is the
-        shared core the API seam calls, so a refusal leaves the order exactly
-        as it was and reports the same text on both surfaces.
+        capability; issuance is the shared core the API seam calls, so a
+        refusal leaves the order exactly as it was.
         """
         if not self._holds_capability(request, "refunds.create"):
             raise PermissionDenied
@@ -962,9 +807,8 @@ class OrderAdmin(SavedFilterMixin, RoleAwareModelAdmin):
             writer.writerow(
                 [
                     order.id,
-                    # [R-1.13] `customer_name` resolves the guest's email when
-                    # the row has no account, so an export of a mixed queue
-                    # cannot raise on the guest orders in it.
+                    # `customer_name` resolves the guest's email, so exporting a
+                    # mixed queue cannot raise on guest orders.
                     order.customer_name,
                     order.status,
                     order.total_amount,
@@ -978,14 +822,11 @@ class OrderAdmin(SavedFilterMixin, RoleAwareModelAdmin):
 
 @admin.register(OrderStatusEvent)
 class OrderStatusEventAdmin(RoleAwareModelAdmin):
-    """[R-10.18] SPEC-10-02: view-only surface for the append-only trail.
+    """View-only surface for the append-only trail.
 
-    Staff holding ``orders.read`` (support/finance/admin roles) can read
-    the trail; no staff role gets add/change/delete (all capability-less),
-    and even the superuser bypass is refused at add/delete — audit history
-    is never creatable or deletable through the admin. The change form
-    renders every field read-only, so it is a view, not an editor; the
-    model save guard is the second immutable layer behind this one.
+    Staff holding ``orders.read`` can read it; no role gets add/change/delete
+    and even the superuser bypass is refused there. Every field renders
+    read-only; the model save guard is the second immutable layer.
     """
 
     capability_map = {
@@ -1022,10 +863,9 @@ class OrderStatusEventAdmin(RoleAwareModelAdmin):
 
 @admin.register(Coupon)
 class CouponAdmin(RoleAwareModelAdmin):
-    # Promotions are marketing's domain and the capability map has no
-    # read-only split for them, so every model permission rides
-    # ``discounts.write`` (marketing + admin) — least privilege by default:
-    # support/finance/inventory get no coupon surface.
+    # Promotions are marketing's domain and the map has no read-only split, so
+    # every permission rides ``discounts.write``; least privilege means no other
+    # role gets a coupon surface.
     capability_map = {
         "view": "discounts.write",
         "add": "discounts.write",
@@ -1052,17 +892,10 @@ class CouponAdmin(RoleAwareModelAdmin):
     def save_model(self, request, obj, form, change):
         """Record the real before -> after value of a promotion edit.
 
-        SPEC-20-4 [R-20.27]: Django's own changelist-edit LogEntry names the
-        column ("Changed Active.") but not what it changed FROM or TO, so a
-        deactivated coupon cannot be reconstructed from the trail. This is
-        the ``list_editable`` ``active`` toggle, the only field editable
-        outside the change form; the change form's own structured LogEntry
-        already carries its old/new values.
-
-        The snapshot is read from the DATABASE, not off the instance:
-        ``save_form`` has already applied the submitted values by the time
-        ``save_model`` runs, so the instance holds the new state and would
-        report no change at all.
+        Django's own changelist-edit LogEntry names the column but not what it
+        changed from or to. The snapshot is read from the DATABASE, not off the
+        instance, because ``save_form`` has already applied the submitted values
+        by the time ``save_model`` runs.
         """
         if not change:
             return
@@ -1104,17 +937,12 @@ class CouponAdmin(RoleAwareModelAdmin):
 
 @admin.register(Refund)
 class RefundAdmin(RoleAwareModelAdmin):
-    """[R-1.14] SPEC-1-05: a read-only window onto issued refunds.
+    """A read-only window onto issued refunds.
 
-    ``refunds.create`` gates the surface, so it is finance who reconciles the
-    money (spec 1.1's finance operator) plus admin — support, which may read
-    and fulfil orders, gets no refund page at all. No staff role gets
-    add/change/delete, and the superuser bypass is refused on add and delete
-    too: a refund is issued through ``orders.refunds.issue_refund`` (the API
-    endpoint and the order action on this site both call it), the one writer
-    that calls the gateway, so a hand-written row here would be money movement
-    with no payment behind it. Every field renders read-only, so even the change view
-    is a read, not an editor.
+    ``refunds.create`` gates it, so finance reconciles the money and support
+    gets no page; no role gets add/change/delete (the superuser bypass
+    included), because a refund is issued only through the shared writer that
+    calls the gateway. Every field renders read-only.
     """
 
     capability_map = {
@@ -1162,13 +990,11 @@ class RefundAdmin(RoleAwareModelAdmin):
 
 
 class RefundRequestDecisionNoteForm(ConfirmationNoteForm):
-    """[SPEC-E-02] The decision note is REQUIRED on the refund-request surface.
+    """The decision note is REQUIRED on the refund-request surface.
 
-    The shared interstitial treats a note as optional (SPEC-20-5), but a
-    refund decision is a financial act that has to explain itself later, so
-    this surface tightens only its own field: an empty note fails validation
-    on the confirmation page and the action body refuses to decide without
-    one. The base class stays optional for every other action.
+    The shared interstitial treats a note as optional, but a refund decision is
+    a financial act that has to explain itself later, so this surface tightens
+    only its own field; the base stays optional for every other action.
     """
 
     def __init__(self, *args, **kwargs):
@@ -1180,26 +1006,14 @@ class RefundRequestDecisionNoteForm(ConfirmationNoteForm):
 
 @admin.register(RefundRequest)
 class RefundRequestAdmin(RoleAwareModelAdmin):
-    """[SPEC-E-02] The staff decision over a customer's refund request.
+    """The staff decision over a customer's refund request.
 
-    The customer's ask (SPEC-E-01) is never money. Approval is the one seam
-    allowed to turn it into money, and it does so by calling
-    ``orders.refunds.issue_refund`` - the same writer the API and the order
-    action call - rather than writing a ``Refund`` row by hand or calling the
-    gateway. That is what keeps the balance gate, the idempotency key, the
-    payment-dimension move and the privileged-action record in one place.
-
-    Approval locks the order and the pending request, derives the asked-for
-    amount (line totals, or the remaining balance for a whole-order ask),
-    issues the refund, and only then marks the request approved. A refusal or
-    a gateway failure escapes that atomic block whole, so the request stays
-    pending and no partial state survives.
-
-    ``refunds.create`` gates view and change - finance reconciles the money
-    and support must not move it - and no role gets add or delete: a request
-    is filed by a customer, and the decision trail is never erased. Every
-    field renders read-only; the only two writes are the actions below, both
-    confirmation-gated with a required note.
+    The ask is never money: approval turns it into money only by calling the
+    shared refund writer, and it locks the order and the request, derives the
+    amount, issues the refund and only then marks the request approved - so a
+    refusal or gateway failure leaves it pending with no partial state.
+    ``refunds.create`` gates view and change; no role gets add or delete, every
+    field is read-only, and the only writes are the confirmation-gated actions.
     """
 
     capability_map = {
@@ -1262,12 +1076,10 @@ class RefundRequestAdmin(RoleAwareModelAdmin):
     def approve_requests(self, request, queryset):
         """Turn pending requests into refunds through the ONE money writer.
 
-        One note covers the selection because it is the operator's written
-        justification for this decision, and it is the reason recorded on
-        every refund it issues. A request that is no longer pending is
-        skipped with a message; the refund writer's idempotency key makes a
-        replay collapse onto the refund it already produced, so a second
-        approval can never double-refund.
+        One note covers the selection - it is recorded as the reason on every
+        refund issued. A request no longer pending is skipped, and the
+        idempotency key makes a second approval collapse onto the refund it
+        already produced.
         """
         note = self.confirmation_note(request, "approve_requests")
         if not note:
@@ -1288,8 +1100,6 @@ class RefundRequestAdmin(RoleAwareModelAdmin):
                     messages.ERROR,
                 )
             except refunds_core.RefundGatewayError:
-                # The provider's own text went to the log in the core; the
-                # operator gets the fact and nothing about its internals.
                 self.message_user(
                     request,
                     f"Refund request #{refund_request.pk}: the payment "
@@ -1337,10 +1147,8 @@ class RefundRequestAdmin(RoleAwareModelAdmin):
 
         The lock order is order-then-request, the same order the customer
         filing seam takes, so a decision and a concurrent filing serialize
-        instead of deadlocking. ``issue_refund`` re-locks the order inside
-        this transaction (a savepoint) and rolls its own gateway failure back
-        to that savepoint; the exception leaves this block too, so the request
-        status change below is never reached.
+        instead of deadlocking. A gateway failure escapes this block too, so
+        the request status change below is never reached.
         """
         with transaction.atomic():
             order = Order.objects.select_for_update().get(pk=refund_request.order_id)
@@ -1362,9 +1170,9 @@ class RefundRequestAdmin(RoleAwareModelAdmin):
                 order_id=order.pk,
                 amount=amount,
                 reason=note,
-                # Deterministic per request, so a retry after a crash - or a
-                # request an operator re-opened by hand - collapses onto the
-                # refund it already produced instead of paying twice.
+                # Deterministic per request, so a retry - or a request an
+                # operator re-opened - collapses onto the refund it already
+                # produced instead of paying twice.
                 idempotency_key=f"refund-request-{locked.pk}",
                 source="admin",
             )
@@ -1374,7 +1182,7 @@ class RefundRequestAdmin(RoleAwareModelAdmin):
             locked.decided_at = timezone.now()
             locked.save(update_fields=["status", "decided_by", "decided_at"])
 
-            # [6.12.6] The request's own half of the privileged-action trail;
+            # The request's own half of the privileged-action trail;
             # issue_refund records the money's half against the Refund row.
             self.log_change(
                 request,
@@ -1393,20 +1201,19 @@ class RefundRequestAdmin(RoleAwareModelAdmin):
         )
 
 
-# [R-1.16] SPEC-1-B07a: the return-request surface (spec 6.8 line 1949's
-# `/admin/returns`). Read is ``returns.read`` and every write is
+# The return-request surface: read is ``returns.read`` and every write is
 # ``returns.write``, so a role can be given the queue without the decision.
 RETURNS_READ = "returns.read"
 RETURNS_WRITE = "returns.write"
 
 RETURN_CAPABILITY_MAP = {
     "view": RETURNS_READ,
-    # A return request is the CUSTOMER's ask (spec 4 line 1083), filed through
-    # the API seam; a hand-written row here would be a return nobody asked for.
+    # The CUSTOMER's ask, filed through the API seam; a hand-written row here
+    # would be a return nobody asked for.
     "add": None,
     "change": RETURNS_WRITE,
-    # Deleting one erases the review trail spec 6.8 line 1983 requires, so no
-    # staff role gets it - not even the superuser bypass reaches the form.
+    # Deleting one erases the review trail, so not even the superuser bypass
+    # reaches the form.
     "delete": None,
 }
 
@@ -1414,37 +1221,26 @@ RETURN_CAPABILITY_MAP = {
 class ReturnRequestAdminForm(forms.ModelForm):
     """The change form's machine check, and the operator's answer when it fails.
 
-    Validation is the right layer for "this value is not a legal value FOR THIS
-    ROW", and putting it here rather than in ``save_model`` is deliberate: an
-    aborted ``save_model`` still gets logged by Django's own ``log_change``
-    (it runs after ``save_model`` returns, unconditionally), so a refusal that
-    way would leave a "Changed status" entry on a row whose status never moved.
-    A field error is refused before ``save_model`` is reached at all, so the
-    refusal leaves the row untouched AND writes no misleading audit entry.
-
-    ``old`` is read under ``select_for_update()`` inside an explicit atomic
-    block - and Django already wraps the whole change-form view in a
-    transaction, so the lock is held for the check AND the subsequent write: two
-    operators editing the same request cannot both pass against a status the
-    database has already left. (SQLite emits no FOR UPDATE, so the lock is inert
-    there; ``ReturnRequest.save`` re-checks the edge against the stored status
-    regardless, which is what makes the guarantee engine-independent.)
+    Putting the check here rather than in ``save_model`` is deliberate: an
+    aborted ``save_model`` still gets logged by Django's ``log_change``, which
+    would leave a "Changed status" entry on a row that never moved. ``old`` is
+    read under ``select_for_update()`` inside the view's transaction, and
+    ``ReturnRequest.save`` re-checks the edge regardless, so the guarantee is
+    engine-independent.
     """
 
     class Meta:
         model = ReturnRequest
-        # ``status`` is the only editable field on this surface. The admin
-        # overrides this with its own field list (built from ``readonly_fields``
-        # below), so the declaration here is what lets the form be built and
-        # unit-tested on its own.
+        # The admin overrides this with its own field list; the declaration here
+        # is what lets the form be built and unit-tested on its own.
         fields = ("status",)
 
     def clean_status(self):
         status = self.cleaned_data["status"]
         if not self.instance.pk:
-            # The add form cannot be reached (has_add_permission is False below),
-            # so a row with no pk never gets here; the guard keeps the lookup
-            # honest if that ever changes rather than raising DoesNotExist.
+            # The add form cannot be reached, so a row with no pk never gets
+            # here; the guard keeps the lookup honest rather than raising
+            # DoesNotExist.
             return status
         with transaction.atomic():
             old = (
@@ -1462,43 +1258,21 @@ class ReturnRequestAdminForm(forms.ModelForm):
 
 @admin.register(ReturnRequest)
 class ReturnRequestAdmin(RoleAwareModelAdmin):
-    """[R-1.16] The staff half of a return: review it, then walk it.
+    """The staff half of a return: review it, then walk it.
 
-    This is the whole of spec 6.8 line 1957's "Return request review" for this
-    task: the queue is the changelist, and the decision is the ``status`` field
-    on the change form, checked against the return machine by
-    ``ReturnRequestAdminForm.clean_status`` and again by ``ReturnRequest.save``
-    behind it. ``order``, ``reason_code`` and ``reason_note`` are the customer's
-    own input and render read-only, so an operator acts on a request by walking
-    its status and can never rewrite what was asked for.
-
-    That leaves this surface with no place for an operator's own words - the
-    spec's "Manual exception workflow" and the decision note have nowhere to
-    live yet. It is a named gap, not an oversight: SPEC-1-B07b owns the
-    returns serializer and the return/refund audit trail (spec 6.8 line 1983),
-    and a staff note belongs with that work rather than as a second column
-    invented here.
-
-    NO ``scoped_view_capability``: this surface has one door. The narrow second
-    door SPEC-1-B03 built for the packing operator has no business here, and
-    declaring one would also be the way to widen a role's capability set that
-    ``tests/test_superadmin_tier.py`` pins exactly.
-
-    ONE write path. There is no ``list_editable`` cell and no bulk action on
-    this surface, so the change form is the only admin path that can move a
-    status - which is what makes ``ReturnRequestQuerySet`` refusing
-    ``update(status=...)`` a statement about the whole surface rather than
-    about one of two doors. ``ReturnRequestAdminForm`` is what that one path
-    asks before it writes.
+    The queue is the changelist and the decision is the ``status`` field,
+    checked by ``ReturnRequestAdminForm.clean_status`` and again by
+    ``ReturnRequest.save``; the customer's own input renders read-only. There is
+    deliberately no scoped second door, and no ``list_editable`` cell or bulk
+    action, so the change form is the ONE admin write path.
     """
 
     form = ReturnRequestAdminForm
     capability_map = RETURN_CAPABILITY_MAP
     list_display = ("id", "order", "status", "reason_code", "created_at", "updated_at")
     list_filter = ("status", "reason_code", "created_at")
-    # The order reference is how staff find the request (spec 6.8 pairs every
-    # returns surface with its order); the pk is here for the same reason
-    # RefundAdmin carries it.
+    # The order reference is how staff find the request; the pk is here for the
+    # same reason RefundAdmin carries it.
     search_fields = ("id", "order__id", "order__order_number", "reason_code")
     readonly_fields = (
         "order",

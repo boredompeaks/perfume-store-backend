@@ -1,25 +1,3 @@
-"""Test-run isolation: one suite per test database, one cache namespace per run.
-
-Two suites pointed at one test database destroy each other. The 2026-10-20
-parallel run on pg2a measured it: 1,110 ``FATAL database ... does not exist``,
-192 schema-drift errors and 32 deadlocks (docs/run/PG-1-damage-report.md). The
-same run made 125,640 ``FLUSHDB`` calls against one shared Redis database and
-collected 466 ``ERR`` replies, because ``cache.clear()`` on Django's
-``RedisCache`` is ``FLUSHDB`` - it ignores ``KEY_PREFIX`` and wipes every key
-in the selected database, including a deployment's.
-
-This module closes the first half: ``LockedDiscoverRunner`` takes an exclusive
-OS-level file lock keyed on the database the suite is about to create, refuses
-to start (non-zero) when another suite owns it, and releases on teardown,
-process exit and SIGINT/SIGTERM. The second half lives in ``config.settings``,
-which points a test run's Redis cache at its own DB index so ``clear()`` can
-only flush the test namespace.
-
-The lock is deliberately stdlib-only (``msvcrt`` on Windows, ``fcntl`` on
-POSIX): a test-infrastructure guard that needed installing before it could
-protect the suite would be missing exactly when a fresh checkout runs first.
-"""
-
 import atexit
 import hashlib
 import os
@@ -33,10 +11,6 @@ from typing import Any, cast
 from django.conf import settings
 from django.test.runner import DiscoverRunner
 
-# A test database that lives in memory is private to the process: Django gives
-# every worker its own, so two processes cannot corrupt each other and no lock
-# is needed. A real file (or a server database) is shared, and that is what the
-# lock key names.
 _IN_MEMORY_MARKERS = (":memory:", "mode=memory")
 
 
@@ -51,18 +25,7 @@ def _is_in_memory(test_name):
 
 
 def test_database_identity(databases=None):
-    """Return a stable, filesystem-safe key for the suite's test database.
-
-    The identity is derived from the RESOLVED connection settings - engine,
-    host, port and the database name Django will test - never from
-    ``DATABASE_URL`` itself, so two processes that name the same database by
-    different spellings (an explicit ``TEST["NAME"]`` versus the default
-    ``test_<NAME>``) still collide, which is the point. Credentials are not
-    part of the key and never reach the lock file.
-
-    Returns ``None`` for an in-memory SQLite database, which no other process
-    can share.
-    """
+    """Derived from the resolved connection settings, not DATABASE_URL, so different spellings of one database still collide; None for in-memory SQLite."""
     databases = settings.DATABASES if databases is None else databases
     config = databases["default"]
     engine = str(config.get("ENGINE") or "")
@@ -82,13 +45,7 @@ def test_database_identity(databases=None):
 
 
 def parallel_shares_one_database(databases=None, parallel=None):
-    """True when ``--parallel`` would put workers on ONE shared test database.
-
-    PostgreSQL (and MySQL) give each worker its own cloned database, so
-    parallel runs are safe there. A file-backed SQLite test database does not:
-    every worker opens the same file, which is the suite-vs-suite corruption
-    this task exists to stop, reproduced inside one run.
-    """
+    """A file-backed SQLite test database is shared by every --parallel worker, which is the corruption this guard stops."""
     try:
         workers = int(parallel or 0)
     except (TypeError, ValueError):
@@ -110,12 +67,7 @@ def _lock_directory():
 
 
 def _try_lock(fd):
-    # ``os.name == "nt"`` is a runtime value, not a type-level one: mypy checks
-    # BOTH branches on every platform, so the module the current OS does not
-    # ship is still resolved and every member of it is reported missing
-    # (msvcrt on Linux, fcntl on Windows). The cast to ``Any`` keeps the runtime
-    # call exactly as it was - same module, same function, same constants - and
-    # takes the platform-gated API out of the type checker's hands.
+    # mypy checks both branches on every platform, so the module the current OS does not ship is reported missing; the cast to Any takes it out of the checker's hands.
     if os.name == "nt":
         import msvcrt
 
@@ -144,13 +96,7 @@ def _unlock(fd):
 
 
 class DatabaseSuiteLock:
-    """Exclusive, non-blocking-by-default lock file for one test database.
-
-    ``timeout`` is the total time spent retrying before refusing; zero means
-    one attempt. The holder's PID is written to a sidecar file so the refusal
-    can name the process that owns the database instead of only the lock path
-    (Windows blocks reads of the locked byte itself).
-    """
+    """The holder's PID lives in a sidecar file because Windows blocks reads of the locked byte."""
 
     def __init__(self, key, *, directory=None, timeout=None):
         self.key = key
@@ -179,9 +125,7 @@ class DatabaseSuiteLock:
         self.directory.mkdir(parents=True, exist_ok=True)
         fd = os.open(str(self.path), os.O_RDWR | os.O_CREAT)
         if os.fstat(fd).st_size == 0:
-            # msvcrt locks a byte range; a one-byte file makes the range exist
-            # before any contender opens it (two contenders may both write it;
-            # the content is overwritten by whoever wins the lock).
+            # msvcrt locks a byte range, so the file must be one byte long before any contender opens it.
             os.write(fd, b"\0")
         deadline = time.monotonic() + self.timeout
         while True:
@@ -211,7 +155,6 @@ class DatabaseSuiteLock:
         try:
             _unlock(fd)
         except OSError:
-            # The OS drops the lock when the descriptor closes anyway.
             pass
         os.close(fd)
         try:
@@ -231,7 +174,6 @@ class DatabaseSuiteLock:
         try:
             self.owner_path.write_text(f"{os.getpid()}\n", encoding="ascii")
         except OSError:
-            # Diagnostic only: the file lock, not this file, is the authority.
             pass
 
     def _holder(self):
@@ -274,14 +216,7 @@ class DatabaseSuiteLock:
 
 
 class LockedDiscoverRunner(DiscoverRunner):
-    """``DiscoverRunner`` that owns the test database for the whole run.
-
-    Acquisition happens in ``setup_test_environment`` - before Django creates
-    or destroys any database - and release in ``teardown_test_environment`` so
-    a second suite can start as soon as this one is done. ``--parallel`` is
-    only refused where Django would give every worker the SAME database; PG
-    clones and in-memory SQLite are allowed.
-    """
+    """Acquired in setup_test_environment before Django creates a database, released in teardown_test_environment."""
 
     def __init__(self, *args, **kwargs):
         self._lock_key_override = kwargs.pop("lock_key", None)
@@ -328,7 +263,6 @@ class LockedDiscoverRunner(DiscoverRunner):
             )
         key = self.get_lock_key()
         if key is None:
-            # In-memory SQLite is private to this process; nothing to guard.
             return
         lock = DatabaseSuiteLock(
             key,

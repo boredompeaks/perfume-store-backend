@@ -1,9 +1,7 @@
 """Unit tests for scripts/doc_metrics.py.
 
-Mostly pure core: no git, no real tree, no Django. The shell (git index reads
-and the file list) is exercised by running the script; the integration tests
-pin the index rules, because those rules are the measurement's whole
-reproducibility claim.
+Mostly pure core (no git, no Django); the index rules are pinned because
+they are the measurement's whole reproducibility claim.
 
 Run from the repo root::
 
@@ -107,9 +105,7 @@ class LineClassificationTests(unittest.TestCase):
         self.assertEqual(result.total_lines, 3)
 
     def test_module_docstring_and_blank_inside_it(self):
-        # The pinned rule: a blank line inside a docstring is BLANK, not a
-        # docstring line. The count then tracks prose the author wrote rather
-        # than how airy the docstring happens to be.
+        # Pinned rule: a blank line inside a docstring is BLANK, not docstring prose.
         result = counts('"""Module doc.\n\nMore text.\n"""\n')
         self.assertEqual(result.total_lines, 4)
         self.assertEqual(result.docstring_lines, 3)
@@ -135,8 +131,7 @@ class LineClassificationTests(unittest.TestCase):
         self.assertEqual(result.logic_lines, 3)
 
     def test_assigned_triple_quoted_string_is_logic(self):
-        # A multiline string that is not a first-statement docstring is code,
-        # even when its text looks like a comment.
+        # A multiline string that is not a first-statement docstring is code.
         source = 'X = """\n# not a comment\n"""\n'
         result = counts(source)
         self.assertEqual(result.logic_lines, 3)
@@ -300,8 +295,7 @@ class CompareTests(unittest.TestCase):
             dm.compare_to_baseline(measurement(), baseline)
 
     def test_zero_denominator_current_measurement_is_an_error(self):
-        # An empty app scope must be rejected before comparison in BOTH check
-        # modes; otherwise plain check reports a pass that --json cannot build.
+        # An empty app scope must be rejected in BOTH modes before they can disagree.
         baseline = dm.measurement_payload(measurement())
         with self.assertRaises(dm.MeasurementError):
             dm.compare_to_baseline(measurement(logic=0), baseline)
@@ -439,8 +433,7 @@ class IndexMeasurementTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             sample = self._stage_sample(root)
-            # The worktree now disagrees with the index; the measurement is the
-            # staged (what-will-be-committed) content, not the edit.
+            # The worktree disagrees with the index; the measurement is the staged content.
             sample.write_text("y = 2\n", encoding="utf-8")
             measured = dm.measure(root)
             self.assertEqual(measured.app_python.files, 1)

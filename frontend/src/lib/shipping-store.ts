@@ -1,22 +1,12 @@
 import { site } from "./site";
 
 /**
- * Checkout address prefill — handled as PII, per PLAN.md:
- * - a visible "saved on this device" disclosure at the point of prefill,
- * - an explicit "forget saved details" control,
- * - cleared on logout (see AuthProvider.logout).
- * Same-browser convenience only; never server truth.
- *
- * The key is derived from the configured brand so two white-label tenants
- * never read each other's saved address. The former hardcoded key
- * "aurel.shipping" is abandoned: entries written under it are left behind,
- * an acceptable prefill loss for white-label correctness.
+ * Checkout prefill is PII: a visible disclosure, an explicit forget control and
+ * clearing on logout. The key derives from the configured brand so white-label
+ * tenants never read each other's saved address.
  */
 
-/**
- * Slugified storage key for a brand name — exported so tests can pin the
- * derivation (e.g. "Maison Aurel" → "maison.aurel.shipping").
- */
+/** Slugified brand-derived key, exported so tests can pin the derivation. */
 export function shippingStorageKey(brandName: string = site.name): string {
   const slug = brandName
     .toLowerCase()

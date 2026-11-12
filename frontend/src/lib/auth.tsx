@@ -24,11 +24,7 @@ export type AuthStatus = "loading" | "authenticated" | "anonymous";
 type AuthContextValue = {
   status: AuthStatus;
   userId: number | null;
-  /**
-   * `surface` picks the door: "customer" posts to the storefront login,
-   * which has no MFA field, "staff" to the one that enforces the TOTP
-   * factor (SPEC-20-10).
-   */
+  /** The customer door has no MFA field; the staff door enforces TOTP. */
   login: (
     surface: LoginSurface,
     username: string,
@@ -44,10 +40,8 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   const [status, setStatus] = useState<AuthStatus>("loading");
   const [userId, setUserId] = useState<number | null>(null);
 
-  // Bootstrap: the refresh token lives in an HttpOnly cookie we cannot
-  // read, so a non-secret hint decides whether a refresh probe is worth
-  // one throttled call. No hint (first visit, logged out) = anonymous
-  // without any request.
+  // The refresh token is HttpOnly, so a non-secret hint decides whether the
+  // one throttled refresh probe is worth making; no hint means anonymous.
   useEffect(() => {
     if (!hasSessionHint()) {
       setStatus("anonymous");
@@ -71,11 +65,8 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       password: string,
       totp?: string,
     ) => {
-      // The login response carries only the access token: the refresh token
-      // is set as an HttpOnly cookie by the backend (R-17.12) and never
-      // enters JS-readable storage. `totp` rides along only on the staff
-      // door, which the backend demands for privileged roles (SPEC-17-05,
-      // R-17.9); the customer door has no such field (SPEC-20-10).
+      // Only the access token is returned; the refresh token stays an
+      // HttpOnly cookie and never enters JS-readable storage.
       const data = await apiFetch<{ access: string }>(loginEndpoint(surface), {
         method: "POST",
         body: buildLoginBody(surface, { username, password }, totp),
@@ -88,19 +79,15 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   );
 
   const logout = useCallback(() => {
-    // The refresh token lives only in an HttpOnly cookie, so the backend
-    // must do the revoking: this call blacklists the cookie token and
-    // clears the cookie. Best-effort — local state clears regardless of
-    // the outcome (dead cookie, offline) so the UI never traps the user.
+    // Only the backend can revoke the HttpOnly cookie, so this call is
+    // best-effort; local state clears regardless so the UI never traps users.
     void apiFetch("/api/accounts/logout/", { method: "POST", auth: true }).catch(
       () => {},
     );
     clearTokens();
-    // PII: never leave saved checkout details behind on a logged-out device.
+    // Saved checkout details are PII and must not outlive logout.
     forgetShipping();
-    // The guest order credential's ONLY clear point (G1 policy): explicit
-    // logout — never a tab/storage event, which would fight sessionStorage's
-    // own tab scope.
+    // Explicit logout is the only clear point for the guest order token.
     clearGuestToken();
     setUserId(null);
     setStatus("anonymous");

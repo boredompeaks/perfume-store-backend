@@ -6,10 +6,7 @@ import { ApiError } from "@/lib/api";
 import { addToCart } from "@/lib/cart-api";
 import { useToast } from "./toast";
 
-/**
- * Client island on the PDP. Stock is enforced server-side; the stepper cap is
- * a courtesy — the real answer is the backend's "Not enough stock" 400.
- */
+/** Server enforces stock; the stepper cap is only a courtesy. */
 export default function AddToCartButton({
   productId,
   stock,
@@ -59,10 +56,6 @@ export default function AddToCartButton({
         role="group"
         aria-label="Quantity"
       >
-        {/* §7.5: `px-3 py-2` on a 14px glyph was ~32×36 — inside WCAG 2.2's
-            24px floor but under this system's 44px touch convention. The
-            stepper buttons are 44×44 (h-11/min-w-11 are already in the
-            stylesheet; no new utility is emitted for this fix). */}
         <button
           type="button"
           onClick={() => setQty((q) => Math.max(1, q - 1))}

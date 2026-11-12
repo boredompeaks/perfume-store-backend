@@ -1,14 +1,3 @@
-"""SPEC-19-2: admin alert dispatch (spec 19.2, alerting halves of
-[R-19.15]/[R-19.20]/[R-19.21]/[R-19.27]).
-
-Every alert rides the SPEC-19-1 single send path (common.notifications
-send_email — no new send_mail anywhere), targets ALERT_RECIPIENTS only,
-is suppressed inside its per-type cooldown, and is log-only on send
-failure (an alert can never break the flow that tripped it). The
-cooldown rides the dedicated ``alerts`` cache alias — no network, and
-the alias is cleared per test.
-"""
-
 from datetime import timedelta
 from unittest import mock
 
@@ -26,20 +15,14 @@ from ops.services import check_stock_alerts
 
 
 def alert_recipients(value):
-    """Point ALERT_RECIPIENTS at a test mailbox (empty = disabled)."""
     return override_settings(ALERT_RECIPIENTS=value)
 
 
 def _clear_cooldowns():
-    # The alerts cache alias is cleared per test by ApiTestCase, but
-    # explicit clearing keeps the cooldown tests self-evident.
     caches["alerts"].clear()
 
 
 def _seed_failures(count, minutes_ago=1):
-    """Record failed-payment audit events, backdated into/out of the
-    spike window (AuditEvent.record owns the write path; only the
-    timestamps are shifted for window-edge tests)."""
     now = timezone.now()
     for i in range(count):
         marker = f"seed-{now.timestamp()}-{i}"
@@ -51,8 +34,6 @@ def _seed_failures(count, minutes_ago=1):
 
 @tag("alerts")
 class AlertRecipientTests(ApiTestCase):
-    """Recipients parse from ALERT_RECIPIENTS; empty disables everything."""
-
     def test_recipients_parse_split_strip_dedupe(self):
         with alert_recipients("a@x.com, b@x.com ,a@x.com,"):
             self.assertEqual(alerts._recipients(), ["a@x.com", "b@x.com"])
@@ -69,8 +50,6 @@ class AlertRecipientTests(ApiTestCase):
 
 @tag("alerts")
 class LowStockAlertTests(ApiTestCase):
-    """[R-19.15] alerting half: low/out-of-stock breach alerts."""
-
     def test_low_stock_breach_sends_one_mail_per_recipient(self):
         with alert_recipients("staff@x.com, boss@x.com"):
             _clear_cooldowns()
@@ -121,8 +100,6 @@ class LowStockAlertTests(ApiTestCase):
 
 @tag("alerts")
 class CooldownTests(ApiTestCase):
-    """Per-alert-type cooldown: a spike cannot email-bomb the staff."""
-
     def test_second_alert_inside_window_is_suppressed(self):
         with alert_recipients("staff@x.com"):
             _clear_cooldowns()
@@ -171,8 +148,6 @@ class CooldownTests(ApiTestCase):
 
 @tag("alerts")
 class PaymentFailureSpikeTests(ApiTestCase):
-    """[R-19.21] alerting half: >=3 failed payment attempts in 300s."""
-
     def test_below_threshold_no_alert(self):
         with alert_recipients("staff@x.com"):
             _clear_cooldowns()
@@ -209,8 +184,6 @@ class PaymentFailureSpikeTests(ApiTestCase):
         self.assertEqual(len(mail.outbox), 1)
 
     def test_no_recipients_skips_the_spike_query_entirely(self):
-        # Disabled alerts must not even hit the audit trail for the spike
-        # check — the trigger site is hot (every verify failure).
         _clear_cooldowns()
         with mock.patch("common.models.AuditEvent.objects.filter") as filter_mock:
             self.assertFalse(alerts.check_payment_failure_spike())
@@ -220,11 +193,6 @@ class PaymentFailureSpikeTests(ApiTestCase):
 
 @tag("alerts")
 class SpikeDashboardWiringTests(ApiTestCase):
-    """[R-19.20] audit c1 BUG-1: the spike detector had no production
-    call site. The dashboard load is the wired seam (beside the stock
-    poll), matching the check_stock_alerts export symmetry; a hot trigger
-    site would have needed an orders/views.py edit (frozen file)."""
-
     def setUp(self):
         User.objects.create_superuser("boss", "boss@example.com", "boss-pass-123")
         self.assertTrue(self.client.login(username="boss", password="boss-pass-123"))
@@ -248,9 +216,6 @@ class SpikeDashboardWiringTests(ApiTestCase):
         self.assertEqual(len(mail.outbox), 1)
 
     def test_dashboard_with_no_recipients_skips_the_spike_query(self):
-        # The detector's cheap-when-disabled property must survive the new
-        # seam: with ALERT_RECIPIENTS empty the dashboard load must not
-        # touch the audit trail at all (cheap page even when alerts are off).
         _clear_cooldowns()
         with mock.patch("common.models.AuditEvent.objects.filter") as filter_mock:
             res = self.client.get("/admin/dashboard/")
@@ -261,8 +226,6 @@ class SpikeDashboardWiringTests(ApiTestCase):
 
 @tag("alerts")
 class SecurityChangeAlertTests(ApiTestCase):
-    """[R-19.27] alerting half: password reset triggers the staff alert."""
-
     def _reset_password(self, username):
         res = self.client.post(
             "/api/accounts/password-reset/",
@@ -292,8 +255,6 @@ class SecurityChangeAlertTests(ApiTestCase):
         self.assertIn("Password reset completed", staff_alerts[0].body)
 
     def test_no_recipients_password_reset_still_succeeds(self):
-        # Best-effort alerting: the customer flow is identical when the
-        # alert mailbox is unconfigured.
         self.register_and_verify(username="resetalert2")
         res = self._reset_password("resetalert2")
         self.assertEqual(res.status_code, 200, res.data)
@@ -301,8 +262,6 @@ class SecurityChangeAlertTests(ApiTestCase):
 
 @tag("alerts")
 class IntegrationOutageAlertTests(ApiTestCase):
-    """[R-19.20] alerting half: degraded /health/ fires the outage alert."""
-
     def test_degraded_health_sends_outage_alert(self):
         degraded = {
             "status": "degraded",
@@ -333,8 +292,6 @@ class IntegrationOutageAlertTests(ApiTestCase):
 
 @tag("alerts")
 class SendFailureContractTests(ApiTestCase):
-    """Log-only failure contract: an alert can never break its trigger."""
-
     def test_send_failure_is_logged_and_swallowed(self):
         with alert_recipients("staff@x.com"):
             _clear_cooldowns()
@@ -350,10 +307,6 @@ class SendFailureContractTests(ApiTestCase):
         self.assertIn("smtp down", "\n".join(logs.output))
 
     def test_cache_failure_fails_open_and_still_sends(self):
-        """A raisable cache backend must not kill the alert: the cooldown
-        check runs inside _send's try, so a cache outage degrades to an
-        attempted send (worst case one un-deduped mail), never a 500 in
-        the dashboard/health flow that tripped the alert."""
         with alert_recipients("staff@x.com"):
             _clear_cooldowns()
             with mock.patch.object(
@@ -366,10 +319,6 @@ class SendFailureContractTests(ApiTestCase):
         self.assertEqual(len(mail.outbox), 1)
 
     def test_one_bad_recipient_does_not_abandon_the_staff_list(self):
-        """Per-recipient isolation (ASYNC-2d): a single unreachable
-        mailbox must not silently drop the rest of the staff list — the
-        surviving recipients still get the alert, and the alert reports
-        True because a mail actually left for one of them."""
         attempts = []
 
         def send_email(alert_key, context, subject, recipient):
@@ -385,16 +334,11 @@ class SendFailureContractTests(ApiTestCase):
                     sent = alerts.notify_low_stock(
                         [{"id": 1, "name": "Rose Aurum", "stock": 2}]
                     )
-        # The loop continued past the failing recipient rather than
-        # aborting on it.
         self.assertEqual(attempts, ["down@x.com", "up@x.com"])
         self.assertTrue(sent)
         self.assertIn("smtp refused", "\n".join(logs.output))
 
     def test_all_recipients_failing_reports_false(self):
-        """The True/False seam stays truthful: with every mailbox down,
-        nothing left, so the alert reports False — while still never
-        raising into its trigger."""
         with alert_recipients("a@x.com, b@x.com"):
             _clear_cooldowns()
             with mock.patch(
@@ -408,11 +352,6 @@ class SendFailureContractTests(ApiTestCase):
         self.assertFalse(sent)
 
     def test_send_backstop_swallows_a_failure_outside_the_recipient_loop(self):
-        """The outer try in _send is the module's load-bearing log-only
-        guarantee: an exception raised anywhere in the dispatch — including
-        outside the per-recipient loop — must never propagate into the
-        dashboard/health flow that tripped the alert. The per-recipient
-        isolation above narrows what reaches it, not whether it exists."""
         _clear_cooldowns()
         with mock.patch.object(
             alerts, "_recipients", side_effect=Exception("settings broke")
@@ -425,10 +364,6 @@ class SendFailureContractTests(ApiTestCase):
 
 @tag("alerts")
 class CooldownBackendTests(ApiTestCase):
-    """The cooldown must sit on a backend shared across worker processes
-    (ASYNC-2d). LocMemCache is per-process, so each gunicorn worker held
-    its own window and the documented mail-bomb bound did not hold."""
-
     def test_cooldown_marker_lives_on_the_alerts_alias(self):
         with alert_recipients("staff@x.com"):
             _clear_cooldowns()
@@ -437,7 +372,4 @@ class CooldownBackendTests(ApiTestCase):
         self.assertIsNone(cache.get("alerts:cooldown:low_stock"))
 
     def test_alerts_alias_is_distinct_from_the_default_alias(self):
-        """Two aliases, two backends: the alert cooldown cannot fall back
-        into the per-process default cache, which still holds throttle
-        history and sessions."""
         self.assertIsNot(caches["alerts"], caches["default"])

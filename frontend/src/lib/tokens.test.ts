@@ -1,9 +1,8 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 /**
- * Token-storage contract (SPEC-17-02, R-17.12): the refresh token never
- * touches JS-readable storage. Only the short-lived access token lives in
- * memory; localStorage may hold nothing but the non-secret session hint.
+ * The refresh token never touches JS-readable storage; only the access token
+ * is in memory and localStorage holds just the non-secret hint.
  */
 const storage = new Map<string, string>();
 const writes: Array<[string, string]> = [];
@@ -37,7 +36,7 @@ describe("token store", () => {
     tokens.setTokens("access-1");
 
     expect(tokens.getAccessToken()).toBe("access-1");
-    // The session hint (boolean "1") is written — no token value ever is.
+    // Only the boolean hint is written; never a token value.
     expect(storage.get("aurel.session")).toBe("1");
     for (const [key, value] of writes) {
       expect(key).toBe("aurel.session");
@@ -147,9 +146,8 @@ describe("token store", () => {
 
 describe("refresh and the CSRF gate (SPEC-17-03, R-17.18)", () => {
   it("refresh replays the csrftoken cookie as X-CSRFToken", async () => {
-    // A browser that built a guest cart sends its sessionid cookie on the
-    // refresh POST too, so the backend CSRF gate applies: the header must
-    // ride along, read from the same cookie the SPA's apiFetch uses.
+    // A guest session cookie also rides the refresh POST, so the CSRF header
+    // must come from the same cookie apiFetch reads.
     vi.stubGlobal("document", { cookie: "csrftoken=tok-123; other=1" });
     let headers: Record<string, string> = {};
     vi.stubGlobal(

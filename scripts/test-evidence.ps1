@@ -3,84 +3,45 @@
     Run a test command and capture one honest coverage artifact per engine.
 
 .DESCRIPTION
-    This is the evidence wrapper that `backend/docs/test-gaps.md` tells a reader
-    to use. It exists because two evidence files in this repo were written by a
-    shell pipeline that hid the process exit code (`Q-S3-evidence.md` records
-    FAILED runs with `exit 0`) and because `pg_cov.log` was byte-identical to
-    `sqlite_cov.log`, which is only possible if one engine's "measured" output
-    was a copy of the other's.
-
-    Four things it does, each one closing that defect:
-
-      1. It reads the test command's `$LASTEXITCODE` on the very next statement
-         and never pipes the command's output. A native command's exit code is
-         not the exit code of `Tee-Object`, `Select-String` or `Out-String`, so
-         any pipeline between the command and the read is how "FAILED" gets
-         recorded next to "exit 0".
-      2. It writes EXACTLY ONE artifact per engine -- `coverage-sqlite.json` or
-         `coverage-pg.json` -- through `coverage json` with `.coveragerc` passed
-         explicitly as `--rcfile`, and it snapshots BOTH artifacts' existence
-         and hash around the run, so a run that creates, deletes or rewrites
-         the other engine's artifact fails. Two engines can never share a file.
-      3. It refuses STALE coverage data: the `.coverage` database must have been
-         rewritten by the command it just ran. A `coverage json` over yesterday's
-         data is a plausible-looking wrong number, not evidence.
-      4. It asserts the total against `[report] fail_under` read from
-         `.coveragerc` (and also passes the floor to `coverage json` itself), so
-         a sub-floor run exits non-zero even when every test passed.
-      5. It asserts the artifact's statement totals equal the canonical
-         `coverage report` over the same data file and config. `coverage json`
-         locates `.coveragerc` relative to the CURRENT directory, so an artifact
-         written from the caller's cwd silently uses coverage.py's defaults --
-         no `exclude_lines`, so a subprocess-only guard is counted as missed --
-         and its totals stop matching `coverage report`. Both commands now receive the absolute `--rcfile`, and a disagreement
-         between them fails the run rather than being filed as evidence.
-
-    Nothing here parses prose. The artifact is produced by coverage.py and the
-    numbers printed are read back out of that artifact.
+    The evidence wrapper `backend/docs/test-gaps.md` tells a reader to use.
+    It reads `$LASTEXITCODE` on the next statement with no pipeline (a pipeline
+    reports its own exit code, never the suite's), writes exactly ONE artifact
+    per engine (`coverage-sqlite.json` / `coverage-pg.json`) and snapshots both,
+    refuses `.coverage` data the run did not rewrite, enforces `[report]
+    fail_under` from `.coveragerc`, and requires the artifact's totals to match
+    `coverage report`.
 
 .PARAMETER Engine
-    Which engine this run is measuring: `sqlite` or `pg`. It selects the
-    artifact name and is recorded in the summary line. It does NOT choose the
-    database -- the test command decides that, and a run labelled `pg` against
-    SQLite is the exact defect this wrapper was written for, so state the
-    database in the command (see EXAMPLES) and keep the label honest.
+    `sqlite` or `pg`; selects the artifact name and the summary label. It does
+    NOT choose the database -- the command does, and the label must match it.
 
 .PARAMETER Command
-    The test command to run, as a string, e.g.
-    `"venv\Scripts\python -m coverage run manage.py test --verbosity 0"`.
-    It runs from the backend directory. It must invoke a native executable
-    (`python`, `manage.py`, ...) so that `$LASTEXITCODE` is set; a PowerShell
-    expression that does not set it fails closed rather than reporting success.
+    Test command as a string, run from the backend directory. It must invoke a
+    native executable so `$LASTEXITCODE` is set; a PowerShell-only expression
+    fails closed.
 
 .PARAMETER BackendDir
-    The backend directory the command runs in. Defaults to `../backend`
-    relative to this script.
+    Directory the command runs in. Defaults to `../backend` beside this script.
 
 .PARAMETER Coveragerc
-    The coverage config whose `fail_under` is enforced. Defaults to
-    `backend/.coveragerc`. It is passed to both `coverage json` and `coverage
-    report` as an absolute `--rcfile`, so both read the same `omit` and
-    `exclude_lines` rules regardless of the caller's working directory.
+    Coverage config whose `fail_under` is enforced. Defaults to
+    `backend/.coveragerc`; passed as an absolute `--rcfile` to both `coverage
+    json` and `coverage report` so they share `omit`/`exclude_lines`.
 
 .EXAMPLE
-    # SQLite leg
     .\scripts\test-evidence.ps1 -Engine sqlite -Command "venv\Scripts\python -m coverage run manage.py test --verbosity 0"
 
 .EXAMPLE
-    # PostgreSQL leg: lane B's pg2b container, database perfume_store_b.
     $env:DATABASE_URL = 'postgresql://postgres:postgres@localhost:5433/perfume_store_b'
     $env:REDIS_URL = 'redis://127.0.0.1:6379/2'
     .\scripts\test-evidence.ps1 -Engine pg -Command "venv\Scripts\python -m coverage run manage.py test --verbosity 0"
 
 .NOTES
-    Exit codes: the test command's own exit code when it fails (preserved, never
-    rewritten to 1); 1 when the run failed for another reason (stale coverage
-    data, sub-floor coverage, missing artifact, artifact totals that disagree
-    with `coverage report`, the other engine's artifact created/deleted/changed);
-    2 for a usage/environment error (bad paths, unparsable `.coveragerc`). 0
-    means: the tests exited 0 AND coverage is at or above the floor AND the
-    artifact agrees with the canonical report.
+    Exit codes: the test command's own code when it fails (preserved); 1 for
+    every other failed run (stale data, sub-floor coverage, missing or
+    disagreeing artifact, the other engine's artifact changed); 2 for a
+    usage/environment error. 0 means tests exited 0 AND coverage is at or above
+    the floor AND the artifact agrees with the canonical report.
 #>
 [CmdletBinding()]
 param(
@@ -100,9 +61,7 @@ Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
 # Per-engine artifact names, fixed here so no caller can point two engines at
-# one file. `pg` is the lane-B container (`pg2b`); `postgresql` is accepted by
-# coverage/changelog_figures as the engine *vendor* name, and the label here is
-# the short one because that is what the artifact filename carries.
+# one file. `pg` is the lane-B container; `postgresql` is the vendor name.
 $ArtifactNames = @{ sqlite = 'coverage-sqlite.json'; pg = 'coverage-pg.json' }
 $OtherEngine = if ($Engine -eq 'sqlite') { 'pg' } else { 'sqlite' }
 
@@ -128,11 +87,8 @@ if (-not (Test-Path -LiteralPath $Python -PathType Leaf)) {
     $Python = 'python'
 }
 
-# --------------------------------------------------------------------------
-# The floor, read from [report] fail_under. Parsed rather than hardcoded: a
-# wrapper that carries its own copy of the gate is a second source of truth,
-# and the first thing to drift.
-# --------------------------------------------------------------------------
+# The floor is read from [report] fail_under: a second hardcoded copy is a
+# second source of truth, and the first thing to drift.
 $FailUnder = $null
 $InReport = $false
 foreach ($line in Get-Content -LiteralPath $Coveragerc) {
@@ -155,11 +111,8 @@ $Artifact = Join-Path $BackendDir $ArtifactNames[$Engine]
 $OtherArtifact = Join-Path $BackendDir $ArtifactNames[$OtherEngine]
 $CoverageData = Join-Path $BackendDir '.coverage'
 
-# Snapshot BOTH artifacts' existence AND content before the run. The guard
-# used to arm only when the other artifact already existed, so a command that
-# created it from nothing -- the exact way one engine's "measurement" becomes a
-# copy of the other's -- slipped through as "no change". An absent file is a
-# state: Exists=False is compared like any hash.
+# Snapshot BOTH artifacts' existence AND hash before the run: an absent file
+# is a state, so a command that creates the other engine's file is caught.
 function Get-ArtifactState {
     param([string]$Path)
     if (Test-Path -LiteralPath $Path -PathType Leaf) {
@@ -185,9 +138,6 @@ function Get-CoverageDataStamp {
 
 $DataBefore = Get-CoverageDataStamp
 
-# --------------------------------------------------------------------------
-# 1. Run the tests. No pipeline between the call and the read.
-# --------------------------------------------------------------------------
 Write-Host "test-evidence: engine=$Engine backend=$BackendDir"
 Write-Host "test-evidence: command=$Command"
 
@@ -195,14 +145,10 @@ $Location = Get-Location
 $TestExit = $null
 try {
     Set-Location -LiteralPath $BackendDir
-    # Clear the previous native exit code first: a stale 0 inherited from an
-    # earlier command in the same session is the other half of the masking
-    # defect, and a PowerShell-only command would then look successful.
+    # Clear the stale native exit code first, and deliberately do NOT pipe the
+    # command: `$LASTEXITCODE` belongs to the last native command, so
+    # `| Tee-Object`/`| Out-String` would report the pipeline's success instead.
     $global:LASTEXITCODE = $null
-    # Deliberately NOT piped: `$LASTEXITCODE` belongs to the last native
-    # command, so a `| Tee-Object`/`| Out-String` here would report the
-    # pipeline's success instead of the suite's. The output goes straight to
-    # the console for the same reason.
     Invoke-Expression $Command
     $TestExit = $LASTEXITCODE
 }
@@ -215,17 +161,12 @@ finally {
 }
 
 if ($null -eq $TestExit) {
-    # Fail closed. A PowerShell-only command never sets $LASTEXITCODE, and
-    # "$null -eq 0" is false, so an unguarded script would report success for
-    # a command that may never have run.
+    # Fail closed: a PowerShell-only command never sets $LASTEXITCODE.
     Write-Host "test-evidence: the command did not set `$LASTEXITCODE (not a native executable); refusing to report success" -ForegroundColor Red
     exit 1
 }
 Write-Host "test-evidence: test exit code = $TestExit"
 
-# --------------------------------------------------------------------------
-# 2. Refuse stale coverage data. The artifact must describe the run above.
-# --------------------------------------------------------------------------
 $DataAfter = Get-CoverageDataStamp
 if ($null -eq $DataAfter) {
     Write-Host "test-evidence: no .coverage database was produced; the command must be a 'coverage run' invocation" -ForegroundColor Red
@@ -238,22 +179,17 @@ if ($DataAfter -eq $DataBefore) {
     exit 1
 }
 
-# --------------------------------------------------------------------------
-# 3. ONE artifact for this engine, via `coverage json`. The floor is passed to
-#    coverage itself as well, so a sub-floor run cannot exit 0 even if this
+# 3. ONE artifact for this engine, via `coverage json`. The floor is also
+#    passed to coverage itself, so a sub-floor run cannot exit 0 even if this
 #    script's own comparison were skipped.
-# --------------------------------------------------------------------------
 $CoverageExit = $null
 $CoveragePercent = $null
 if (Test-Path -LiteralPath $Artifact -PathType Leaf) {
     Remove-Item -LiteralPath $Artifact -Force
 }
-# `--rcfile` is load-bearing. `coverage json` looks for `.coveragerc` in the
-# CURRENT directory, and this line runs after the script restored the caller's
-# location: without the flag the artifact silently used coverage.py's defaults
-# (no `omit`, no `exclude_lines`) and counted the subprocess-only guard in
-# config/settings.py as missed. The path is absolute, so the artifact does not
-# depend on where the wrapper was invoked.
+# `--rcfile` is load-bearing: `coverage json` finds `.coveragerc` in the
+# CURRENT directory, so without it the artifact used coverage.py's defaults
+# (no `omit`, no `exclude_lines`) and the totals stopped matching.
 & $Python -m coverage json "--rcfile=$Coveragerc" --data-file=$CoverageData --pretty-print --fail-under=$FailUnder -o $Artifact
 $CoverageExit = $LASTEXITCODE
 
@@ -262,10 +198,8 @@ if (-not (Test-Path -LiteralPath $Artifact -PathType Leaf)) {
     if ($TestExit -ne 0) { exit $TestExit }
     exit 1
 }
-# Parse the artifact with the interpreter that wrote it. Windows PowerShell's
-# ConvertFrom-Json cannot ingest coverage.py's `files` object: its keys are
-# absolute Windows paths, and 5.1 rejects them as member names. Reading the
-# same artifact through json.load is the same number, without that parser bug.
+# Parse with the interpreter that wrote it: Windows PowerShell 5.1's
+# ConvertFrom-Json rejects coverage.py's absolute-path member names.
 $TotalsLine = & $Python -c "import json, sys; t = json.load(open(sys.argv[1], encoding='utf-8'))['totals']; print('|'.join(str(t[k]) for k in ('percent_covered', 'percent_covered_display', 'num_statements', 'missing_lines')))" $Artifact
 if ($LASTEXITCODE -ne 0 -or -not $TotalsLine) {
     Write-Host "test-evidence: could not read totals out of $Artifact" -ForegroundColor Red
@@ -278,20 +212,14 @@ $CoverageDisplay = [string]$TotalParts[1]
 $ArtifactStatements = [int]$TotalParts[2]
 $ArtifactMissed = [int]$TotalParts[3]
 
-# --------------------------------------------------------------------------
 # 3b. The artifact must agree with the canonical `coverage report` over the
-#     same data file and the same config. Comparing the two counts, rather than
-#     asserting a remembered total, is what keeps this check honest at every
-#     future tip: a hardcoded 14005 would itself become the next stale figure.
-#     A disagreement means the artifact was produced under a different config,
-#     which is exactly the 14007/1-by-a-default-config defect.
-# --------------------------------------------------------------------------
+#     same data file and config. A hardcoded total would itself go stale.
 $ReportLines = & $Python -m coverage report "--rcfile=$Coveragerc" --data-file=$CoverageData --fail-under=0
 $ReportExit = $LASTEXITCODE
 $TotalRow = @($ReportLines | Where-Object { $_ -match '^TOTAL\s' }) | Select-Object -First 1
 if ($ReportExit -ne 0 -or -not $TotalRow) {
-    # `--fail-under=0` keeps a sub-floor total from exiting 2 here: the floor is
-    # enforced below and by `coverage json`, and this step only compares counts.
+    # `--fail-under=0` keeps a sub-floor total from exiting 2 here: the floor
+    # is enforced below and by `coverage json`; this step only compares counts.
     Write-Host "test-evidence: coverage report could not be read (exit $ReportExit); the artifact totals are unverified" -ForegroundColor Red
     if ($TestExit -ne 0) { exit $TestExit }
     exit 1
@@ -306,12 +234,8 @@ if ($ArtifactStatements -ne $ReportStatements -or $ArtifactMissed -ne $ReportMis
     exit 1
 }
 
-# --------------------------------------------------------------------------
 # 4. Neither artifact may be created, deleted or rewritten by a run labelled
-#    with ONE engine. Comparing existence as well as content is what catches a
-#    command that creates the other engine's file from scratch; the previous
-#    guard skipped the comparison whenever that file did not already exist.
-# --------------------------------------------------------------------------
+#    with ONE engine; comparing existence catches the created-from-nothing case.
 $OtherMoved = $false
 $OtherBeforeState = $ArtifactsBefore[$OtherArtifact]
 $OtherAfterState = Get-ArtifactState -Path $OtherArtifact

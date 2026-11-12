@@ -4,12 +4,8 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { API_BASE } from "./config";
 
 /**
- * Policy binding contract (spec A-12.D.2): `getReturnWindow` renders a number
- * ONLY from a positive `return_window_days` on `GET /api/settings/`. Absent
- * field, malformed values (strings, the closed-window 0, negatives, junk
- * bodies), non-2xx replies and a dead backend must all resolve to `{}` —
- * there is no default on this path, because a fabricated window is the exact
- * contradiction the rule exists to prevent.
+ * Only a positive `return_window_days` yields a number; absent/malformed/0/
+ * non-2xx/dead-backend all yield `{}`, because a fabricated window is the bug.
  */
 function jsonResponse(body: unknown, status = 200) {
   return new Response(JSON.stringify(body), {
@@ -109,13 +105,8 @@ describe("getReturnWindow", () => {
 });
 
 /**
- * Dispatch/delivery windows (same A-12.D.2 single-source rule as the return
- * window): the shipping page is imported beside `shippingPolicy`, so "the
- * page renders the constants" is proven on both sides — the module's strings
- * against the element tree the page actually returns, plus a source check
- * that no window range is typed into the page again. A page that re-wrote
- * the numbers itself would satisfy a rendered-text check by coincidence;
- * only the source check fails it.
+ * Both sides are proven: rendered text against the constants, plus a source
+ * scan so a page that retypes the ranges cannot pass by coincidence.
  */
 function collectText(node: unknown): string {
   if (node === null || node === undefined || typeof node === "boolean") {
@@ -152,19 +143,15 @@ describe("shippingPolicy", () => {
     ]);
 
     const text = collectText(ShippingPage());
-    // The whole sentence, word for word — structure is the page's contract,
-    // the numbers come from the module, so nothing may drift between them.
+    // Structure is the page's contract; numbers come from the module.
     const sentence =
       `Orders are typically dispatched within ${shippingPolicy.dispatchWindow} ` +
       `of payment confirmation, and delivery usually takes a further ` +
       `${shippingPolicy.deliveryWindow} depending on your location. ` +
       `Business days exclude Sundays and public holidays.`;
     expect(text).toContain(sentence);
-    // §5.7 (D1 screens): the same two module windows ALSO render as the
-    // scannable fact matrix at the top, so each appears twice on screen
-    // (facts + prose) by design. The pin is the SET of range claims: a
-    // third distinct window typed anywhere on the page fails here, and a
-    // typed range in the source fails the source pin below.
+    // The module windows render twice by design (facts + prose); a third
+    // distinct range in the page fails here.
     const claims = text.match(/\d+[–-]\d+ (?:business )?days/g) ?? [];
     expect([...new Set(claims)].sort()).toEqual(
       [shippingPolicy.dispatchWindow, shippingPolicy.deliveryWindow].sort(),
@@ -178,8 +165,7 @@ describe("shippingPolicy", () => {
     ]);
 
     const text = collectText(ShippingPage());
-    // Counting, not just containment: a refactor that drops the fact
-    // matrix (or the sentence) leaves only one occurrence and fails here.
+    // Counting catches a refactor that drops the fact matrix or the sentence.
     const occurrences = (needle: string) => text.split(needle).length - 1;
     expect(occurrences(shippingPolicy.dispatchWindow)).toBe(2);
     expect(occurrences(shippingPolicy.deliveryWindow)).toBe(2);
@@ -198,12 +184,8 @@ describe("shippingPolicy", () => {
 });
 
 /**
- * /returns (D1 screens, U-W13-T12): the API window renders in the top
- * fact matrix AND the short-version prose when `GET /api/settings/`
- * publishes one, and the page ships NO return-window count when it does
- * not: A-12.D.2's single-source rule extended to the new fact-matrix
- * surface. (Operational copy, i.e. refund timing and the damage-notice
- * deadline, carries its own figures by design and is not the window.)
+ * The API window renders in the fact matrix and prose; no count ships when the
+ * API publishes none. Operational figures (refund timing) are not the window.
  */
 describe("returns page window claims (A-12.D.2)", () => {
   async function renderReturns() {

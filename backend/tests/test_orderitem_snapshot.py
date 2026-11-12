@@ -1,16 +1,3 @@
-"""R-8.13 OrderItem snapshot columns (sku, variant_name) — spec section 8.
-
-Extends the historical-immutability pins of tests/test_e2e_isolation.py:79-131
-(price change + product delete): order lines must stay self-describing after
-the catalogue changes or the product row is gone. sku/variant_name are frozen
-at checkout and read-only everywhere.
-
-Documented population source: no variant-selection input exists at checkout
-(CartItem is product-only; variant picking rides SPEC-3-21/SPEC-6-08) and
-``products`` carries no product-level SKU, so ``sku`` snapshots empty and
-``variant_name`` mirrors the product name until a variant can be chosen.
-"""
-
 import importlib
 from decimal import Decimal
 
@@ -44,7 +31,6 @@ class OrderItemSnapshotTests(ApiTestCase):
         self.api_login("buyer")
 
     def _checkout(self):
-        """Check out one unit of the fixture product; return the order item."""
         self.seed_session_cart([(self.product, 1)])
         res = self.checkout()
         self.assertEqual(res.status_code, 201, res.data)
@@ -59,13 +45,10 @@ class OrderItemSnapshotTests(ApiTestCase):
     def test_checkout_snapshots_product_identity(self):
         item = self._checkout()
 
-        # The product model has no product-level SKU and no variant can be
-        # chosen at checkout yet, so the snapshot is the product's own
-        # identity (see module docstring for the population decision).
+        # No variant can be chosen at checkout and products carry no SKU, so sku snapshots empty and variant_name mirrors the product name.
         self.assertEqual(item.sku, "")
         self.assertEqual(item.variant_name, "Oud Royale")
 
-        # exposed read-only on the customer order payload
         res = self.client.get("/api/orders/")
         self.assertEqual(res.status_code, 200, res.data)
         row = res.data["results"][0]["items"][0]
@@ -84,7 +67,7 @@ class OrderItemSnapshotTests(ApiTestCase):
         self.assertEqual(res.status_code, 200, res.data)
 
         item.refresh_from_db()
-        self.assertEqual(item.variant_name, "Oud Royale")  # frozen at checkout
+        self.assertEqual(item.variant_name, "Oud Royale")
         self.assertEqual(item.sku, "")
         self.assertEqual(item.price, Decimal("250.00"))
 
@@ -100,7 +83,6 @@ class OrderItemSnapshotTests(ApiTestCase):
         res = staff.delete(f"/api/products/{self.product.slug}/")
         self.assertEqual(res.status_code, 204, res.data)
 
-        # FK is SET_NULL; the frozen columns carry the purchase record
         item.refresh_from_db()
         self.assertIsNone(item.product)
         self.assertEqual(item.sku, "")
@@ -145,15 +127,6 @@ class OrderItemSnapshotTests(ApiTestCase):
 
 
 class SnapshotBackfillTests(ApiTestCase):
-    """Pins the 0007 backfill function semantics without DDL round-trips.
-
-    The function is invoked exactly as the migration executor does (via the
-    app registry), so the assertions cover the real backfill code path:
-    pre-existing rows inherit the product's CURRENT name (best-effort — the
-    at-purchase name already lives in ``product_name``), rows whose product
-    was deleted get empty snapshots, and the pass is id-ordered/deterministic.
-    """
-
     def test_backfill_populates_from_current_product_state(self):
         module = importlib.import_module(
             "orders.migrations.0007_orderitem_sku_orderitem_variant_name"
@@ -180,7 +153,7 @@ class SnapshotBackfillTests(ApiTestCase):
             quantity=1,
             subtotal=Decimal("50.00"),
         )
-        gone.delete()  # OrderItem.product is SET_NULL
+        gone.delete()
 
         module.backfill_order_item_snapshots(global_apps, None)
 
@@ -188,8 +161,6 @@ class SnapshotBackfillTests(ApiTestCase):
         orphan.refresh_from_db()
         self.assertEqual(keep.sku, "")
         self.assertEqual(keep.variant_name, "Backfill Source")
-        # documented: orphan rows get empty snapshots; product_name/price
-        # already carry their purchase record
         self.assertEqual(orphan.sku, "")
         self.assertEqual(orphan.variant_name, "")
         self.assertEqual(orphan.product_name, "Orphan Line")

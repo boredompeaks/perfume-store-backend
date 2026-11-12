@@ -1,14 +1,3 @@
-"""SPEC-T0 (Phase T known-state seed): ``manage.py seed_demo``.
-
-The BUILD-QUEUE T0 promotion of the former ``scripts/demo_seed.py`` into a
-management command — the known-state entry point the red-team (T1) and
-load (T2) programs both start from. The seed creates MARKED rows (the
-script's own ``demo-`` prefix scheme, unchanged) so ``--cleanup`` can
-remove exactly the demo set; the seed itself is idempotent by recreation
-(clean-then-create), so a second run converges on the same set rather
-than refusing or deduping in place.
-"""
-
 from datetime import timedelta
 from decimal import Decimal
 from io import StringIO
@@ -23,9 +12,8 @@ from common.roles import STAFF_ROLES
 from orders.models import Coupon, Order, OrderItem
 from products.models import StockMovement, products
 
-# Hand-written literals pinning the exact demo set: if STAFF_ROLES or the
-# seed's data ever changes, these fail and force a conscious update rather
-# than silently recomputing from the same source the command reads.
+# Hand-written literals pinning the exact demo set: a change to STAFF_ROLES or the
+# seed data fails here rather than silently recomputing from the source.
 STAFF_USERNAMES = {
     "demo-support",
     "demo-catalogue",
@@ -51,8 +39,6 @@ def _run(*argv):
 
 
 class SeedDemoTests(TestCase):
-    """The seeded set: marked rows, exact counts, exact identities."""
-
     def test_seed_creates_the_marked_demo_set(self):
         _run()
 
@@ -87,7 +73,6 @@ class SeedDemoTests(TestCase):
         demo_products = products.objects.filter(name__startswith="demo-")
         self.assertEqual(demo_products.count(), 3)
         self.assertEqual({p.slug: p.stock for p in demo_products}, PRODUCT_SLUGS)
-        # Every demo product is inside the marker domain by name AND slug.
         self.assertTrue(all(p.slug.startswith("demo-") for p in demo_products))
 
         coupon = Coupon.objects.get(code=COUPON_CODE)
@@ -131,8 +116,6 @@ class SeedDemoTests(TestCase):
             "items": OrderItem.objects.count(),
         }
         self.assertEqual(first, second)
-        # Literal pins, not a recomputed oracle: the second run leaves the
-        # same counts behind, no duplicates, no growth.
         self.assertEqual(
             second,
             {
@@ -146,13 +129,7 @@ class SeedDemoTests(TestCase):
 
     def test_seeded_customer_logs_in_with_the_printed_demo_credential(self):
         out = _run()
-        # Hand-written literal, NOT the command's own constant (a pin derived
-        # from the constant would agree with a wrong constant from both
-        # sides): the demo credential is what the seed prints for humans to
-        # sign in with, so changing it must be a conscious, pinned update —
-        # and it must stay plainly fake, never password-shaped, or secret
-        # scanners read it as a real credential (GitGuardian incidents
-        # 38269594/38269595).
+        # Hand-written literal, NOT the command's own constant: the demo credential is what the seed prints, and it must stay plainly fake so scanners do not read it as real.
         self.assertIn("demo-customer / demo-account", out)
         self.assertIsNotNone(
             authenticate(username="demo-customer", password="demo-account")
@@ -160,17 +137,13 @@ class SeedDemoTests(TestCase):
 
 
 class SeedDemoCleanupTests(TestCase):
-    """``--cleanup``: removes exactly the marked set; foreign rows live."""
-
     def _make_foreign_rows(self):
-        """Rows sharing the seeded MODELS but outside the marker domain —
-        including near-misses that contain 'demo' without the prefix."""
         foreign_user = User.objects.create_user(
             username="real-buyer", password="fixture"
         )
         near_miss_user = User.objects.create_user(
             username="demo",
-            password="x-near-miss",  # no dash: unmarked
+            password="x-near-miss",
         )
         foreign_product = products.objects.create(
             name="Bergamot Noir",
@@ -182,7 +155,7 @@ class SeedDemoCleanupTests(TestCase):
             category="oriental",
         )
         near_miss_product = products.objects.create(
-            name="demo",  # no dash: unmarked
+            name="demo",
             slug="demo-product-word",
             description="Contains the word but not the marker prefix.",
             price=Decimal("199.00"),
@@ -200,7 +173,7 @@ class SeedDemoCleanupTests(TestCase):
             valid_until=timezone.now() + timedelta(days=30),
         )
         near_miss_coupon = Coupon.objects.create(
-            code="DEMO",  # no dash: unmarked
+            code="DEMO",
             discount_type="fixed",
             discount_value=Decimal("5.00"),
             minimum_order_amount=Decimal("0.00"),
@@ -241,9 +214,6 @@ class SeedDemoCleanupTests(TestCase):
     def test_cleanup_removes_exactly_the_marked_set(self):
         foreign = self._make_foreign_rows()
         _run()
-        # Simulate red-team activity attaching a ledger row to a DEMO
-        # product after the seed: it is inside the marker domain, so
-        # cleanup owns it too.
         demo_product = products.objects.get(slug="demo-plenty-perfume")
         demo_movement = StockMovement.objects.create(
             product=demo_product,
@@ -268,9 +238,6 @@ class SeedDemoCleanupTests(TestCase):
         )
         self.assertFalse(StockMovement.objects.filter(pk=demo_movement.pk).exists())
 
-        # Foreign rows — same models, outside the marker domain — survive,
-        # including the 'demo'-without-dash near-misses that pin the
-        # prefix boundary exactly.
         self.assertTrue(User.objects.filter(pk=foreign["user"].pk).exists())
         self.assertTrue(User.objects.filter(pk=foreign["near_miss_user"].pk).exists())
         self.assertTrue(products.objects.filter(pk=foreign["product"].pk).exists())
@@ -286,8 +253,6 @@ class SeedDemoCleanupTests(TestCase):
             StockMovement.objects.filter(pk=foreign["movement"].pk).exists()
         )
 
-        # Role groups are shared RBAC infrastructure (get_or_create on
-        # role names): cleanup never deletes them.
         self.assertEqual(
             set(
                 Group.objects.filter(name__in=STAFF_ROLES).values_list(
@@ -301,7 +266,7 @@ class SeedDemoCleanupTests(TestCase):
         foreign = self._make_foreign_rows()
         _run()
         _run("--cleanup")
-        _run("--cleanup")  # second pass: nothing marked left, still exit 0
+        _run("--cleanup")
 
         self.assertEqual(User.objects.filter(username__startswith="demo-").count(), 0)
         self.assertEqual(products.objects.filter(name__startswith="demo-").count(), 0)
@@ -309,16 +274,12 @@ class SeedDemoCleanupTests(TestCase):
         self.assertEqual(
             Order.objects.filter(user__username__startswith="demo-").count(), 0
         )
-        # Foreign survivors are untouched by the repeated cleanup.
         self.assertTrue(User.objects.filter(pk=foreign["user"].pk).exists())
         self.assertTrue(products.objects.filter(pk=foreign["product"].pk).exists())
         self.assertTrue(Coupon.objects.filter(pk=foreign["coupon"].pk).exists())
         self.assertTrue(Order.objects.filter(pk=foreign["order"].pk).exists())
 
     def test_cleanup_on_an_empty_database_is_a_clean_noop(self):
-        # No seed, no foreign rows: the marker querysets are empty, the
-        # command exits 0 having deleted nothing (the marker path is the
-        # ONLY deletion path — there is no blanket-delete mode to refuse).
         _run("--cleanup")
         self.assertEqual(User.objects.count(), 0)
         self.assertEqual(products.objects.count(), 0)

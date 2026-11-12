@@ -8,8 +8,7 @@ export default function robots(): MetadataRoute.Robots {
       {
         userAgent: "*",
         allow: "/",
-        // Derived from the page registry: every non-indexable static route is
-        // disallowed, so robots can never drift from the sitemap's indexable set.
+        // Registry-derived, so robots can never drift from the sitemap's set.
         disallow: disallowedPaths(),
       },
     ],

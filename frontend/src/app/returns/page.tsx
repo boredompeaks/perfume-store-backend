@@ -7,25 +7,8 @@ export const metadata: Metadata = {
   title: "Returns & Refunds",
 };
 
-/**
- * /returns — editorial policy spread (D1 design override of §5.7's
- * LegalShell composition; screens: maison_ther_politique_de_retour).
- * Same system as /shipping: bronze eyebrow, serif display h1, revision
- * line, a fact matrix at the top right, then anchor index + measure
- * prose with hairline seams. This stays a POLICY page, never a request
- * form (§A-14, §5.7): there is no customer-facing returns endpoint, so
- * the "how to request" path is the mailto below.
- *
- * The return window is the API's number or no number (A-12.D.2,
- * getReturnWindow): when `GET /api/settings/` publishes a positive
- * `return_window_days` it renders in the fact matrix AND the short
- * version; when it does not, both ship without a figure. What the
- * guard actually enforces: no RETURN-WINDOW count is typed in this
- * file; the API window never falls back to a hardcoded number. The
- * operational figures below (bank refund timing, damage-notice
- * deadline) are copy, not the window. Motion: none (P2, §5.7).
- * Server component.
- */
+// Policy page, never a request form: there is no returns endpoint, so the mailto
+// is the only path. The return window is the API's number or none — no fallback.
 
 const sections = [
   {
@@ -51,12 +34,9 @@ const sections = [
 ] as const;
 
 export default async function ReturnsPage() {
-  // A-12.D.2: the window is stated only when the API publishes one; with no
-  // number the same sentences ship minus their claim, never a fallback value.
   const { days } = await getReturnWindow();
   return (
     <div className="mx-auto w-full max-w-5xl px-4 py-16 sm:px-6">
-      {/* Header band: left title spread, right fact matrix (screen header). */}
       <header className="flex flex-col gap-8 border-b border-hairline pb-10 lg:flex-row lg:items-end lg:justify-between">
         <div className="max-w-2xl">
           <p className="text-eyebrow uppercase text-bronze">
@@ -70,7 +50,6 @@ export default async function ReturnsPage() {
           </p>
         </div>
         <dl className="flex flex-col gap-6 sm:flex-row lg:flex-col">
-          {/* The API's window, or the fact is omitted entirely. */}
           {days && (
             <div className="min-w-56">
               <dt className="text-eyebrow uppercase text-ink-secondary">
@@ -93,7 +72,6 @@ export default async function ReturnsPage() {
       </header>
 
       <div className="grid gap-10 pt-10 lg:grid-cols-[200px_1fr] lg:gap-x-8">
-        {/* Plain in-page anchor index, same pattern as /shipping. */}
         <nav
           aria-label="Returns sections"
           className="hidden text-small text-ink-secondary md:block lg:sticky lg:top-24 lg:self-start"
@@ -115,7 +93,6 @@ export default async function ReturnsPage() {
           </ol>
         </nav>
 
-        {/* Measure-limited prose, hairline-ruled sections (screen). */}
         <div className="min-w-0 max-w-(--measure) space-y-10">
           <section id="the-short-version" className="scroll-mt-24">
             <div className="flex items-baseline gap-2">
@@ -201,7 +178,6 @@ export default async function ReturnsPage() {
         </div>
       </div>
 
-      {/* Support + cross-links, the screen's bottom band in English. */}
       <div className="mt-16 border-t border-hairline pt-6">
         <div className="flex flex-col gap-6 sm:flex-row sm:items-baseline sm:justify-between">
           <div>

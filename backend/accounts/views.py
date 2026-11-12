@@ -48,21 +48,18 @@ from .serializers import (
 
 
 def _lock_user_addresses(user):
-    """Lock one owner's rows before a default-flag write (SPEC-9-T4).
+    """Lock one owner's rows before a default-flag write.
 
-    The address rows alone cannot serialize the FIRST default: there is
-    nothing to lock yet, so two concurrent creates would both win. Locking
-    the owner row first gives every writer one serialization point, and
-    every writer takes the locks in this same order (owner, then rows), so
-    the flip is race-free and deadlock-free. Caller must be inside
-    ``transaction.atomic()``.
+    The rows alone cannot serialize the first default (there is nothing to lock
+    yet), so the owner row is locked first; every writer takes locks in this same
+    order, making the flip race- and deadlock-free. Caller must be in a transaction.
     """
     User.objects.select_for_update().get(pk=user.pk)
     return Address.objects.select_for_update().filter(user=user, is_default=True)
 
 
 class AddressViewSet(viewsets.ModelViewSet):
-    """CRUD for the caller's saved addresses (SPEC-9-T4, R-9.2.20).
+    """CRUD for the caller's saved addresses.
 
     The queryset is the authorization boundary: filtering by ``request.user``
     turns a foreign id into the repo's uniform 404 rather than a 403, so the
@@ -98,23 +95,9 @@ class AddressViewSet(viewsets.ModelViewSet):
 class LoginView(TokenObtainPairView):
     """JWT login behind the 'auth' throttle scope — the STAFF door.
 
-    SPEC-20-10: this is the privileged surface. It keeps the MFA-aware
-    serializer, so a privileged account must present its TOTP code (or
-    enroll first) exactly as before; the customer door is
-    StorefrontLoginView below.
-
-    Throttling here bounds credential stuffing (V-04). The response contract
-    is TokenObtainPairView's, except that the refresh token never enters the
-    JSON body [R-17.12]: it is moved into an HttpOnly cookie, so browser JS
-    cannot read it (spec §17.1). [R-7.20] successful (200) and rejected
-    (400/401) attempts each land an audit event; 429 refusals are raised by
-    throttling before this view runs, so they are the rate limit doing its
-    job, not an authentication outcome, and write nothing.
-
-    SPEC-17-05 [R-17.9]: the serializer is the MFA-aware subclass —
-    privileged-role users must present a valid TOTP code (or enroll first),
-    and those rejections raise here too, so they are audited as failed
-    logins without any code path that mints tokens skipping the factor.
+    Uses the MFA-aware serializer, keeps the refresh token out of the JSON body
+    and in an HttpOnly cookie, and audits both successful and rejected attempts;
+    throttling bounds credential stuffing.
     """
 
     throttle_scope = "auth"
@@ -124,17 +107,13 @@ class LoginView(TokenObtainPairView):
         try:
             response = super().post(request, *args, **kwargs)
         except (AuthenticationFailed, DRFValidationError, PermissionDenied):
-            # super().post signals every rejection by raising; record the
-            # failed attempt, then re-raise so the response is unchanged.
-            # PermissionDenied is the storefront door refusing a privileged
-            # account (SPEC-20-10) — a refused login like any other.
+            # super().post signals every rejection by raising; record the failed
+            # attempt, then re-raise so the response is unchanged.
             self._record_login(request, succeeded=False)
             raise
         self._record_login(request, succeeded=True)
-        # D-04b: the guest basket this browser built follows the account it
-        # just signed into. Done on the shared door so the storefront (which
-        # inherits this post) and the staff door agree; a sign-in with no
-        # guest basket and no existing cart adds no key and mints nothing.
+        # The guest basket follows the account it just signed into; with none,
+        # nothing is minted and no key is added.
         user = self._logged_in_user(request)
         if user is not None:
             cart = merge_session_cart_into_user_cart(request, user)
@@ -144,19 +123,16 @@ class LoginView(TokenObtainPairView):
 
     @staticmethod
     def _logged_in_user(request):
-        # The login serializer validates an exact username, so the account is
-        # the row authenticate() just proved; an unparsable body cannot reach
-        # this line (it would not have authenticated).
+        # The serializer validated an exact username, so this is the row
+        # authenticate() just proved.
         payload = request.data if isinstance(request.data, dict) else {}
         username = str(payload.get("username", "") or "")
         return User.objects.filter(username=username).first()
 
     @staticmethod
     def _record_login(request, succeeded):
-        # request.data may be any parsed JSON (a list body has no .get);
-        # the attempted username always rides in detail, while the actor FK
-        # resolves only an exact username match — the same lookup
-        # authenticate() just performed.
+        # request.data may be any parsed JSON (a list body has no .get); the
+        # actor FK resolves only an exact username match.
         payload = request.data if isinstance(request.data, dict) else {}
         username = str(payload.get("username", "") or "")
         AuditEvent.record(
@@ -169,14 +145,12 @@ class LoginView(TokenObtainPairView):
 
 
 class StorefrontLoginView(LoginView):
-    """POST /api/accounts/storefront/login/ — the CUSTOMER door (SPEC-20-10).
+    """POST /api/accounts/storefront/login/ — the CUSTOMER door.
 
-    Inherited wholesale from LoginView, so the throttle, the audit trail
-    and the HttpOnly refresh cookie [R-17.12] are literally the same code.
-    The only difference is the serializer: this door has no ``totp`` field
-    and refuses privileged accounts outright (see
-    StorefrontTokenObtainPairSerializer) — which is what keeps it from
-    becoming a way around [R-17.9].
+    Inherited wholesale from LoginView, so the throttle, audit trail and HttpOnly
+    refresh cookie are the same code; only the serializer differs — no ``totp``
+    field, and privileged accounts are refused rather than authenticated without
+    the factor.
     """
 
     serializer_class = StorefrontTokenObtainPairSerializer
@@ -184,11 +158,8 @@ class StorefrontLoginView(LoginView):
 
 def _set_refresh_cookie(response):
     """Move the freshly minted refresh token out of the response body and
-    into the HttpOnly cookie [R-17.12]. A refresh token delivered as JSON is
-    readable by any injected script — the cookie is the only carrier the
-    browser client gets. The cookie's max-age is synced to the token
-    lifetime so the browser never presents a cookie older than the token it
-    holds."""
+    into the HttpOnly cookie. A token delivered as JSON is readable by injected
+    script; the cookie's max-age is synced to the token lifetime."""
     token = response.data.get("refresh")
     if token:
         response.set_cookie(
@@ -205,8 +176,8 @@ def _set_refresh_cookie(response):
 
 
 def _clear_refresh_cookie(response):
-    """Expire the refresh cookie in place. Name + Path must match the
-    cookie set by _set_refresh_cookie or the browser keeps the stale one."""
+    """Expire the refresh cookie in place. Name + Path must match
+    _set_refresh_cookie or the browser keeps the stale one."""
     response.set_cookie(
         settings.JWT_REFRESH_COOKIE_NAME,
         "",
@@ -221,20 +192,13 @@ def _clear_refresh_cookie(response):
 
 
 def _refresh_origin_is_trusted(request):
-    """Origin/CSRF gate for the refresh seam (SPEC-Q-P1).
+    """Origin gate for the refresh seam.
 
-    The refresh credential rides a cookie, so a forged cross-origin POST is
-    the attack the gate exists for. SameSite=Lax already withholds the
-    cookie from cross-SITE requests, but SameSite is registered-domain
-    scoped: a hostile sibling subdomain (or a deployment that relaxes
-    SameSite through the env knob) is same-site, the browser attaches the
-    cookie, and only the Origin header still names the attacker. Django's
-    CSRF middleware cannot make this check - DRF APIViews are csrf_exempt
-    and this view authenticates no session - so it is made explicitly: an
-    Origin the deployment does not name is refused (403), the API's own
-    scheme://host plus the configured CSRF/CORS origin lists are allowed,
-    and an absent Origin is not a cross-site claim at all (non-browser API
-    clients send none and hold no ambient cookie jar to ride).
+    The refresh credential rides a cookie, and SameSite is registered-domain
+    scoped, so a hostile sibling subdomain would still attach it; Django's CSRF
+    middleware cannot check DRF APIViews (csrf_exempt, no session auth), so the
+    Origin header is checked explicitly. An absent Origin is not a cross-site
+    claim — non-browser clients send none and hold no cookie jar.
     """
     origin = request.META.get("HTTP_ORIGIN")
     if origin is None:
@@ -248,13 +212,10 @@ def _refresh_origin_is_trusted(request):
 def _legacy_body_refresh_allowed():
     """Is the legacy body carrier still inside its dual-accept window?
 
-    The window exists so Q-F3's frontend half can migrate at its own pace:
-    closing it early turns every browser still holding the token in
-    localStorage into a logged-out user (the bricking SPEC-Q-P1 forbids),
-    while leaving it open forever keeps an XSS-readable carrier alive.
-    ENABLED is the kill switch; otherwise the window closes START + DAYS,
-    all three env-driven (see settings). Settings are read per call, so a
-    deployment - or a test - can move the window without a restart.
+    The window lets the frontend migrate at its own pace: closing it early logs
+    out clients still holding a localStorage token, while leaving it open keeps
+    an XSS-readable carrier alive. Env-driven and read per call, so a deployment
+    or test can move the window without a restart.
     """
     if not settings.JWT_REFRESH_BODY_ACCEPT_ENABLED:
         return False
@@ -268,15 +229,10 @@ def _resolve_refresh_carrier(request, body):
     """Decide which carrier supplies the refresh token; return the raw token
     the rotation will consume (None when neither carrier presented one).
 
-    Window OPEN: an explicit body token wins - byte for byte the legacy
-    behaviour, which is what "dual-accept" means - with the cookie filling
-    an empty body. Window CLOSED: the body carrier is retired, so a cookie
-    refill takes precedence over a stray body token (a transitional client
-    sending both keeps working), and a body-only presentation is refused by
-    name instead of the generic "field is required", which would tell a
-    legacy client nothing about why it stopped working. A non-dict body
-    (form-encoded, not the browser surface this seam is about) is never
-    merged with the cookie, exactly as before.
+    Window open: an explicit body token wins, the legacy behaviour. Window
+    closed: a cookie refill takes precedence and a body-only presentation is
+    refused by name, not with the generic "field is required" a legacy client
+    could not interpret. A non-dict body is never merged with the cookie.
     """
     if body is None:
         return None
@@ -300,18 +256,13 @@ def _resolve_refresh_carrier(request, body):
 def _lock_presented_refresh(raw):
     """Serialize concurrent rotations of the SAME presented refresh token.
 
-    Rotation mutates two token-blacklist rows, and simplejwt's
-    check-then-blacklist is not atomic on its own: two simultaneous POSTs
-    carrying one token could both pass the blacklist check and both mint a
-    replacement - one token spent twice. The OutstandingToken row keyed by
-    the presented token's jti is the gate every rotation passes, so it is
-    locked FOR UPDATE inside the rotation's transaction; the loser blocks,
-    re-validates against the committed blacklist and dies 401 instead of
-    double-spending. Only a token that already verifies gets locked (a
-    forged jti would otherwise buy a lock on a stranger's row), and a token
-    that cannot verify mutates nothing, so its canonical rejection needs no
-    lock. SQLite serialises writes and no-ops FOR UPDATE, so the real
-    enforcement is the PostgreSQL leg of the floor pair.
+    simplejwt's check-then-blacklist is not atomic: two simultaneous POSTs
+    carrying one token could both pass and mint replacements. The
+    OutstandingToken row keyed by the token's jti is locked FOR UPDATE inside the
+    rotation transaction, so the loser re-validates against the committed
+    blacklist and dies 401. Only a token that verifies is locked (a forged jti
+    must not buy a lock on a stranger's row); SQLite no-ops FOR UPDATE, so the
+    real enforcement is PostgreSQL.
     """
     if not raw:
         return
@@ -327,26 +278,18 @@ def _lock_presented_refresh(raw):
 class RefreshView(TokenRefreshView):
     """JWT refresh behind the 'auth' throttle scope.
 
-    Throttling here bounds refresh-token brute forcing (V-04 family). The
-    refresh token is read from the HttpOnly cookie set at login [R-17.12];
-    while the SPEC-Q-P1 dual-accept window is open an explicit body token
-    still works for legacy clients, and once it closes the cookie is the
-    only carrier (_resolve_refresh_carrier names the refusal). Every
-    response re-sets the rotated token into the cookie and never into the
-    body, a cross-origin POST is refused before any carrier is read
-    (_refresh_origin_is_trusted), the rotation runs in one transaction
-    under the presented token's row lock (_lock_presented_refresh), and a
-    rejected refresh sweeps the cookie so a dead token cannot pin the
-    browser into retrying it - an origin refusal is not a verdict on the
-    token, so it never sweeps."""
+    The refresh token is read from the HttpOnly cookie (a body token still works
+    while the dual-accept window is open), rotation runs in one transaction under
+    the presented token's row lock, and a rejected refresh sweeps the cookie so a
+    dead token cannot pin the browser into retrying it.
+    """
 
     throttle_scope = "auth"
 
     def post(self, request, *args, **kwargs):
         if not _refresh_origin_is_trusted(request):
-            # 403 before the body is even read: a cross-origin caller gets
-            # the same verdict whatever it presented, and a probe must never
-            # sweep (or mint from) the victim's cookie.
+            # 403 before the body is read: a cross-origin probe must never sweep
+            # or mint from the victim's cookie.
             raise PermissionDenied("Cross-origin refresh requests are not allowed.")
         raw = _resolve_refresh_carrier(
             request, request.data if isinstance(request.data, dict) else None
@@ -357,11 +300,9 @@ class RefreshView(TokenRefreshView):
         return _set_refresh_cookie(response)
 
     def handle_exception(self, exc):
-        # super().post signals rejection by raising (InvalidToken -> 401
-        # here), so a rejected refresh can only sweep its cookie in the
-        # exception handler. 429 throttle refusals are NOT a verdict on the
-        # token — the cookie must survive them (parallel tabs share one
-        # budget) — so only an authentication verdict sweeps.
+        # super().post signals rejection by raising, so the sweep can only happen
+        # here. 429 throttle refusals are not a verdict on the token (parallel tabs
+        # share one budget), so only an authentication verdict sweeps.
         response = super().handle_exception(exc)
         if response.status_code == 401:
             response = _clear_refresh_cookie(response)
@@ -369,16 +310,12 @@ class RefreshView(TokenRefreshView):
 
 
 class LogoutView(APIView):
-    """Secure logout [R-17.8]: blacklist the presented refresh token.
+    """Secure logout: blacklist the presented refresh token.
 
-    POST /api/accounts/logout/ with a valid access token blacklists the
-    refresh token and clears its HttpOnly cookie, so the browser session
-    cannot outlive the logout — a stolen refresh token can no longer mint
-    access tokens. The cookie is the token source for browser clients
-    [R-17.12]; an explicit body token still works for non-browser API
-    clients. Authentication is required (an anonymous caller has nothing to
-    revoke and must not learn anything about token validity); the 'auth'
-    throttle scope covers the endpoint like its sibling token routes.
+    POST /api/accounts/logout/ with a valid access token blacklists the refresh
+    token and clears its HttpOnly cookie, so a stolen token can no longer mint
+    access tokens. The cookie is the browser source; an explicit body token works
+    for non-browser clients. Authentication is required and 'auth'-throttled.
     """
 
     permission_classes = [IsAuthenticated]
@@ -389,16 +326,15 @@ class LogoutView(APIView):
         if not raw and isinstance(request.data, dict):
             raw = request.data.get("refresh")
         if not isinstance(raw, str) or not raw:
-            # No cookie and no body token: nothing was presented, and no
-            # cookie can exist to sweep (raw would have come from it).
+            # Nothing presented; no cookie can exist to sweep either.
             raise DRFValidationError({"refresh": ["This field is required."]})
         try:
-            # RefreshToken() verifies signature and expiry: an invalid or
-            # already-expired token is rejected rather than recorded.
+            # RefreshToken() verifies signature and expiry: an invalid or expired
+            # token is rejected rather than recorded.
             token = RefreshToken(raw)
         except TokenError:
-            # A dead cookie must not pin the browser: sweep it even while
-            # rejecting, or every future logout retries the same dead token.
+            # A dead cookie must not pin the browser: sweep it even while rejecting,
+            # or every future logout retries the same dead token.
             return _clear_refresh_cookie(
                 Response(
                     {"refresh": ["Invalid or expired token."]},
@@ -410,15 +346,12 @@ class LogoutView(APIView):
 
 
 def _blacklist_user_refresh_tokens(user):
-    """Session invalidation after critical account changes [R-17.10].
+    """Session invalidation after critical account changes.
 
-    Blacklists every refresh token still outstanding for ``user`` so a
-    pre-change session (stolen device, forgotten tab, attacker) cannot
-    mint new access tokens after the account's credentials changed. The
-    caller runs this inside the same transaction as the credential
-    change, so the sessions die exactly when the change lands. Idempotent
-    via get_or_create: re-blacklisting an already-blacklisted token is a
-    no-op, so concurrent changes cannot collide.
+    Blacklists every refresh token still outstanding for ``user`` so a pre-change
+    session cannot mint new access tokens after the credentials changed; the
+    caller runs it in the same transaction, and ``get_or_create`` makes it
+    idempotent under concurrent changes.
     """
     for outstanding in OutstandingToken.objects.filter(user=user):
         BlacklistedToken.objects.get_or_create(token=outstanding)
@@ -430,7 +363,7 @@ def _encoded_user_id(user):
 
 def _get_user(uid):
     # Guard against None/empty uid: urlsafe_base64_decode(None) would raise
-    # AttributeError (500) instead of the documented 400 (test-gaps #8).
+    # AttributeError (500) instead of the documented 400.
     if not uid:
         return None
     try:
@@ -454,44 +387,22 @@ def _send_verification_email(user):
     )
 
 
-# Q-S3 [F3 ACCESS GATE]: domain separation and payload for the signed access
-# challenge. Literals on purpose, not settings: they are the minting contract
-# the owner-side edge gate must reproduce character-for-character, and a
-# constant in the source is what a non-Django minter can read (the env contract
-# that varies per deployment lives in ACCOUNT_CHALLENGE_* settings below).
+# Domain separation and payload for the signed access challenge. Literals on
+# purpose, not settings: the owner-side edge gate must reproduce them
+# character-for-character; only the ACCOUNT_CHALLENGE_* settings vary per deployment.
 CHALLENGE_SALT = "accounts.access-challenge"
 CHALLENGE_VALUE = "accounts-access"
 CHALLENGE_REFUSAL = "Access challenge required."
 
 
 def _enforce_access_challenge(request):
-    """Q-S3 [F3 ACCESS GATE]: the optional signed-challenge hook.
+    """Optional signed-challenge hook for the access gate.
 
-    Env contract (both keys are documented in ``.env.example``):
-
-    - ``ACCOUNT_CHALLENGE_SECRET`` unset — the zero-config default — the hook
-      is DISABLED: every request passes with no ``challenge`` parameter, which
-      is what keeps a deployment that has not wired an edge gate (and every
-      existing test) green.
-    - Set to the edge gate's shared secret, the request must carry
-      ``challenge=<token>`` in the JSON body or the query string: a Django
-      ``TimestampSigner`` token minted with that same secret, the
-      ``CHALLENGE_SALT`` domain and the ``CHALLENGE_VALUE`` payload —
-      ``TimestampSigner(key=secret, salt=CHALLENGE_SALT).sign(CHALLENGE_VALUE)``
-      is the exact mint — a one-liner beside any Python edge gate, or
-      reproduced byte-for-byte elsewhere from TimestampSigner's recipe (b62
-      timestamp, then base64 HMAC-SHA-256 keyed with the salt label mixed
-      into the secret). Missing, foreign-key, tampered, wrong-payload
-      and stale tokens are all refused with the SAME ``PermissionDenied``
-      detail, so the refusal distinguishes nothing.
-    - ``ACCOUNT_CHALLENGE_MAX_AGE`` freshness window in seconds (default 300);
-      a value below 1 disables only the age check — the signature stays
-      required.
-
-    Runs inside the view, i.e. AFTER DRF throttling has already gated the
-    request, so guessing at tokens is bounded by the endpoint's scope budget
-    too. Raises only ``PermissionDenied``, which the uniform error envelope
-    renders as the same 403 body on both endpoints.
+    With ``ACCOUNT_CHALLENGE_SECRET`` unset the hook is disabled; otherwise the
+    request must carry a ``TimestampSigner`` token minted with that secret and the
+    ``CHALLENGE_SALT``/``CHALLENGE_VALUE`` domain, refused identically when
+    missing, foreign, tampered or stale. It runs after DRF throttling, so token
+    guessing is bounded by the endpoint's budget too.
     """
     secret = settings.ACCOUNT_CHALLENGE_SECRET
     if not secret:
@@ -516,22 +427,18 @@ def _enforce_access_challenge(request):
 @api_view(["POST"])
 @throttle_scope("register")
 def register(request):
-    """POST /api/accounts/register/ — Q-S3 [F3 ACCESS GATE].
+    """POST /api/accounts/register/ — the access gate.
 
-    Throttled on its own ``register`` scope (tighter default than the shared
-    ``auth`` budget it left) and gated by the signed-challenge hook when
-    ``ACCOUNT_CHALLENGE_SECRET`` is configured — see
-    ``_enforce_access_challenge`` for the env contract. The response carries
-    no numeric ``user.id``: an auto-incrementing account id in an anonymous
-    response leaks sign-up ordering for free.
+    Throttled on its own ``register`` scope and gated by the signed-challenge
+    hook when configured. The response carries no numeric ``user.id``: an
+    auto-incrementing id in an anonymous response leaks sign-up ordering.
     """
     _enforce_access_challenge(request)
 
     serializer = RegisterSerializer(data=request.data)
 
     if serializer.is_valid():
-        # [R-7.20] The account creation and its trail row commit together:
-        # no user without its registration event, no event without a user.
+        # Account creation and its audit row commit together.
         with transaction.atomic():
             user = serializer.save()
             AuditEvent.record(
@@ -540,9 +447,8 @@ def register(request):
                 detail={"username": user.username},
             )
 
-        # D-04b: the basket built before signing up belongs to the new
-        # account, exactly as it would on a login. Optional cart_id keeps the
-        # response additive; no guest basket mints nothing.
+        # The pre-signup guest basket follows the new account; no basket mints
+        # nothing and adds no key.
         cart = merge_session_cart_into_user_cart(request, user)
         body = {
             "message": "User registered. Check your email to verify the account.",
@@ -573,16 +479,12 @@ def register(request):
 @api_view(["GET"])
 @throttle_scope("username-probe")
 def username_available(request):
-    """Q-S3 [F3 ACCESS GATE]: the public username-existence oracle.
+    """The public username-existence oracle.
 
-    The scope also throttles GET (ScopedRateThrottle has no safe-method
-    exemption): without a rate limit this endpoint enables cheap username
-    enumeration, and its own ``username-probe`` budget is tighter by default
-    than the shared ``auth`` budget it left. On top of that, the signed-
-    challenge hook refuses every probe once ``ACCOUNT_CHALLENGE_SECRET`` is
-    configured (see ``_enforce_access_challenge`` for the env contract); with
-    the zero-config default the endpoint stays open but bounded, by design —
-    the edge gate half is the owner's to switch on.
+    The scope throttles GET too (ScopedRateThrottle has no safe-method
+    exemption), because without a rate limit the endpoint enables cheap username
+    enumeration. The signed-challenge hook refuses every probe once configured;
+    with the zero-config default it stays open but bounded by design.
     """
     _enforce_access_challenge(request)
     username = request.query_params.get("username", "").strip()
@@ -603,15 +505,13 @@ def username_available(request):
     )
 
 
-# Token-carrying account mutations (no mail): the 'auth' budget already
-# bounds identity flows (register/login/refresh), and verify/confirm are
-# bounded further by the entropy of their one-time tokens.
+# Token-carrying account mutations (no mail): the 'auth' budget and the entropy
+# of their one-time tokens bound them.
 @api_view(["POST"])
 @throttle_scope("auth")
 def verify_email(request):
-    # Non-object JSON bodies have no .get; reading them as {} routes every
-    # such body into this endpoint's own invalid-link 400 (the _body_value
-    # shape) instead of a 500.
+    # Non-object JSON bodies have no .get; {} routes them into the invalid-link
+    # 400 (the _body_value shape) instead of a 500.
     payload = request.data if isinstance(request.data, dict) else {}
     user = _get_user(payload.get("uid"))
     token = payload.get("token", "")
@@ -622,9 +522,8 @@ def verify_email(request):
         )
 
     if not user.is_active:
-        # [R-7.20] The activation and its trail row commit together; a
-        # re-verify of an already-active account is a no-op and writes
-        # nothing.
+        # Activation and its audit row commit together; re-verifying an active
+        # account is a no-op and writes nothing.
         with transaction.atomic():
             user.is_active = True
             user.save(update_fields=["is_active"])
@@ -636,16 +535,11 @@ def verify_email(request):
     return Response({"message": "Email verified. You can now log in."})
 
 
-# The three email-sending recovery endpoints get their own 'recovery'
-# scope, tighter than 'auth' (see THROTTLE_RECOVERY_RATE): every accepted
-# request triggers an outbound email, so the budget *is* the mail-bomb
-# bound. The uniform 200 bodies below are untouched by throttling — only
-# the extra 429 refusal is added.
+# The three email-sending recovery endpoints get their own tighter 'recovery'
+# scope: every accepted request sends mail, so the budget is the mail-bomb bound.
 @api_view(["POST"])
 @throttle_scope("recovery")
 def resend_verification(request):
-    # Non-object JSON bodies have no .get; {} keeps them on the uniform
-    # 200 (the _body_value shape) instead of a 500.
     payload = request.data if isinstance(request.data, dict) else {}
     email = payload.get("email", "").strip()
     user = User.objects.filter(email__iexact=email, is_active=False).first()
@@ -667,8 +561,6 @@ def resend_verification(request):
 @api_view(["POST"])
 @throttle_scope("recovery")
 def forgot_username(request):
-    # Non-object JSON bodies have no .get; {} keeps them on the uniform
-    # 200 (the _body_value shape) instead of a 500.
     payload = request.data if isinstance(request.data, dict) else {}
     email = payload.get("email", "").strip()
     user = User.objects.filter(email__iexact=email).first()
@@ -693,8 +585,6 @@ def forgot_username(request):
 @api_view(["POST"])
 @throttle_scope("recovery")
 def request_password_reset(request):
-    # Non-object JSON bodies have no .get; {} keeps them on the uniform
-    # 200 (the _body_value shape) instead of a 500.
     payload = request.data if isinstance(request.data, dict) else {}
     email = payload.get("email", "").strip()
     user = User.objects.filter(email__iexact=email, is_active=True).first()
@@ -729,9 +619,6 @@ def request_password_reset(request):
 @api_view(["POST"])
 @throttle_scope("auth")
 def reset_password(request):
-    # Non-object JSON bodies have no .get; reading them as {} routes every
-    # such body into this endpoint's own invalid-link 400 (the _body_value
-    # shape) instead of a 500.
     payload = request.data if isinstance(request.data, dict) else {}
     user = _get_user(payload.get("uid"))
     token = payload.get("token", "")
@@ -747,56 +634,42 @@ def reset_password(request):
         return Response(
             {"password": list(error.messages)}, status=status.HTTP_400_BAD_REQUEST
         )
-    # [R-7.20] The credential change and its trail row commit together. The
-    # one-time token is deliberately not stored in detail: it is single-use
-    # evidence, not audit data.
+    # The credential change and its audit row commit together; the one-time token
+    # is deliberately not stored in detail (single-use evidence, not audit data).
     with transaction.atomic():
         user.set_password(password)
         user.save(update_fields=["password"])
-        # [R-17.10] the password change is a critical account change: every
-        # outstanding session (refresh token) dies with it, in the same
-        # transaction — no window where old sessions outlive new
-        # credentials.
+        # Every outstanding session dies with the password change, in the same
+        # transaction — no window where old sessions outlive new credentials.
         _blacklist_user_refresh_tokens(user)
         AuditEvent.record(
             AuditEvent.EventType.AUTH_PASSWORD_RESET,
             actor=user,
             detail={"username": user.username},
         )
-        # [SPEC-19-2] Security-sensitive account change ([R-19.27]
-        # alerting half) beside the audit hook, in the same atomic block.
-        # The identity line carries the username only — the same [R-17.32]
-        # allowlist the audit trail's log mirror already governs. Log-only
-        # on failure: an alert outage must not fail a completed password
-        # reset. The alert does not name the recipient inbox (the customer
-        # reset mail already went out) — it tells the staff the event
-        # happened, catching a mailbox compromise.
+        # Security alert beside the audit hook, in the same atomic block. It
+        # carries the username only and is log-only on failure, so an alert outage
+        # cannot undo a completed reset; the inbox is omitted deliberately.
         alerts.notify_security_change(
             f"Password reset completed for user {user.username} (id {user.pk})."
         )
     return Response({"message": "Password reset successfully. You can now log in."})
 
 
-# --- SPEC-17-05 [R-17.9]: TOTP enrollment for privileged roles ------------
-# Every endpoint here serves exactly the population enforcement blocks at
-# login: status/disable/trust are IsPrivilegedRole-gated, and setup/confirm
-# carry their own gate (a JWT session, or the credential bootstrap while no
-# device is active). The 'auth' scope bounds brute-forcing the 6-digit code
-# space like every other identity flow. Secrets leave the server exactly once
-# (setup response) and never again; nothing below returns or logs one.
+# TOTP enrollment for privileged roles: status/disable/trust are
+# IsPrivilegedRole-gated, setup/confirm carry their own gate; secrets leave once.
 
 
 def _body_value(request, key):
-    # request.data may be any parsed JSON (a list body has no .get) — the
-    # same defensive shape LoginView._record_login already uses.
+    # request.data may be any parsed JSON (a list body has no .get).
     payload = request.data if isinstance(request.data, dict) else {}
     return payload.get(key)
 
 
 def _authorize_enrollment(request):
     """Shared setup/confirm gate: privileged JWT caller, or the credential
-    bootstrap while no device is active (see MFASetupView). Returns the
-    target user, or an error response."""
+    bootstrap while no device is active. Returns the target user, or an error
+    response."""
     user = request.user
     if not user.is_authenticated:
         payload = request.data if isinstance(request.data, dict) else {}
@@ -806,15 +679,14 @@ def _authorize_enrollment(request):
             password=str(payload.get("password", "") or ""),
         )
         if user is None:
-            # Uniform rejection: no signal whether username, password or
-            # both were wrong.
+            # Uniform rejection: no signal whether username, password or both
+            # were wrong.
             return None, Response(
                 {"error": "Invalid credentials."},
                 status=status.HTTP_401_UNAUTHORIZED,
             )
         if TOTPDevice.active_for(user) is not None:
-            # The bootstrap window is over once a device is active:
-            # credentials alone must never reach an enrolled account.
+            # Credentials alone must never reach an account with an active device.
             return None, Response(
                 {
                     "error": "A device is already enrolled. Sign in and use "
@@ -833,8 +705,8 @@ def _authorize_enrollment(request):
 def _consume_code(device, code):
     """Verify `code` against `device` and persist the replay watermark.
 
-    Returns the matched counter, or None when the code is wrong/expired/
-    replayed — in which case nothing is written.
+    Returns the matched counter, or None when wrong/expired/replayed (in which
+    case nothing is written).
     """
     counter = totp.verify_code(
         device.secret,
@@ -852,9 +724,8 @@ class MFAStatusView(APIView):
     """GET /api/accounts/mfa/status/ — {enabled} only, never the secret."""
 
     permission_classes = [IsPrivilegedRole]
-    # The accounts URLConf wiring guard requires a scope on every route;
-    # 'auth' matches the sibling MFA endpoints (this one is read-only, but
-    # the budget also bounds enabled-state probing).
+    # 'auth' matches the sibling MFA endpoints; the budget also bounds
+    # enabled-state probing.
     throttle_scope = "auth"
 
     def get(self, request):
@@ -862,32 +733,12 @@ class MFAStatusView(APIView):
 
 
 class MFASetupView(APIView):
-    """POST /api/accounts/mfa/setup/ — mint a fresh secret, shown once.
+    """Mint a fresh secret, otpauth URI and scannable QR in one response.
 
-    Returns the base32 secret, the otpauth:// URI for the user's
-    authenticator app, and (SPEC-20-9) a scannable QR of that same URI so
-    nobody has to transcribe a secret by hand. All three ride ONE response:
-    the secret leaves the server exactly once, so a separate QR endpoint
-    would have to re-disclose it. The QR is presentation only — every
-    decision about the factor still reads the secret and the URI, never the
-    picture. Two deliberate trust paths:
-
-    - JWT session (privileged): steady-state path. Re-enrolling while a
-      device is enabled must also re-prove the second factor with ``code``
-      — a session thief who could re-enroll freely would own the new
-      secret.
-    - Credential bootstrap (anonymous): the rollout path that keeps
-      blocked-at-login enforcement reachable. A privileged account with no
-      active device can never obtain a JWT (login demands the factor it
-      does not have yet), so setup additionally accepts username+password
-      — exactly the first-factor-enrollment window every mainstream
-      authenticator flow grants a password-proven identity. Once a device
-      is active this path closes: credentials alone never touch an
-      enrolled account (that is the whole point of the factor), and the
-      'auth' throttle bounds the credential attempts.
-
-    The fresh row starts unconfirmed and disabled; nothing changes until a
-    valid confirm.
+    The secret leaves the server exactly once, so the QR rides the same response;
+    re-enrolling an enabled device also re-proves the factor with ``code``, and
+    anonymous credential bootstrap exists only while no device is active (such an
+    account cannot obtain a JWT yet).
     """
 
     permission_classes = []
@@ -904,17 +755,15 @@ class MFASetupView(APIView):
                     {"code": [MFA_CODE_INVALID]}, status=status.HTTP_400_BAD_REQUEST
                 )
         with transaction.atomic():
-            # get_or_create (IntegrityError-retrying) then overwrite: the
-            # row is keyed by the OneToOne user, and setup always mints a
-            # fresh secret — never reuses a stale one.
+            # get_or_create retries the IntegrityError; setup always mints a fresh
+            # secret, never reuses a stale one.
             device, _ = TOTPDevice.objects.get_or_create(user=user)
             device.secret = totp.generate_secret()
             device.enabled = False
             device.confirmed_at = None
             device.last_used_counter = None
-            # SPEC-20-8: a rotation (the lost-device path) is a NEW factor,
-            # so any trust the previous secret collected lapses here rather
-            # than silently carrying over to the secret nobody has vetted.
+            # A rotated secret is a new factor, so any prior trust lapses rather
+            # than carrying over to a secret nobody has vetted.
             device.trusted_until = None
             device.save(
                 update_fields=[
@@ -936,14 +785,12 @@ class MFASetupView(APIView):
 
 
 class MFAConfirmView(APIView):
-    """POST /api/accounts/mfa/confirm/ {code} — verify + enable the device.
+    """POST /api/accounts/mfa/confirm/ {code} — verify and enable the device.
 
-    Shares the setup view's dual trust path: the bootstrapped user still
-    holds no JWT (their device is unconfirmed, so login keeps refusing),
-    so confirm accepts the same credential proof while no device is
-    active. Only a pending (unconfirmed, disabled) device can be
-    confirmed, so a valid code flips enabled for exactly the secret the
-    user just enrolled and never for a still-active previous one.
+    Shares the setup view's dual trust path: a bootstrapped user still holds no
+    JWT, so confirm accepts the same credential proof while no device is active.
+    Only a pending device can be confirmed, so the code flips enabled for exactly
+    the secret just enrolled.
     """
 
     permission_classes = []
@@ -982,12 +829,9 @@ class MFAConfirmView(APIView):
 class MFADisableView(APIView):
     """POST /api/accounts/mfa/disable/ {code} — turn MFA off.
 
-    Spec text is silent on the disable guard; the second factor is chosen
-    and declared: disabling requires a valid code from the enabled device,
-    so a stolen session or password alone cannot strip the factor (the
-    lost-device recovery path is an ops concern R-17.9 does not name).
-    The row survives (enrollment history) but the secret is dead for
-    verification; re-enrollment mints a fresh one.
+    Disabling requires a valid code from the enabled device, so a stolen session
+    or password alone cannot strip the factor. The row survives (enrollment
+    history) but the secret is dead for verification; re-enrollment mints a new one.
     """
 
     permission_classes = [IsPrivilegedRole]
@@ -1008,9 +852,8 @@ class MFADisableView(APIView):
             )
         with transaction.atomic():
             device.enabled = False
-            # SPEC-20-8: a factor that is off has nothing to trust. Clearing
-            # the TTL means a later re-enrollment starts from the challenge,
-            # so a stale grant can never ride back in with the new secret.
+            # A factor that is off has nothing to trust; clearing the TTL means a
+            # later re-enrollment starts from the challenge.
             device.trusted_until = None
             device.save(update_fields=["enabled", "trusted_until"])
         return Response({"enabled": False})
@@ -1019,17 +862,10 @@ class MFADisableView(APIView):
 class MFATrustDeviceView(APIView):
     """POST /api/accounts/mfa/trust/ {code} — trust THIS device for N days.
 
-    SPEC-20-8: the opt-in half of "trust this device for 30 days". It is
-    never reached implicitly — the privileged user asks for it, from a
-    session that already holds a JWT (which itself required the factor), and
-    this call re-proves the factor with a FRESH code. That second proof is
-    deliberate: a stolen session must not be able to convert itself into
-    thirty days of challenge-free logins, and the fresh code goes through
-    the same replay-guarded ``_consume_code`` as every other code, so
-    granting trust spends a one-time code exactly once.
-
-    Gated and throttled exactly like its siblings (IsPrivilegedRole, 'auth'),
-    and it can only ever write to the caller's own device row.
+    Never reached implicitly: the caller already holds a JWT and must re-prove
+    the factor with a fresh code, so a stolen session cannot convert itself into
+    challenge-free logins. Gated and throttled like its siblings, and it only
+    ever writes the caller's own device row.
     """
 
     permission_classes = [IsPrivilegedRole]
@@ -1038,8 +874,8 @@ class MFATrustDeviceView(APIView):
     def post(self, request):
         device = TOTPDevice.active_for(request.user)
         if device is None:
-            # No factor to make trustworthy; the enrollment message belongs
-            # to the login path, and this one names the missing precondition.
+            # No factor to make trustworthy; this names the missing precondition
+            # rather than the login-path enrollment message.
             return Response(
                 {"code": ["Multi-factor authentication is not enabled."]},
                 status=status.HTTP_400_BAD_REQUEST,

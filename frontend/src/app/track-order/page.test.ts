@@ -11,19 +11,12 @@ const layoutSource = readFileSync(
   "utf8",
 );
 
-/**
- * /track-order behaviour pins (U-W13-T12, §5.6) — the screen restyle may
- * change chrome, never these: the uniform-miss anti-oracle contract, the
- * credential hygiene (token never in state, field cleared once read),
- * the explicit-submit-only lookup, the W9-T1 head-tag arrangement, the
- * §7.7 label association the ui.test form scan depends on, and the
- * single token-driven settle (no new motion on a utility surface).
- */
+// Behaviour pins: uniform-miss anti-oracle, credential hygiene, explicit-submit
+// lookup, label association, and the single token-driven settle.
 describe("/track-order lookup contract (§5.6)", () => {
   it("keeps the uniform miss: one backend message, no case branching", () => {
     expect(pageSource).toContain("err instanceof TrackingMissError");
     expect(pageSource).toContain("{state.message}");
-    // The oracle rule: the page never inspects the message to pick a UI.
     expect(pageSource).not.toMatch(
       /message\.(includes|toLowerCase|toUpperCase|startsWith|match)/,
     );
@@ -32,8 +25,7 @@ describe("/track-order lookup contract (§5.6)", () => {
   it("keeps the token out of React state and clears the field once read", () => {
     expect(pageSource).toContain('tokenField.value = ""');
     expect(pageSource).not.toMatch(/useState\([^)]*token/i);
-    // Masked input: the screen shows the token in clear; a credential
-    // field must not (U-W13-T12 docblock).
+    // Masked credential field; the screen's clear-token fixture must not ship.
     expect(pageSource).toMatch(
       /id="track-token"[\s\S]{0,120}type="password"/,
     );
@@ -52,9 +44,7 @@ describe("/track-order lookup contract (§5.6)", () => {
   });
 
   it("keeps the single enter-settle on the result panel, token-driven", () => {
-    // The one animation this page is allowed: the existing @starting-style
-    // settle on the found container. No stagger, no keyframes, no scroll
-    // work (§5.6 "no motion at all" on first load with no query).
+    // The only allowed animation: the @starting-style settle; no keyframes.
     expect(pageSource).toContain("duration-(--motion-enter-dur)");
     expect(pageSource).toContain("ease-(--motion-ease)");
     expect(pageSource).not.toMatch(/@keyframes|animate-|animation-timeline/);

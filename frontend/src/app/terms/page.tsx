@@ -11,13 +11,11 @@ export const metadata: Metadata = {
 const policyLink = "underline underline-offset-4 hover:text-bronze";
 
 export default async function TermsPage() {
-  // A-12.D.2, same binding as /returns: number only when the API publishes
-  // one, otherwise the sentence ships without its window claim.
+  // Return window only when the API publishes one, never a fallback.
   const { days } = await getReturnWindow();
 
-  // A5.11: the section list drives both the ToC anchors and the headings, so
-  // the two can never drift apart. The copy is the shipped policy text — no
-  // new commercial or legal claim is introduced here (P5, §0b.1).
+  // One section list drives both the ToC anchors and the headings, so they
+  // cannot drift apart.
   const sections: LegalProseSection[] = [
     {
       id: "using-this-store",

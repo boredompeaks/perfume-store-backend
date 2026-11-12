@@ -1,57 +1,17 @@
 #!/usr/bin/env python3
 """Print the changelog's figures instead of typing them (GATE-7).
 
-Three subcommands, one job each:
+Subcommands: ``floor`` runs the suite with coverage per engine, saves
+``scripts/figures/<task>.json`` and prints a paste-ready bullet; ``mutation``
+replays a manifest through ``mutation_evidence.py`` and prints one bullet per
+mutation; ``check`` fails on a floor/mutation figure in new ``changes.md``
+rows that has no artifact behind it.
 
-  floor     run the backend suite with coverage on every engine available,
-            save the measured numbers to scripts/figures/<task-id>.json, and
-            print a bullet ready to paste into a docs/changes.md row
-  mutation  replay a task's recorded mutations through scripts/mutation_evidence.py
-            and print one paste-ready bullet per mutation: the verdict, the
-            failure count, the test count
-  check     read the rows docs/changes.md has gained since a base ref and fail
-            on any floor figure or `failures=N` mutation figure that has no
-            artifact behind it
-
-The rule this enforces is the one in docs/conventions.md: a figure in the
-changelog is printed by this script, not typed by a builder. A hand-typed
-figure is the mechanism behind every "stale figures" finding in this repo's
-history -- the number survives in prose long after the thing it described has
-moved, and nothing in the suite notices.
-
-Two things about `check` that are decisions rather than accidents:
-
-  * a figure-bearing table line whose first cell is not a date is a SUB-TABLE
-    -- one of the floors tables or before/after engine comparisons embedded in
-    a section's prose -- not an agent-run row. It is reported and counted, never
-    failed. Reading a task id out of a table cell asked for an artifact named
-    `before.json`, which nothing can produce;
-  * a figure in a ROW that no artifact can ever back is exempted only by the
-    committed inventory at scripts/changelog_figures_baseline.json, one entry
-    per task carrying a written reason, and only that. The inventory is never
-    written by the gate itself, and an entry whose reason does not clear a
-    length floor is a hard error, so regenerating the file cannot turn a red
-    gate green.
-
-Stdlib only, so it can run in a CI step with no install and cannot disagree
-with requirements.txt about what it imports.
-
-Every number this prints comes out of a subprocess it just ran. Nothing is
-read from a previous report, a previous artifact or a comment: `floor` reads
-the runner's own summary line and `coverage report`'s TOTAL row, `mutation`
-replays the mutation and reads the runner again, and both record the exit codes
-alongside the counts. Conventions this script exists to keep:
-
-  * a green run reports NO failures, and nothing is not zero -- `failures` is
-    null on an OK run, never 0;
-  * `failures` is read off the `FAILED (failures=N)` line, never off a run
-    summary or a count of headers;
-  * the engine is measured, never declared. settings.py falls back to SQLite
-    without a word when DATABASE_URL is unset or malformed, so "I did not set
-    it" says nothing about which engine ran;
-  * the floor is a pair (SQLite + PostgreSQL). A single engine is labelled
-    SINGLE-ENGINE in the bullet it prints and in the artifact, so a half floor
-    cannot be pasted into a row as if it were the whole thing.
+Every number comes out of a subprocess this script just ran: a green run
+reports NO failures (nothing is not zero), ``failures`` is read from the
+``FAILED (failures=N)`` line, the engine is measured rather than declared, and
+a one-engine floor is labelled SINGLE-ENGINE. An unbacked figure is exempted
+only by the committed inventory, one reasoned entry per task.
 """
 
 from __future__ import annotations
@@ -73,12 +33,8 @@ CHANGELOG = "backend/docs/changes.md"
 
 
 def figures_dir() -> pathlib.Path:
-    """Where `floor` saves its artifact. Resolved per call, not at import.
-
-    A module-level constant would be frozen against the tree this file was
-    imported from, which is exactly what a unit test cannot then point at a
-    fixture. `check` reads the same directory, so both halves move together.
-    """
+    """Where `floor` saves its artifact; resolved per call, so a test can
+    point it at a fixture."""
     return REPO_ROOT / "scripts" / "figures"
 
 
@@ -88,19 +44,12 @@ def mutation_dir() -> pathlib.Path:
 
 
 def baseline_path() -> pathlib.Path:
-    """Where `check` reads its committed exemption inventory from.
-
-    Resolved per call for the reason `figures_dir` is: a module-level constant
-    would be frozen against the tree this file was imported from, which is
-    exactly what a unit test cannot then point at a fixture.
-    """
+    """Where `check` reads its committed exemption inventory from."""
     return REPO_ROOT / "scripts" / "changelog_figures_baseline.json"
 
-# An explicit sqlite URL rather than the absence of DATABASE_URL:
-# settings._databases_from_url() cannot tell "unset" from "malformed" -- both
-# land on the same silent sqlite fallback -- whereas an explicit sqlite URL is
-# honoured in every environment and is recorded in the artifact, so the engine
-# a figure was measured on is a fact in the file rather than an assumption.
+# An explicit sqlite URL, not the absence of DATABASE_URL: settings cannot
+# tell "unset" from "malformed" (both silently fall back), and an explicit
+# URL is recorded in the artifact, so the engine is a fact, not an assumption.
 SQLITE_URL = "sqlite:///db.sqlite3"
 
 ENGINE_VENDORS = {
@@ -108,10 +57,8 @@ ENGINE_VENDORS = {
     "django.db.backends.postgresql": "postgresql",
 }
 
-# Reads connection.settings_dict["ENGINE"] in a child process that carries the
-# same environment as the suite run, which is the only way to be sure the two
-# agree: a probe in this process would resolve .env and os.environ for itself,
-# not for the run.
+# Probe connection.settings_dict["ENGINE"] in a child process carrying the
+# same environment as the suite run, so the two cannot disagree.
 ENGINE_PROBE = (
     "import os;"
     "os.environ.setdefault('DJANGO_SETTINGS_MODULE', 'config.settings');"
@@ -121,10 +68,9 @@ ENGINE_PROBE = (
     "print(connection.settings_dict['ENGINE'])"
 )
 
-# `FAILED (failures=6, errors=1, expected failures=4)` / `OK (expected
-# failures=4)`. Anchored, and the whole comma-separated body is matched part by
-# part, because a bare `(failures|errors)=(\d+)` scan of the body reads
-# `expected failures=4` as `failures=4` and reports 4 for a run that failed 6.
+# `FAILED (failures=6, errors=1, expected failures=4)` /
+# `OK (expected failures=4)`; the body is matched part by part so
+# `expected failures=4` is never read as `failures=4`.
 SUMMARY_RE = re.compile(r"^(?P<verdict>FAILED|OK)\b\s*(?:\((?P<body>[^)]*)\))?\s*$")
 COUNT_RE = re.compile(
     r"^\s*(?P<key>expected failures|expectedFailures|failures|errors)"
@@ -132,24 +78,19 @@ COUNT_RE = re.compile(
 )
 RAN_RE = re.compile(r"^Ran (\d+) tests?\b")
 
-# The floor figure vocabulary this changelog actually uses. Kept narrow on
-# purpose: a detector that flags prose which merely contains a number produces
-# findings nobody acts on, and the rows here carry plenty of both.
+# The floor vocabulary this changelog actually uses; narrow on purpose, so
+# prose that merely contains a number does not flood the gate.
 FLOOR_PATTERNS = (
     ("tests", re.compile(r"\bRan (\d+) tests\b")),
     ("tests", re.compile(r"\b(\d[\d,]*)\s+tests\b")),
     ("coverage", re.compile(r"\bcov(?:erage)?\s+(\d+(?:\.\d+)?)\s*%")),
     ("stmts", re.compile(r"\b(\d[\d,]*)\s*stmts\b")),
     ("expected_failures", re.compile(r"\bxf\s+(\d+)\b")),
-    # The long spelling of the same invariant, which is the one the runner
-    # itself prints. Left out, a row could quote the xfail count in the runner's
-    # own words and go unchecked -- the figure the xfail ceiling's blind spot
-    # came from.
+    # The long spelling of the same invariant, which is what the runner prints.
     ("expected_failures", re.compile(r"\bexpected failures\s*=\s*(\d+)")),
 )
-# A mutation figure. The lookbehind keeps `expected failures=4` (the runner's
-# xfail count on a red floor run) out of this class, where it would demand a
-# mutation manifest from a row that recorded no mutation at all.
+# A mutation figure. The lookbehind keeps `expected failures=4` out of this
+# class, where it would demand a manifest from a row with no mutation.
 MUTATION_FIGURE_RE = re.compile(r"(?<!expected )\bfailures\s*=\s*(\d+)")
 TASK_ID_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*")
 
@@ -190,19 +131,14 @@ def _git(*args: str) -> str:
     return result.stdout
 
 
-# --------------------------------------------------------------------------
-# parsers
-# --------------------------------------------------------------------------
 
 
 def parse_run(output: str) -> dict:
     """Read the runner's own verdict, counts and test count out of a run.
 
-    Lines are scanned in reverse and the first summary line wins, so a test that
-    prints its own `OK` cannot be mistaken for the runner's verdict. `failures`
-    and `errors` are None on a green run: the runner reports nothing there, and
-    reporting 0 would be inventing a count nobody measured.
-    """
+    Lines are scanned in reverse, first summary line wins, so a test printing
+    its own `OK` cannot be mistaken for the verdict. `failures` and `errors`
+    are None on a green run: reporting 0 would be inventing a count."""
     verdict = None
     counts: dict[str, int] = {}
     for line in reversed(output.splitlines()):
@@ -240,9 +176,8 @@ def parse_run(output: str) -> dict:
     return {
         "verdict": verdict,
         "tests": tests,
-        # None, not 0, wherever the runner reported nothing: a zero here would
-        # be a count nobody measured, and "nothing is not zero" is the rule this
-        # script exists to keep.
+        # None, not 0, wherever the runner reported nothing: a zero is a count
+        # nobody measured.
         "failures": None if green else counts.get("failures"),
         "errors": None if green else counts.get("errors"),
         "expected_failures": counts.get("expected_failures"),
@@ -252,11 +187,8 @@ def parse_run(output: str) -> dict:
 def parse_coverage(output: str) -> dict:
     """Read the TOTAL row of `coverage report`.
 
-    The row is positional: `TOTAL <stmts> <missed> [<branches> <partial>] <pct>`.
-    Branch coverage adds the two middle columns (backend/.coveragerc sets
-    branch = True), so the column count decides which shape this is. Anything
-    else is a refusal rather than a guess.
-    """
+    The row is positional and branch coverage adds two middle columns, so the
+    column count decides the shape; anything else is a refusal, not a guess."""
     for line in output.splitlines():
         if not line.startswith("TOTAL"):
             continue
@@ -288,10 +220,7 @@ def format_verdict(run: dict) -> str:
     """Render the runner's verdict with the counts it actually reported.
 
     Only counts the summary line carried are rendered, and an absent count is
-    None in `run` rather than 0, so nothing is invented: a green run prints the
-    xfail count it reported and never a `failures=0`, and a bare `FAILED` line
-    stays bare. The verdict itself is the runner's, never this function's.
-    """
+    None rather than 0, so a green run never prints a `failures=0`."""
     parts = []
     for key in ("failures", "errors", "expected_failures"):
         value = run.get(key)
@@ -312,9 +241,6 @@ def format_coverage(coverage: dict) -> str:
     return f"cov {coverage['coverage_percent']}% ({', '.join(detail)})"
 
 
-# --------------------------------------------------------------------------
-# floor
-# --------------------------------------------------------------------------
 
 
 def detect_engine(env: dict[str, str]) -> str:
@@ -355,9 +281,8 @@ def measure_engine(vendor: str, url: str) -> dict:
         "0",
     ]
     test_exit, test_output = _run(test_command, BACKEND_DIR, env)
-    # `coverage report` runs even on a red suite: the floor is the pair of the
-    # verdict AND the coverage figure, and a gate that only prints the first
-    # invites the second to be carried forward from somewhere else.
+    # `coverage report` runs even on a red suite: the floor is the verdict AND
+    # the coverage figure, so neither is carried forward from somewhere else.
     cov_command = [sys.executable, "-m", "coverage", "report"]
     cov_exit, cov_output = _run(cov_command, BACKEND_DIR, env)
 
@@ -387,11 +312,9 @@ def _redact(url: str) -> str:
 def postgres_url(explicit: str) -> str:
     """Return the PostgreSQL URL to measure, or '' when there is none.
 
-    Only a URL with a postgres scheme qualifies. A DATABASE_URL that merely
-    looks like a database location -- the one in backend/.env here is a bare
-    hostname with no scheme -- is exactly the value that makes settings fall
-    back to sqlite, so accepting it would label a SQLite run as PostgreSQL.
-    """
+    Only a URL with a postgres scheme qualifies: a DATABASE_URL that merely
+    looks like a location (a bare hostname, as in backend/.env) makes settings
+    fall back to sqlite, and accepting it would label a SQLite run PostgreSQL."""
     if explicit:
         if explicit.split("://", 1)[0].lower() not in ("postgres", "postgresql"):
             raise FigureError(
@@ -452,14 +375,11 @@ def cmd_floor(args: argparse.Namespace) -> int:
         f"- artifact written: {path.relative_to(REPO_ROOT).as_posix()}"
     )
     # Exit 0 means "the figures were measured and printed", not "the suite was
-    # green": a red engine is a finding to record, and the bullet above carries
-    # its exit code. Exit 1 is reserved for a figure that could not be measured.
+    # green"; a red engine is a finding to record. Exit 1 = a figure could not
+    # be measured.
     return 0
 
 
-# --------------------------------------------------------------------------
-# mutation
-# --------------------------------------------------------------------------
 
 
 def _load_mutation_module():
@@ -478,24 +398,16 @@ def _load_mutation_module():
 def recording_run_tests(module):
     """Capture each `run_tests` call and its output while replaying a manifest.
 
-    MutationOutcome carries the gate's verdict and its failure count but not the
-    runner's `Ran N tests` line, and this bullet has to print that count as a
-    measured figure rather than a transcribed one. The labels are kept with the
-    output because they are what pairs a run to its mutation: not every
-    mutation reaches a suite run -- a `find` that no longer occurs aborts before
-    one -- and pairing by position alone would then report one mutation's counts
-    under another's name.
-
-    The wrapped function still runs unchanged and its output is passed through
-    untouched, so the verdict and the failure count in every bullet are read
-    from that captured output and there is exactly one parse of it. Restored on
-    the way out, including on error, so the module is left as it was found.
-    """
+    The bullet needs the runner's `Ran N tests` line, which MutationOutcome does
+    not carry. Labels are kept with the output because they pair a run to its
+    mutation -- a mutation whose `find` no longer occurs aborts before any run,
+    and pairing by position would report one mutation's counts under another.
+    The wrapped function runs unchanged and the module is restored on the way
+    out, including on error."""
     captured: list[tuple[list, str]] = []
     original = module.run_tests
-    # Whether run_tests was an INSTANCE attribute before the swap decides how it
-    # is put back: reassigning a class method as an instance attribute would
-    # leave a shadow behind that no later assignment could see.
+    # Whether run_tests was an INSTANCE attribute decides how it is put back:
+    # reassigning a class method as an instance attribute leaves a shadow.
     was_instance = "run_tests" in vars(module)
 
     def wrapper(*args, **kwargs):
@@ -551,9 +463,8 @@ def cmd_mutation(args: argparse.Namespace) -> int:
             (i for i, (labels, _) in enumerate(available) if labels == scope), None
         )
         if index is None:
-            # No suite ran for this one, so there is no figure to print. Saying
-            # so is the whole point: a bullet with a count on it would be a
-            # number no run produced.
+            # No suite ran, so there is no figure to print; a bullet with a count
+            # here would be a number no run produced.
             problems += 1
             print(
                 f"- mutation {outcome.mutation_id}: NO RUN -- {outcome.status}: "
@@ -562,9 +473,8 @@ def cmd_mutation(args: argparse.Namespace) -> int:
             continue
         _, output = available.pop(index)
         run = parse_run(output)
-        # The verdict and the counts below are read from the replayed run's own
-        # summary, not from the manifest: claimed_count is the hand-typed figure
-        # this whole script exists to stop anyone publishing.
+        # Read from the replayed run's own summary, never from the manifest:
+        # claimed_count is the hand-typed figure this script exists to stop.
         figures = (
             f"mutation {outcome.mutation_id}: {format_verdict(run)}, "
             f"Ran {run['tests']} tests"
@@ -589,19 +499,14 @@ def cmd_mutation(args: argparse.Namespace) -> int:
     return 0
 
 
-# --------------------------------------------------------------------------
-# check
-# --------------------------------------------------------------------------
 
 
 def added_lines(base: str, path: str) -> dict[int, str]:
     """Map each line `path` gained since `base` to its line number in the file.
 
-    `git diff <base> -- <path>` compares the base blob to the WORKING TREE, not
-    to HEAD, so an uncommitted row is checked before it is committed and the
-    same command keeps working afterwards. `--unified=0` is required: with
-    context lines, unchanged prose is reported as added.
-    """
+    `git diff <base> -- <path>` compares against the WORKING TREE, so an
+    uncommitted row is checked too. `--unified=0` is required: with context,
+    unchanged prose is reported as added."""
     raw = _git("diff", "--unified=0", base, "--", path)
     added: dict[int, str] = {}
     current: str | None = None
@@ -634,48 +539,21 @@ def _cells(row: str) -> list[str]:
     return [cell.strip() for cell in row.strip().strip("|").split("|")]
 
 
-# The first cell of an agent-run row is its date, and no other table in this
-# changelog carries one: the floors tables, the before/after engine comparisons
-# and the assertion tables all open with a task name, a label, or a bare pipe.
-# That is what tells a row from prose, and it is a shape test rather than a
-# whitelist of ids, so a sub-table nobody has written yet is classified by the
-# same rule instead of producing a task id read out of a table cell.
-#
-# The date is searched for anywhere in the cell, never matched at its start. An
-# anchored match is the fail-open defect this replaced: `**2026-10-05**` is
-# still an agent-run row, but it does not match at offset 0, so the row was
-# classified as a sub-table in a section's prose and every figure in it escaped
-# a gate that catches the same row undecorated. Decoration is the cheapest way
-# to walk a row out of this check, so the test now survives it: the ONLY way to
-# leave the row path is to delete the date, which is visible in the diff.
+# The first cell of an agent-run row carries a date, and no other table in this
+# changelog does, so that is what tells a row from prose. The date is searched
+# anywhere in the cell, because an anchored match let `**2026-10-05**` escape
+# the gate as a sub-table.
 DATE_CELL_RE = re.compile(r"\d{4}-\d{2}-\d{2}")
 
 
 def is_prose_table_row(row: str) -> bool:
     """True for a table line that belongs to a sub-table, not to a row.
 
-    Without this, `check` took the first cell it could parse as a task id, so a
-    before/after comparison of two engine floors demanded an artifact named
-    `scripts/figures/before.json` and a sub-table of measured floors demanded one
-    named after the first digit of the figure inside it. Neither can be
-    satisfied honestly: a sub-table's cell is not a task, and `floor --task`
-    cannot be pointed at one.
-
-    Prose is therefore "the first cell carries no date at all", which is
-    decidable and total: a row cannot leave the row path by being decorated,
-    only by dropping its date. It is deliberately NOT "the first cell carries no
-    date AND the second cell is not task-shaped", because the sub-tables this
-    file really contains have task-shaped second cells -- `1784`, `1790`,
-    `Ran 1797`, `SQLite` -- so that conjunction would reclassify every one of
-    them as a row and demand an artifact named after a table cell, which is the
-    defect the conjunction was meant to close.
-
-    An EMPTY first cell is deliberately not prose. `| | SQLite | PostgreSQL 17 |`
-    is a header carrying no figure, and a figure-bearing line shaped like an
-    agent-run row with a blank date is a malformed ROW -- which stays a failure,
-    because a figure nobody can attribute to a task cannot be given an artifact
-    either.
-    """
+    Prose is "the first cell carries no date at all", which is decidable and
+    total: a sub-table's cell is not a task, so demanding an artifact named
+    after it would fail every honest before/after table. An EMPTY first cell is
+    deliberately not prose -- a figure-bearing line with a blank date is a
+    malformed ROW and stays a failure."""
     cells = _cells(row)
     if not cells or not cells[0]:
         return False
@@ -685,12 +563,8 @@ def is_prose_table_row(row: str) -> bool:
 def has_decorated_date_cell(row: str) -> bool:
     """True when the first cell carries a date that is not its first characters.
 
-    Reported, never failed: `**2026-10-05**` is a legitimate way to write a date
-    and the row is checked as a row regardless. What is reported is the shape
-    that nearly escaped a gate -- the same row read as prose while carrying
-    every figure it had undecorated -- so a reviewer sees a decorated date
-    instead of having to notice one.
-    """
+    Reported, never failed: the row is still checked as a row, and what is
+    surfaced is the shape that once escaped the gate by looking like prose."""
     cells = _cells(row)
     if not cells or not cells[0]:
         return False
@@ -701,10 +575,7 @@ def task_id_of(row: str) -> str:
     """Return the task id a changelog row belongs to, or '' when it has none.
 
     The id is the first cell after the date column, trimmed to its leading
-    token, so `ASYNC-2c1 cycle 2` yields `ASYNC-2c1`. A row that carries a
-    figure and names no task cannot be given a backing artifact by anyone, which
-    is why an empty result is a finding rather than a silent skip.
-    """
+    token; a figure-bearing row that names no task cannot be backed."""
     cells = _cells(row)
     if len(cells) < 2:
         return ""
@@ -729,14 +600,8 @@ def figures_in(row: str) -> list[tuple[str, str]]:
 def artifact_records_failures(path: pathlib.Path, count: int) -> bool:
     """True when a saved artifact records this exact failure count.
 
-    The floor artifact records the failure count of a red engine, so a row may
-    quote `failures=N` from the floor run rather than from a mutation replay.
-    Requiring the VALUE to match, rather than only the file to exist, keeps the
-    check stricter than mere existence for this class: a row that quotes 3 while
-    its artifact records 6 is flagged, where an existence test would wave it
-    through. Anything unreadable or malformed answers False, so a broken
-    artifact cannot vouch for a figure.
-    """
+    The VALUE must match, not merely the file exist: a row quoting 3 while its
+    artifact records 6 is flagged. Anything unreadable answers False."""
     try:
         data = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, ValueError):
@@ -765,11 +630,8 @@ def artifact_records_failures(path: pathlib.Path, count: int) -> bool:
 def artifact_for(kind: str, figure: str, task: str) -> tuple[pathlib.Path, bool]:
     """Return the artifact that backs this figure, and whether it does.
 
-    A `failures=N` figure is satisfied by a mutation manifest, or by a floor
-    artifact recording the SAME count -- stricter than the existence test the
-    other classes get, and what lets a row quote a red engine's failure count
-    from the run that measured it.
-    """
+    A `failures=N` figure is satisfied by a mutation manifest or by a floor
+    artifact recording the SAME count -- stricter than mere existence."""
     floor = figures_dir() / f"{task}.json"
     if kind != "mutation":
         return floor, floor.exists()
@@ -783,23 +645,17 @@ def artifact_for(kind: str, figure: str, task: str) -> tuple[pathlib.Path, bool]
     return manifest, False
 
 
-# A reason has to be a sentence, because the inventory is a suppression list and
-# a suppression list whose entries cannot say why is indistinguishable from a
-# list of things nobody looked at. The floor is a cost, not a proof that
-# anyone followed the trail; the review is the control, exactly as it is for the
-# counter-examples in scripts/doc_claims.py.
+# A reason has to be a sentence: the inventory is a suppression list, and an
+# entry that cannot say why is indistinguishable from one nobody looked at.
 MIN_REASON = 40
 
 
 def load_baseline(path: str) -> dict[tuple[str, str, str], str]:
     """Read the committed exemptions for `path` as (task, kind, figure) -> reason.
 
-    A missing file is an empty inventory rather than an error: the inventory
-    records debt, and a repository with none has nothing to exempt. An entry that
-    is malformed, or whose reason does not clear the floor, is a hard error --
-    an inventory that cannot be read must not quietly exempt nothing, and one
-    that cannot explain itself must not quietly exempt something.
-    """
+    A missing file is an empty inventory (the repo has no debt to exempt). A
+    malformed entry or a reason under the floor is a hard error: an inventory
+    that cannot explain itself must not quietly exempt something."""
     file = baseline_path()
     if not file.exists():
         return {}
@@ -849,14 +705,10 @@ def load_baseline(path: str) -> dict[tuple[str, str, str], str]:
 def write_baseline(path: str, unbacked: set[tuple[str, str, str]]) -> pathlib.Path:
     """Fold this run's unbacked figures into the committed inventory.
 
-    Never called by the gate itself: a baseline that updated itself would record
-    whatever the prose happened to claim, which is the defect this script exists
-    to catch -- the rule scripts/doc_claims.py follows for the same reason. An
-    existing reason is carried over untouched and a task with no entry yet is
-    written with an EMPTY one, which `load_baseline` rejects. Regenerating the
-    inventory therefore cannot buy a figure its way past the gate: a new task
-    stays red until somebody writes down why it can never be backed.
-    """
+    Never called by the gate itself: a self-updating baseline records whatever
+    the prose claimed, which is the defect this script exists to catch. A new
+    task is written with an EMPTY reason, which `load_baseline` rejects, so
+    regenerating the inventory cannot buy a figure past the gate."""
     existing = load_baseline(path)
     reasons: dict[str, str] = {}
     for (task, _, _), reason in existing.items():
@@ -909,11 +761,9 @@ def cmd_check(args: argparse.Namespace) -> int:
         if not figures:
             continue
         if is_prose_table_row(row):
-            # Reported and counted, never failed. The rule this enforces is about
-            # ROWS: a section's floors table or before/after table is prose that
-            # happens to be tabulated, and failing it would demand an artifact
-            # named after a table cell. Counting it keeps the figure visible to a
-            # reviewer without inventing a requirement nobody can meet.
+            # Reported and counted, never failed: a floors table in a section's
+            # prose is not an agent-run row, and failing it would demand an
+            # artifact named after a table cell.
             prose_rows += 1
             print(
                 f"{args.path}:{number}  PROSE TABLE  {len(figures)} figure(s)  -- "
@@ -985,7 +835,6 @@ def cmd_check(args: argparse.Namespace) -> int:
     return 1 if flagged else 0
 
 
-# --------------------------------------------------------------------------
 
 
 def build_parser() -> argparse.ArgumentParser:

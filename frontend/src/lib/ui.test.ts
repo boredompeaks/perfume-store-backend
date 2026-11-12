@@ -9,10 +9,8 @@ const srcDir = fileURLToPath(new URL("..", import.meta.url));
 const globalsCss = readFileSync(join(srcDir, "app/globals.css"), "utf8");
 
 /**
- * Every `--color-*` declared in the `@theme` block, i.e. every name a Tailwind
- * colour utility can actually resolve to. A colour utility is only a string:
- * one referencing a removed token compiles to nothing at all once that token
- * is gone from `@theme`, and nothing in the build complains.
+ * Every `--color-*` in `@theme`: a utility referencing a removed token
+ * compiles to nothing and the build never complains.
  */
 const themeColours = new Set(
   [...(globalsCss.match(/@theme[^{]*\{([\s\S]*?)\n\}/)?.[1] ?? "").matchAll(
@@ -21,17 +19,9 @@ const themeColours = new Set(
 );
 
 /**
- * The `--text-*` namespace in the same `@theme` block — §2.2's nine-step
- * type scale (`text-display`, `text-body`, `text-label`, …). Those utilities
- * share the `text-` prefix with the colour utilities, so the guard below
- * reads every font-size utility as a colour token named `display` / `body` /
- * `label` and fails on a component that is doing exactly what the type scale
- * exists to do (proved by running this file against `app/page.tsx` before the
- * exemption: seven false positives). Exempted by *name resolution against
- * @theme*, not by blocklisting the words, so a future scale step is covered
- * the moment it is declared. The `--text-…--line-height` companion keys are
- * filtered out — they are not utilities, and one of them would otherwise
- * shadow nothing but bloat the set.
+ * `--text-*` utilities share the `text-` prefix with colours, so they are
+ * exempted by name resolution against @theme; line-height companion keys are
+ * not utilities and are filtered out.
  */
 const themeTexts = new Set(
   [...(globalsCss.match(/@theme[^{]*\{([\s\S]*?)\n\}/)?.[1] ?? "").matchAll(
@@ -72,11 +62,7 @@ const BUILTIN_COLOURS = new Set([
   "black",
 ]);
 
-/**
- * Suffixes that are layout or typography rather than colour, and so follow a
- * colour prefix without being one — plus `ghost`, which is a hand-written class
- * in `globals.css` (`.text-ghost`), not a theme token.
- */
+/** Suffixes that follow a colour prefix but are layout/typography. */
 const NOT_A_COLOUR = new Set([
   "", "t", "r", "b", "l", "x", "y", "s", "e",
   "solid", "dashed", "dotted", "double", "none", "hidden",
@@ -88,16 +74,11 @@ const NOT_A_COLOUR = new Set([
   "uppercase", "lowercase", "capitalize",
   "normal", "tight", "tighter", "loose", "looser", "widest",
   "inset", "inner", "thin", "medium", "thick", "offset", "ghost",
-  // Shadow sizes: every one of xs / sm / lg / xl / 2xl is already above, so
-  // `md` was the single omission — `shadow-md` read as `--color-md`.
+  // Shadow sizes: only `md` was missing, so `shadow-md` read as --color-md.
   "md",
   // `text-shadow`, which puts a shadow size under the `text-` prefix.
   "shadow",
-  // Our own `--text-*` type steps that Tailwind also exposes as `text-*`
-  // utilities: typography, never a colour. `money` is §5.3's money style
-  // (`--text-money`, 0.9375rem/600) — added when the cart line total first
-  // used it; pinned by the isColourCandidate case below so the entry cannot
-  // be dropped while the class ships.
+  // Our own type steps that Tailwind exposes under `text-`, never colours.
   "money",
   // Background and caret keywords that share a colour prefix: position, size,
   // attachment, repeat.
@@ -109,17 +90,8 @@ const NOT_A_COLOUR = new Set([
 ]);
 
 /**
- * Families rather than single words, for the same reason: these follow a colour
- * prefix but belong to another Tailwind namespace. Every pattern is anchored
- * and matches nothing that could be a colour token, because no name in
- * `@theme` contains a digit or one of these keywords.
- *
- * The first entry is the one that made `ring-2` fail. Tailwind's numeric step
- * scale is shared by width, position and spacing utilities, so `ring-2`,
- * `border-x-2`, `ring-offset-2`, `border-spacing-2`, `outline-2`, `stroke-2`
- * and `from-0` all produce a bare number where a colour name would sit. Only
- * the prefixes in `COLOUR_PREFIXES` can reach this check, which is why
- * `rounded-2`, `gap-2` and the rest of the scale were never at risk.
+ * Numeric utility steps (`ring-2`, `border-x-2`, …) put a bare number where a
+ * colour name would sit; only COLOUR_PREFIXES reach this check.
  */
 const NOT_A_COLOUR_PATTERNS = [
   /^(?:spacing-|offset-|[trblexy]-)?\d+(?:\.\d+)?$/,
@@ -128,11 +100,7 @@ const NOT_A_COLOUR_PATTERNS = [
   /^rule-(?:evenodd|nonzero)$/, // fill-rule-evenodd
 ];
 
-/**
- * Whether `prefix`-`name` is asking for a colour token at all. Anything this
- * returns `true` for is a colour name, so a name that resolves to nothing in
- * `@theme` is a real defect rather than a layout utility.
- */
+/** True when `prefix-name` asks for a colour token rather than layout. */
 export function isColourCandidate(prefix: string, name: string): boolean {
   return (
     COLOUR_PREFIXES.has(prefix) &&
@@ -174,13 +142,8 @@ function unresolvedColourTokens(): string[] {
 }
 
 /**
- * Pins the WCAG 2.2 AA fix at the token level (§2.1.2 / §2.1.3): the
- * placeholder must be full-strength `--color-ink-secondary` (an opacity
- * modifier composited it below the 4.5:1 text minimum) and field borders must
- * use `--color-field-border` — `--color-hairline` is 1.29:1 there and is under
- * the 3:1 non-text minimum of 1.4.11. Deliberately not a whole-string
- * snapshot: unrelated layout classes may evolve, but these token classes must
- * not.
+ * Placeholder must be full-strength ink-secondary and field borders must use
+ * field-border; hairline is below the 3:1 non-text floor.
  */
 describe("inputClass", () => {
   it("uses the AA-compliant field tokens", () => {
@@ -216,23 +179,13 @@ describe("theme tokens", () => {
   });
 
   it("declares every colour token that any component references", () => {
-    // 105 references to removed tokens (the pre-refs muted-ink, hairline and
-    // strong-hairline names) shipped with a green suite, because the old
-    // assertions checked that a class-name STRING appeared in this file —
-    // which was true — rather than that the class resolved to any CSS at all.
-    // This asserts resolution.
+    // Removed tokens used to pass because assertions only checked the
+    // class-name string, not that it resolved to CSS.
     expect(unresolvedColourTokens()).toEqual([]);
   });
 });
 
-/**
- * The guard above is only useful while it is neither blind nor trigger-happy,
- * and both failure modes are silent: a colour name wrongly classified as
- * layout passes an unresolved token through, and a layout utility wrongly
- * classified as a colour fails the suite on a legitimate class. These pin both
- * directions, because the vocabulary they cover is Tailwind's, not ours, and
- * it grows without anyone editing this file.
- */
+/** Pin both classifiers: a wrong one is silent in either direction. */
 describe("isColourCandidate", () => {
   it("reads a colour-prefixed width, offset or position as a width", () => {
     for (const [prefix, name] of [
@@ -291,20 +244,6 @@ describe("isColourCandidate", () => {
   });
 });
 
-/* ==========================================================================
-   §7 accessibility conformance surface (U-W9-T2).
-
-   §7.8 asks for runnable checks rather than "look at it". Everything below is
-   a source-level invariant that vitest can hold: landmarks and the skip link,
-   tab order (no tabindex above 0), the focus ring surviving `inputClass`'s
-   `focus:outline-none`, label association on every form, the
-   aria-invalid/aria-describedby pattern, distinct nav names, the menu
-   overlay's trap, the cart's announcement channels, and §7.5's 44px touch
-   floor on the pager and both quantity steppers. Playwright owns the
-   behavioural halves (overlay wrap-around, the post-step-change focus, the
-   contrast walk) — those stay UNPROVEN here until the backend is up.
-   ======================================================================== */
-
 const layoutSource = readFileSync(join(srcDir, "app/layout.tsx"), "utf8");
 const headerSource = readFileSync(join(srcDir, "components/Header.tsx"), "utf8");
 const overlaySource = readFileSync(
@@ -317,11 +256,8 @@ const checkoutSource = readFileSync(
 );
 
 /**
- * Comments are prose: this file's own pins deliberately quote the retired
- * class pairs (`h-9 min-w-9`, `px-3 py-1.5`) so a reader can see what was
- * repaired, and a comment in a component may cite an old value too. Code-only
- * is what the assertions below measure — and stripping them also keeps a
- * `/* … *​/` mention of `<main>` from reading as a second landmark.
+ * Strip comments before matching so prose mentions cannot satisfy a pin;
+ * it also stops a docblock quoting `<main>` from reading as a landmark.
  */
 function stripComments(source: string): string {
   return source
@@ -344,9 +280,8 @@ function componentSources(): [string, string][] {
 }
 
 /**
- * Label targets compared RAW: a template literal like `addr-${f.key}` pairs
- * with the input's own `addr-${f.key}` — string with string, template with
- * template — which is exactly how AddressForm (the §7.1 pattern) wires it.
+ * Label targets compare raw: a template literal pairs with the same template
+ * in the input, which is how AddressForm wires them.
  */
 function labelTargets(source: string): Set<string> {
   const targets = new Set<string>();
@@ -392,7 +327,7 @@ describe("7.7 landmarks and the skip link", () => {
       .flatMap(([, src]) =>
         [...src.matchAll(/<nav[^>]*aria-label="([^"]+)"/g)].map((m) => m[1]),
       );
-    // Not vacuous: the seven names §7.7 enumerates must all be present…
+    // Not vacuous: all seven names must be present, with no duplicates.
     for (const required of [
       "Primary",
       "Mobile",
@@ -420,8 +355,7 @@ describe("7.2 keyboard order and focus", () => {
   });
 
   it("moves focus to the new step heading on every checkout step change", () => {
-    // The spec calls this a real, present-day gap: the panel swapped and
-    // focus stayed on the button that no longer existed.
+    // Panel swaps left focus on a button that no longer existed.
     expect(checkoutSource).toContain("tabIndex={-1}");
     expect((checkoutSource.match(/tabIndex=\{-1\}/g) ?? []).length).toBeGreaterThanOrEqual(3);
     expect(checkoutSource).toContain("stepHeading.current?.focus()");
@@ -451,11 +385,8 @@ describe("7.3 focus visibility", () => {
   });
 
   it("keeps the ring rule UNLAYERED, so inputClass's focus:outline-none cannot win", () => {
-    // The cascade compares layers before specificity. `inputClass` carries
-    // `focus:outline-none` (specificity 0-2-0); the ring is 0-1-0. The ring
-    // only survives because it is declared outside every @layer — move it
-    // into one and every text field silently loses its focus indicator while
-    // this suite stays green.
+    // The cascade compares layers before specificity: `focus:outline-none`
+    // (0-2-0) beats the 0-1-0 ring unless the ring stays outside every @layer.
     expect(inputClass).toContain("focus:outline-none");
     const at = cleanedGlobals.indexOf(":focus-visible {");
     expect(at).toBeGreaterThan(-1);
@@ -491,8 +422,8 @@ describe("7.7 names and labels", () => {
       expect(labels.size, `${path}: labels with no control`).toBeGreaterThan(0);
       expect(labels.size).toBe(new Set(inputIds(source)).size);
     }
-    // Checkout's delivery radios are label-WRAPPED (no htmlFor) — the one
-    // association style this scan does not read, so pin it by source.
+    // Delivery radios are label-wrapped (no htmlFor), the one style the
+    // scan cannot read, so pin it by source.
     expect(checkoutSource).toMatch(
       /<label[^>]*>\s*<input\s+type="radio"/,
     );
@@ -511,8 +442,8 @@ describe("7.7 names and labels", () => {
   });
 
   it("keeps the cart badge on one announcement channel", () => {
-    // aria-live on a STATIC wrapper with a changing child, plus the sr-only
-    // "0 items" so the aria-label and the live region never fight.
+    // aria-live sits on a static wrapper; "0 items" keeps it from fighting
+    // the aria-label.
     expect(headerSource).toContain('aria-live="polite"');
     expect(headerSource).toContain('"0 items"');
     expect(headerSource).toContain("sr-only");
@@ -537,14 +468,11 @@ describe("7.5 target sizes", () => {
   });
 
   it("brings the header's cart, menu and account targets to the 44px floor", () => {
-    // Menu button and cart link: h-11/p-3 give 44x44 hit boxes without
-    // layout shift (the header's h-16 is unchanged; p-3 on the 20px cart
-    // icon = 44px total width, matching the Pagination convention).
+    // 44x44 hit boxes without layout shift: h-11/p-3 on a 20px icon.
     const cleaned = stripComments(headerSource);
     expect(cleaned).toContain("flex h-11 min-w-11 items-center justify-center md:hidden");
     expect(cleaned).toContain("relative flex items-center p-3");
-    // Account links (Orders / Sign out / Sign in): min-h-11 + inline-flex
-    // makes them block-level 44px-tall targets without changing the header.
+    // Account links: min-h-11 gives 44px targets without changing the header.
     expect(
       (cleaned.match(/inline-flex min-h-11 items-center/g) ?? []).length,
       "header: §7.5 wants 44px account targets",
@@ -554,11 +482,9 @@ describe("7.5 target sizes", () => {
   });
 
   it("gates the account links with a breakpoint display, never hidden+inline-flex (OBS-1)", () => {
-    // U-W13-T10: Tailwind v4 emits `.inline-flex` AFTER `.hidden`, so
-    // `hidden inline-flex` computes to inline-flex at EVERY viewport — the
-    // always-visible "Orders" link overlapped the centred wordmark at 390.
-    // The display utility must ride the `sm:` variant alone; `hidden` keeps
-    // a free cascade slot at the base layer.
+    // Tailwind v4 emits `.inline-flex` after `.hidden`, so `hidden
+    // inline-flex` is inline-flex at every viewport; the display utility must
+    // ride the `sm:` variant alone.
     const cleaned = stripComments(headerSource);
     expect(cleaned).not.toContain("hidden inline-flex");
     expect(
@@ -568,11 +494,7 @@ describe("7.5 target sizes", () => {
   });
 });
 
-/**
- * U-W10-T3 — CouponForm's error is wired to the input via aria-describedby,
- * following the RegisterForm pattern (§7.1 KEEP: "Form errors linked with
- * aria-invalid + aria-describedby … apply it to every other form").
- */
+/** CouponForm's error is linked to its input by aria-describedby. */
 describe("CouponForm aria wiring (U-W10-T3)", () => {
   const couponSource = readFileSync(
     join(srcDir, "components/cart/CouponForm.tsx"),
@@ -591,11 +513,7 @@ describe("CouponForm aria wiring (U-W10-T3)", () => {
   });
 });
 
-/**
- * U-W10-T3 — /orders/[id] must have exactly one h1 (§7.7, "one thing
- * leads"). The order-number heading is promoted from h2; the DOM order
- * guarantees the h1 precedes the conditional payment-success h2.
- */
+/** One h1 per order page, ahead of the conditional payment-success h2. */
 describe("orders detail heading (U-W10-T3)", () => {
   const orderDetailSource = readFileSync(
     join(srcDir, "components/orders/OrderDetailView.tsx"),
@@ -619,14 +537,8 @@ describe("orders detail heading (U-W10-T3)", () => {
 });
 
 /**
- * U-W11-T5 — /products screen-parity restyle. The screen (media/designs/
- * maison_ther_all_fragrances_refined_cards_atmosphere) drives the visuals;
- * these pins hold the behaviours the restyle must not drop: the native-select
- * ban with its ARIA replacement, the ordering still committing through the
- * URL `update` path, the card's server-money rendering on the tabular money
- * step, the hairline plate frame, and the count sentence's live region with
- * its filtered suffix. Comments are stripped first so a prose mention of a
- * selector in a docblock cannot satisfy a pin.
+ * Pins the products restyle's behaviours: native-select ban, URL ordering,
+ * server-money rendering, hairline plate and the live count sentence.
  */
 describe("products sort control (U-W11-T5)", () => {
   const filterSource = stripComments(

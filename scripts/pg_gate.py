@@ -1,41 +1,13 @@
-"""Gate the PostgreSQL suite against the CERTIFIED FAILURE SET.
+"""Gate a PostgreSQL suite run against the CERTIFIED FAILURE SET.
 
-The backend suite is read on two engines. SQLite is green; PostgreSQL is not,
-and it has not been for a documented stretch of the run: a set of known
-failures lives on PG that does not exist on SQLite (index introspection sees
-Postgres-only ``varchar_pattern_ops`` duplicates, and Postgres sequences are not
-transactional so hardcoded primary keys do not survive rollback). Those
-failures are certified in ``pg_baseline.json`` and are deliberately NOT fixed
-here -- they are tracked as their own rows (PG-2b, PG-2e), and a fix lands by
-editing the baseline in the same commit that fixes the test.
+The baseline lives in ``pg_baseline.json`` and is never written by this
+script: ``--emit-baseline`` prints a skeleton for a human to review. A new
+failure is red; a fixed one is merely reported. Two guards keep it honest:
+the runner's summary line is the authority on how many problems occurred,
+and a test id is never guessed -- an ambiguous short name is an error.
 
-The defect this gate closes is that the certified set lived only in prose. A
-ledger line saying "PG: failures=6, errors=1" is a claim about a SET, and a
-count cannot tell two things apart: the same six failing forever (nothing
-changed) and six failing plus one new one (a regression). This script compares
-the SET, so a new failure is red and a fixed one is merely reported.
-
-Two rules keep the gate honest, and both exist because a gate that reads
-nothing looks exactly like a gate that passed:
-
-  * The summary line is the authority on HOW MANY problems occurred. If it
-    reports failures/errors and the headers yield no resolvable test id, this
-    exits non-zero instead of reporting an empty (therefore "clean") set.
-  * A test id is never guessed. unittest's own output is prose, and at
-    ``--verbosity 2`` ``getDescription`` prefers a test's DOCSTRING over its
-    id, so the qualified id is present in some renderings and absent in
-    others. Where the output carries only the short method name, the name is
-    resolved against the suite Django actually collected; a short name matching
-    more than one test is an error, not a coin flip.
-
-The baseline is never written by this script. A self-updating baseline records
-whatever the run just did, which is the same defect this file exists to catch
-(see ``doc_claims_baseline.json`` and the same argument in
-``doc_claims.py``). ``--emit-baseline`` prints a skeleton for a human to review
-and paste; the gate cannot launder a regression into a baseline.
-
-Exit codes: 0 = no failure outside the baseline, 1 = a new failure, 2 = the run
-could not be judged (unreadable log, unresolvable name, count mismatch).
+Exit codes: 0 = no failure outside the baseline, 1 = a new failure, 2 = the
+run could not be judged (unreadable log, unresolvable name, count mismatch).
 """
 
 from __future__ import annotations
@@ -49,30 +21,16 @@ import re
 import sys
 
 # `FAILED (failures=6, errors=1, expected failures=4)` -- the runner's own
-# count of problems, which is what the extracted headers are checked against.
+# count of problems, which the extracted headers are checked against.
 SUMMARY_RE = re.compile(r"^(?P<verdict>FAILED|OK)\b\s*(?:\((?P<body>[^)]*)\))?\s*$")
 
-# One whole comma-separated part of the summary body, so that `expected
+# One whole comma-separated part of the summary body, so `expected
 # failures=4` cannot be mistaken for `failures=4`.
 COUNT_RE = re.compile(r"^\s*(?P<key>failures|errors)\s*=\s*(?P<value>\d+)\s*$")
 
-# A failure header. unittest renders three shapes, all measured on Python 3.14
-# against PostgreSQL 17.11:
-#   FAIL: test_x (module.Class.test_x)                          plain failure
-#   FAIL: test_x (module.Class.test_x) (column='razorpay_order_id')
-#                                                              a subTest case
-#   FAIL: test_x                                    a docstring-bearing test,
-#                                                              id rendered bare
-# The trailing subTest group is the second shape and it is NOT optional noise:
-# a header regex anchored with `\s*$` after the id matches 5 of a 7-problem run,
-# the anti-vacuous count cross-check then refuses the run, and the gate is red
-# on every execution (BUG-1).
-#
-# The id is required to be a DOTTED path, which is what separates shape 2 from
-# shape 3: a subTest group is rendered `key=value`, so it never matches a
-# dotted identifier, and a bare `(alpha)`-style parameter cannot be promoted to
-# a test id either. Without that restriction the regex would happily certify
-# `alpha` as a failing test id.
+# A failure header. unittest renders plain, subTest (a trailing `key=value`
+# group) and docstring-bare shapes; the id must be a DOTTED path so a subTest
+# parameter can never be certified as a test id.
 HEADER_RE = re.compile(
     r"^(?P<kind>FAIL|ERROR):\s+(?P<short>[A-Za-z_][A-Za-z0-9_]*)"
     r"(?:\s+\((?P<qualified>[A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)+)\))?"
@@ -83,14 +41,8 @@ HEADER_RE = re.compile(
 def decode(raw: bytes) -> str:
     """Decode suite output by sniffing the byte-order mark.
 
-    Measured, not hypothetical: capturing the suite through PowerShell's
-    ``Tee-Object`` on Windows writes UTF-16LE (BOM ``FF FE``), and reading that
-    as UTF-8 yields a file in which NO summary line and NO failure header is
-    findable. Read naively, this gate would then compare an empty extracted set
-    against the baseline and call it clean. The gate refuses to judge a run it
-    could not read, but a gate that cannot read a log is useless, so the
-    encoding is sniffed instead of assumed.
-    """
+    Captured through PowerShell's ``Tee-Object`` the log can be UTF-16LE, and
+    read naively as UTF-8 no summary line or header is findable at all."""
     if raw.startswith((codecs.BOM_UTF16_LE, codecs.BOM_UTF16_BE)):
         return raw.decode("utf-16", errors="replace")
     if raw.startswith(codecs.BOM_UTF8):
@@ -99,7 +51,6 @@ def decode(raw: bytes) -> str:
 
 
 def read_source(log: str) -> str:
-    """Read the suite output from a file or stdin and return decoded text."""
     if log == "-":
         buffer = getattr(sys.stdin, "buffer", None)
         raw = buffer.read() if buffer is not None else sys.stdin.read().encode()
@@ -111,16 +62,9 @@ def read_source(log: str) -> str:
 def parse_summary(text: str) -> tuple[str | None, int, int]:
     """Return (verdict, failures, errors) from the runner's summary line.
 
-    Counts come from the ``FAILED (...)`` line and never from a count of
-    headers: on a green run the summary reports nothing, and nothing is not
-    zero.
-
-    Each comma-separated part is matched whole. Matching the keys with a bare
-    ``(failures|errors)\\s*=\\s*(\\d+)`` scans the body twice, because
-    ``expected failures=4`` contains ``failures=4``: a dict built from that
-    keeps the LAST match and silently reports 4 instead of 6, which is how this
-    printed ``problems=5`` for a run that reported 7.
-    """
+    Counts come from the ``FAILED (...)`` line, never from a count of headers:
+    a green run reports nothing, and nothing is not zero. Each comma-separated
+    part is matched whole, so ``expected failures=4`` cannot read as 4."""
     for line in reversed(text.splitlines()):
         match = SUMMARY_RE.match(line.strip())
         if not match:
@@ -138,10 +82,8 @@ def parse_summary(text: str) -> tuple[str | None, int, int]:
 def collect_headers(text: str) -> list[tuple[str, str | None]]:
     """Return the (short_name, qualified_id_or_None) pairs from FAIL/ERROR lines.
 
-    Only lines that start the line are read, case-sensitively: a Django log
-    record such as ``ERROR 2026-10-04 ... django.request`` is interleaved into
-    this same stream, and a case-insensitive scan sweeps those in as failures.
-    """
+    Only lines that start the line, case-sensitively: a Django log record such
+    as ``ERROR 2026-10-04 ...`` in the same stream is not a failure."""
     headers: list[tuple[str, str | None]] = []
     for line in text.splitlines():
         match = HEADER_RE.match(line.rstrip())
@@ -161,17 +103,9 @@ def _iter_ids(suite):
 def collected_short_names() -> dict[str, list[str]]:
     """Map each collected test's short method name to its qualified ids.
 
-    Resolution comes from the suite Django builds, so it cannot invent an id
-    that no test has. Import failures are excluded: a ``_FailedTest`` id names a
-    module that did not load, which is a different failure from the ones this
-    gate certifies.
-
-    The working directory is changed and restored because Django's
-    ``DiscoverRunner.build_suite`` discovers from ``'.'``: run this script from
-    the repository root -- where CI runs it -- and it would collect nothing and
-    resolve no name at all. Measured, and silent: an empty collection turns
-    every failure header into an unresolvable name.
-    """
+    Resolution comes from the suite Django builds, so it cannot invent an id;
+    ``_FailedTest`` import failures are excluded. The working directory is
+    changed and restored because DiscoverRunner discovers from ``'.'``."""
     backend = pathlib.Path(__file__).resolve().parent.parent / "backend"
     if str(backend) not in sys.path:
         sys.path.insert(0, str(backend))
@@ -200,14 +134,8 @@ def collected_short_names() -> dict[str, list[str]]:
 def extract_failing_ids(text: str) -> tuple[set[str], list[str], int]:
     """Return (resolved ids, problems, header count).
 
-    The header count is returned separately because it is NOT the length of the
-    id set: a ``subTest`` emits one header per sub-case, so one test can
-    account for several problems. ``test_payment_provider_references_stay_
-    constraint_covered`` fails for two columns and reports twice, which is why
-    the certified set has six ids while the runner counts seven problems. The
-    count cross-check below therefore compares headers to problems, never ids
-    to problems.
-    """
+    Header count is NOT the id count: a ``subTest`` emits one header per
+    sub-case, so the cross-check compares headers to problems, never ids."""
     headers = collect_headers(text)
     resolved: set[str] = set()
     problems: list[str] = []
@@ -243,16 +171,9 @@ def extract_failing_ids(text: str) -> tuple[set[str], list[str], int]:
 def detect_engine() -> str | None:
     """Return the live database backend's ENGINE, or None if undeterminable.
 
-    Measured, not declared: this reads ``connection.settings_dict['ENGINE']``,
-    so it reports the engine this process would actually use. That matters
-    because settings.py falls back to SQLite without complaint when
-    DATABASE_URL is unset or malformed -- a silent fallback is precisely how a
-    SQLite run could be compared against a PostgreSQL baseline.
-
-    Returns None rather than raising when Django or the settings cannot be
-    loaded: the engine is a diagnostic, and a gate that cannot measure it must
-    still be able to judge the failure set.
-    """
+    Measured from ``connection.settings_dict``: settings.py falls back to
+    SQLite silently when DATABASE_URL is unset, which is how a SQLite run could
+    be compared against a PostgreSQL baseline. Diagnostic only, never fatal."""
     backend = pathlib.Path(__file__).resolve().parent.parent / "backend"
     if str(backend) not in sys.path:
         sys.path.insert(0, str(backend))
@@ -303,9 +224,7 @@ def main(argv: list[str] | None = None) -> int:
     try:
         text = read_source(args.log)
     except OSError as exc:
-        # An unreadable log is the documented exit 2, not a traceback with exit
-        # 1: a mistyped path in CI must report "cannot be judged", the same as
-        # any other unreadable input, rather than dumping a stack (OBS-1).
+        # An unreadable log is the documented exit 2, not a traceback with exit 1.
         print(
             f"pg_gate: cannot read the suite log {args.log!r}: {exc}", file=sys.stderr
         )
@@ -314,12 +233,8 @@ def main(argv: list[str] | None = None) -> int:
     verdict, failures, errors = parse_summary(text)
     extracted, problems, header_count = extract_failing_ids(text)
 
-    # The count cross-check is the anti-vacuous-pass guard: the runner says N
-    # problems, so N headers must be present. Fewer means the extractor read
-    # less than the run produced, and an under-read set compares as "clean".
-    # It runs BEFORE --emit-baseline, because seeding a baseline from a run the
-    # extractor did not fully read is how a vacuous gate gets certified into the
-    # repo as if it were the measured thing.
+    # Anti-vacuous guard, BEFORE --emit-baseline: the runner says N problems, so
+    # N headers must be read. Fewer means an under-read set compares as "clean".
     reported = failures + errors
     if verdict is None and not args.emit_baseline:
         print(
@@ -360,8 +275,7 @@ def main(argv: list[str] | None = None) -> int:
     try:
         baseline, data = load_baseline(baseline_path)
     except (OSError, ValueError, json.JSONDecodeError) as exc:
-        # Same class as the unreadable log above: a missing or corrupt baseline
-        # cannot be judged against, so it reports exit 2 instead of tracing back.
+        # A missing or corrupt baseline cannot be judged against: report exit 2.
         print(
             f"pg_gate: cannot read the baseline {baseline_path}: {exc}",
             file=sys.stderr,
@@ -371,14 +285,9 @@ def main(argv: list[str] | None = None) -> int:
     new = sorted(extracted - baseline)
     healed = sorted(baseline - extracted)
 
-    # Two engine facts, kept apart because they answer different questions and
-    # only one of them is measured here. `baseline_engine` is a string copied
-    # out of the baseline JSON: it says what the baseline was CERTIFIED against,
-    # and printing it as `engine=` read as though this run had been measured to
-    # be on that engine (OBS-2) -- it is a claim in a file, nothing more.
-    # `connection_engine` is measured, from the live Django connection, and is
-    # the one that can catch the real mistake: pointing this gate at a SQLite
-    # log while the baseline is a PostgreSQL baseline.
+    # Two engine facts, kept apart: baseline_engine is a string copied from the
+    # baseline (what it was CERTIFIED against, nothing more); connection_engine
+    # is measured live, and catches a SQLite log pointed at a PG baseline.
     print(f"pg_gate: verdict={verdict} (from the log)")
     print(
         f"pg_gate: baseline_engine={data.get('engine', 'unknown')} "
@@ -391,9 +300,8 @@ def main(argv: list[str] | None = None) -> int:
     )
 
     for test_id in healed:
-        # Staying green is deliberate: a baseline entry that stopped failing is
-        # the fix landing, and the ratchet is to delete the entry in the same
-        # commit. A gate that went red on it would punish the fix.
+        # Staying green is deliberate: a healed entry is the fix landing, and the
+        # ratchet is deleting the entry in the same commit, not going red.
         print(f"pg_gate: WARNING baseline entry no longer fails: {test_id}")
 
     if new:

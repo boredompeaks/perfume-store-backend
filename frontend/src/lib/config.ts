@@ -1,19 +1,13 @@
-// The cart lives in the session cookie, and a Lax cookie is only sent when
-// the API is SAME-SITE with the page. Defaulting the API to a fixed loopback
-// spelling (127.0.0.1) silently broke every page opened at the other one
-// (localhost): each request arrived without `sessionid`, so the backend
-// minted a brand-new, empty cart on every call. Without an explicit override
-// the API is therefore addressed on the host the page itself was served from,
-// which keeps the pair same-site whichever loopback spelling is used.
+// The session cookie is Lax, so the API must be same-site with the page.
+// Defaulting to a fixed loopback spelling (127.0.0.1 vs localhost) made every
+// request mint a fresh empty cart, so resolve from the page's own host.
 const DEV_API_PORT = 8000;
 
 export type PageLocation = { protocol: string; hostname: string };
 
 /**
- * Resolve the API origin.
- *
- * `page` is the browser's `location` (null during SSR, where the server talks
- * to the API over loopback regardless of the hostname a visitor used).
+ * `page` is the browser's location (null during SSR, where the server talks
+ * to the API over loopback regardless of the visitor's hostname).
  */
 export function resolveApiBase(
   override: string | undefined,
@@ -31,10 +25,7 @@ export const API_BASE = resolveApiBase(
     : { protocol: window.location.protocol, hostname: window.location.hostname },
 );
 
-/**
- * Product image paths come back relative ("/media/…") because the backend
- * serializes without a request context. Resolve against the API origin.
- */
+/** Media paths arrive relative (serialized without request context). */
 export function mediaUrl(path: string | null | undefined): string | null {
   if (!path) return null;
   return path.startsWith("http") ? path : `${API_BASE}${path}`;

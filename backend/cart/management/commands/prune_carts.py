@@ -1,19 +1,9 @@
-"""Delete abandoned anonymous carts (D-04b).
+"""Delete abandoned anonymous carts.
 
-A guest cart is never converted into anything: a visitor who never signs in
-leaves a session-keyed row that no account owns and no order points at. This
-command is the scheduled cleanup for those rows, and it deliberately cannot
-touch anything else:
-
-* only ``user IS NULL`` rows — an account cart is the customer's basket and
-  is never pruned, however old;
-* only empty carts — a row with a line is a basket someone may still sign in
-  to claim, so the merge path, not the janitor, decides its fate;
-* only carts no order links — a checked-out cart is history the capture
-  flow still clears through the link.
-
-Age is measured on ``updated_at`` (the last write), not ``created_at``: a
-guest who added an item yesterday evening has an old row but a live basket.
+Only ``user IS NULL``, empty, orderless rows are eligible — an account cart is
+the customer's basket, a cart with lines may still be claimed at sign-in, and a
+checked-out cart is history. Age is measured on ``updated_at`` so a live basket
+is never pruned for being old.
 """
 
 from datetime import timedelta
@@ -62,8 +52,7 @@ class Command(BaseCommand):
             return
 
         stale.delete()
-        # Report the matched count (the rows this command selected), not the
-        # ORM's cascade-inclusive delete count.
+        # Report the matched count, not the ORM's cascade-inclusive delete count.
         self.stdout.write(
             f"Deleted {matched} empty anonymous cart(s) older than {days} day(s)."
         )

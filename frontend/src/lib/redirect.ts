@@ -1,7 +1,6 @@
 /**
- * Sanitize a `?next=` redirect target. Internal absolute paths only.
- * Blocks: absolute URLs (https://…), protocol-relative (//…), and backslash
- * tricks (/\…) that browsers normalize into protocol-relative form.
+ * Only internal absolute paths: blocks absolute URLs, protocol-relative `//`
+ * and backslashes that browsers normalize into `//`.
  */
 export function safeNext(raw: string | undefined | null): string | undefined {
   if (!raw) return undefined;

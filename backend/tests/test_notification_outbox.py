@@ -1,48 +1,3 @@
-"""ASYNC-2c1/2c2: the durable notification outbox — storage, enqueue, drain.
-
-The substrate the business call sites queue through. It landed before any
-site was converted (the safety argument for that ordering is historical and
-recorded in ``common.notifications``: converting a site before a drain loop
-exists would mean the notification is silently never delivered). Since
-TIER1-ASYNC-CONVERT the sites HAVE converted, and the last class here pins
-that converted state end to end — the call site writes a row and never
-sends, the row lives and dies with its business transaction, the drain
-worker is what puts the mail in the customer's inbox, and a notification
-outage cannot break the transaction it follows.
-
-What is pinned, and against which plausible wrong implementation:
-
-- **Nothing instance-shaped is stored.** Asserted on the raw column text, not
-  on a re-read attribute: an implementation that dumped the model, or stored a
-  rendered subject/template, fails here.
-- **The row is written inside the caller's transaction**, visible before the
-  block exits, and dies with a rollback. An ``on_commit`` enqueue fails the
-  visibility test; a detached/own-transaction enqueue fails the rollback one.
-- **The dedup key identifies the event, not its state.** Amending the order
-  between two enqueues must still collide; a key derived from the order's
-  mutable contents would not.
-- **The stored form round-trips** back to live rows, and resolution reads
-  CURRENT state — a snapshot implementation fails the amend-then-resolve test.
-- **A vanished row fails in a defined way** (``UnresolvableNotification``)
-  rather than crashing a drain loop or silently rendering nothing.
-- **An unhandled event writes no row**, so converting a call site can never
-  trade a working no-op for a permanently undelivered queue entry.
-- **A failed enqueue propagates**, unlike ``dispatch``. That divergence is
-  deliberate and is argued in ``notifications.enqueue``; if it is ever
-  reverted to log-and-swallow, the dual-write this substrate removes comes
-  back.
-- **The dedup key is injective and order-independent.** Two distinct contexts
-  must not collide on a separator, and the same context built in a different
-  key order must produce the same key. Both were false of a ``":".join`` key.
-- **A repeat is expressible.** ``occurrence`` is the deliberate escape hatch;
-  without it a resend or a second reminder was structurally impossible.
-- **An over-long value is refused, not cut.** A silently truncated token or
-  URL renders as a working-looking link and fails at the customer.
-- **The unsanitised payload has a control now.** ``expires_at`` is a field
-  default, so no code path can omit it, and ``purge_notification_outbox`` is
-  the named deletion owner. Both are asserted, not assumed.
-"""
-
 import json
 from datetime import timedelta
 from decimal import Decimal
@@ -84,8 +39,6 @@ def _make_order(user, total="499.99"):
 
 @tag("notifications")
 class OutboxSerialisationTests(ApiTestCase):
-    """What a row holds: identifiers and scalars, never live objects."""
-
     def test_a_model_context_is_stored_as_a_label_and_a_primary_key(self):
         order = _make_order(self.make_user("outboxref"))
         row = notifications.enqueue(AuditEvent.EventType.ORDER_PAID, {"order": order})
@@ -94,14 +47,10 @@ class OutboxSerialisationTests(ApiTestCase):
             row.payload,
             {"order": {"label": "orders.order", "pk": order.pk}},
         )
-        # The column itself, read back over SQL rather than through the
-        # attribute: a repr of the instance, or a pre-rendered subject, would
-        # be in this text and not in the attribute above.
         with connection.cursor() as cursor:
             cursor.execute("SELECT payload FROM common_notificationoutbox")
             stored = cursor.fetchone()[0]
         if not isinstance(stored, str):
-            # Some backends hand a JSON column back already parsed.
             stored = json.dumps(stored)
         self.assertEqual(json.loads(stored), row.payload)
         self.assertNotIn("<Order:", stored)
@@ -114,10 +63,7 @@ class OutboxSerialisationTests(ApiTestCase):
             AuditEvent.EventType.ORDER_PAID,
             {
                 "order": order,
-                # A money value must never round-trip through a float
-                # (conventions.md), and a lazy translation string must not
-                # survive into a row the draining process could resolve
-                # against its own language.
+                # A money value must never round-trip through a float, and a lazy translation string must not survive into a row drained in another language.
                 "amount": Decimal("499.99"),
                 "label": gettext_lazy("Back in stock"),
                 "rows": [order, None],
@@ -135,13 +81,6 @@ class OutboxSerialisationTests(ApiTestCase):
         self.assertEqual(row.payload["extra"]["nested"], "1.50")
 
     def test_an_over_long_value_is_refused_rather_than_truncated(self):
-        # The defect this replaces: an over-long value was cut at an arbitrary
-        # boundary and stored, which a probe could not detect (a bare "…" is
-        # indistinguishable from a real one the author wrote) and which landed
-        # mid-token - a 233-character reset URL was stored at 201 characters,
-        # still starting "https://" and still containing "token=", so it
-        # rendered as a working link and failed at the customer. Refusing puts
-        # the failure at the call site instead.
         order = _make_order(self.make_user("outboxlong"))
         long_url = "https://shop.example/reset/" + "t" * 233
         with self.assertRaises(NotificationPayloadError) as caught:
@@ -152,8 +91,6 @@ class OutboxSerialisationTests(ApiTestCase):
         self.assertIn(
             str(notifications.PAYLOAD_VALUE_MAX_LENGTH), str(caught.exception)
         )
-        # Nothing was written: the refusal happens before the insert, so a bad
-        # context cannot leave a half-queued row behind either.
         self.assertEqual(NotificationOutbox.objects.count(), 0)
 
     def test_a_value_at_the_bound_is_stored_whole(self):
@@ -165,13 +102,8 @@ class OutboxSerialisationTests(ApiTestCase):
         self.assertEqual(row.payload["code"], exact)
 
     def test_a_set_context_value_is_ordered_deterministically(self):
-        # Python's str() of a set walks it in hash order, which varies with
-        # PYTHONHASHSEED - so the same context enqueued by two different
-        # gunicorn workers used to produce two different dedup keys and the
-        # duplicate suppression silently did not happen across workers. The
-        # described value is sorted by its canonical JSON form instead.
+        # str() of a set walks it in hash order, which varies with PYTHONHASHSEED; the value is sorted by its canonical JSON form instead.
         described = notifications.serialize_context({"tags": {"beta", "alpha"}})
-        # Hand-written expectation, not one recomputed from the code under test.
         self.assertEqual(described, {"tags": ["alpha", "beta"]})
 
     def test_a_repeated_element_in_a_set_is_described_once(self):
@@ -179,10 +111,6 @@ class OutboxSerialisationTests(ApiTestCase):
         self.assertEqual(described, {"tags": ["alpha"]})
 
     def test_a_non_mapping_context_is_stored_as_an_empty_payload(self):
-        # Matches AuditEvent.record's treatment of a detail: a context is
-        # always a mapping, and coercing something else into one would invent
-        # data. Asserted against serialize_context directly so the enqueue path
-        # does not have to be reachable with a broken context to hit it.
         self.assertEqual(notifications.serialize_context(None), {})
         self.assertEqual(notifications.serialize_context(["order"]), {})
 
@@ -197,11 +125,7 @@ class OutboxSerialisationTests(ApiTestCase):
         self.assertEqual(resolved["amount"], "1.00")
 
     def test_references_nested_in_mappings_and_sequences_also_resolve(self):
-        # A bulk notification ("your three items shipped") carries a list of
-        # rows, not one flat key, so resolution has to recurse exactly as
-        # serialisation does. A resolver that only handled top-level keys
-        # would hand the handler the raw reference mappings and the template
-        # would render a dict instead of an order.
+        # A bulk notification carries a list of rows, so resolution recurses exactly as serialisation does.
         first = _make_order(self.make_user("outboxnest1"))
         second = _make_order(self.make_user("outboxnest2"))
         payload = notifications.serialize_context(
@@ -220,18 +144,11 @@ class OutboxSerialisationTests(ApiTestCase):
 
 @tag("notifications")
 class OutboxTransactionTests(ApiTestCase):
-    """Enqueue is part of the business transaction, not a post-commit extra."""
-
     def test_the_row_is_written_inside_the_caller_transaction(self):
-        # Deliberately NOT inside captureOnCommitCallbacks: an enqueue
-        # registered on transaction.on_commit would leave this assertion
-        # looking at an empty table, which is the whole difference between
-        # the two placements.
+        # Deliberately NOT inside captureOnCommitCallbacks: an on_commit enqueue would leave this assertion looking at an empty table.
         with transaction.atomic():
             order = _make_order(self.make_user("outboxtx"))
             notifications.enqueue(AuditEvent.EventType.ORDER_PAID, {"order": order})
-            # Still inside the block, locks hypothetically held: the intent is
-            # already durable in the same transaction as the write.
             self.assertEqual(NotificationOutbox.objects.count(), 1)
             self.assertEqual(Order.objects.count(), 1)
 
@@ -241,15 +158,10 @@ class OutboxTransactionTests(ApiTestCase):
                 order = _make_order(self.make_user("outboxrb"))
                 notifications.enqueue(AuditEvent.EventType.ORDER_PAID, {"order": order})
                 raise RuntimeError("later in the money block failed")
-        # Neither survives. The dual-write this task removes is an order that
-        # commits with its notification missing, not two independent outcomes.
         self.assertEqual(Order.objects.count(), 0)
         self.assertEqual(NotificationOutbox.objects.count(), 0)
 
     def test_enqueue_commits_with_the_business_write(self):
-        # Paired half of the rollback test. The committed-row proof proper
-        # needs a transaction that really commits, which TestCase's wrapper
-        # cannot give — see OutboxCommitVisibilityTests for that.
         with transaction.atomic():
             order = _make_order(self.make_user("outboxcommit"))
             notifications.enqueue(AuditEvent.EventType.ORDER_PAID, {"order": order})
@@ -257,10 +169,7 @@ class OutboxTransactionTests(ApiTestCase):
         self.assertEqual(Order.objects.count(), 1)
 
     def test_a_failed_enqueue_propagates_instead_of_being_swallowed(self):
-        # The deliberate divergence from dispatch, which logs and swallows an
-        # SMTP failure. Here the write IS the transaction's own record of what
-        # it owes, so swallowing a database failure would recreate the dual
-        # write. The checkout rolls back, visibly, instead.
+        # Deliberately unlike dispatch, which logs and swallows: here the write is the transaction's record of what it owes, so the failure propagates and checkout rolls back.
         order = _make_order(self.make_user("outboxfail"))
         with mock.patch(
             "common.notifications.NotificationOutbox.objects.create",
@@ -272,15 +181,6 @@ class OutboxTransactionTests(ApiTestCase):
 
 @tag("notifications")
 class OutboxDedupTests(ApiTestCase):
-    """The enqueue-side guard: one queued row per notification identity.
-
-    What this key is NOT: the drain loop's "already handled" guard. It is
-    derived only from the event type and the payload, is byte-identical before
-    and after any send, and is unique, so it can never match a second row and
-    carries no send state at all. At-least-once delivery is the locked
-    status/sent_at claim, which ASYNC-2c2 has not built.
-    """
-
     def test_a_second_enqueue_of_the_same_event_is_a_no_op(self):
         order = _make_order(self.make_user("outboxdup"))
         first = notifications.enqueue(AuditEvent.EventType.ORDER_PAID, {"order": order})
@@ -294,11 +194,6 @@ class OutboxDedupTests(ApiTestCase):
         self.assertIn("already queued", "\n".join(logs.output))
 
     def test_the_key_survives_a_change_to_the_referenced_row(self):
-        # The property the key's stability exists for: the two facts it is
-        # built from (the event type, and the label+pk of the referenced row)
-        # cannot change, so a retry after the order was corrected still
-        # collides. A key derived from the order's total, its rendered subject
-        # or its repr would miss and queue a duplicate.
         order = _make_order(self.make_user("outboxkey"))
         first = notifications.enqueue(AuditEvent.EventType.ORDER_PAID, {"order": order})
         order.total_amount = Decimal("999.00")
@@ -311,10 +206,6 @@ class OutboxDedupTests(ApiTestCase):
         self.assertEqual(NotificationOutbox.objects.count(), 1)
 
     def test_the_key_names_the_event_and_the_row_it_is_about(self):
-        # A shape check by hand-written substrings, NOT by rebuilding the key
-        # from the code under test: a key naming neither the event nor its
-        # subject would still collide correctly for one event and still be
-        # useless to whoever reads the table.
         order = _make_order(self.make_user("outboxshape"))
         row = notifications.enqueue(AuditEvent.EventType.ORDER_PAID, {"order": order})
         self.assertIn("order.paid", row.dedup_key)
@@ -322,21 +213,12 @@ class OutboxDedupTests(ApiTestCase):
         self.assertIn(str(order.pk), row.dedup_key)
 
     def test_the_key_does_not_depend_on_the_order_the_context_was_built_in(self):
-        # The two paths that fire for one payment are different call sites, and
-        # a caller may build its context either way round. The previous key
-        # appended scalars in insertion order, so the same notification built
-        # differently produced two keys and both rows were queued - defeating
-        # the exact collapse the key exists for.
         self.assertEqual(
             notifications._dedup_key("order.paid", {"a": "1", "b": "2"}),
             notifications._dedup_key("order.paid", {"b": "2", "a": "1"}),
         )
 
     def test_two_distinct_contexts_do_not_collide_on_a_separator(self):
-        # The previous key was a ":".join of rendered fragments, so an
-        # unescaped separator made these two different notifications share one
-        # key - and the second was silently swallowed, because the unique
-        # constraint read it as "already queued".
         self.assertNotEqual(
             notifications._dedup_key("order.paid", {"a": "1", "b": "2"}),
             notifications._dedup_key("order.paid", {"a": "1:b=2"}),
@@ -358,8 +240,6 @@ class OutboxDedupTests(ApiTestCase):
         self.assertEqual(NotificationOutbox.objects.count(), 2)
 
     def test_the_default_occurrence_is_the_one_off_case(self):
-        # Left at None, the key says "this business event owes one
-        # notification" - which is right for a confirmation.
         order = _make_order(self.make_user("outboxonce"))
         self.assertIsNotNone(
             notifications.enqueue(AuditEvent.EventType.ORDER_PAID, {"order": order})
@@ -372,13 +252,6 @@ class OutboxDedupTests(ApiTestCase):
         self.assertEqual(NotificationOutbox.objects.count(), 1)
 
     def test_a_repeat_notification_is_expressible_and_gets_its_own_row(self):
-        # Before this existed, a resend after a mis-send and a second reminder
-        # were structurally impossible: same type, same row, same scalars
-        # meant enqueue returned None forever - no nonce, no attempt
-        # discriminator, no force, no key retirement. An occurrence makes the
-        # repeat a NEW row with its own send state, which is what "this
-        # notification is still owed" actually means, rather than a mutation
-        # of the first.
         order = _make_order(self.make_user("outboxrepeat"))
         first = notifications.enqueue(
             AuditEvent.EventType.ORDER_PAID, {"order": order}, occurrence="reminder-1"
@@ -413,9 +286,7 @@ class OutboxDedupTests(ApiTestCase):
         self.assertIn("pending", str(row))
 
     def test_an_event_with_no_registered_handler_writes_no_row(self):
-        # The registry-hook events (order.shipped and friends) resolve no
-        # handler yet, and dispatch no-ops on them. Enqueue must agree, or
-        # converting such a site would queue rows nothing knows how to send.
+        # The registry-hook events resolve no handler yet and dispatch no-ops on them; enqueue must agree.
         with self.assertLogs("common.notifications", level="DEBUG") as logs:
             self.assertIsNone(notifications.enqueue("order.shipped", {"order": None}))
         self.assertEqual(NotificationOutbox.objects.count(), 0)
@@ -424,15 +295,7 @@ class OutboxDedupTests(ApiTestCase):
 
 @tag("notifications")
 class OutboxRetentionTests(ApiTestCase):
-    """ASYNC-2c1 cycle 2: the control that makes the unsanitised payload safe.
-
-    The payload is deliberately NOT run through the audit trail's
-    credential-field scrubber, because a password-reset or verification
-    notification is built out of exactly the one-time token material that
-    scrubber drops. That decision is only defensible with a compensating
-    control in place, so the bound and the deletion owner exist now rather
-    than being deferred to the call-site conversions.
-    """
+    """The payload is deliberately NOT scrubbed: reset/verification notifications carry the one-time token material that scrubber drops, so the retention bound is the compensating control."""
 
     def test_every_row_carries_an_expiry_inside_the_configured_bound(self):
         order = _make_order(self.make_user("outboxttl"))
@@ -442,8 +305,6 @@ class OutboxRetentionTests(ApiTestCase):
                 AuditEvent.EventType.ORDER_PAID, {"order": order}
             )
         after = timezone.now()
-        # The bound is the field's own default, so no code path can create a
-        # row without one - there is nowhere to forget it.
         self.assertGreaterEqual(row.expires_at, before + timedelta(seconds=120))
         self.assertLessEqual(row.expires_at, after + timedelta(seconds=120))
 
@@ -460,14 +321,9 @@ class OutboxRetentionTests(ApiTestCase):
         self._expire(spent)
         call_command("purge_notification_outbox", verbosity=0)
         self.assertFalse(NotificationOutbox.objects.filter(pk=spent.pk).exists())
-        # A row inside its window is a notification still owed, so the purge
-        # must never be the reason a customer stops hearing about an order.
         self.assertTrue(NotificationOutbox.objects.filter(pk=live.pk).exists())
 
     def test_the_purge_command_deletes_a_stranded_pending_row_too(self):
-        # Nothing drains the table until ASYNC-2c2, so an expired PENDING row
-        # is stranded rather than finished. Its payload may hold credential
-        # material, so the bound does not wait for a status to change.
         stranded = notifications.enqueue(
             AuditEvent.EventType.ORDER_PAID,
             {"order": _make_order(self.make_user("outboxstranded"))},
@@ -504,20 +360,8 @@ class OutboxRetentionTests(ApiTestCase):
             {"order": _make_order(self.make_user("outboxgrace"))},
         )
         self._expire(expired)
-        # Expired, but only just: a grace window must keep it.
         call_command("purge_notification_outbox", grace_seconds=3600, verbosity=0)
         self.assertTrue(NotificationOutbox.objects.filter(pk=expired.pk).exists())
-        # A second row that is NOT expired yet, and expires in a minute. The
-        # negative grace is clamped at zero, so it cannot move the cutoff
-        # forward past this row and delete a notification that is still owed.
-        #
-        # The row's expiry is set forward explicitly because the default
-        # three-day bound is far longer than any plausible grace value: with
-        # the bound left alone, a clamped and an unclamped cutoff would both
-        # keep the row and the assertion below could not tell them apart. The
-        # previous version of this test asserted the opposite thing on an
-        # already-expired row, so its comment described one property and its
-        # assertion another.
         live = notifications.enqueue(
             AuditEvent.EventType.ORDER_PAID,
             {"order": _make_order(self.make_user("outboxnotexpired"))},
@@ -531,8 +375,6 @@ class OutboxRetentionTests(ApiTestCase):
         self.assertFalse(NotificationOutbox.objects.filter(pk=expired.pk).exists())
 
     def test_a_missing_bound_falls_back_to_the_documented_default(self):
-        # A deployment that never sets the key still gets a bounded expiry
-        # rather than an unbounded one.
         self.assertEqual(NOTIFICATION_OUTBOX_DEFAULT_TTL_SECONDS, 259200)
         with override_settings():
             del settings.NOTIFICATION_OUTBOX_TTL_SECONDS
@@ -547,8 +389,6 @@ class OutboxRetentionTests(ApiTestCase):
 
 @tag("notifications")
 class OutboxResolveFailureTests(ApiTestCase):
-    """A row that has since gone away fails in a defined, catchable way."""
-
     def test_a_deleted_reference_raises_a_defined_error(self):
         order = _make_order(self.make_user("outboxgone"))
         row = notifications.enqueue(AuditEvent.EventType.ORDER_PAID, {"order": order})
@@ -564,17 +404,11 @@ class OutboxResolveFailureTests(ApiTestCase):
         self.assertIn("nosuchapp.NoSuchModel", str(caught.exception))
 
     def test_a_label_the_registry_cannot_parse_raises_the_defined_error(self):
-        # The gap this closes. apps.get_model signals an unparseable label with
-        # ValueError, not LookupError - "a.b.c" unpacks into three parts there -
-        # so catching only LookupError let it escape uncaught. That is the one
-        # failure a drain loop filtering on UnresolvableNotification cannot
-        # survive, and it is reachable from a hand-edited or migrated row, which
-        # is exactly what _load_reference's docstring claimed was in scope.
+        # apps.get_model signals an unparseable label with ValueError, not LookupError, so catching only LookupError let it escape the drain loop.
         payload = {"order": {"label": "a.b.c", "pk": 1}}
         with self.assertRaises(UnresolvableNotification) as caught:
             notifications.resolve_context(payload)
         self.assertIn("a.b.c", str(caught.exception))
-        # And the one class a drain loop can catch, provably not a ValueError.
         self.assertNotIsInstance(caught.exception, ValueError)
 
     def test_an_unaddressable_primary_key_raises_a_defined_error(self):
@@ -584,10 +418,6 @@ class OutboxResolveFailureTests(ApiTestCase):
         self.assertIn("not-a-pk", str(caught.exception))
 
     def test_resolution_reads_current_state_not_enqueue_time_state(self):
-        # Nothing pre-rendered is stored, so the subject and body are built at
-        # drain time from the live row and current settings. A snapshotting
-        # enqueue (storing the total, or a rendered subject) would hand the
-        # handler the corrected-away value here.
         order = _make_order(self.make_user("outboxamend"))
         row = notifications.enqueue(AuditEvent.EventType.ORDER_PAID, {"order": order})
         order.total_amount = Decimal("750.25")
@@ -601,16 +431,6 @@ class OutboxResolveFailureTests(ApiTestCase):
 
 @tag("notifications")
 class CallSiteConvertedTests(ApiTestCase):
-    """TIER1-ASYNC-CONVERT has happened. This is what must now be true.
-
-    The dark regression the conversion was sequenced to avoid: a site
-    converted to ``enqueue`` while nothing drained the row means the
-    customer is never emailed, and a suite that asserts only on queue
-    rows would report it green. So these tests hold BOTH ends — the call
-    site writes a row and never sends inline, and the drain worker is
-    what turns that row into the customer's mail.
-    """
-
     def setUp(self):
         self.user = self.make_user("outboxproof")
         _, self.token = self.api_login(username=self.user.username)
@@ -635,13 +455,10 @@ class CallSiteConvertedTests(ApiTestCase):
             format="json",
         )
         self.assertEqual(res.status_code, 200, res.data)
-        # Nothing sent on the request thread; the intent is queued.
         self.assertEqual(len(mail.outbox), 0)
         row = NotificationOutbox.objects.get(event_type=AuditEvent.EventType.ORDER_PAID)
         self.assertEqual(row.status, NotificationOutbox.Status.PENDING)
         self.assertEqual(row.payload["order"]["pk"], order_id)
-        # The scheduled worker is the only send path: drain it and the
-        # customer's mail appears, addressed to the buyer.
         notifications.drain_notifications()
         self.assertEqual(len(mail.outbox), 1)
         self.assertEqual(mail.outbox[0].to, [self.user.email])
@@ -654,14 +471,11 @@ class CallSiteConvertedTests(ApiTestCase):
         order = _make_order(self.user)
         with mock.patch("orders.events.notifications.enqueue") as enqueue_mock:
             notify_transition(order, "confirmed", "shipped")
-        # The seam call is enqueue, and nothing was sent on this thread.
         enqueue_mock.assert_called_once_with("order.shipped", {"order": order})
         self.assertEqual(len(mail.outbox), 0)
 
 
 class OutboxCommitVisibilityTests(TransactionTestCase):
-    """The committed-row proof, over a transaction that really commits."""
-
     def test_a_committed_enqueue_is_readable_by_a_fresh_query(self):
         with transaction.atomic():
             order = Order.objects.create(
@@ -676,7 +490,6 @@ class OutboxCommitVisibilityTests(TransactionTestCase):
                 guest_token="fresh-query-token",
             )
             notifications.enqueue(AuditEvent.EventType.ORDER_PAID, {"order": order})
-        # No ambient transaction here, so this read is genuinely post-COMMIT.
         self.assertFalse(transaction.get_connection().in_atomic_block)
         row = NotificationOutbox.objects.get()
         self.assertEqual(row.event_type, AuditEvent.EventType.ORDER_PAID)

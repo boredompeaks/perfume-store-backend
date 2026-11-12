@@ -14,15 +14,7 @@ type Availability =
   | { state: "taken" }
   | { state: "short" };
 
-/**
- * The account-created terminal state. `message` is the SERVER's copy,
- * rendered verbatim in both branches (§5.9): the 201 message on success,
- * the 503 `error` when the account exists but the verification email could
- * not be sent. The 503 is a state of its own — not a failure of the form —
- * so it renders in a status panel (role="status"), distinct from the
- * role="alert" error surfaces, with the §5.9-named link to
- * /resend-verification.
- */
+/** `message` is the server's copy, rendered verbatim (201 success or 503). */
 type Registered = { emailFailed: boolean; message: string };
 
 export default function RegisterForm() {
@@ -37,7 +29,7 @@ export default function RegisterForm() {
   const [availability, setAvailability] = useState<Availability>({ state: "idle" });
   const latestCheck = useRef(0);
 
-  // Live username availability — debounced, 3-char minimum (matches backend).
+  // Live availability is a courtesy; the server re-validates.
   useEffect(() => {
     const trimmed = username.trim();
     if (trimmed.length < 3) {
@@ -54,7 +46,7 @@ export default function RegisterForm() {
         })
         .catch(() => {
           if (latestCheck.current !== requestId) return;
-          setAvailability({ state: "idle" }); // check is a courtesy; server re-validates
+          setAvailability({ state: "idle" });
         });
     }, 400);
     return () => clearTimeout(timer);
@@ -67,21 +59,20 @@ export default function RegisterForm() {
     setFieldErrors({});
     try {
       const res = await register(username.trim(), email.trim(), password);
-      // D-04b: registration adopts the guest basket into the new account, so
-      // the anonymous cart query no longer describes what this browser owns.
+      // Registration adopts the guest basket, so the anonymous cart query is
+      // stale.
       await queryClient.invalidateQueries({ queryKey: ["cart"] });
       setRegistered({ emailFailed: false, message: res.message });
     } catch (err) {
       if (err instanceof ApiError) {
         if (err.status === 503) {
-          // Backend created the account but the verification email failed —
-          // its `error` string is the copy for that state, verbatim.
+          // Account created but the verification email failed; its `error`
+          // string is the copy for that state.
           setRegistered({ emailFailed: true, message: err.message });
         } else if (err.fieldErrors) {
           setFieldErrors(err.fieldErrors);
         } else {
-          // Includes the 429 throttle wording: whatever the server said,
-          // shown exactly as said (server copy verbatim, §5.9 / P5).
+          // Server copy verbatim, including the 429 throttle wording.
           setFormError(err.message);
         }
       } else {

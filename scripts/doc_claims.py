@@ -1,123 +1,15 @@
 """Scan documentation diffs for mechanically checkable claims.
 
-The changelog is the only part of this repository with no oracle. Code has
-tests; prose has a reader. That asymmetry is the root condition behind every
-drift finding in the SPEC-1 run -- an unmeasured figure, a quoted test name
-that does not exist, a byte count that changed because a PowerShell write
-mangled the file.
+Three classes are hard failures: a quoted ``test_*`` name with no matching
+``def``, a quoted module path that does not exist, and a ``file.py:123``
+reference whose file is missing or too short. Everything else (counts,
+universal quantifiers, self-counts) is reported for a human.
 
-This script does not judge prose and never will. It refuses to let a
-checkable claim pass unlisted. Three classes are decidable by a machine and
-are hard failures:
-
-  * a quoted ``test_*`` name with no matching ``def`` anywhere in the tree
-  * a quoted module path that does not exist
-  * a ``file.py:123`` reference whose file is missing or whose line is past
-    the end of the file
-
-A cited token is read as ONE of those, never as two at once. ``file.py:123``
-is a path citation and not also a test name, so the ``test_`` inside
-``test_e2e_concurrency.py`` is never demanded of a ``def`` -- it is the
-module's stem, and the module is checked where a module is checked: the file
-has to resolve and the line has to be inside it. Reading one token as both a
-path and a method is what made this gate RED on correct prose (BUG-1, TOOL-01),
-and the two available responses to a red gate are to delete the check or to
-stop citing real files, so the scanner is fixed instead. A ``test_`` token that
-is NOT inside a cited path is a method and is still held to the method check,
-and a ``test_*.py`` path that does not resolve is still an error -- dressing a
-real error up as a path buys nothing.
-
-One of those three cannot tell a CLAIM from a COUNTER-EXAMPLE. Prose that
-quotes a retired test name, or a misspelling, or a path that a byte-eaten
-write left as a fragment, in order to REPORT that it does not exist, is the
-same sentence shape as prose that asserts it does -- and this repository is
-full of the former, in its own ledger. A gate that is red on correct prose
-gets deleted or made ``continue-on-error``, which is worse than having no
-gate, so the author states the counter-example explicitly and this script
-reads the statement rather than guessing at the sentence::
-
-    the file now reads `ests_returns.py`
-    <!-- doc-claims:absent ests_returns.py (corrupted-fragment-of
-         tests_returns.py) ; reason: c873b27 ate the leading byte -->
-
-That directive silences at most ONE claim, on at most ONE line: two or more
-directives on a line and the line is read as carrying none. A named witness
-has to be real -- a ``def`` for a test name, or for a path a tracked file
-whose own path ends with the cited fragment, since that fragment is the
-intact name with its front truncated. ``retired`` names no witness at all and
-is therefore the weakest kind, held only by the review. The reason has to
-clear a length floor AND contain a token that looks like a ledger reference;
-that second rule is a shape test that raises the cost of filler, not a proof
-that anyone can follow the trail, and the review is the control there too. It
-is not a suppression list, not a file exemption, and not a regex escape
-hatch, and it cannot be produced by editing the sentence: "there is not a
-test named ``test_x``" is still an error. The full grammar, and every rule
-that keeps it narrow, are on ``parse_counter_examples``.
-
-The directive is line-local: its author has to be present to write it, which
-works for new prose and not at all for history that is already append-only.
-``changes.md`` rows cannot be annotated after the fact, and restructures move
-the tree UNDER those rows -- the flat ``orders/views.py`` cited throughout the
-ledger became a package, bare ``views.py`` cites span apps that were never
-pinnable, and nine test names were renamed. Those cites were true when
-written and cannot be edited forward, so the scanner carries their resolution
-itself: ``scripts/doc_claims_restructure_map.json`` holds one explicit,
-reviewed entry per restructure (old cite -> where it lives now), loaded and
-shape-checked by ``load_restructure_map``. It RESOLVES, it does not suppress:
-a map entry passes only while its target exists (delete the package and the
-cites fail again), every pass prints a ``RESTRUCTURED`` line carrying the
-entry's reason, and a ``path_line`` cite resolved through the map has its
-line check downgraded to a warning that says the line was NOT verified -- the
-map pins locations, never historical line numbers. Each path entry also
-records ``cites_in``, the doc file(s) whose historical rows it was written
-for, and only a claim MADE IN one of those files is resolved by it: without
-that scope a bare token entry would silently satisfy the same token cited in
-an unrelated doc -- a false pass, the exact defect the resolve-not-suppress
-rule exists to avoid. The next restructure is one entry in that file: no doc
-edit, no workflow change, no baseline.
-
-Everything else is reported, never failed, because a machine cannot decide
-whether "kills 7 tests" was true. Those become the auditor's checklist:
-
-  * ``count``      -- a number attached to a countable noun
-  * ``universal``  -- an absolute quantifier that needs a witness
-  * ``self_count`` -- a count a file makes about its own contents, which is
-                      false on commit by construction (BUG-7, SPEC-1-B07d c3)
-
-A fourth check is orthogonal to the diff: byte integrity of tracked
-documentation blobs. ``changes.md`` has been corrupted three times in this
-run, each time by a shell write that ate bytes invisibly. The baseline is a
-whole-file property, so this check is deliberately NOT diff-scoped.
-
-Scope discipline: claim extraction is diff-scoped against a base ref, so
-pre-existing debt is never re-reported and the output cannot die of noise.
-Run it with a wide base after a long-lived branch to see everything at once.
-
-THE BASE MUST MOVE WITH THE PROMOTION. After a train is promoted,
-``origin/spec-comp`` is an ANCESTOR of the branch tip, so ``A...B`` is
-legitimately empty, the claim half scans nothing, and the step is green
-because it looked at nothing (BUG-5, TOOL-01). A base is therefore resolved,
-first hit winning:
-
-  1. ``--base REF``
-  2. ``$DOC_CLAIMS_BASE``       <- the hook the CI workflow should set
-  3. ``origin/$GITHUB_BASE_REF`` when ``$CI`` is set
-  4. ``origin/spec-comp``       (the local default, unchanged)
-
-``git diff A...B`` is already the merge-base diff, so naming the PR base branch
-is sufficient; no merge-base call is needed. The run also prints the base it
-resolved and where it came from, and says so loudly on stderr when the claim
-half scanned zero files, so "green" can never again mean "empty".
-
-Usage::
-
-    python scripts/doc_claims.py --base origin/spec-comp
-    python scripts/doc_claims.py --base origin/spec-comp --json > claims.json
-    python scripts/doc_claims.py --update-baseline
-
-    # in CI, with DOC_CLAIMS_BASE set by the workflow:
-    DOC_CLAIMS_BASE="${{ github.event.pull_request.base.sha }}" \\
-        python scripts/doc_claims.py
+Counter-examples are declared with a ``<!-- doc-claims:absent ... -->``
+directive (at most one per line, naming a real witness); the restructure map
+resolves historical cites whose target moved, and resolves rather than
+suppresses. The diff base must move with the promotion: if the base is an
+ancestor of HEAD the claim half scans nothing, which is reported loudly.
 
 Exit codes: 0 clean, 1 errors present, 2 usage or environment failure.
 """
@@ -147,7 +39,6 @@ PR_BASE_ENV_VAR = "GITHUB_BASE_REF"
 CI_ENV_VAR = "CI"
 FALLBACK_BASE = "origin/spec-comp"
 
-# Directories never walked when building the repository index.
 SKIP_DIRS = frozenset(
     {
         ".git",
@@ -167,41 +58,19 @@ SKIP_DIRS = frozenset(
 # A token boundary that will not match inside a longer identifier.
 _BOUNDARY = r"(?<![A-Za-z0-9_])"
 
-# One character after the prefix is enough: a cited name is a name whatever its
-# length, and a length floor here would silently drop short names from the
-# check rather than report them.
+# One character after the prefix is enough: a cited name is a name whatever
+# its length, and a floor here would silently drop short names.
 RE_TEST_NAME = re.compile(_BOUNDARY + r"(test_[A-Za-z0-9_]+)")
-# The tail after `.py` is `\w*(?:\.\w+)*`, and BOTH halves are load-bearing.
-#
-# `(?:\.\w+)*` rather than a bare `\b`: a `.py` followed by another dot is not
-# the end of a path, it is the front of a longer filename (`views.py.bak`,
-# `x.py.orig`). Under `\b` the dot is a boundary, so
-# `test_e2e_concurrency.py.bak` resolved to the real `test_e2e_concurrency.py`
-# and the trailing `.bak` -- a file nobody has -- was dropped without comment.
-# That was a false pass before BUG-1; once the name inside a path stopped being
-# demanded as a method it would have been a false pass with nothing left behind
-# it.
-#
-# `\w*` closes the same hole one character class further out: a tail that does
-# not BEGIN with a dot is not thereby not a tail. `views.pyx`,
-# `test_e2e_concurrency.pyt` and `foo.pyc` each name a file nobody has while
-# resolving to the real `.py` beside them -- the identical laundering, still a
-# false pass, and caught by nothing. So the tail is "anything a name can be
-# made of", dot-led groups and bare word characters alike.
-#
-# The tail must still be able to END in a word character and must still be
-# allowed to be EMPTY: `\w*` matches nothing when the next character is not a
-# word character, and `(?:\.\w+)*` matches nothing when the period is not
-# followed by one. That is what keeps the sentence-closing period in "see
-# views.py." out of the filename while `views.py.bak` keeps its dot. The two
-# patterns agree on where a path token ends rather than each guessing.
+# The tail after `.py` is `\w*(?:\.\w+)*` so a longer filename
+# (`views.py.bak`, `views.pyx`) is matched whole and fails as missing; `\b`
+# would drop the tail and launder it into the real `.py` beside it.
 _PATH_TOKEN = r"[A-Za-z0-9_][A-Za-z0-9_./-]*\.py\w*(?:\.\w+)*"
 RE_MODULE_PATH = re.compile(_BOUNDARY + f"({_PATH_TOKEN})")
 RE_PATH_LINE = re.compile(_BOUNDARY + f"({_PATH_TOKEN}):(?:L)?(\\d+)")
 RE_DEF_TEST = re.compile(_BOUNDARY + r"def\s+(test_[A-Za-z0-9_]+)")
 
-# A number welded to something countable. Deliberately verbose: a bare digit
-# is not a claim, "7 tests" is.
+# A number welded to something countable: a bare digit is not a claim, "7
+# tests" is.
 RE_COUNT = re.compile(
     r"(?<![\w.])(\d+)\s+"
     r"(tests?|fixtures?|failures?|errors?|migrations?|statements?|stmts?|"
@@ -210,18 +79,16 @@ RE_COUNT = re.compile(
     re.IGNORECASE,
 )
 RE_MEASURED = re.compile(r"\bmeasured\s+(\d+)", re.IGNORECASE)
-# The BUG-7 sentence in docs/changes.md spells the numeral ("occurs at exactly
-# ONE place"), so a digits-only pattern misses the very sentence this rule was
-# written for. Spellings are admitted inside this narrow frame only, where a
-# stray "one" cannot become a count claim.
+# The BUG-7 sentence spells the numeral ("exactly ONE place"), so spellings
+# are admitted inside this narrow frame only, where "one" cannot become a
+# count claim.
 RE_NUMBER = r"(\d+|one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve)"
 RE_EXACTLY_PLACES = re.compile(
     r"\bexactly\s+" + RE_NUMBER + r"\s+(?:place|occurrence|instance)s?\b",
     re.IGNORECASE,
 )
 
-# Narrow on purpose. Bare "all" and "none" fire on almost every honest
-# sentence ("all tests pass") and would bury the real findings.
+# Narrow on purpose: bare "all" and "none" would bury the real findings.
 RE_UNIVERSAL = re.compile(
     r"\b(always|never|only|sole|solely|exclusively|impossible|cannot|"
     r"can not|must not|no code path|every single|without exception)\b",
@@ -232,71 +99,23 @@ RE_SELF_REF = re.compile(
     re.IGNORECASE,
 )
 
-# --------------------------------------------------------------------------
-# The counter-example directive (BUG-4, then BUG-A/B/C, TOOL-01 c1 and c2).
+# Grammar, all on ONE source line, inside an HTML comment:
 #
-# Grammar, all on ONE source line, inside an HTML comment so it never becomes
-# part of the document's voice:
-#
-#   <!-- doc-claims:absent <test> (renamed-to <test>
-#                              | misspelling-of <test>
+#   <!-- doc-claims:absent <test> (renamed-to <test> | misspelling-of <test>
 #                              | retired) ; reason: <text> -->
-#   <!-- doc-claims:absent <path> (corrupted-fragment-of <path>)
-#                              ; reason: <text> -->
+#   <!-- doc-claims:absent <path> (corrupted-fragment-of <path>) ; reason: <text> -->
 #
-# Narrowness, which is the whole point. Each bullet is what the CODE does:
-#
-#   * AT MOST ONE directive is accepted per line, so at most ONE claim on a
-#     line can be silenced by this mechanism. Two or more well-formed
-#     directives on one line means NONE is accepted: the script will not pick
-#     one, because picking one is a guess, and a guess is what this file
-#     refuses to do everywhere else (BUG-A). One line rather than one per
-#     document, because a per-document cap would depend on which lines the
-#     diff happened to touch -- a cap that changes with the base ref is not a
-#     cap, it is a lottery.
-#   * it names ONE target, and only that target, so a sibling claim on the same
-#     sentence is still checked.
-#   * `renamed-to` and `misspelling-of` MUST name a witness, and the witness
-#     must have a real `def` in the tree; `corrupted-fragment-of` MUST name a
-#     witness that resolves to a tracked file whose path ENDS WITH the cited
-#     fragment -- resolving alone would prove only that SOME file exists, and
-#     would silence any absent path at all.
-#   * a kind is only accepted on a target it can mean: a path target takes
-#     `corrupted-fragment-of` and nothing else, so `retired` -- the one kind
-#     with no witness to check -- cannot be spent on a path.
-#   * the reason must clear MIN_REASON_CHARS, which is a LENGTH FLOOR and buys
-#     exactly one thing: that the reason is a fragment rather than a bare
-#     token. It is not evidence of anything. What makes a reason auditable is
-#     RE_REASON_REFERENCE: it must name a commit sha or a task id, so the
-#     statement points at a ledger row a reviewer can open (BUG-B).
-#   * a directive NEVER excuses a line past the end of a file that resolved.
-#     The file existing is proof that the citation is not a counter-example,
-#     so only the missing-file half of a `file.py:123` claim is reachable
-#     here at all.
-#   * a MALFORMED or over-quota directive honours nothing, and says so in the
-#     error it leaves behind. Failing closed is the only safe direction: a
-#     typo leaves the gate red, with the reason, and the author finds out.
-#
-# It is deliberately not satisfiable by rewriting the sentence. "there is not a
-# test named test_x" contains no directive and is still a hard error, which is
-# the test that pins the guarantee.
-# --------------------------------------------------------------------------
+# At most ONE directive per line, naming ONE target and -- for every kind but
+# `retired` -- a real witness: a `def` for a test, a tracked file whose path ends
+# with the cited fragment for a path. The reason must clear MIN_REASON_CHARS and
+# name a commit sha or task id; a malformed or over-quota directive honours
+# nothing and fails closed.
 MIN_REASON_CHARS = 24
 
 # The checkable half of a reason: a token that LOOKS like a ledger reference.
-# Both branches require a DIGIT inside the token, which is the whole fix
-# (BUG-B): without it any hyphenated English word passes, and this repository's
-# prose is saturated with them, so the rule accepted `well-known`,
-# `counter-example`, `e-mail`, `read-only`, `up-to-date` and `so-so`. The sha
-# branch needs it for the same reason -- `defaced`, `effaced`, and a bare run of
-# a-f letters all matched `[0-9a-f]{7,40}` and named nothing at all.
-#
-# What this is NOT: proof that the reason is traceable. It is a SHAPE test that
-# raises the cost of filler, and the review remains the control. Filler that
-# still survives it is any hyphenated token containing a digit -- `a-1`,
-# `utf-8`, `sha-1` -- which is recorded as a known residual rather than papered
-# over, because the alternative (an uppercase-led token) would reject id forms
-# this repository has not written yet and is a decision for the next cycle.
+# Both branches require a digit inside the token (without it any hyphenated
+# English word or a-f run passed). This is a shape test, not proof of
+# traceability; the review remains the control.
 RE_REASON_REFERENCE = re.compile(
     r"(?:\b(?=[0-9a-f]*[0-9])[0-9a-f]{7,40}\b"
     r"|\b(?=[A-Za-z0-9-]*[0-9])[A-Za-z][A-Za-z0-9]*(?:-[A-Za-z0-9]+)+\b)"
@@ -310,9 +129,7 @@ RE_COUNTER_EXAMPLE = re.compile(
     r"|retired)\)"
     r"\s*;\s*reason:\s*(?P<reason>[^\n]+?)\s*-->"
 )
-# Which kinds each kind of target can carry. A path target gets ONLY the kind
-# with a checkable witness, so extending the directive to paths (BUG-C) added
-# no new unwitnessed escape.
+# A path target gets ONLY the kind with a checkable witness.
 COUNTER_EXAMPLE_KINDS = {
     "test": frozenset({"renamed-to", "misspelling-of", "retired"}),
     "path": frozenset({"corrupted-fragment-of"}),
@@ -325,22 +142,16 @@ RE_HTML_COMMENT = re.compile(r"<!--.*?-->", re.DOTALL)
 
 
 def _strip_directive_comments(line: str) -> str:
-    """Remove the machine-readable directives from the prose being scanned.
+    """Remove the marker-carrying directives from the prose being scanned.
 
-    A directive is metadata, not prose: left in place, the name it names and
-    the witness it cites would each be extracted as claims in their own right
-    and the line would fail on its own annotation. Only comments carrying the
-    marker are removed, so a genuine claim cannot be parked in a comment and
-    hidden -- and a MALFORMED directive is stripped too, which keeps failing
-    closed: it suppresses nothing, it just stops annotating itself.
-    """
+    A malformed directive is stripped too, which keeps failing closed: it
+    suppresses nothing, it just stops annotating itself."""
     return RE_HTML_COMMENT.sub(
         lambda match: "" if "doc-claims:" in match.group(0) else match.group(0), line
     )
 
 
-# Decidable -> hard failure. Not decidable -> report only.
-# ``byte_integrity`` is decided by this script, so a failure there is an error.
+# Decidable claims are hard failures; ``byte_integrity`` is decided here too.
 ERROR_KINDS = frozenset({"test_name", "module_path", "path_line", "byte_integrity"})
 
 
@@ -348,12 +159,8 @@ ERROR_KINDS = frozenset({"test_name", "module_path", "path_line", "byte_integrit
 class CounterExample:
     """One author's explicit statement that a quoted target is reported ABSENT.
 
-    ``target_kind`` is ``test`` or ``path`` and decides which kinds may appear
-    here at all. ``witness`` is the surviving name (tests) or the intact file
-    (paths); it is empty only for ``retired``, the one kind with nothing to
-    check against. ``verify_claims`` refuses a directive whose witness does not
-    exist, so a directive can never swap one absent target for another.
-    """
+    A ``retired`` directive has no witness; every other kind must name one
+    that exists in the tree, or ``verify_claims`` refuses the directive."""
 
     target: str
     target_kind: str
@@ -363,7 +170,6 @@ class CounterExample:
 
 
 def _directive_kind(match: re.Match) -> tuple[str, str, str]:
-    """``(kind, witness)`` for one grammar match, or ``("", "")`` if unknown."""
     if match.group("renamed_to"):
         return "renamed-to", match.group("renamed_to")
     if match.group("misspelling_of"):
@@ -378,15 +184,8 @@ def parse_counter_examples(
 ) -> tuple[dict[str, CounterExample], dict[str, str]]:
     """Read the counter-example directives out of ONE source line.
 
-    Returns ``(accepted, refused)``, both keyed by target. Narrow by
-    construction, and every refusal carries its reason so the error the
-    directive failed to prevent says WHY it was not honoured -- a gate that
-    goes red without saying why is a gate the author cannot act on.
-
-    Refused: an over-quota line, a malformed target/kind pairing, a reason
-    under the length floor, and a reason that names no ledger reference. A
-    target is only ever in one of the two mappings.
-    """
+    Returns ``(accepted, refused)`` keyed by target; every refusal carries
+    its reason so the error a directive failed to prevent says why."""
     accepted: dict[str, CounterExample] = {}
     refused: dict[str, str] = {}
     candidates: list[CounterExample] = []
@@ -418,9 +217,8 @@ def parse_counter_examples(
         )
 
     if len(candidates) > 1:
-        # The cap. Refusing ALL of them rather than keeping the first is
-        # deliberate: the script does not get to decide which of two
-        # statements on one line the author meant.
+        # The cap: refuse ALL rather than keep the first, because the script
+        # does not get to decide what the author meant.
         for candidate in candidates:
             refused[candidate.target] = OVER_QUOTA
         return {}, refused
@@ -432,13 +230,10 @@ def parse_counter_examples(
 
 @dataclass(frozen=True)
 class Claim:
-    """One extracted claim. ``value`` is the matched text a human checks.
+    """One extracted claim; ``value`` is the matched text a human checks.
 
-    ``detail`` is the machine half (a ``path_line`` claim parses its own cited
-    path out of it), ``note`` is the human half (why a counter-example
-    directive was accepted, for the run log). Keeping them apart is what stops
-    an annotation from being parsed back as part of a citation.
-    """
+    ``detail`` is the machine half, ``note`` the human half, kept apart so an
+    annotation is never parsed back as part of a citation."""
 
     kind: str
     value: str
@@ -453,12 +248,8 @@ class Claim:
     def severity(self) -> str:
         """Whether this claim failed, or is a warning for a human to read.
 
-        A claim only KEEPS its directive when the directive was accepted, so
-        ``directive is not None`` is exactly "this absent-name citation was
-        stated by its author and is not a claim that the name exists". A
-        refused directive is dropped onto a fresh Claim by ``verify_claims``
-        and reads as an error again.
-        """
+        A claim keeps its directive only when it was accepted; a refused one
+        is dropped onto a fresh Claim and reads as an error again."""
         if self.directive is not None:
             return "warn"
         return "error" if self.kind in ERROR_KINDS else "warn"
@@ -466,7 +257,6 @@ class Claim:
 
 @dataclass
 class Report:
-    """Scan result. Serialised to JSON verbatim."""
 
     base: str
     head: str
@@ -481,17 +271,11 @@ class Report:
         return json.dumps(asdict(self), indent=2, sort_keys=True)
 
 
-# --------------------------------------------------------------------------
-# Pure core. No filesystem, no subprocess -- this is what the unit tests hit.
-# --------------------------------------------------------------------------
+# Pure core: no filesystem, no subprocess -- this is what the unit tests hit.
 
 
 def _directive_note(directive: CounterExample | None) -> str:
-    """The one-line human note for an accepted directive, or ``""``.
-
-    Written for all three kinds by one function so the log cannot show a
-    counter-example for a path and stay mute for a test.
-    """
+    """The one-line human note for an accepted directive, or ``""``."""
     if directive is None:
         return ""
     return f"cited as a counter-example ({directive.kind}): {directive.reason}"
@@ -500,33 +284,21 @@ def _directive_note(directive: CounterExample | None) -> str:
 def _is_dotted_module_segment(text: str, span: tuple[int, int]) -> bool:
     """True when ``span`` is a NON-FINAL segment of a dotted identifier.
 
-    A dotted test id has the shape ``package.module.Class.test_method``, so
-    every segment but the last names a module or a class. A module that is a
-    test module carries the ``test_`` stem in its own name
-    (``tests.test_correlation_ids....``), and demanding a ``def`` for that stem
-    reported correct prose as a missing test.
-
-    The final segment is deliberately NOT exempt: it is the method name, which
-    is the claim the gate exists to check, so this cannot hide a quoted method
-    that does not exist. The dotted run is measured on the IDENTIFIER text
-    either side of the segment, not on the whole line, so prose around the
-    citation cannot change the verdict.
-    """
+    A module cited dotted carries the ``test_`` stem as a segment with no
+    ``def``; the final segment is the method and is deliberately not exempt.
+    Measured on the identifier text either side, never on the whole line."""
     start, end = span
     before = start - 1
     while before >= 0 and (text[before].isalnum() or text[before] == "_"):
         before -= 1
     if before >= 0 and text[before] == ".":
-        # There is a dotted segment in front of this one, so this is not the
-        # head of the identifier; it is an interior segment whatever follows.
         pass
     else:
         return False
     after = end
     while after < len(text) and (text[after].isalnum() or text[after] == "_"):
         after += 1
-    # A non-final segment is exactly one that is followed by a dot and at least
-    # one more word character.
+    # A non-final segment is followed by a dot and at least one word character.
     return (
         after < len(text)
         and text[after] == "."
@@ -538,13 +310,9 @@ def _is_dotted_module_segment(text: str, span: tuple[int, int]) -> bool:
 def _inside_any_span(span: tuple[int, int], spans: list[tuple[int, int]]) -> bool:
     """Whether ``span`` lies wholly inside any one of ``spans``.
 
-    Span containment, not string equality: the decision is "was this token part
-    of a path the author wrote", which is a question about POSITION on the line,
-    and a name-equality test would also silence a bare ``test_foo`` merely
-    because a path containing a different ``foo`` was cited beside it.
-    Containment rather than overlap so that a token which reaches ACROSS a path
-    without sitting inside it stays its own claim.
-    """
+    Position on the line decides "was this token part of a cited path", not
+    string equality; containment rather than overlap keeps a token that
+    reaches across a path its own claim."""
     start, end = span
     return any(low <= start and end <= high for low, high in spans)
 
@@ -552,9 +320,8 @@ def _inside_any_span(span: tuple[int, int], spans: list[tuple[int, int]]) -> boo
 def extract_claims(text: str, path: str, first_line: int = 1) -> list[Claim]:
     """Pull every claim out of one blob of added documentation text.
 
-    ``first_line`` is the line number of ``text``'s first line in the file, so
-    that findings point somewhere a human can navigate to.
-    """
+    ``first_line`` is where ``text`` starts in the file, so findings point
+    somewhere a human can navigate."""
     claims: list[Claim] = []
     for offset, raw in enumerate(text.splitlines()):
         line_no = first_line + offset
@@ -562,18 +329,12 @@ def extract_claims(text: str, path: str, first_line: int = 1) -> list[Claim]:
         if not line:
             continue
         accepted, refused = parse_counter_examples(line)
-        # Directives are metadata; claims are read from the prose around them.
         prose = _strip_directive_comments(line)
 
-        # A path cited as `file.py:123` is one claim, not two. Record which
-        # names were consumed as path:line so the bare-module pass skips them.
+        # A `file.py:123` cite is one claim; record it so the module pass skips it.
         cited_with_line: set[str] = set()
         # The SPAN of every path token, so the test-name pass cannot read a
-        # `test_` that is part of a filename (BUG-1). Recorded in the module pass
-        # alone, and that is not an omission: `_PATH_TOKEN` and `_BOUNDARY` are
-        # shared with `RE_PATH_LINE`, which only adds the `:NN` requirement, so
-        # every `path:line` citation is also a module citation at the identical
-        # span. Two records would be two chances to record only one of them.
+        # `test_` that is part of a filename. `path:line` cites share the span.
         path_spans: list[tuple[int, int]] = []
         for match in RE_PATH_LINE.finditer(prose):
             cited = match.group(1)
@@ -609,31 +370,17 @@ def extract_claims(text: str, path: str, first_line: int = 1) -> list[Claim]:
             )
 
         for match in RE_TEST_NAME.finditer(prose):
-            # A `test_` INSIDE a cited path is the module's stem, not a method,
-            # and demanding a `def` for it reported correct prose as a missing
-            # test (BUG-1). The path claim above is not skipped in exchange --
-            # it is still extracted and still verified -- so this closes one
-            # reading rather than removing a check. Scoped to the PATH TOKEN's
-            # own span, so a method cited anywhere else on the line is
-            # unaffected.
+            # A `test_` INSIDE a cited path is the module's stem, not a method;
+            # the path claim is still verified in exchange.
             if _inside_any_span(match.span(), path_spans):
                 continue
-            # The same reading one syntax level up (BUG-2). A test module is
-            # cited DOTTED as well as by path -- `tests.test_correlation_ids.
-            # UnhandledExceptionTests.test_...` is how a failure id is written
-            # down -- and in that form the module's own `test_` stem is a
-            # segment with no `def` anywhere, so the pass demanded one and
-            # reported correct prose as a missing test. Only a NON-FINAL segment
-            # of a dotted identifier is a module or class name; the final
-            # segment is the method, which is exactly the claim worth making, so
-            # the exemption cannot launder a quoted method name. A stem that is
-            # not part of a dotted identifier at all is untouched.
+            # Dotted ids carry the module stem as a non-final segment, which
+            # has no `def`; only a non-final segment is exempt, because the
+            # final segment is the method the gate exists to check.
             if _is_dotted_module_segment(prose, match.span()):
                 continue
             name = match.group(1)
-            # A quoted name is one claim whether it is asserted or reported
-            # absent; only an explicit directive on THIS line tells the two
-            # apart, and only for the one target the directive spells out.
+            # Only an explicit directive on THIS line separates the two readings.
             directive = accepted.get(name)
             claims.append(
                 Claim(
@@ -647,9 +394,7 @@ def extract_claims(text: str, path: str, first_line: int = 1) -> list[Claim]:
                 )
             )
 
-        # A figure already claimed by a narrower pattern is not claimed twice:
-        # "exactly 2 places" is one figure, not two, and a doubled figure makes
-        # a reviewer count the wrong number of things to check.
+        # A figure claimed by a narrower pattern is not claimed twice.
         covered: list[tuple[int, int]] = []
         for regex in (RE_MEASURED, RE_EXACTLY_PLACES):
             for match in regex.finditer(prose):
@@ -701,18 +446,9 @@ def _map_entry_for(
 ) -> dict | None:
     """The map entry allowed to resolve THIS cite, or ``None``.
 
-    Matching on the token is exact (``dict`` lookup, never substring), and
-    the entry must also record the citing doc file in ``cites_in``: an entry
-    is written for the historical rows of specific files, and without that
-    scope a bare token (``views.py``, ``handlers/base.py``) would silently
-    satisfy the same token cited in an unrelated doc -- a false pass, the
-    defect resolve-not-suppress exists to prevent.
-
-    Fail-closed: an entry with no recorded scope resolves nothing. A silent
-    no-op entry is loud the day its own rows stop resolving; an entry that
-    resolved everything would keep passing long after its reason stopped
-    describing the cite in front of it.
-    """
+    Exact token match AND the citing file must appear in ``cites_in``: an
+    entry written for one file's historical rows must not green the same
+    token in another doc. Fail-closed: no recorded scope resolves nothing."""
     entry = path_map.get(token)
     if entry is None:
         return None
@@ -729,24 +465,10 @@ def verify_claims(
 ) -> tuple[list[Claim], list[Claim]]:
     """Split claims into hard errors and unverified warnings.
 
-    ``known_paths`` maps a repo-relative posix path to its line count.
-
-    ``restructure`` is the parsed restructure map (``load_restructure_map``)
-    plus, optionally, ``tracked`` -- the HEAD tree's file list, for entries
-    that promise a path stays uncommitted. When a CITED token has a map
-    entry scoped to the citing file (``cites_in``), THE MAP DECIDES: it
-    preempts the direct index lookup, any counter-example directive on the
-    line, and the numeric line check. The path half is still verified (the
-    entry's targets must exist, or the claim is an error naming the missing
-    target); the line half of a path_line cite is downgraded to a warning
-    that says the line was not verified, because a location that moved
-    cannot vouch for the line numbers prose remembers. An entry is scoped
-    to the doc file(s) it records: a cite of the same token in any other
-    file falls through to the original behaviour, because an entry written
-    for one file's historical rows must not silently satisfy unrelated
-    prose. Without a map entry -- or outside its scope -- every branch below
-    is the original behaviour, unchanged.
-    """
+    ``known_paths`` maps a repo-relative posix path to its line count. A map
+    entry scoped to the citing file decides: it preempts the direct lookup,
+    any directive and the numeric line check, and downgrades a path_line's
+    line half to a warning saying the line was not verified."""
     errors: list[Claim] = []
     warnings: list[Claim] = []
     restructure = restructure or {}
@@ -754,8 +476,7 @@ def verify_claims(
     test_map: dict[str, dict] = restructure.get("tests", {})
     tracked = restructure.get("tracked")
     for claim in claims:
-        # Computed once, and handed to the error text, so the message cannot
-        # describe a different failure from the one that actually happened.
+        # Computed once so the error text cannot describe a different failure.
         failure = (
             _directive_failure(claim.directive, known_tests, known_paths)
             if claim.directive is not None
@@ -765,9 +486,8 @@ def verify_claims(
             if claim.value in known_tests:
                 warnings.append(claim)
             elif claim.value in test_map:
-                # The map pins the renamed successor, and the pass requires
-                # the SUCCESSOR to exist: a rename resolves, a deletion of
-                # the replacement fails the old cite again.
+                # The map requires the SUCCESSOR to exist: deleting the
+                # replacement fails the old cite again.
                 entry = test_map[claim.value]
                 successor = entry["successor"]
                 if successor in known_tests:
@@ -799,8 +519,8 @@ def verify_claims(
                         )
                     )
             elif claim.directive is not None and not failure:
-                # The author stated this name is being reported ABSENT and the
-                # statement survives the one check a machine can make on it.
+                # The author stated this name is reported ABSENT, and the
+                # witness check passed.
                 warnings.append(claim)
             else:
                 errors.append(
@@ -859,12 +579,8 @@ def verify_claims(
             cited, _, tail = rest.partition(" line=")
             entry = _map_entry_for(cited, claim.path, path_map)
             if entry is not None:
-                # The map preempts the line check outright: a location that
-                # moved cannot vouch for the line numbers prose remembers, so
-                # the path half is verified (targets must exist) and the line
-                # half becomes a warning that SAYS it was not verified -- a
-                # claim silently waved through is the failure mode this
-                # whole branch exists to avoid.
+                # The map preempts the line check: a moved location cannot vouch
+                # for remembered line numbers, so the warning says so.
                 ok, note = restructure_check(entry, known_paths, tracked)
                 if ok:
                     warnings.append(
@@ -905,11 +621,8 @@ def verify_claims(
                         )
                     )
             elif int(tail) > known_paths[resolved]:
-                # No directive reaches this branch, deliberately. The file
-                # resolved, which is proof the citation is not a
-                # counter-example: a wrong line number is a wrong number, and
-                # letting prose declare it absent is how a stale reference gets
-                # to live forever.
+                # No directive reaches this branch: the file resolved, so the
+                # cite is not a counter-example and a wrong line is just wrong.
                 errors.append(
                     Claim(
                         claim.kind,
@@ -932,28 +645,11 @@ def _directive_failure(
 ) -> str:
     """Why this directive is NOT acceptable, or ``""`` when it is.
 
-    Returning the reason rather than a bool is what keeps the error honest: a
-    single "not in the tree either" for every path failure would be a lie the
-    moment the witness resolves and merely is not this fragment's intact form.
-
-    A named witness must be REAL, and it must be the intact form of THIS
-    target. A test witness must have a ``def``; a path witness must resolve to
-    a tracked file whose own path ENDS WITH the cited fragment. Resolving alone
-    would prove only that SOME file exists, so `corrupted-fragment-of
-    orders/views.py` would otherwise silence any absent path at all, and a
-    directive could swap one absent target for another absent one.
-
-    SUFFIX, not "ends with /<fragment>". A byte-eaten write truncates the
-    FRONT of a name, so the intact form is the fragment with something
-    prepended: `ests_returns.py` is the intact `tests_returns.py`, and
-    requiring a slash before the fragment would reject the very corruption
-    case this whole kind exists for. A suffix match still cannot cut into an
-    unrelated file, because `orders/views.py` does not end with
-    `accounts/whatever.py` or with `whatever.py`.
-
-    ``retired`` names no witness, has nothing to fail, and is the weakest kind
-    by construction; the review is the control there.
-    """
+    A named witness must be real and be the intact form of THIS target: a
+    ``def`` for a test, or a tracked path that ENDS WITH the cited fragment
+    (a byte-eaten write truncates the FRONT of the name, so a slash-prefixed
+    match would reject the very corruption this kind exists for). ``retired``
+    names no witness and is the weakest kind; the review is the control."""
     if directive.kind == "retired":
         return ""
     if directive.target_kind == "test":
@@ -978,7 +674,6 @@ def _directive_failure(
 
 
 def _absent_detail(claim: Claim, base: str, failure: str = "") -> str:
-    """Why an absent-target claim is an error, including any failed directive."""
     if failure:
         return f"{base}, and {failure}"
     if claim.refusal:
@@ -992,17 +687,9 @@ def _absent_detail(claim: Claim, base: str, failure: str = "") -> str:
 def _resolve_path(candidate: str, known_paths: dict[str, int]) -> str | None:
     """Resolve a cited module path against the index, or return ``None``.
 
-    Three passes, most specific first: the exact path, then a suffix match on a
-    PATH BOUNDARY, then the bare basename.
-
-    The middle pass is BUG-3 (TOOL-01). Prose cites app-relative paths
-    constantly -- ``orders/views.py`` -- and without it the only fallback is a
-    basename match, which is ambiguous across the four apps that each own a
-    views.py. The result was that a correct citation was reported as an error,
-    and 94 of the 121 errors on the wide base were that. The ``/`` in the
-    suffix is load-bearing: ``orders/views.py`` is a path, ``ders/views.py`` is
-    not, and only the boundary tells them apart.
-    """
+    Three passes: exact path, suffix match on a PATH BOUNDARY, then bare
+    basename. The ``/`` is load-bearing -- ``orders/views.py`` is a path,
+    ``ders/views.py`` is not -- and a basename alone is ambiguous across apps."""
     normalised = candidate[2:] if candidate.startswith("./") else candidate
     if normalised in known_paths:
         return normalised
@@ -1014,45 +701,25 @@ def _resolve_path(candidate: str, known_paths: dict[str, int]) -> str | None:
 
 
 def _ends_with_path(tracked: str, cited: str) -> bool:
-    """Whether a tracked path ENDS WITH the cited path, at a boundary."""
     return tracked.endswith("/" + cited)
 
 
 def _same_basename(tracked: str, cited: str) -> bool:
-    """Whether a tracked path has the same final segment as the cited one."""
     return tracked.rsplit("/", 1)[-1] == cited.rsplit("/", 1)[-1]
 
 
 def _path_exists(candidate: str, known_paths: dict[str, int]) -> bool:
-    """Whether a cited module path names exactly one file in the tree."""
     return _resolve_path(candidate, known_paths) is not None
 
 
-# --------------------------------------------------------------------------
 # The restructure map: historical cites whose target moved, pinned in data.
-#
-# Prose written before a restructure cites the path AS IT WAS -- orders/views.py
-# before the views split, a bare views.py when the app was implied, a test name
-# that was later renamed. Those cites were true when written; the tree moved
-# underneath them, and append-only history (changes.md most of all) means the
-# cite itself cannot be brought forward. The map is the scanner's side of that
-# bargain: an explicit, reviewed entry per restructure that resolves the old
-# cite to where the thing lives now, and still fails the day that target
-# disappears. No regex guesses, no baseline suppresses: every pass through the
-# map prints a RESTRUCTURED line naming the entry's reason, and an entry whose
-# own target is gone is an error like any other. An entry carries ``cites_in``,
-# the doc file(s) its rows live in, and resolves only claims made there: a bare
-# token keyed globally would green the same token in an unrelated doc, and a
-# map that greens what it was not written for is a suppress list wearing a
-# resolver's name.
-# --------------------------------------------------------------------------
+# It resolves, it never suppresses: every pass prints a RESTRUCTURED line with
+# the entry's reason, an entry whose target is gone is an error, and cites_in
+# scopes an entry to the doc files it was written for.
 
-# One of these three keys, exactly, per path entry -- and nothing else beyond
-# the reason (and ``mode`` for targets). Unknown keys are rejected rather than
-# ignored so a typo cannot park an entry in silent no-op limbo. ``cites_in``
-# is required on every shape: the doc file(s) whose claims the entry may
-# resolve, so an entry written for one file's historical rows cannot silently
-# satisfy the same token cited anywhere else.
+# Exactly one of these three keys per path entry; unknown keys are rejected
+# so a typo cannot park an entry in silent no-op limbo. ``cites_in`` is
+# required on every shape.
 _MAP_ENTRY_KEYS = {
     "targets": frozenset({"reason", "targets", "mode", "cites_in"}),
     "untracked": frozenset({"reason", "untracked", "cites_in"}),
@@ -1068,11 +735,7 @@ def _map_error(where: str, problem: str) -> RuntimeError:
 
 def _validate_reason(where: str, entry: dict) -> str:
     """The entry's reason, or raise: an unexplained pass is a defect.
-
-    The same floor the counter-example directives clear, for the same reason:
-    a reason short enough to be filler is not an audit trail, and the reason
-    is what the RESTRUCTURED log line prints.
-    """
+    Same floor as the directives; the reason is what the log line prints."""
     reason = entry.get("reason")
     if not isinstance(reason, str) or len(reason.strip()) < MIN_REASON_CHARS:
         raise _map_error(
@@ -1114,10 +777,8 @@ def _validate_path_entry(where: str, entry: object) -> None:
         _validate_path_list(where, "untracked", entry["untracked"])
     elif entry["external"] is not True:
         raise _map_error(where, "external must be true")
-    # Scope last, so a bad targets/mode still reports as itself. A cites_in
-    # outside the scanned doc prefixes can never hold a claim, so it is a
-    # load error rather than a silent no-op -- the same rule unknown keys
-    # and short reasons are held to.
+    # A cites_in outside the scanned doc prefixes can never hold a claim, so
+    # it is a load error rather than a silent no-op.
     _validate_path_list(where, "cites_in", entry.get("cites_in"))
     for cited_doc in entry["cites_in"]:
         if not cited_doc.startswith(DEFAULT_DOCS):
@@ -1143,12 +804,8 @@ def _validate_test_entry(where: str, entry: object) -> None:
 def validate_restructure_map(data: object) -> dict:
     """Shape-check a parsed map, or raise. Existence is NOT checked here.
 
-    Whether a target still exists is the CLAIM's question, answered per claim
-    so a rotted target fails the cite that named it (and says which) instead
-    of aborting every scan at load time. A structurally broken map does
-    abort: a scanner quietly running without its map would report every
-    mapped cite as missing and teach its red to be ignored.
-    """
+    A rotted target fails the claim that named it, per claim; a structurally
+    broken map aborts, because a scanner without its map lies by omission."""
     if not isinstance(data, dict):
         raise _map_error("", "top level must be an object")
     unknown = set(data) - {"_readme", "paths", "tests"}
@@ -1170,9 +827,7 @@ def validate_restructure_map(data: object) -> dict:
 
 
 def load_restructure_map(path: Path = RESTRUCTURE_MAP_PATH) -> dict:
-    """Read and shape-validate the map file. Missing or unreadable raises:
-    a scan without its map is a scan that lies by omission.
-    """
+    """Read and shape-validate the map file; missing or unreadable raises."""
     try:
         raw = path.read_text(encoding="utf-8")
     except OSError as error:
@@ -1187,10 +842,8 @@ def load_restructure_map(path: Path = RESTRUCTURE_MAP_PATH) -> dict:
 def _target_present(target: str, known_paths: dict[str, int]) -> bool:
     """Whether one map target exists in the index.
 
-    A target ending in ``/`` is a PACKAGE: present while any indexed file
-    lives under it, so a cite of the old flat module resolves to the package
-    and fails the day the package does.
-    """
+    A target ending in ``/`` is a package: present while any indexed file
+    lives under it, so the cite fails the day the package does."""
     if target.endswith("/"):
         return any(path.startswith(target) for path in known_paths)
     return target in known_paths
@@ -1203,13 +856,9 @@ def restructure_check(
 ) -> tuple[bool, str]:
     """``(holds, note)`` for one map entry against THIS tree.
 
-    The note is written for both outcomes and always names the entry's
-    reason: it is the pass line printed as RESTRUCTURED, and -- unchanged --
-    the error detail when the entry no longer holds, so the log cannot
-    describe a different failure from the one that happened. ``tracked`` is
-    the HEAD tree's file list; an untracked entry without it cannot be
-    verified and answers False rather than passing on absent evidence.
-    """
+    The note always names the entry's reason and is used unchanged as the
+    error detail. An untracked entry without ``tracked`` answers False, never
+    passing on absent evidence."""
     reason = entry["reason"]
     if "external" in entry:
         return True, (
@@ -1245,18 +894,15 @@ def restructure_check(
 def check_byte_integrity(blob: bytes, baseline: dict) -> dict:
     """Compare one committed blob against its recorded byte facts.
 
-    Returns a dict with ``ok`` plus the measured values, so a failure says
-    what moved rather than merely that something did.
-    """
+    Returns ``ok`` plus the measured values, so a failure says what moved."""
     lines = blob.split(b"\n")
     if blob.endswith(b"\n"):
         lines = lines[:-1]
 
     control: list[dict] = []
     for index, raw in enumerate(lines, start=1):
-        # Every control byte is recorded, not the first on the line: the real
-        # changes.md carries three on line 675, and stopping at the first would
-        # baseline that line as one byte and hide the next corruption there.
+        # Every control byte is recorded, not the first on the line: stopping at
+        # the first would hide the next corruption on the same line.
         for column, byte in enumerate(raw, start=1):
             if byte < 0x20 and byte != 0x09:
                 control.append(
@@ -1291,9 +937,8 @@ def check_byte_integrity(blob: bytes, baseline: dict) -> dict:
             f"CRLF pairs {measured['crlf_pairs']} != recorded "
             f"{baseline['crlf_pairs']}"
         )
-    # The changelog grows on every commit, so equality would be wrong and
-    # useless. A SHRINK is the signature of a write that ate content, which is
-    # exactly the corruption this check exists for.
+    # The changelog grows on every commit, so only a SHRINK is a failure: it
+    # is the signature of a write that ate content.
     if "lines" in baseline and measured["lines"] < baseline["lines"]:
         problems.append(
             f"{measured['lines']} lines is fewer than the recorded "
@@ -1306,9 +951,7 @@ def check_byte_integrity(blob: bytes, baseline: dict) -> dict:
     return measured
 
 
-# --------------------------------------------------------------------------
-# Shell. Git and filesystem live here and nowhere else.
-# --------------------------------------------------------------------------
+# Shell: git and the filesystem live here and nowhere else.
 
 
 def resolve_base(
@@ -1316,20 +959,10 @@ def resolve_base(
 ) -> tuple[str, str]:
     """Pick the diff base, and say where the choice came from.
 
-    First hit wins:
-
-    1. ``--base REF``
-    2. ``$DOC_CLAIMS_BASE`` -- the hook the CI workflow is expected to set
-    3. ``origin/$GITHUB_BASE_REF`` when ``$CI`` is set
-    4. ``origin/spec-comp`` -- the local default, unchanged
-
-    The base has to MOVE WITH THE PROMOTION or the claim half checks nothing.
-    Once a train is promoted ``origin/spec-comp`` is an ancestor of the branch
-    tip, ``A...B`` is legitimately empty, and the step goes green having read
-    zero lines of prose (BUG-5, TOOL-01). ``git diff A...B`` is already the
-    merge-base diff, so naming the PR base branch is enough; no merge-base call
-    is needed here.
-    """
+    First hit wins: ``--base``, ``$DOC_CLAIMS_BASE``, ``origin/$GITHUB_BASE_REF``
+    when ``$CI`` is set, then ``origin/spec-comp``. The base must MOVE WITH
+    THE PROMOTION: once a train is promoted the default is an ancestor of
+    HEAD, the three-dot diff is empty, and the claim half scans nothing."""
     environ = os.environ if env is None else env
     if explicit:
         return explicit, "--base"
@@ -1344,11 +977,7 @@ def resolve_base(
 
 def empty_scan_notice(files_scanned: Iterable[str], base: str, head: str) -> str:
     """The message for a claim half that found nothing to look at, else ``""``.
-
-    Silence here is the defect: a gate that scanned zero lines reports zero
-    errors and is indistinguishable from a gate that passed. This says so on
-    stderr, every run, so "green" cannot quietly mean "empty" again.
-    """
+    A gate that scanned zero lines must not look like a gate that passed."""
     if list(files_scanned):
         return ""
     return (
@@ -1381,16 +1010,14 @@ def _git(*args: str, check: bool = True) -> str:
 def added_lines(base: str, head: str, doc_prefixes: tuple[str, ...]) -> dict:
     """Map each changed doc file to its added line numbers.
 
-    ``--unified=0`` is essential: with context, unchanged prose is reported as
-    added and the output drowns.
-    """
+    ``--unified=0`` is essential: with context, unchanged prose counts as
+    added and the output drowns."""
     raw = _git("diff", "--unified=0", f"{base}...{head}", "--", *doc_prefixes)
     files: dict[str, set[int]] = {}
     current: str | None = None
     for line in raw.splitlines():
         if line.startswith("+++ "):
-            # A deleted file's post-image is /dev/null; it has no added lines to
-            # read and `git show head:/dev/null` would abort the whole scan.
+            # A deleted file's post-image is /dev/null; it has no added lines.
             candidate = line[6:]
             if candidate == "/dev/null":
                 current = None
@@ -1472,11 +1099,8 @@ def write_baseline() -> dict:
 def run(base: str, head: str, base_source: str = "") -> Report:
     known_tests, known_paths = build_index()
     restructure = load_restructure_map()
-    # The HEAD tree, for the map's must-stay-untracked entries: those cite
-    # files purged from (or never admitted to) history, and the promise being
-    # verified is that they are never COMMITTED -- a walk of the source roots
-    # cannot see a root-level scratch file, but `ls-tree` sees the tree the
-    # doc row swore about.
+    # The HEAD tree, for the map's must-stay-untracked entries: a source-root
+    # walk cannot see a root-level scratch file, but `ls-tree` sees the tree.
     restructure["tracked"] = frozenset(
         _git("ls-tree", "-r", "--name-only", head).splitlines()
     )
@@ -1602,9 +1226,8 @@ def main(argv: list[str] | None = None) -> int:
                 f"({entry['control_bytes']} control, CR {entry['cr']}, "
                 f"LF {entry['trailing_lf']})"
             )
-        # Every honoured counter-example and every map resolution is printed,
-        # never silently dropped: a pass that leaves no trace in the log is
-        # not reviewable, and reviewability is the entire control on both.
+        # Every honoured counter-example and map resolution is printed: a pass
+        # that leaves no trace in the log is not reviewable.
         for claim in report.warnings:
             if claim.directive is not None:
                 print(

@@ -1,38 +1,3 @@
-"""SPEC-17-05 [R-17.9]: mandatory TOTP MFA for privileged roles.
-
-Pins the whole feature end to end:
-
-- common/totp.py against the public RFC 6238 SHA-1 test vectors and every
-  branch of the verification/replay logic (stdlib-only helper — R-17.9
-  names no mechanism, so no package was added);
-- the enrollment API (setup/confirm/status/disable) for privileged roles,
-  both trust paths (JWT steady-state and the credential bootstrap that
-  keeps blocked-at-login enforcement reachable);
-- SPEC-20-13 enrollment REACH: the admin login page offers the enrollment
-  surface (and says so loudly when MFA is what blocked the attempt), and the
-  bootstrap flow the enrollment page drives mints a usable device without a
-  JWT;
-- enforcement at BOTH surfaces: the staff API login (totp required for
-  privileged users, replay-guarded) and the Django admin login form;
-- SPEC-20-10 door split: the storefront login declares no totp field at all
-  and refuses privileged accounts, while the staff door keeps demanding and
-  spending the factor;
-- rollout semantics: unenrolled privileged accounts are blocked with the
-  enrollment path named; customers and non-admin staff are untouched;
-- SPEC-20-8 "trust this device for N days": the opt-in is explicit, is bound
-  to the browser that asked for it, lapses on the env-driven TTL, is dropped
-  by disable/re-enrollment, and never touches the challenge path, the replay
-  guard or the customer door;
-- SPEC-20-8b the same opt-in at the Django admin door, decided by the SAME
-  shared function, with every fail-safe (other browser, lapsed grant, forged
-  or other-user marker, the TTL kill switch) still challenged there;
-- Q-S4 [F8]: the admin login form's own FAILED-attempt budget (the API
-  'auth' scope provably never covered the plain-Django login view), the
-  'auth' budget engaging on the enrollment surfaces themselves, and the
-  post-enrollment first-factor cells the pentest never exercised;
-- secret exposure: shown exactly once at setup, never returned again.
-"""
-
 import base64
 from datetime import timedelta
 from unittest import mock
@@ -74,7 +39,6 @@ RFC_8DIGIT_VECTORS = (
 
 
 def make_privileged(username, is_superuser=False):
-    """An MFA-privileged account (admin role, or superuser) with NO device."""
     user = User.objects.create_user(
         username=username,
         email=f"{username}@example.com",
@@ -88,7 +52,6 @@ def make_privileged(username, is_superuser=False):
 
 
 def enroll_via_model(user, secret=TEST_TOTP_SECRET):
-    """Fixture shortcut: a confirmed, enabled device."""
     return TOTPDevice.objects.create(
         user=user, secret=secret, enabled=True, confirmed_at=timezone.now()
     )
@@ -101,15 +64,7 @@ def login_payload(username, password=PASSWORD, **extra):
 
 
 def code_after(device):
-    """The code right after the one a login consumed.
-
-    api_login (and every successful verification) stores the matched
-    counter as the replay watermark, so the next acceptable code is
-    watermark + 1 — inside the ±1 step window whether or not a 30-second
-    boundary passes mid-test (hermetic: no sleeps, no clock patching).
-    The instance is refreshed first: api_login rewinds the watermark in
-    the database, not on the caller's object.
-    """
+    """The next acceptable code is watermark + 1, inside the +-1 window with no sleeps; the instance is refreshed first because api_login rewinds the watermark in the DB."""
     device.refresh_from_db()
     return totp.hotp(device.secret, device.last_used_counter + 1)
 
@@ -123,7 +78,6 @@ class TOTPHelperTests(SimpleTestCase):
                 )
 
     def test_rfc6238_six_digit_totp(self):
-        # 6-digit codes are the low six digits of the 8-digit vector.
         for at_time, expected8 in RFC_8DIGIT_VECTORS:
             with self.subTest(at_time=at_time):
                 self.assertEqual(totp.totp(RFC_SECRET, at_time), expected8[-6:])
@@ -183,12 +137,9 @@ class TOTPHelperTests(SimpleTestCase):
         base = at_time // totp.STEP
         code = totp.hotp(RFC_SECRET, base)
         self.assertEqual(totp.verify_code(RFC_SECRET, code, at_time), base)
-        # Same code after the counter was consumed: every candidate counter
-        # in the window is at or below the watermark, so nothing matches.
         self.assertIsNone(
             totp.verify_code(RFC_SECRET, code, at_time, last_used_counter=base)
         )
-        # A watermark above the whole window also fails closed.
         self.assertIsNone(
             totp.verify_code(RFC_SECRET, code, at_time, last_used_counter=base + 5)
         )
@@ -237,15 +188,10 @@ class MFAEnrollmentTests(ApiTestCase):
             format="json",
         )
 
-    # -- permission surface -------------------------------------------------
-
     def test_anonymous_gets_uniform_denials(self):
-        # JWT-only surfaces: uniform 403, no auth dance offered.
         self.assertEqual(self.client.get("/api/accounts/mfa/status/").status_code, 403)
         res = self.client.post("/api/accounts/mfa/disable/", {}, format="json")
         self.assertEqual(res.status_code, 403)
-        # Bootstrap surfaces: a uniform 401 for unknown credentials, with
-        # no signal about which half was wrong — or about the account.
         res = self.client.post("/api/accounts/mfa/setup/", {}, format="json")
         self.assertEqual(res.status_code, 401)
         self.assertEqual(res.data["error"], "Invalid credentials.")
@@ -275,8 +221,6 @@ class MFAEnrollmentTests(ApiTestCase):
         self.assertEqual(res.status_code, 401)
         self.assertEqual(res.data["error"], "Invalid credentials.")
 
-    # -- the bootstrap rollout path -----------------------------------------
-
     def test_bootstrap_enroll_confirm_then_login(self):
         res = self.bootstrap_setup()
         self.assertEqual(res.status_code, 200)
@@ -293,7 +237,6 @@ class MFAEnrollmentTests(ApiTestCase):
         self.assertTrue(device.enabled)
         self.assertIsNotNone(device.confirmed_at)
 
-        # The whole point: the factor now gates login, and a valid code passes.
         res = self.client.post(
             "/api/accounts/login/",
             login_payload("boss", totp=code_after(device)),
@@ -308,8 +251,6 @@ class MFAEnrollmentTests(ApiTestCase):
         res = self.bootstrap_setup()
         self.assertEqual(res.status_code, 403)
         self.assertIn("already enrolled", res.data["error"])
-
-    # -- steady-state JWT path ----------------------------------------------
 
     def jwt_login(self, device):
         return self.client.post(
@@ -332,7 +273,7 @@ class MFAEnrollmentTests(ApiTestCase):
         self.assertEqual(res.status_code, 400)
         self.assertIn("Invalid or expired", res.data["details"]["code"][0])
         device.refresh_from_db()
-        self.assertTrue(device.enabled)  # refused setup touched nothing
+        self.assertTrue(device.enabled)
 
     def test_setup_reenroll_rotates_secret(self):
         device = enroll_via_model(self.boss)
@@ -346,13 +287,11 @@ class MFAEnrollmentTests(ApiTestCase):
         self.assertNotEqual(new_secret, device.secret)
         device.refresh_from_db()
         self.assertEqual(device.secret, new_secret)
-        self.assertFalse(device.enabled)  # pending again until confirmed
+        self.assertFalse(device.enabled)
         self.assertIsNone(device.confirmed_at)
 
     def test_setup_while_pending_needs_no_code(self):
-        # Once a rotation is pending (device disabled), a JWT holder who
-        # already proved the factor for this session may re-mint freely;
-        # the code guard exists to protect an ACTIVE device.
+        # Once a rotation is pending (device disabled), a JWT holder who already proved the factor may re-mint freely; the code guard protects an ACTIVE device.
         enroll_via_model(self.boss)
         _, token = self.api_login("boss")
         self.auth(token)
@@ -423,8 +362,6 @@ class MFAEnrollmentTests(ApiTestCase):
         ):
             self.assertNotIn(secret, str(later.data))
 
-    # -- disable --------------------------------------------------------------
-
     def test_disable_requires_code_then_mandatory_blocks_login(self):
         enroll_via_model(self.boss)
         _, token = self.api_login("boss")
@@ -441,9 +378,6 @@ class MFAEnrollmentTests(ApiTestCase):
         self.assertFalse(res.data["enabled"])
         device.refresh_from_db()
         self.assertFalse(device.enabled)
-        # Mandatory means mandatory: with the factor stripped, the next
-        # password-only login is refused — and the credential bootstrap
-        # reopens so the user can re-enroll (recovery without ops help).
         self.auth(None)
         res = self.client.post(
             "/api/accounts/login/", login_payload("boss"), format="json"
@@ -454,7 +388,7 @@ class MFAEnrollmentTests(ApiTestCase):
         self.assertEqual(res.status_code, 200)
 
     def test_disable_without_device_rejected(self):
-        _, token = self.api_login("boss")  # api_login enrolls the fixture device
+        _, token = self.api_login("boss")
         self.auth(token)
         TOTPDevice.objects.all().delete()
         res = self.client.post(
@@ -463,22 +397,10 @@ class MFAEnrollmentTests(ApiTestCase):
         self.assertEqual(res.status_code, 400)
 
 
-# Q-S4: the classes below post many refused admin logins back to back; the
-# budget override keeps those refusals the EXACT MFA refusals they assert,
-# never the throttle's generic one (AdminLoginThrottleTests owns that proof).
+# Q-S4: the budget override keeps this class's many refused admin logins at the
+# EXACT MFA refusal, never the throttle's generic one.
 @override_settings(ADMIN_LOGIN_THROTTLE_RATE="1000/min")
 class MFAEnrollmentReachTests(ApiTestCase):
-    """SPEC-20-13: a blocked privileged account can actually reach enrollment.
-
-    Mandatory MFA (R-17.9) refuses an unenrolled privileged login, so the
-    enrollment API was reachable only by hand-typed POSTs — an account with
-    no device was locked out of /admin/ and the API with no path back in.
-    These pins cover both halves of the reach: the admin login page offers
-    the enrollment surface (always, and loudly when MFA is the reason the
-    attempt failed), and the credential-bootstrap flow the enrollment page
-    drives mints a working device without ever holding a JWT.
-    """
-
     def setUp(self):
         self.boss = make_privileged("boss")
 
@@ -508,9 +430,6 @@ class MFAEnrollmentReachTests(ApiTestCase):
         self.assertContains(res, settings.MFA_ENROLL_URL)
 
     def test_password_failure_shows_the_link_but_not_the_mfa_notice(self):
-        # The notice is keyed off the MFA block specifically: telling a
-        # caller who simply mistyped their password to go and enroll would
-        # be a confusing (and leaky) answer to an ordinary failure.
         res = self.client.post(
             "/admin/login/",
             {"username": "boss", "password": "Wr0ng-Passphrase!"},
@@ -521,9 +440,6 @@ class MFAEnrollmentReachTests(ApiTestCase):
         self.assertContains(res, settings.MFA_ENROLL_URL)
 
     def test_signed_in_admin_visit_is_redirected_not_rendered(self):
-        # config.admin.MFAAdminSite.login flags the enrollment block on the
-        # unrendered login page; an already-authenticated visit is a redirect
-        # that has no form at all.
         self.client.force_login(
             User.objects.create_superuser(
                 username="root", email="root@example.com", password=PASSWORD
@@ -538,9 +454,6 @@ class MFAEnrollmentReachTests(ApiTestCase):
         self.assertNotContains(res, TEST_TOTP_SECRET)
 
     def test_enrollment_reach_needs_no_jwt_then_login_works(self):
-        """The whole reach, exactly as the enrollment page drives it:
-        password-proven setup -> secret + provisioning URI -> confirm ->
-        the factor now gates (and admits) login."""
         res = self.client.post(
             "/api/accounts/mfa/setup/",
             {"username": "boss", "password": PASSWORD},
@@ -574,17 +487,6 @@ class MFAEnrollmentReachTests(ApiTestCase):
 
 
 class MfaQrTests(SimpleTestCase):
-    """SPEC-20-9: the enrollment QR is a real, scannable QR of the URI.
-
-    What is pinned (no decoder is available, and inventing one here would
-    test segno, not this repo): the artifact is an inline SVG data URI, its
-    geometry is the QR matrix sized for THIS payload at the declared scale
-    and quiet zone, it is byte-identical to an independent render of the
-    provisioning URI the same response returns (so the view cannot have
-    encoded some other string), and it changes when the payload changes —
-    together that is a picture a scanner decodes to the provisioning URI.
-    """
-
     def test_artifact_is_an_inline_svg_of_the_right_geometry(self):
         uri = totp.otpauth_uri(TEST_TOTP_SECRET, "boss")
         artifact = qr.qr_data_uri(uri)
@@ -609,8 +511,6 @@ class MfaQrTests(SimpleTestCase):
         self.assertNotEqual(qr.qr_data_uri(uri), qr.qr_data_uri(other))
 
     def test_secret_is_encoded_not_written_into_the_markup(self):
-        # The payload travels as QR modules; the SVG itself carries no
-        # plaintext secret to leak into a DOM, a log or a screenshot.
         artifact = qr.qr_data_uri(totp.otpauth_uri(TEST_TOTP_SECRET, "boss"))
         self.assertNotIn(
             TEST_TOTP_SECRET,
@@ -619,8 +519,6 @@ class MfaQrTests(SimpleTestCase):
 
 
 class MFAEnrollmentQrTests(ApiTestCase):
-    """SPEC-20-9: setup hands the enrollment page a scannable code."""
-
     def setUp(self):
         self.boss = make_privileged("boss")
 
@@ -639,8 +537,6 @@ class MFAEnrollmentQrTests(ApiTestCase):
         )
 
     def test_bootstrap_rotation_returns_a_new_qr(self):
-        # Re-minting mints a new secret, so the picture must change with it:
-        # a stale QR would enroll the previous secret.
         first = self.bootstrap_setup().data
         self.client.post(
             "/api/accounts/mfa/confirm/",
@@ -652,7 +548,7 @@ class MFAEnrollmentQrTests(ApiTestCase):
             format="json",
         )
         second = self.bootstrap_setup()
-        self.assertEqual(second.status_code, 403)  # the bootstrap window closed
+        self.assertEqual(second.status_code, 403)
         _, token = self.api_login("boss")
         self.auth(token)
         device = TOTPDevice.objects.get(user=self.boss)
@@ -783,14 +679,6 @@ class MFALoginEnforcementTests(ApiTestCase):
         self.assertEqual(res.status_code, 200)
 
     def test_customer_door_has_no_totp_field(self):
-        # SPEC-20-10 rewrite of the old `test_customer_totp_field_ignored`
-        # pin. That pin asserted the superseded contract — "the storefront
-        # login SERVES a totp field and ignores its value" — which is the
-        # bug: a customer was shown, and could post, an authentication code
-        # no server check ever read. The customer door now declares the
-        # parent's username/password and nothing else, so `totp` is not a
-        # field in either direction (it cannot be rendered, and a body that
-        # includes it is ignored instead of half-honoured).
         self.assertEqual(
             sorted(StorefrontTokenObtainPairSerializer().fields),
             ["password", "username"],
@@ -811,7 +699,7 @@ class MFALoginEnforcementTests(ApiTestCase):
         res = self.client.post(
             "/api/accounts/login/", login_payload("root"), format="json"
         )
-        self.assertEqual(res.status_code, 400)  # unenrolled superuser blocked
+        self.assertEqual(res.status_code, 400)
         enroll_via_model(root)
         res = self.client.post(
             "/api/accounts/login/",
@@ -822,24 +710,6 @@ class MFALoginEnforcementTests(ApiTestCase):
 
 
 class MfaTrustDeviceTests(ApiTestCase):
-    """SPEC-20-8: "trust this device for 30 days" - opt-in, per browser.
-
-    A fresh code on every privileged login is a burden the user directive
-    rejects, but R-17.9 still stands for everyone who does not opt in. These
-    pins cover both halves of that promise, in the order the feature makes
-    them:
-
-    - the opt-in is explicit and hard to reach by accident: it needs a
-      privileged session, a FRESH code and an enabled factor, and nothing
-      else in the system (no login, no enrollment, no default) can set it;
-    - what it buys is narrow: this browser, this device row, this user, until
-      the TTL lapses. Every other login is challenged exactly as before;
-    - what it never buys: a way around the factor. Trust cannot spend a
-      one-time code, cannot resurrect one already spent, and cannot outlive
-      the TTL (nor survive a disable or a secret rotation);
-    - non-privileged logins and the customer door are untouched throughout.
-    """
-
     TRUST_PATH = "/api/accounts/mfa/trust/"
     LOGIN_PATH = "/api/accounts/login/"
 
@@ -848,15 +718,6 @@ class MfaTrustDeviceTests(ApiTestCase):
         self.device = enroll_via_model(self.boss)
 
     def grant(self):
-        """The opt-in exactly as a staff UI drives it: a privileged session
-        (which itself demanded the factor) plus a fresh code here.
-
-        The watermark rewind is the same accommodation ``api_login``
-        documents: it leaves the device unable to spend this step's code, so
-        without the rewind the trust call could only burn the NEXT step's and
-        nothing could authenticate until the clock moved on. No sleeps, no
-        clock patching.
-        """
         self.api_login("boss")
         device = TOTPDevice.objects.get(user=self.boss)
         counter = totp.now() // totp.STEP
@@ -876,13 +737,10 @@ class MfaTrustDeviceTests(ApiTestCase):
         )
 
     def challenge(self, res):
-        """Assert the R-17.9 challenge came back (and no tokens rode with it)."""
         self.assertEqual(res.status_code, 400, res.data)
         self.assertNotIn("access", res.data)
         self.assertIn("totp", res.data["details"])
         return res.data["details"]["totp"][0]
-
-    # -- 1. the promise: no fresh code on the trusted device ---------------
 
     def test_trusted_device_logs_in_without_a_fresh_code(self):
         self.grant()
@@ -898,9 +756,6 @@ class MfaTrustDeviceTests(ApiTestCase):
         self.assertIn("authentication code", message)
 
     def test_a_trusted_login_spends_no_code_and_ignores_a_posted_one(self):
-        # On a trusted device the client is never asked for a code, so a
-        # posted value is not a factor: it is neither verified nor consumed,
-        # and it can neither move the watermark nor block the login.
         self.grant()
         device = TOTPDevice.objects.get(user=self.boss)
         watermark = device.last_used_counter
@@ -908,8 +763,6 @@ class MfaTrustDeviceTests(ApiTestCase):
         self.assertEqual(res.status_code, 200, res.data)
         device.refresh_from_db()
         self.assertEqual(device.last_used_counter, watermark)
-
-    # -- 2. nothing grants trust implicitly --------------------------------
 
     def test_an_untrusted_device_is_challenged(self):
         message = self.challenge(self.login())
@@ -922,12 +775,9 @@ class MfaTrustDeviceTests(ApiTestCase):
         self.device.refresh_from_db()
         self.assertIsNone(self.device.trusted_until)
         self.assertNotIn(settings.MFA_TRUST_COOKIE_NAME, res.cookies)
-        # ...and the NEXT login, from any browser, is still challenged.
         self.challenge(self.login(client=self.fresh_client()))
 
     def test_enrollment_never_grants_trust(self):
-        # Neither bootstrap step of a fresh enrollment writes the TTL: a new
-        # device starts untrusted, so enrollment is not a trust side effect.
         newbie = make_privileged("newbie")
         res = self.client.post(
             "/api/accounts/mfa/setup/",
@@ -950,8 +800,6 @@ class MfaTrustDeviceTests(ApiTestCase):
         self.assertIn("authentication code", res.data["details"]["totp"][0])
 
     def test_trust_requires_privilege_a_session_and_a_fresh_code(self):
-        # Anonymous gets the same JWT-only 403 as status/disable, and a
-        # customer session is refused outright.
         self.assertEqual(
             self.client.post(self.TRUST_PATH, {}, format="json").status_code, 403
         )
@@ -962,9 +810,6 @@ class MfaTrustDeviceTests(ApiTestCase):
             self.client.post(self.TRUST_PATH, {}, format="json").status_code, 403
         )
         self.auth(None)
-        # A privileged session is still not enough: the second factor must be
-        # re-proved here, so a stolen session cannot convert itself into
-        # thirty days of challenge-free logins.
         self.api_login("boss")
         for payload in ({}, {"code": "000000"}):
             res = self.client.post(self.TRUST_PATH, payload, format="json")
@@ -982,8 +827,6 @@ class MfaTrustDeviceTests(ApiTestCase):
         self.assertEqual(res.status_code, 400)
         self.assertIn("not enabled", res.data["details"]["code"][0])
 
-    # -- 3. the marker must genuinely identify this device -----------------
-
     def test_a_forged_marker_is_refused(self):
         self.grant()
         real = self.client.cookies[settings.MFA_TRUST_COOKIE_NAME].value
@@ -993,10 +836,7 @@ class MfaTrustDeviceTests(ApiTestCase):
         self.challenge(self.login())
 
     def test_another_users_marker_does_not_carry_over(self):
-        # Shared/kiosk browser: the marker names (user, device), so one
-        # user's grant can never answer a different user's challenge. BOTH
-        # devices are genuinely trusted, so the (user, device) pair is the
-        # only thing left that can refuse.
+        # Shared/kiosk browser: the marker names (user, device), so one user's grant can never answer another's challenge.
         chief = make_privileged("chief")
         chief_device = enroll_via_model(chief)
         chief_device.trusted_until = mfa_trust.trust_deadline()
@@ -1017,8 +857,6 @@ class MfaTrustDeviceTests(ApiTestCase):
         self.challenge(self.login())
 
     def test_a_marker_signed_before_the_ttl_is_refused(self):
-        # Belt to the DB deadline's braces: the signed marker cannot outlive
-        # MFA_TRUST_DAYS even while trusted_until is still in the future.
         self.grant()
         stale = totp.now() - (settings.MFA_TRUST_DAYS + 1) * mfa_trust.SECONDS_PER_DAY
         with mock.patch("django.core.signing.time.time", return_value=stale):
@@ -1039,8 +877,6 @@ class MfaTrustDeviceTests(ApiTestCase):
         self.assertGreater(cookie["max-age"], budget - 60)
         self.assertLessEqual(cookie["max-age"], budget)
 
-    # -- 4. the TTL ---------------------------------------------------------
-
     def test_the_grant_lasts_the_env_driven_ttl(self):
         with override_settings(MFA_TRUST_DAYS=7):
             res = self.grant()
@@ -1052,8 +888,6 @@ class MfaTrustDeviceTests(ApiTestCase):
         self.assertEqual(self.login().status_code, 200)
 
     def test_zero_days_is_the_kill_switch(self):
-        # The documented emergency off-switch: the opt-in still resolves, but
-        # the grant is already over, so the challenge is straight back.
         with override_settings(MFA_TRUST_DAYS=0):
             res = self.grant()
         self.assertEqual(res.data["trust_days"], 0)
@@ -1070,9 +904,6 @@ class MfaTrustDeviceTests(ApiTestCase):
         self.assertIn("authentication code", message)
 
     def test_an_expired_grant_does_not_resurrect_a_spent_code(self):
-        # The replay guard across the trust boundary: the code the trust call
-        # spent stays spent once the challenge returns, and the next unused
-        # code is the one that works.
         self.grant()
         device = TOTPDevice.objects.get(user=self.boss)
         spent = totp.hotp(device.secret, device.last_used_counter)
@@ -1082,8 +913,6 @@ class MfaTrustDeviceTests(ApiTestCase):
         message = self.challenge(self.login(totp=spent))
         self.assertIn("Invalid or expired", message)
         self.assertEqual(self.login(totp=code_after(device)).status_code, 200)
-
-    # -- 5. losing the device or the factor drops the trust ----------------
 
     def test_disabling_mfa_drops_the_trust(self):
         self.grant()
@@ -1098,15 +927,10 @@ class MfaTrustDeviceTests(ApiTestCase):
         self.device.refresh_from_db()
         self.assertFalse(self.device.enabled)
         self.assertIsNone(self.device.trusted_until)
-        # The stale marker cannot re-open anything: with the factor off the
-        # login demands enrollment again rather than answering the challenge.
         self.auth(None)
         self.assertIn("Multi-factor", self.challenge(self.login()))
 
     def test_re_enrolling_drops_the_trust(self):
-        # A rotation is the lost-device path, so trust collected by the old
-        # secret must not ride along with the new one, and the leftover marker
-        # must not admit the freshly confirmed factor either.
         self.grant()
         device = TOTPDevice.objects.get(user=self.boss)
         res = self.client.post(
@@ -1125,8 +949,6 @@ class MfaTrustDeviceTests(ApiTestCase):
         self.auth(None)
         self.assertIn("authentication code", self.challenge(self.login()))
 
-    # -- 6. nobody else is affected ----------------------------------------
-
     def test_customers_are_untouched_by_trust(self):
         self.make_user("buyer")
         res = self.client.post(self.LOGIN_PATH, login_payload("buyer"), format="json")
@@ -1138,15 +960,6 @@ class MfaTrustDeviceTests(ApiTestCase):
 
 
 class StorefrontLoginSplitTests(ApiTestCase):
-    """SPEC-20-10: the customer door never speaks TOTP; the staff door does.
-
-    One `LoginView` used to serve both populations, which forced the TOTP
-    field into every customer's validation surface. The split gives
-    customers their own door and keeps the privileged enforcement on
-    `login/` — and, critically, makes the customer door REFUSE a
-    privileged account, so it cannot become a way around [R-17.9].
-    """
-
     CUSTOMER_DOOR = "/api/accounts/storefront/login/"
     STAFF_DOOR = "/api/accounts/login/"
 
@@ -1161,8 +974,6 @@ class StorefrontLoginSplitTests(ApiTestCase):
         self.assertIn("access", res.data)
 
     def test_customer_door_treats_a_posted_totp_as_nothing(self):
-        # Not an auth factor and not a device: the code is a non-field, so
-        # it reaches no verification and mints no credential of its own.
         res = self.client.post(
             self.CUSTOMER_DOOR,
             login_payload("buyer", totp="000000"),
@@ -1172,8 +983,6 @@ class StorefrontLoginSplitTests(ApiTestCase):
         self.assertFalse(TOTPDevice.objects.exists())
 
     def test_customer_door_keeps_the_refresh_cookie_contract(self):
-        # [R-17.12] unchanged on the new door: the refresh token rides the
-        # HttpOnly cookie, never the response body.
         res = self.client.post(
             self.CUSTOMER_DOOR, login_payload("buyer"), format="json"
         )
@@ -1202,8 +1011,6 @@ class StorefrontLoginSplitTests(ApiTestCase):
         )
 
     def test_customer_door_refuses_an_unenrolled_privileged_account(self):
-        # Mandatory means mandatory: with no device to satisfy, the door
-        # without a code field still must not authenticate the account.
         make_privileged("newbie")
         res = self.client.post(
             self.CUSTOMER_DOOR, login_payload("newbie"), format="json"
@@ -1212,9 +1019,6 @@ class StorefrontLoginSplitTests(ApiTestCase):
         self.assertNotIn("access", res.data)
 
     def test_customer_door_serves_non_privileged_staff_unchanged(self):
-        # R-17.9 binds privileged roles only, and the customer door refuses
-        # exactly those: a support-role staffer (staff, no staff.manage) is
-        # an ordinary caller here, as it always was on the shared door.
         helper = self.make_user("helper")
         helper.is_staff = True
         helper.save()
@@ -1225,9 +1029,6 @@ class StorefrontLoginSplitTests(ApiTestCase):
         self.assertEqual(res.status_code, 200, res.data)
 
     def test_staff_door_still_ignores_a_customers_totp(self):
-        # The staff door keeps its own contract for non-privileged callers:
-        # the field exists for privileged logins and is inert for everyone
-        # else (the pre-split pin, preserved on the door it described).
         res = self.client.post(
             self.STAFF_DOOR, login_payload("buyer", totp="000000"), format="json"
         )
@@ -1238,19 +1039,17 @@ class StorefrontLoginSplitTests(ApiTestCase):
         boss = make_privileged("boss")
         device = enroll_via_model(boss)
         res = self.client.post(self.STAFF_DOOR, login_payload("boss"), format="json")
-        self.assertEqual(res.status_code, 400)  # no code
+        self.assertEqual(res.status_code, 400)
         self.assertNotIn("access", res.data)
         res = self.client.post(
             self.STAFF_DOOR, login_payload("boss", totp="000000"), format="json"
         )
-        self.assertEqual(res.status_code, 400)  # wrong code
+        self.assertEqual(res.status_code, 400)
         code = totp.hotp(device.secret, totp.now() // totp.STEP)
         res = self.client.post(
             self.STAFF_DOOR, login_payload("boss", totp=code), format="json"
         )
         self.assertEqual(res.status_code, 200, res.data)
-        # The replay guard rides on the door that consumed the code: the same
-        # one cannot be spent twice (RFC 6238 §5.2).
         replay = self.fresh_client()
         res = replay.post(
             self.STAFF_DOOR, login_payload("boss", totp=code), format="json"
@@ -1260,8 +1059,6 @@ class StorefrontLoginSplitTests(ApiTestCase):
 
 @override_settings(ADMIN_LOGIN_THROTTLE_RATE="1000/min")
 class AdminMFAEnforcementTests(ApiTestCase):
-    """The second R-17.9 enforcement surface: the Django admin login form."""
-
     def setUp(self):
         self.boss = make_privileged("boss")
         enroll_via_model(self.boss)
@@ -1329,23 +1126,6 @@ class AdminMFAEnforcementTests(ApiTestCase):
 
 @override_settings(ADMIN_LOGIN_THROTTLE_RATE="1000/min")
 class AdminMfaTrustDeviceTests(ApiTestCase):
-    """SPEC-20-8b: "trust this device" reaches the Django admin door too.
-
-    SPEC-20-8 shipped the opt-in on the staff API serializer; ``/admin/`` is
-    the OTHER privileged door and its form is a second enforcement surface.
-    These pins hold the line that there is ONE rule, not two that drift:
-
-    - a trusted, unexpired device with a valid marker logs into the admin
-      with no fresh code (the user's directive, on the primary staff door);
-    - every fail-safe still bites AT THE ADMIN: another browser, a lapsed
-      grant, a forged or someone else's marker, and the ``MFA_TRUST_DAYS=0``
-      kill switch all land back on the challenge;
-    - the challenge itself is untouched — a wrong code is still
-      MFA_CODE_INVALID, the replay watermark is never moved by a skipped or
-      untrusted login, and nothing is downgraded to make a skip possible;
-    - non-privileged staff (and customers) are exactly as they were.
-    """
-
     TRUST_PATH = "/api/accounts/mfa/trust/"
 
     def setUp(self):
@@ -1353,15 +1133,9 @@ class AdminMfaTrustDeviceTests(ApiTestCase):
         self.device = enroll_via_model(self.boss)
 
     def grant(self):
-        """Drive the real opt-in from a real privileged session, so the
-        marker on the client is one ``bind_trust_cookie`` actually signed.
-        """
         self.api_login("boss")
         device = TOTPDevice.objects.get(user=self.boss)
         counter = totp.now() // totp.STEP
-        # Same accommodation MfaTrustDeviceTests.grant documents: the login
-        # above spent this step's code, so the watermark is rewound for the
-        # trust call rather than sleeping or patching the clock.
         device.last_used_counter = counter - 1
         device.save(update_fields=["last_used_counter"])
         res = self.client.post(
@@ -1382,33 +1156,24 @@ class AdminMfaTrustDeviceTests(ApiTestCase):
         return "_auth_user_id" in (client or self.client).session
 
     def challenged(self, res, client=None):
-        """Assert the admin refused the login and re-asked for the code."""
         self.assertFalse(self.is_logged_in(client))
         self.assertContains(res, "Enter your authentication code.")
         return res
-
-    # -- 1. the promise, on the admin door ---------------------------------
 
     def test_trusted_device_reaches_the_admin_without_a_fresh_code(self):
         self.grant()
         res = self.admin_login()
         self.assertTrue(self.is_logged_in())
-        # Past the login page (the admin chrome is rendering) and never
-        # once asked for a code.
         self.assertContains(res, "/admin/logout/")
         self.assertNotContains(res, "Enter your authentication code.")
 
     def test_a_trusted_admin_login_spends_no_code_and_ignores_a_posted_one(self):
-        # Nobody asked this browser for a code, so a posted value is not a
-        # factor: never verified, never consumed, watermark unmoved.
         self.grant()
         watermark = TOTPDevice.objects.get(user=self.boss).last_used_counter
         self.admin_login(totp="000000")
         self.assertTrue(self.is_logged_in())
         device = TOTPDevice.objects.get(user=self.boss)
         self.assertEqual(device.last_used_counter, watermark)
-
-    # -- 2. the fail-safes, at the admin door ------------------------------
 
     def test_another_browser_is_still_challenged_at_the_admin(self):
         self.grant()
@@ -1430,8 +1195,6 @@ class AdminMfaTrustDeviceTests(ApiTestCase):
         self.challenged(self.admin_login())
 
     def test_another_users_marker_does_not_open_the_admin(self):
-        # Shared/kiosk browser. Both grants are genuinely live, so the
-        # (user, device) pair is the only thing left that can refuse.
         chief = make_privileged("chief")
         chief_device = enroll_via_model(chief)
         chief_device.trusted_until = mfa_trust.trust_deadline()
@@ -1443,17 +1206,11 @@ class AdminMfaTrustDeviceTests(ApiTestCase):
         self.challenged(self.admin_login())
 
     def test_zero_days_is_the_kill_switch_at_the_admin(self):
-        # The deployment-wide off-switch reaches this door too: the grant and
-        # the marker are both still here, and the challenge is straight back.
         self.grant()
         with override_settings(MFA_TRUST_DAYS=0):
             self.challenged(self.admin_login())
 
-    # -- 3. the challenge is not weakened ----------------------------------
-
     def test_an_invalid_code_is_still_refused_while_a_marker_is_present(self):
-        # Holding a marker does not make a wrong code acceptable: once the
-        # grant is gone, the same invalid code is refused exactly as before.
         self.grant()
         self.device.trusted_until = timezone.now() - timedelta(seconds=1)
         self.device.save(update_fields=["trusted_until"])
@@ -1462,17 +1219,12 @@ class AdminMfaTrustDeviceTests(ApiTestCase):
         self.assertContains(res, "Invalid or expired authentication code.")
 
     def test_trust_cannot_resurrect_a_spent_code_at_the_admin(self):
-        # The replay guard across the trust boundary: the code the opt-in
-        # spent stays spent, and the next unused one is what works.
         self.grant()
         device = TOTPDevice.objects.get(user=self.boss)
         spent = totp.hotp(device.secret, device.last_used_counter)
-        # The skipped login spends nothing...
         self.admin_login()
         self.assertTrue(self.is_logged_in())
         self.client.logout()
-        # ...and the code the opt-in spent is still spent once the challenge
-        # is back: the next unused one is what works.
         self.device.trusted_until = timezone.now() - timedelta(seconds=1)
         self.device.save(update_fields=["trusted_until"])
         res = self.admin_login(totp=spent)
@@ -1482,8 +1234,6 @@ class AdminMfaTrustDeviceTests(ApiTestCase):
         self.assertTrue(self.is_logged_in())
 
     def test_disabling_mfa_still_demands_enrollment_at_the_admin(self):
-        # The enrollment check outranks the skip, so a leftover marker can
-        # never answer a login whose factor was turned off.
         self.grant()
         device = TOTPDevice.objects.get(user=self.boss)
         res = self.client.post(
@@ -1496,11 +1246,7 @@ class AdminMfaTrustDeviceTests(ApiTestCase):
         self.assertFalse(self.is_logged_in())
         self.assertContains(res, "Multi-factor authentication is mandatory")
 
-    # -- 4. the plumbing, and the untouched third parties ------------------
-
     def test_the_form_reads_the_marker_off_the_request_it_is_given(self):
-        # White box on the plumbing itself: the form is handed a request
-        # (as AdminSite -> LoginView does) and finds the marker there.
         from accounts.admin import MFAAdminAuthenticationForm
 
         self.grant()
@@ -1517,7 +1263,6 @@ class AdminMfaTrustDeviceTests(ApiTestCase):
         self.assertEqual(form.cleaned_data["username"], "boss")
 
     def test_a_form_without_a_request_is_challenged_not_crashed(self):
-        # No request means no browser to vouch for: challenge, never 500.
         from accounts.admin import MFAAdminAuthenticationForm
 
         self.grant()
@@ -1535,10 +1280,6 @@ class AdminMfaTrustDeviceTests(ApiTestCase):
         self.assertTrue(self.is_logged_in())
 
     def test_a_customer_is_still_refused_the_admin_door(self):
-        # The admin door answers a non-staff account with the stock admin
-        # message and no MFA wording at all, so neither the challenge nor
-        # the enrollment block leaks to a caller who failed the first factor
-        # (and the trust machinery changes nothing for them either).
         self.make_user("shopper")
         res = self.admin_login("shopper")
         self.assertFalse(self.is_logged_in())
@@ -1558,23 +1299,8 @@ class AdminSiteWiringTests(SimpleTestCase):
         self.assertIs(admin.site.login_form, MFAAdminAuthenticationForm)
 
 
-# --- Q-S4 [F8]: the admin login throttle + the gaps it filled ---------------
-
-
 @override_settings(ADMIN_LOGIN_THROTTLE_RATE="1000/min")
 class AdminMfaPathMatrixCells(ApiTestCase):
-    """Q-S4: the two post-enrollment admin-path cells the pentest never hit.
-
-    The rest of the path x enrollment matrix is pinned elsewhere in this
-    module — AdminMFAEnforcementTests drives no-code / valid-code /
-    invalid-code / unenrolled / replay through the real /admin/login/ URL,
-    and AdminLoginThrottleTests owns the budget below. These two cells close
-    the first-factor edges: a code never promotes a wrong password or an
-    unknown user, and neither failure leaks an MFA-shaped hint (the page's
-    own "Authentication code" field label is not a leak — only the refusal
-    strings are, which is what these pins watch for).
-    """
-
     def setUp(self):
         self.boss = make_privileged("boss")
         enroll_via_model(self.boss)
@@ -1605,18 +1331,6 @@ class AdminMfaPathMatrixCells(ApiTestCase):
 
 
 class AdminLoginThrottleTests(ApiTestCase):
-    """Q-S4 [F8]: the Django admin login form's own failed-attempt budget.
-
-    AdminLoginThrottleNonCoverageTests proves the API 'auth' scope never
-    covered this door; these pins hold the bound that replaced that gap:
-    FAILED attempts per client ident are refused with one generic message
-    for the window, successes spend nothing, the budget is per ident, the
-    rate is the env-driven settings knob, and an empty knob is the kill
-    switch. The class-level override keeps this class's own counting
-    deterministic against the deployed default (pinned separately by
-    AdminLoginThrottleSettingsTests).
-    """
-
     RATE = "2/min"
 
     def setUp(self):
@@ -1626,16 +1340,12 @@ class AdminLoginThrottleTests(ApiTestCase):
         override = override_settings(ADMIN_LOGIN_THROTTLE_RATE=self.RATE)
         override.enable()
         self.addCleanup(override.disable)
-        # Never leak budget state into (or pick up residue from) the rest of
-        # the suite — the throttle cache is process-wide LocMemCache.
         self.addCleanup(cache.clear)
 
     def valid_code(self):
         return totp.hotp(TEST_TOTP_SECRET, totp.now() // totp.STEP)
 
     def post_login(self, username, password=PASSWORD, client=None, meta=None, **extra):
-        # Form fields ride the payload (totp=... is a field); meta rides the
-        # WSGI environ (REMOTE_ADDR=... is the ident the throttle keys on).
         payload = {"username": username, "password": password}
         payload.update(extra)
         return (client or self.client).post("/admin/login/", payload, **(meta or {}))
@@ -1644,29 +1354,20 @@ class AdminLoginThrottleTests(ApiTestCase):
         return "_auth_user_id" in (client or self.client).session
 
     def test_spent_budget_refuses_further_attempts_with_one_generic_message(self):
-        # Two failures spend the 2/min budget...
         first = self.post_login("boss", "Wr0ng-Passphrase!")
         self.assertEqual(first.status_code, 200)
         self.assertContains(first, "Please enter the correct username and password")
         second = self.post_login("boss", "Wr0ng-Passphrase!")
         self.assertContains(second, "Please enter the correct username and password")
-        # ...and the next attempt is refused BEFORE the first factor is
-        # evaluated — even with credentials and a code that would work.
         third = self.post_login("boss", PASSWORD, totp=self.valid_code())
         self.assertEqual(third.status_code, 200)
         self.assertContains(third, ADMIN_LOGIN_THROTTLE_MESSAGE)
         self.assertFalse(self.is_logged_in())
 
     def test_successes_spend_nothing(self):
-        # Budget is 2/min: two successful logins must both go through, and a
-        # failure after them is still inside the budget (a count-everything
-        # throttle of the same size would have refused one of these).
         self.post_login("boss", PASSWORD, totp=self.valid_code())
         self.assertTrue(self.is_logged_in())
         self.client.logout()
-        # The first login spent this step's code; the replay watermark moves
-        # to the next acceptable step rather than sleeping or patching clocks
-        # (same accommodation AdminMfaTrustDeviceTests documents).
         self.post_login("boss", PASSWORD, totp=code_after(self.device))
         self.assertTrue(self.is_logged_in())
         self.client.logout()
@@ -1679,8 +1380,6 @@ class AdminLoginThrottleTests(ApiTestCase):
         self.post_login("boss", "Wr0ng-Passphrase!")
         blocked = self.post_login("boss", "Wr0ng-Passphrase!")
         self.assertContains(blocked, ADMIN_LOGIN_THROTTLE_MESSAGE)
-        # A different REMOTE_ADDR is a different ident with a full budget —
-        # one abusive client cannot exhaust the office behind the NAT.
         other = self.post_login(
             "boss", "Wr0ng-Passphrase!", meta={"REMOTE_ADDR": "10.9.8.7"}
         )
@@ -1688,10 +1387,6 @@ class AdminLoginThrottleTests(ApiTestCase):
         self.assertContains(other, "Please enter the correct username and password")
 
     def test_the_budget_restores_when_the_window_lapses(self):
-        # The window is a sliding TTL, not a lockout: once it lapses the
-        # stale attempts are pruned and the ident gets a fresh budget. The
-        # clock is the throttle's own timer hook, so this is hermetic — no
-        # sleeps, and the cache TTL itself is real (and irrelevant here).
         clock = {"now": 1_000_000.0}
         frozen = staticmethod(lambda: clock["now"])
         with mock.patch.object(AdminLoginThrottle, "timer", frozen):
@@ -1699,7 +1394,7 @@ class AdminLoginThrottleTests(ApiTestCase):
             self.post_login("boss", "Wr0ng-Passphrase!")
             blocked = self.post_login("boss", "Wr0ng-Passphrase!")
             self.assertContains(blocked, ADMIN_LOGIN_THROTTLE_MESSAGE)
-            clock["now"] += 61  # past the 60s window of the 2/min rate
+            clock["now"] += 61
             recovered = self.post_login("boss", "Wr0ng-Passphrase!")
             self.assertNotContains(recovered, ADMIN_LOGIN_THROTTLE_MESSAGE)
             self.assertContains(
@@ -1717,26 +1412,11 @@ class AdminLoginThrottleTests(ApiTestCase):
 
 
 class AdminLoginThrottleSettingsTests(SimpleTestCase):
-    """Q-S4: the rate is configuration, not a constant in the form."""
-
     def test_unset_env_yields_the_documented_default(self):
-        # In the test process THROTTLE_ADMIN_LOGIN_RATE is unset, so this is
-        # the literal settings.py boots with; the knob's env contract is
-        # documented in .env.example beside the other throttle rates.
         self.assertEqual(settings.ADMIN_LOGIN_THROTTLE_RATE, "10/min")
 
 
 class AdminLoginThrottleNonCoverageTests(ApiTestCase):
-    """Q-S4: the gap proof — the API 'auth' scope never bounded this door.
-
-    Exhaust the 'auth' budget against the API login door (the third attempt
-    is 429), then drive the SAME ident at /admin/login/ with working
-    credentials: the form still evaluates and admits the attempt, because a
-    plain Django view is invisible to DRF's ScopedRateThrottle. Before Q-S4
-    that meant unlimited admin password/TOTP guessing from one client;
-    AdminLoginThrottleTests pins the bound that now applies.
-    """
-
     def test_the_api_auth_budget_does_not_bound_the_admin_form(self):
         boss = make_privileged("boss")
         enroll_via_model(boss)
@@ -1756,9 +1436,6 @@ class AdminLoginThrottleNonCoverageTests(ApiTestCase):
                 format="json",
             )
             self.assertEqual(limited.status_code, 429, limited.data)
-            # The API budget is spent — yet the admin form still evaluates
-            # this ident's next attempt, and with the right code admits it
-            # (a successful admin login answers with the standard redirect).
             code = totp.hotp(TEST_TOTP_SECRET, totp.now() // totp.STEP)
             res = self.client.post(
                 "/admin/login/",
@@ -1775,17 +1452,6 @@ class AdminLoginThrottleNonCoverageTests(ApiTestCase):
 
 
 class MfaEnrollmentThrottleTests(ApiTestCase):
-    """Q-S4: the 'auth' budget actually engages on the enrollment surfaces.
-
-    The URLConf wiring guard in accounts/tests.py pins that every accounts
-    route DECLARES a scope; these pins prove the budget bites on the two
-    bootstrap enrollment paths themselves (they carry permission_classes=[]
-    and gate inside the view, so the throttle is their outer bound), sitting
-    beside the permission pins this module already holds: anonymous ->
-    uniform 401, non-privileged session -> 403, privileged JWT or the
-    credential bootstrap while no device is active -> served.
-    """
-
     def test_the_auth_budget_engages_on_setup_and_confirm(self):
         rates = dict(api_settings.DEFAULT_THROTTLE_RATES)
         rates["auth"] = "2/min"
@@ -1796,7 +1462,5 @@ class MfaEnrollmentThrottleTests(ApiTestCase):
                 self.assertEqual(res.status_code, 401, res.data)
             limited = self.client.post("/api/accounts/mfa/setup/", {}, format="json")
             self.assertEqual(limited.status_code, 429, limited.data)
-            # One shared 'auth' budget: probing setup cannot spare confirm —
-            # the second enrollment surface is refused on the same counter.
             confirm = self.client.post("/api/accounts/mfa/confirm/", {}, format="json")
             self.assertEqual(confirm.status_code, 429, confirm.data)

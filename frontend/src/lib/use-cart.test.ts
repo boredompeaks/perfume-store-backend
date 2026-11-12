@@ -3,13 +3,9 @@ import { QueryClient, QueryObserver } from "@tanstack/react-query";
 import type { Cart } from "./types";
 
 /**
- * D-04b cycle 1 regression: the access token is memory-only, so on a full
- * page load the auth bootstrap settles asynchronously. A cart GET fired
- * during "loading" carries no bearer, resolves (and creates) the anonymous
- * session cart, and caches that empty basket. These tests pin the three
- * properties that keep that from happening: no fetch until the bootstrap
- * settles, identity-keyed cache slots, and a refetch when the identity key
- * (or the ["cart"] prefix invalidation from login/register) changes.
+ * Regression: a cart fetch during the async auth bootstrap would cache an
+ * anonymous basket. Pins gated reads, identity-keyed slots and refetch on key
+ * or prefix change.
  */
 const storage = new Map<string, string>();
 vi.stubGlobal("localStorage", {
@@ -166,8 +162,7 @@ describe("cart query gating (D-04b)", () => {
     expect(fetchSpy).toHaveBeenCalledTimes(1);
     expect(seen).toEqual(["Bearer access-1"]);
 
-    // LoginForm/RegisterForm invalidate the ["cart"] prefix. Keyed query
-    // keys ("cart", status) must still match that prefix.
+    // Prefix invalidation from login/register must still match keyed entries.
     await client.invalidateQueries({ queryKey: ["cart"] });
     await waitFor(() => fetchSpy.mock.calls.length === 2, "login refetch");
 
@@ -198,8 +193,7 @@ describe("cart query gating (D-04b)", () => {
       client,
       cartQueryOptions("authenticated"),
     );
-    // The identity key starts with no data at all: the guest basket cannot
-    // leak into the post-sign-in render.
+    // The guest basket cannot leak into the post-sign-in render.
     expect(authenticated.getCurrentResult().data).toBeUndefined();
 
     const unsubscribeAuthenticated = authenticated.subscribe(() => {});

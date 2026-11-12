@@ -1,23 +1,3 @@
-"""P0-1: one suite per test database, one cache namespace per test run.
-
-Two halves are pinned here, mirroring the two guards:
-
-- ``LockedDiscoverRunner`` owns the resolved test database through an
-  exclusive OS file lock. A second holder is refused (in-process and from a
-  real child process), a free lock is acquired and released, the identity is
-  stable per database and distinct across databases, and ``--parallel`` is
-  refused only where Django would put every worker on the same SQLite file.
-- A test-run settings import points RedisCache at its own DB index, because
-  ``clear()`` is FLUSHDB and ignores KEY_PREFIX: ``cache.clear()`` in a test
-  must not remove a key written outside that index. A non-test import keeps
-  the operator's location byte-for-byte.
-
-The settings half is subprocess-pinned with the repo's existing clean-env
-harness (``tests.test_settings_security.run_settings_import``), because CACHES
-is built at settings-import time and an in-process read would only prove what
-this run happened to import.
-"""
-
 import os
 import shutil
 import signal
@@ -61,8 +41,6 @@ _TEST_MODE_SNIPPET = (
 
 
 class TestRunCacheNamespaceSettingsTests(SimpleTestCase):
-    """A test run resolves the default alias to its own Redis DB index."""
-
     _REDIS = "redis://127.0.0.1:6390/1"
 
     def test_test_run_uses_the_default_test_db_index(self):
@@ -111,16 +89,12 @@ class TestRunCacheNamespaceSettingsTests(SimpleTestCase):
 
 
 class TestRunRedisClearIsolationTests(SimpleTestCase):
-    """Runtime proof: clear() flushes only the test DB index."""
-
     def _redis_urls(self):
         url = (os.environ.get("REDIS_URL") or "").strip()
         if not url:
             self.skipTest("REDIS_URL is not declared; set it to a reachable Redis")
         if caches["default"].__class__.__name__ != "RedisCache":
             self.skipTest("the default cache alias is not a RedisCache here")
-        # The namespace under test is the alias's resolved location, not
-        # REDIS_URL: the point is where the TEST run's cache actually lives.
         operating = urlparse(url)
         operating_db = operating.path.lstrip("/") or "0"
         test_db = urlparse(settings.CACHES["default"]["LOCATION"]).path.lstrip("/")
@@ -138,7 +112,7 @@ class TestRunRedisClearIsolationTests(SimpleTestCase):
                 url, socket_connect_timeout=3, socket_timeout=3
             )
             client.ping()
-        except Exception as exc:  # refused / DNS / timeout - not armed here
+        except Exception as exc:
             self.skipTest(f"no Redis answered at {url} ({type(exc).__name__})")
         self.addCleanup(client.close)
         return client
@@ -158,8 +132,6 @@ class TestRunRedisClearIsolationTests(SimpleTestCase):
 
 
 class TestRedisLocationHelperTests(SimpleTestCase):
-    """The settings helper is pure and testable without another import."""
-
     def test_a_non_redis_location_is_returned_unchanged(self):
         self.assertEqual(
             config_settings._test_redis_location("memcache://127.0.0.1:11211"),
@@ -180,8 +152,6 @@ class TestRedisLocationHelperTests(SimpleTestCase):
 
 
 class DatabaseIdentityTests(SimpleTestCase):
-    """The lock key is the resolved database, not the URL's spelling."""
-
     _PG = {
         "default": {
             "ENGINE": "django.db.backends.postgresql",
@@ -192,10 +162,7 @@ class DatabaseIdentityTests(SimpleTestCase):
     }
 
     def test_same_database_yields_the_same_key(self):
-        # A literal key, not identity(x) == identity(x): every pure function -
-        # including one that hashes the wrong fields - is equal to itself on
-        # two calls, so the old assertion could not see a changed composition.
-        # The key is SHA-256("engine:host:port:test name")[:16].
+        # A literal key, not identity(x) == identity(x): the key is SHA-256("engine:host:port:test name")[:16].
         self.assertEqual(test_database_identity(self._PG), "0f1b75ebb67d345f")
 
     def test_different_databases_yield_different_keys(self):
@@ -300,10 +267,9 @@ class DatabaseSuiteLockTests(SimpleTestCase):
         with DatabaseSuiteLock("free-key", directory=self.directory, timeout=0) as lock:
             self.assertTrue(lock.held)
             self.assertTrue(lock.path.exists())
-            lock.acquire()  # re-entrant: already held, nothing changes
+            lock.acquire()
         self.assertFalse(lock.held)
 
-        # Released: another holder can take it immediately.
         again = DatabaseSuiteLock("free-key", directory=self.directory, timeout=0)
         again.acquire()
         again.release()
@@ -364,8 +330,6 @@ class DatabaseSuiteLockTests(SimpleTestCase):
         self.assertNotIn("ACQUIRED", res.stdout)
 
     def test_the_key_from_this_run_is_the_configured_database(self):
-        # The live suite runs against some database; the runner's default key
-        # must be exactly what the pure identity function derives for it.
         self.assertEqual(
             LockedDiscoverRunner(verbosity=0, interactive=False).get_lock_key(),
             test_database_identity(),
@@ -391,13 +355,13 @@ class LockedRunnerTests(SimpleTestCase):
         runner = self._runner("runner-key")
         runner._acquire_suite_lock()
         self.assertTrue(runner._suite_lock.held)
-        runner._acquire_suite_lock()  # already held: no second lock
+        runner._acquire_suite_lock()
         self.assertTrue(runner._suite_lock.held)
         refused = DatabaseSuiteLock("runner-key", directory=self.directory, timeout=0)
         with self.assertRaises(SuiteLockError):
             refused.acquire()
         runner._release_suite_lock()
-        runner._release_suite_lock()  # already released: no-op
+        runner._release_suite_lock()
         self.assertIsNone(runner._suite_lock)
         reopened = DatabaseSuiteLock("runner-key", directory=self.directory, timeout=0)
         reopened.acquire()
@@ -424,8 +388,6 @@ class LockedRunnerTests(SimpleTestCase):
 
 
 class LockDiagnosticsTests(SimpleTestCase):
-    """The defensive paths around the lock: hooks, owner file, failure paths."""
-
     def setUp(self):
         super().setUp()
         self.directory = tempfile.mkdtemp(prefix="p0-1-diag-")
@@ -504,7 +466,6 @@ class LockDiagnosticsTests(SimpleTestCase):
             lock._install_hooks()
         self.assertEqual(len(lock._previous_handlers), 1)
         self.assertEqual(lock._previous_handlers[fake.SIGINT], "previous")
-        # The fake signal object cannot be handed to the real signal module.
         lock._previous_handlers.clear()
 
     def test_a_signal_handler_that_cannot_be_installed_is_skipped(self):
@@ -517,8 +478,6 @@ class LockDiagnosticsTests(SimpleTestCase):
         lock = self._lock()
         with mock.patch.object(test_isolation, "signal", fake):
             lock._install_hooks()
-        # The failed install never became a handler; the stored previous value
-        # is discarded with the lock (and cleared here for atexit hygiene).
         self.assertEqual(len(lock._previous_handlers), 1)
         backup = lock._previous_handlers
         self.addCleanup(backup.clear)

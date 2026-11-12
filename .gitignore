@@ -1,5 +1,3 @@
-# Monorepo root gitignore (merged backend + frontend)
-
 # Python / Django
 __pycache__/
 *.py[cod]
@@ -44,7 +42,7 @@ Thumbs.db
 .opencode/
 .git-frontend-backup/
 
-# Ad-hoc probe / red-team / load-test scratch (never committed)
+# Ad-hoc probe / load-test scratch
 *.log
 backend/tmp_*.py
 backend/tmp_*.log
@@ -57,5 +55,4 @@ ISSUES.md
 opencode.json
 probe.py
 
-# Spec run artifacts
 Saturday, Jul 25, 2026 at 5_23 AM.txt

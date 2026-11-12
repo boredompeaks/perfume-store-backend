@@ -1,23 +1,7 @@
-"""Checkout: the order lifecycle's opening move, plus the two public reads that
-bracket it (the guest's own order, and the coupon preview).
-
-One of six modules split out of the former single-file `orders/views.py`. The
-two collapse guards (the SPEC-21-1 accidental-duplicate window and SPEC-9-01's
-header-keyed idempotency) live here because they are properties of ORDER
-CREATION, not of payment.
-
-TIER1-GUEST-DEADEND: checkout is ACCOUNT-ONLY. Full guest checkout is deferred
-(owner decision 2026-10-09, recorded in ``backend/docs/run/TIER1-launch.md``:
-SPEC-3-02 off the Tier-1 list), and what the store did in the meantime was
-worse than not having it - an anonymous POST minted an order that could never
-be paid (the payment endpoints are account-scoped) while it held a stock
-reservation and carried the coupon FK: a dead end that parked saleable
-inventory. ``create_order`` now refuses every anonymous submission with ONE
-uniform answer before anything is read or written (``_guest_checkout_refused``).
-The guest ORDER READ below (``guest_order_detail``) stays: rows minted before
-the refusal are still data, and a later section rebuilding guest checkout
-around a real checkout session (spec route rule 3) will decide their fate.
-"""
+"""Checkout: the order lifecycle's opening move, plus the guest order read and
+the public coupon preview. Checkout is account-only, so an anonymous submission
+gets one uniform refusal before anything is read or written; order creation owns
+both collapse guards (duplicate window and header-keyed idempotency)."""
 
 import logging
 import secrets
@@ -39,84 +23,46 @@ from cart.services import resolve_cart
 from common.models import AuditEvent
 from common.money import quantize_money
 
-# [SPEC-12-02] StockReservation rides the existing products.models import
-# line (insertion-only style): the checkout lifecycle mints them in
-# create_order.
+# Checkout mints the lifecycle's stock holds.
 from products.models import StockReservation
 
-# [R-1.07] SPEC-1-B05: the server-side shipping price. The client may name a
-# delivery OPTION here and nothing else - never an amount - which is what keeps
-# the shipping cost out of the client's hands.
+# The client names a delivery OPTION only, never an amount, so the shipping
+# cost stays out of the client's hands.
 from shipping.pricing import ShippingUnavailable, quote_shipping
 
 from ..models import Coupon, Order, OrderItem, OrderStatusEvent
 from ..serializers import CouponPreviewSerializer, OrderSerializer, money_string
 
-# [R-10.12] SPEC-10-02: transition-audit writers. Own import line so every
-# hunk above stays insertion-only.
+# Order-creation transition audit trigger.
 from ..state import TRIGGER_ORDER_CREATE
 
 logger = logging.getLogger(__name__)
 
-# [R-9.3.14] SPEC-9-01: header-keyed checkout idempotency. The cap mirrors
-# the Order.idempotency_key column width, so an oversized value is rejected
-# with a 400 here instead of a database error at insert time.
+# Cap mirrors the Order.idempotency_key column width, so an oversized value is a
+# 400 here instead of a database error at insert time.
 IDEMPOTENCY_KEY_HEADER = "Idempotency-Key"
 IDEMPOTENCY_KEY_MAX_LENGTH = 128
 
 
 def _object_body(data):
-    """The write body as a dict, or ``{}`` when it is not a JSON object.
-
-    A JSON array / scalar / null body parses fine but has no ``.get`` to
-    call, so reading keys off it raised AttributeError — a 500 on a public
-    write endpoint (F7-B1). Reading it as the empty object routes every
-    such body into the endpoint's own missing-key 400 below
-    (first required shipping field / coupon code required), byte-identical
-    to posting ``{}``; form posts are QueryDict (a dict subclass) and are
-    unaffected. Same helper as ``cart.views._object_body``, inlined
-    because cart.views imports orders.views — importing it back here
-    would be an order-dependent circular import."""
+    """The write body as a dict, or ``{}`` when it is not a JSON object. A
+    non-object body has no ``.get``, so reading one would 500 a public write
+    endpoint; inlined from ``cart.views`` to avoid an import cycle."""
     return data if isinstance(data, dict) else {}
 
 
-# ==================================
-# Guest checkout refusal (TIER1-GUEST-DEADEND)
-# ==================================
-
-# How a guest (legacy row) presents its read credential on the guest order
-# lookup below. A header, never a query param: a URL ends up in access logs,
-# browser history and Referer, and this value is the sole credential for
-# someone else's order details. No NEW token is minted while the refusal
-# stands - the column, the constraint and the read all survive for rows
-# created before it.
+# The guest read credential is a header, never a query param: URLs leak into
+# access logs, history and Referer.
 GUEST_TOKEN_HEADER = "X-Guest-Order-Token"
 
-# The read accepts nothing wider than the column it is matched against
-# (64), so an oversized value is refused before it can reach the index.
+# Anything wider than the matched column (64) is refused before the index.
 GUEST_TOKEN_MAX_LENGTH = 64
 
 
 def _guest_checkout_refused():
-    """The ONE answer every anonymous checkout submission gets.
-
-    The dead-end this gate closes: an anonymous POST used to mint a guest
-    order that could never be paid (create_payment/verify_payment are
-    account-scoped), while the row held a stock reservation and the coupon
-    FK - saleable inventory parked on a purchase nobody could complete. The
-    gate therefore runs before the cart is read, the coupon resolved or the
-    atomic block opens: the refusal creates NOTHING - no order, no
-    reservation, no audit row, no coupon attachment, no burnt order number.
-
-    ONE body for every reason an anonymous submission might otherwise fail
-    (missing, invalid or over-length guest_email; no cart; empty cart; a
-    spent Idempotency-Key; an unserviceable destination): a differentiated
-    answer would let a caller probe which inputs any guest path accepts
-    (conventions.md: uniform responses on anonymous flows, no existence
-    leaks). The SPEC-9-03 envelope middleware wraps this into the store-wide
-    {"error", "code", "details"} shape, and the status family label is
-    "permission_denied" on every reason alike.
-    """
+    """The ONE answer every anonymous checkout submission gets. The gate runs
+    before any read or write, and one body for every reason keeps a caller from
+    probing which inputs a guest path accepts."""
     return Response(
         {
             "error": (
@@ -129,14 +75,9 @@ def _guest_checkout_refused():
 
 
 def _field_length_rejection(field, value):
-    """A 400 when ``value`` is wider than the column it is written to.
-
-    SQLite ignores a ``varchar(n)`` width, so an over-length value saves
-    cleanly in the test suite and raises ``DataError`` on the production
-    Postgres — a 500 on a public endpoint rather than a 400. The limit is
-    read off the model field, so the refusal and the column cannot drift
-    apart (and a field with no width, ``address``'s TextField, passes).
-    """
+    """A 400 when ``value`` is wider than the column it is written to. SQLite
+    ignores ``varchar(n)`` while Postgres raises ``DataError``, so the limit is
+    read off the model field to keep refusal and column in step."""
     max_length = Order._meta.get_field(field).max_length
     if max_length is None:
         return None
@@ -149,15 +90,9 @@ def _field_length_rejection(field, value):
 
 
 def _guest_lookup_miss():
-    """The one answer every guest lookup failure gets.
-
-    No token, a wrong token, an unknown order number and a token that belongs
-    to somebody else's order are byte-identical here: a different answer for
-    any of them would turn this endpoint into an oracle for guessing which
-    order numbers exist (conventions.md: uniform responses on anonymous
-    flows, no existence leaks). 404 rather than 403 for the same reason —
-    "forbidden" would confirm the order is real.
-    """
+    """The one answer every guest lookup failure gets: identical for a bad
+    token, an unknown number and somebody else's order, so the endpoint is not
+    an order-existence oracle."""
     return Response(
         {"error": "Order not found"},
         status=status.HTTP_404_NOT_FOUND,
@@ -165,46 +100,25 @@ def _guest_lookup_miss():
 
 
 def _checkout_response(order, status_code):
-    """The checkout body: the order as the serializer shapes it.
-
-    No guest credential is disclosed here because none exists to disclose:
-    while the TIER1-GUEST-DEADEND refusal stands this view mints no guest
-    rows, and ``OrderSerializer`` never carries ``guest_token`` - so even a
-    legacy guest row cannot leak its read credential through any response
-    this module produces.
-    """
+    """The checkout body, with no guest credential to disclose:
+    ``OrderSerializer`` never carries ``guest_token``."""
     return Response(OrderSerializer(order).data, status=status_code)
 
 
-# The shipping fields that identify a checkout submission; must stay in step
-# with the required_fields list inside create_order (both describe the same
-# payload), which is why the duplicate guard reads them from the request
-# exactly the way create_order persists them.
+# Must stay in step with create_order's required_fields (same payload).
 _SHIPPING_FIELDS = ("full_name", "phone", "address", "city", "state", "pincode")
 
 
 def _order_lines(cart_items):
-    """Order identity as sorted (product_id, quantity) pairs, so the
-    duplicate comparison does not depend on cart-line iteration order."""
+    """Order identity as sorted (product_id, quantity) pairs, independent of
+    cart iteration order."""
     return sorted((item.product_id, item.quantity) for item in cart_items)
 
 
 def _same_purchase(order, cart_items, coupon, payload):
-    """Does ``order`` describe the purchase this submission is making?
-
-    Four agreements beyond owner identity: the cart lines (order-
-    independent, via ``_order_lines``), the coupon, the complete
-    shipping payload, and the delivery option. The owner filter already
-    checked identity; this is the "same purchase attempt" test the
-    keyless dedup guard asks, so it is asked once, here.
-
-    Historically this also gated the keyed GUEST replay (a guest proved
-    only an email and a low-entropy key, so the whole purchase had to
-    agree). That branch died with the TIER1-GUEST-DEADEND refusal: an
-    authenticated caller's (user, key) pair is strong enough that
-    SPEC-9-01's "collapse regardless of payload drift" stands for them,
-    and no anonymous caller gets past the gate at all.
-    """
+    """Does ``order`` describe the purchase this submission is making? Four
+    agreements beyond owner identity: cart lines, coupon, full shipping payload
+    and delivery option."""
     if _order_lines(order.items.all()) != _order_lines(cart_items):
         return False
     if order.coupon_id != (coupon.pk if coupon else None):
@@ -216,20 +130,13 @@ def _same_purchase(order, cart_items, coupon, payload):
     return tuple(getattr(order, field) for field in _SHIPPING_FIELDS) == shipping
 
 
-# [R-1.07] The client-supplied delivery OPTION (SPEC-1-B05): a method code,
-# never an amount. Read through one helper so the guard and the pricing call
-# below cannot disagree about what the client asked for.
+# The client-supplied delivery OPTION is a method code, never an amount.
 SHIPPING_METHOD_FIELD = "shipping_method"
 
 
 def _requested_shipping_code(payload):
-    """The delivery option this submission names, normalized, or None.
-
-    An absent or blank value is None: the client offered no choice and the
-    server priced the destination itself. Normalizing here is what lets the
-    agreement test below compare a client string against a stored slug
-    without either side's whitespace deciding the answer.
-    """
+    """The normalized delivery option this submission names, or None. An absent
+    or blank value means the server priced the destination itself."""
     raw = payload.get(SHIPPING_METHOD_FIELD)
     if raw is None:
         return None
@@ -237,20 +144,8 @@ def _requested_shipping_code(payload):
 
 
 def _same_shipping_choice(order, payload):
-    """Does the delivery option this submission names agree with the order's?
-
-    A submission that NAMES a method must name the one the order was priced
-    with, so a keyless duplicate cannot collapse onto an order priced a
-    different way while supplying everything else the guard checks.
-
-    A submission that names NOTHING agrees with whatever the server chose,
-    because the server chose it: pricing happens after the collapse guard,
-    so the order already holds a resolved method and a replay that never
-    expressed a preference cannot disagree with it. This is what the SPEC-1-
-    B05 client-amount property rests on - a collapse returns the ORIGINAL
-    order, with its own persisted shipping_amount and total_amount, so no
-    replay can reprice anything whatever it posts.
-    """
+    """Does the delivery option this submission names agree with the order's? A
+    keyless replay that named no option agrees with whatever the server chose."""
     requested = _requested_shipping_code(payload)
     if requested is None:
         return True
@@ -259,19 +154,9 @@ def _same_shipping_choice(order, payload):
 
 
 def _find_duplicate_pending_order(owner, cart_items, coupon, payload):
-    """[R-21.2.6] The accidental-duplicate window: checkout never clears the
-    cart (cleanup happens after payment confirmation), so a double-click or
-    client retry resubmits the byte-identical payload while the first order
-    is still payable -- which used to mint a second payable order and with
-    it a second charge target. Returns the owner's recent pending order with
-    the identical payload, or None to proceed with creation.
-
-    Deliberately narrower than SPEC-9-01: the header-keyed idempotency
-    (Idempotency-Key + unique-by-key store, covering cross-session
-    simultaneous duplicates) stays there. This guard only closes the
-    accidental same-session window, and only for orders that are still
-    payable -- verify_payment's already-processed gate remains the authority
-    past that point."""
+    """Return the owner's recent pending order with the identical payload, or
+    None to create. Checkout doesn't clear the cart, so a double-click would
+    otherwise mint a second payable order (and a second charge target)."""
     cutoff = timezone.now() - timedelta(seconds=settings.CHECKOUT_DEDUP_WINDOW_SECONDS)
     candidates = (
         Order.objects.filter(
@@ -279,8 +164,7 @@ def _find_duplicate_pending_order(owner, cart_items, coupon, payload):
             status="pending",
             created_at__gte=cutoff,
         )
-        # payable gate mirrors verify_payment: a pending order with a
-        # payment id attached has already been taken past this point
+        # Payable gate mirrors verify_payment.
         .filter(Q(razorpay_payment_id__isnull=True) | Q(razorpay_payment_id=""))
         .prefetch_related("items")
         .order_by("-created_at")
@@ -291,49 +175,32 @@ def _find_duplicate_pending_order(owner, cart_items, coupon, payload):
     return None
 
 
-# ==================================
-# Order number generation (R-8.4)
-# ==================================
-
-# Bounded retries: a checkout still losing the order-number race after this
-# many attempts indicates something is deeply wrong, so it fails loudly (the
-# whole checkout transaction rolls back) instead of looping forever.
+# A checkout still losing the number race after this many attempts fails loudly
+# (the whole transaction rolls back) instead of looping forever.
 ORDER_NUMBER_ATTEMPTS = 5
 
 
 def _current_year():
-    """The order-number year bucket: the prefix year changes each January 1st
-    (R-8.4), so this is the only clock the format depends on."""
+    """The order-number year bucket, the only clock the format depends on."""
     return timezone.now().year
 
 
 def _generate_order_number():
-    """Mint a customer-facing order number with a random component.
-
-    The year bucket keeps the display stable (ORD-YYYY-XXXXXXXX); the random
-    suffix comes from ``secrets`` (never ``random``) so it is not
-    predictable. The unique constraint on ``Order.order_number`` remains the
-    concurrency authority and the caller retries on IntegrityError."""
+    """Mint a customer-facing order number: a year bucket plus a random suffix
+    from ``secrets`` (never ``random``). The unique constraint on
+    ``Order.order_number`` remains the concurrency authority."""
     year = _current_year()
     return f"ORD-{year}-{secrets.token_hex(4).upper()}"
 
 
 def _mint_order_reservations(order, lines, user):
-    """[R-12.6] SPEC-12-02 §12.1 step 3: one time-limited hold per order
-    line, minted inside the caller's atomic block so a rolled-back checkout
-    never leaves a hold behind.
-
-    Deliberately lock-free and rule-free on stock: create_order's advisory
-    gate already validated live availability, and verify_payment's locked
-    sufficiency re-check stays the oversell authority (§12.2's
-    pay-then-409 residual for two concurrent last-unit checkouts is
-    by-design). The TTL comes from expiry_from_now(), the single
-    env-driven source (RESERVATION_TTL)."""
+    """Mint one time-limited hold per order line inside the caller's atomic
+    block, so a rollback leaves no hold. Deliberately lock-free: verify_payment's
+    locked re-check remains the oversell authority."""
     for line in lines:
         try:
-            # Savepoint: a lost (order, product) mint race rolls back only
-            # this insert and leaves the outer transaction usable for the
-            # re-target below (same shape as the order-number mint loop).
+            # Savepoint: a lost (order, product) mint race rolls back only this
+            # insert, leaving the outer transaction usable for the re-target.
             with transaction.atomic():
                 StockReservation.objects.create(
                     product=line.product,
@@ -343,13 +210,8 @@ def _mint_order_reservations(order, lines, user):
                     expires_at=StockReservation.expiry_from_now(),
                 )
         except IntegrityError:
-            # The (order, product) unique constraint is the concurrency
-            # authority: a replay that slipped past both collapse guards
-            # re-targets the existing hold instead of double-creating it
-            # (§12.1: one hold per checkout line — a duplicate row would
-            # double-count reserved stock). Re-targeting re-arms the hold
-            # for this attempt: the retried line's quantity, a fresh TTL,
-            # active again.
+            # The (order, product) unique constraint is the authority: a replay
+            # re-targets the existing hold instead of double-counting stock.
             reservation = StockReservation.objects.select_for_update().get(
                 order=order, product=line.product
             )
@@ -360,37 +222,21 @@ def _mint_order_reservations(order, lines, user):
 
 
 @api_view(["POST"])
-# AllowAny is deliberate (conventions.md:26) even though guests are refused:
-# the refusal is OURS to write, not the auth stack's. An IsAuthenticated
-# permission would answer the anonymous caller DRF's generic 401 body, which
-# says nothing about guest checkout; the explicit gate below answers the one
-# clear, uniform message instead. An authenticated caller is still scoped to
-# their own orders everywhere below, and nothing here reads a body-supplied
-# user id.
+# AllowAny is deliberate: the refusal is ours to write, not DRF's generic 401.
+# An authenticated caller is still scoped to their own orders below.
 @permission_classes([AllowAny])
-# A public MUTATING endpoint, so conventions.md:24 requires a scope. It
-# shares the cart budget on purpose: checkout is the terminal mutation of
-# exactly the session-cart flow those two rates already govern (add to cart
-# -> apply coupon -> submit), so the whole funnel draws on one budget rather
-# than two that can be spent independently. The throttle runs before the
-# view body, so an anonymous caller can be rate-limited into the same 429 a
-# logged-in one gets - never past it into the refusal below.
+# Public mutating endpoint sharing the cart budget: checkout is the terminal
+# mutation of that same session-cart funnel.
 @throttle_scope("cart")
 def create_order(request):
 
-    # [TIER1-GUEST-DEADEND] FIRST line of the body, before the idempotency
-    # header is even read: every anonymous submission - any payload, any
-    # headers, with or without a cart - gets the one uniform refusal, so no
-    # input can move a guest onto a different answer (and nothing below this
-    # gate can write anything on a guest's behalf).
+    # FIRST line of the body: every anonymous submission gets the one uniform
+    # refusal, before any input is read.
     if not request.user.is_authenticated:
         return _guest_checkout_refused()
 
-    # [R-9.3.14] Honor the Idempotency-Key header when the client sends it:
-    # every retry carrying the same value is the SAME submission, so the
-    # atomic block below dedupes on (user, key). Keyless clients keep the
-    # legacy contract (the SPEC-21-1 guard plus window). Blank means no
-    # key, since an empty value carries no submission identity.
+    # Same key means the SAME submission; the atomic block dedupes on (user, key).
+    # Blank means no key, since an empty value carries no submission identity.
     idempotency_key = (
         request.headers.get(IDEMPOTENCY_KEY_HEADER) or ""
     ).strip() or None
@@ -403,20 +249,13 @@ def create_order(request):
             {"error": "Idempotency-Key is too long"}, status=status.HTTP_400_BAD_REQUEST
         )
 
-    # [R-1.13] Who this submission belongs to, settled once and reused by
-    # every writer below (dedup probe, key binding, the row, the status
-    # event and the stock holds), so no two of them can disagree about it.
-    # Only an account caller is past the gate, so the owner is just the
-    # user; a body-supplied guest_email is ignored outright rather than
-    # stored (the Meta constraint allows exactly one owner per row, and an
-    # account row carries the empty guest_email, never NULL).
+    # Who this submission belongs to, settled once and reused by every writer
+    # below. A body-supplied guest_email is ignored (one owner per row).
     user = request.user
     guest_email = ""
     owner = {"user": user}
 
-    # D-04a/D-07: the SAME ownership rule the cart endpoints use. A customer
-    # who signed in checks out their ACCOUNT cart; a legacy guest order read
-    # stays scoped to the caller's session cart. create=False keeps the
+    # Same ownership rule as the cart endpoints; create=False keeps the
     # documented "Cart not found" 404 instead of minting an empty cart.
     cart = resolve_cart(request, create=False)
 
@@ -445,33 +284,20 @@ def create_order(request):
                 {"error": f"{field} is required"}, status=status.HTTP_400_BAD_REQUEST
             )
 
-    # [R-1.13] The same varchar-width trap the guest email had, on the rest
-    # of the shipping payload: SQLite does not enforce `full_name`'s 150 or
-    # `phone`'s 15, so an over-length value is a 201 in the suite and a
-    # DataError on the production Postgres. Refused here, before the atomic
-    # block opens and therefore before any row exists.
+    # SQLite does not enforce these varchar widths, so an over-length value is a
+    # 201 in tests and a DataError on production Postgres.
     for field in _SHIPPING_FIELDS:
         length_rejection = _field_length_rejection(field, body[field])
 
         if length_rejection is not None:
             return length_rejection
 
-    # SPEC-6-01 [6.2.22]: a cart line that outlasted its stock (stock can
-    # drop after the item was added) must not become an order the customer
-    # can pay for. This gate is advisory and read-only -- stock can still
-    # change between create and pay, so verify_payment re-checks under a
-    # row lock before decrementing; that remains the authoritative backstop.
+    # A cart line that outlasted its stock must not become a payable order;
+    # this gate is advisory, verify_payment re-checks under a row lock.
     unavailable = []
 
-    # MERCHANT-DELIST: a line whose product was taken off sale after it was
-    # added is not buyable at ANY quantity, so it is collected for its own
-    # refusal below rather than the stock gate -- fixing the quantity can
-    # never fix it. The whole checkout is refused (never a silent skip of
-    # the line, which would charge the customer for a cart they did not
-    # submit), and the line itself is deliberately left in the cart:
-    # removal is the customer's call -- they see the line and the refusal
-    # names it -- and a relist makes the line buyable again without the
-    # customer having to rebuild the cart.
+    # A delisted line is not buyable at ANY quantity, so it gets its own
+    # refusal; the line stays in the cart because removal is the customer's call.
     delisted = []
 
     subtotal_amount = Decimal("0.00")
@@ -495,12 +321,8 @@ def create_order(request):
         subtotal_amount += product.price * cart_item.quantity
 
     if delisted:
-        # The delist refusal takes precedence over the stock one: a line
-        # that is not for sale is unfixable by quantity, so telling the
-        # customer to "reduce the quantity" first would be wrong advice.
-        # Sorted by pk: the cart queryset carries no ORDER BY, and a
-        # deterministic body (same names, same order, every retry) is what
-        # lets a client reliably match refusal entries to cart lines.
+        # Delist takes precedence over the stock refusal (quantity cannot fix
+        # it); ordering by pk keeps the refusal body deterministic.
         delisted.sort(key=lambda product: product.id)
         names = ", ".join(f'"{product.name}"' for product in delisted)
         if len(delisted) == 1:
@@ -542,13 +364,8 @@ def create_order(request):
 
     coupon_code = body.get("coupon_code")
 
-    # [R-9.3.5/R-9.3.6] The coupon applied to the cart persists as cart
-    # state: when the checkout payload posts no explicit code, the
-    # persisted one becomes the coupon source. The pre-existing validation
-    # below still re-runs every rule at checkout time (state may have
-    # changed since apply), so an invalidated coupon is rejected here
-    # rather than silently riding the FK into the order; a deleted coupon
-    # is already gone (SET_NULL) and simply applies nothing.
+    # With no explicit code, the coupon persisted on the cart is the source;
+    # every rule still re-runs here because state may have changed since apply.
     if not coupon_code and cart.coupon_id:
         coupon_code = cart.coupon.code
 
@@ -589,49 +406,34 @@ def create_order(request):
             return Response(
                 {
                     "error": "Minimum order amount is required",
-                    # The envelope moves this key into details and re-serializes
-                    # with DRF's encoder, which would turn a bare Decimal into
-                    # the float 5000.0; the wire contract for money is the same
-                    # 2-dp string here as everywhere else in the payload.
+                    # The envelope would re-serialize a bare Decimal as a float,
+                    # so money stays a 2-dp string on the wire.
                     "minimum_order_amount": money_string(coupon.minimum_order_amount),
                 },
                 status=status.HTTP_400_BAD_REQUEST,
             )
 
-        # The coupon-type math lives in one helper so this order row and the
-        # public preview can never disagree about what a coupon is worth
-        # (F-11). A free-shipping coupon returns 0.00 merchandise discount
-        # here; its waiver is applied to the delivery quote below instead.
+        # One helper for the coupon-type math, so this order row and the public
+        # preview cannot disagree (a free-shipping coupon returns 0.00 here).
         discount_amount = coupon_merchandise_discount(coupon, subtotal_amount)
 
-    # [R-1.07] SPEC-1-B05: still the MERCHANDISE total. The shipping charge is
-    # added inside the atomic block below, once the collapse guards have had
-    # their say, so a replay never reprices an order that already exists.
+    # Still the MERCHANDISE total; shipping is added below so a replay never
+    # reprices an order that already exists.
 
     merchandise_total = subtotal_amount - discount_amount
 
-    # The whole block is wrapped in the try so a shipping refusal PROPAGATES
-    # out of it and rolls it back whole, rather than being answered from
-    # inside it: a return from inside an atomic block commits whatever the
-    # block had already written, and "shipping could not be priced" must
-    # never leave a partial order behind (an order with no shipping cost is
-    # a free shipment).
+    # A shipping refusal must propagate out of the atomic block, not return
+    # from inside it: a partial order with no shipping cost would be free.
     try:
         with transaction.atomic():
-            # [R-21.2.6] Serialize same-session submissions on the cart row: two
-            # rapid POSTs queue here, so the loser re-runs the dedup lookup after
-            # the winner has committed and collapses onto the same order instead
-            # of minting a second payable one. The cart row is locked only on
-            # this path (verify_payment locks Order -> Products -> Coupon), so no
-            # new lock-order cycle is introduced.
+            # Serialize same-session submissions on the cart row, so the loser
+            # re-runs dedup after the winner commits; no new lock-order cycle.
             cart = Cart.objects.select_for_update().get(pk=cart.pk)
 
             duplicate = _find_duplicate_pending_order(owner, cart_items, coupon, body)
 
             if duplicate is not None:
-                # Benign double-submit retry, so INFO: a WARNING here would spam
-                # the log on every impatient re-click (same judgement as
-                # verify_payment's already-processed skip).
+                # Benign double-submit retry, so INFO.
                 logger.info(
                     "Checkout dedup: order %s replayed for %s "
                     "(identical pending submission)",
@@ -639,25 +441,12 @@ def create_order(request):
                     duplicate.customer_name,
                 )
 
-                # Scoped by `owner` above AND by `_same_purchase`, so this
-                # can only ever hand back a submission that agrees with the
-                # caller's own identity, on the complete shipping payload,
-                # on the delivery option, on the cart contents and on the
-                # coupon, inside the dedup window -- five independent
-                # agreements, which is what "the same purchase attempt"
-                # means for a double-click or a client retry.
+                # Scoped by owner and ``_same_purchase``: identity, shipping,
+                # delivery option, cart and coupon all agree inside the window.
                 return _checkout_response(duplicate, status.HTTP_200_OK)
 
-            # [R-9.3.14]/[R-9.3.19] SPEC-9-01: key-based replay collapse. The
-            # user row is locked first so two cross-session submissions carrying
-            # the same key serialize here -- the loser's probe runs only after
-            # the winner committed, which makes the probe-then-bind below
-            # race-free (the (user, idempotency_key) unique constraint stays the
-            # last-resort authority). This composes behind the SPEC-21-1 guard
-            # above, which stays the first line of defence for keyless
-            # same-session double-clicks: a keyed replay collapses onto the
-            # original order regardless of payload drift, the dedup window, or
-            # a settled first attempt, and never mints a second order_number.
+            # Key replay: lock the user row so concurrent keyed writers
+            # serialize; the (user, idempotency_key) constraint stays final.
             if idempotency_key is not None:
                 User.objects.select_for_update().get(pk=user.pk)
 
@@ -668,15 +457,8 @@ def create_order(request):
                 )
 
                 if replay is not None:
-                    # An authenticated caller proved who they are at login,
-                    # so (user, key) is a strong pair and SPEC-9-01's
-                    # "collapse regardless of payload drift" stands for
-                    # them. (The keyed GUEST branch that additionally
-                    # demanded whole-purchase agreement died with the
-                    # TIER1-GUEST-DEADEND refusal.)
-                    #
-                    # Benign keyed retry, so INFO: same judgement as the dedup
-                    # guard's collapse log above.
+                    # An authenticated (user, key) pair is strong enough to
+                    # collapse regardless of payload drift.
                     logger.info(
                         "Checkout idempotency: order %s replayed for %s "
                         "(Idempotency-Key)",
@@ -686,19 +468,8 @@ def create_order(request):
 
                     return _checkout_response(replay, status.HTTP_200_OK)
 
-            # [R-1.07] SPEC-1-B05: price the delivery, HERE - after both
-            # collapse guards and inside the same atomic block as the order
-            # row, so a rolled-back checkout takes the shipping cost with it
-            # and a collapse can never reprice an order that already exists.
-            #
-            # The inputs are the destination the customer typed and the
-            # delivery OPTION they picked (a method code). Nothing the client
-            # sent is read as an amount - `shipping_amount`, `shipping_cost`,
-            # `shipping` and `total_amount` have no reader anywhere in this
-            # path, so a forged `shipping_amount: 0` cannot reach the total.
-            # `lock=True` row-locks the matched rate, so a staff edit
-            # committing mid-checkout cannot tear the amount the order is
-            # charged.
+            # Price delivery after the collapse guards, inside the atomic block;
+            # clients name an option only, and lock=True keeps a staff edit out.
             shipping_quote = quote_shipping(
                 region=body.get("state"),
                 postal_code=body.get("pincode"),
@@ -707,29 +478,13 @@ def create_order(request):
                 lock=True,
             )
 
-            # A quote of None means the store has configured no shipping at
-            # all - a real zero charge recorded as one, never a rate of zero
-            # standing in for "we could not price this".
+            # A None quote means no shipping configured at all, recorded as an
+            # honest 0.00 rather than a zero rate.
             shipping_amount = (
                 shipping_quote.amount if shipping_quote is not None else Decimal("0.00")
             )
-            # A free delivery charge comes from either waiver, and both land
-            # on the ONE order-level amount: a merchant-set product flag
-            # (SPEC-C-04) or a free-shipping coupon. Convergence here is what
-            # keeps the pair from double-counting: there is a single charge
-            # to zero, so applying both is byte-identical to applying one.
-            #
-            # ANY qualifying merchandise line is enough (the spec's first
-            # option): the cart has one delivery cost, and a line advertised
-            # as shipping free is the reason to waive it. Flip the predicate
-            # to ``all(...)`` to require every line to qualify; nothing else
-            # in this block changes.
-            #
-            # The quote above still ran, so an unserviceable destination is
-            # still refused -- these waivers waive the charge, not the
-            # service -- and only the AMOUNT is zeroed. The quoted method is
-            # retained exactly as before, which is what tells this zero apart
-            # from the no-shipping-configured zero where the method is null.
+            # Either waiver zeroes the one order-level charge (both equals one);
+            # the quote still ran, so an unserviceable destination is refused.
             free_delivery = any(item.product.free_shipping for item in cart_items) or (
                 coupon is not None and coupon.discount_type == Coupon.FREE_SHIPPING
             )
@@ -738,26 +493,14 @@ def create_order(request):
             shipping_method_id = (
                 shipping_quote.method_id if shipping_quote is not None else None
             )
-            # [R-8.13] The delivery-option label is snapshotted beside the FK
-            # (spec 8.3: an order retains what was actually purchased), so the
-            # order still names the option it was charged for after the method
-            # row is deleted. Empty exactly when the FK is null for the other
-            # reason - the store had no shipping configured - which is what
-            # keeps those two cases tellable apart.
+            # Snapshot the option label beside the FK so the order still names
+            # it after the method row is deleted; empty only when unconfigured.
             shipping_method_code = (
                 shipping_quote.method_code if shipping_quote is not None else ""
             )
             if shipping_quote is None:
-                # The silent zero, made audible (SPEC-1-B05): this order is
-                # being accepted with no delivery charge because the store has
-                # no active shipping method, and nothing else in the request
-                # or the response says so. WARNING rather than INFO because
-                # the cost is silent revenue, and one line per order placed is
-                # a rate an operator can act on - a merchant who sees it can
-                # run `manage.py seed_shipping_methods`. The 201 is unchanged:
-                # refusing the order is a different decision than this task
-                # makes, and a store that has not configured shipping yet is
-                # not broken. `shipping_amount` stays the honest 0.00.
+                # Store has no active shipping method. WARNING because it is
+                # silent revenue; the 201 stands and the amount stays 0.00.
                 logger.warning(
                     "Checkout priced with NO shipping charge for %s: the store "
                     "has no active shipping method configured (seed one with "
@@ -766,22 +509,16 @@ def create_order(request):
                 )
             total_amount = quantize_money(merchandise_total + shipping_amount)
 
-            # [R-8.4] The order number is minted inside this same atomic block,
-            # so a rolled-back checkout never burns a number. Each attempt runs
-            # in a savepoint: a lost race (another connection committed the same
-            # candidate first) rolls back only the failed insert and the next
-            # turn regenerates from committed state. Same-session replays never
-            # reach this loop -- the dedup guard above returns first.
+            # Minted inside the same atomic block so a rollback never burns a
+            # number; each attempt is a savepoint so a lost race retries cleanly.
             for attempt in range(ORDER_NUMBER_ATTEMPTS):
                 candidate = _generate_order_number()
                 try:
                     with transaction.atomic():
                         order = Order.objects.create(
                             user=user,
-                            # The two-owner constraint: an account row carries
-                            # the empty guest_email (never NULL) and no
-                            # guest_token (TIER1-GUEST-DEADEND: no token is
-                            # ever minted while the refusal stands).
+                            # Account rows carry the empty guest_email (never
+                            # NULL) and no guest_token.
                             guest_email=guest_email,
                             full_name=body.get("full_name"),
                             phone=body.get("phone"),
@@ -798,36 +535,20 @@ def create_order(request):
                             order_number=candidate,
                         )
                 except IntegrityError:
-                    # Lost the number race: the unique constraint rejected the
-                    # candidate, so the savepoint above rolled the failed
-                    # insert back and this transaction stays usable for the
-                    # retry. The bound is a safety net, not the expected path:
-                    # one retry converges because the collision window is a
-                    # single insert.
+                    # Lost the number race: the savepoint rolled the insert back,
+                    # so the retry starts from committed state.
                     if attempt == ORDER_NUMBER_ATTEMPTS - 1:
                         raise
                     continue
                 break
 
-            # TIER1-WEBHOOK-CART: bind this cart to the order inside the
-            # same atomic block that mints the order (rollback-together), so
-            # the capture - browser verify or a much-later gateway webhook,
-            # which has no session cookie - can find this cart and empty it
-            # (orders.inventory.commit_order_sale). The cart row is already
-            # locked above; the OneToOne unique constraint on Cart.order is
-            # the last-resort authority should two sessions ever share a
-            # cart row.
+            # Bind the cart to the order in the same transaction so the capture
+            # path (even a later webhook with no session) can find and empty it.
             cart.order = order
             cart.save(update_fields=["order"])
 
-            # [R-10.12]/[R-10.17] SPEC-10-02: creation is the lifecycle's first
-            # transition (no source state -> pending), so the audit trail opens
-            # here — inside the same outer atomic block as the order row, the
-            # minted number, the snapshots and the key binding. A rolled-back
-            # checkout leaves no order and no event; the actor is the customer
-            # who placed the order (OrderStatusEvent.actor stays nullable for
-            # the guest rows that predate the TIER1-GUEST-DEADEND refusal,
-            # like StockMovement.created_by).
+            # Creation is the lifecycle's first transition; the audit trail opens
+            # here in the same transaction, so a rollback leaves no event behind.
             OrderStatusEvent.objects.create(
                 order=order,
                 from_status=None,
@@ -836,19 +557,14 @@ def create_order(request):
                 trigger=TRIGGER_ORDER_CREATE,
             )
 
-            # [R-9.3.14] SPEC-9-01: bind the submission key to the freshly
-            # minted order inside this same transaction, so a later replay's
-            # probe above finds it and collapses. The write is an UPDATE of the
-            # row this transaction just created, after the probe proved no
-            # committed order holds (user, key) and with the user-row lock
-            # excluding a concurrent keyed writer -- so the unique constraint
-            # cannot reject here.
+            # Bind the key inside this transaction: the probe above proved no
+            # committed order holds it and the user-row lock excludes a rival.
             if idempotency_key is not None:
                 order.idempotency_key = idempotency_key
                 order.save(update_fields=["idempotency_key"])
 
-            # Snapshot cart items. Inventory, coupon usage, and cart cleanup occur
-            # only after the payment provider confirms this specific order.
+            # Inventory, coupon usage and cart cleanup happen only after the
+            # payment provider confirms this order.
 
             for cart_item in cart_items:
                 product = cart_item.product
@@ -862,12 +578,8 @@ def create_order(request):
                     order=order,
                     product=product,
                     product_name=product.name,
-                    # [R-8.13] Freeze the catalogue identity the customer bought:
-                    # no variant-selection input exists yet (CartItem is
-                    # product-only, picking rides SPEC-3-21/SPEC-6-08) and the
-                    # product carries no product-level SKU, so sku snapshots
-                    # empty and variant_name mirrors the product name. Set once
-                    # here; no later save path mutates them.
+                    # Freeze catalogue identity: no variant selection exists yet
+                    # and the product carries no SKU, so sku stays empty.
                     sku="",
                     variant_name=product.name,
                     price=price,
@@ -875,17 +587,11 @@ def create_order(request):
                     subtotal=item_subtotal,
                 )
 
-            # [R-12.6] SPEC-12-02 §12.1 step 3: mint the checkout's time-limited
-            # holds inside this same atomic block, so a rolled-back checkout
-            # never leaves a hold behind (helper above carries the semantics).
-            # StockReservation.owner stays nullable for the guest rows that
-            # predate the refusal; a new hold always carries the account user.
+            # Mint the checkout's holds in this same block (helper above).
             _mint_order_reservations(order, cart_items, user)
 
-            # [R-7.20] Business-event trail: the order's creation is recorded in
-            # the same transaction as the order rows, so a rolled-back checkout
-            # leaves no phantom trail row and a committed order is never
-            # trail-less.
+            # Creation trail lands in the same transaction, so a committed order
+            # is never trail-less and a rollback leaves no row.
             AuditEvent.record(
                 AuditEvent.EventType.ORDER_CREATED,
                 actor=user,
@@ -895,10 +601,7 @@ def create_order(request):
                     "total_amount": str(order.total_amount),
                     "coupon": coupon.code if coupon else None,
                     "item_count": len(cart_items),
-                    # [R-1.07] What the order was charged to deliver it, in the
-                    # same trail row: the delivery charge is money like any other
-                    # and a reconciliation asks "what did this order cost" of
-                    # the trail, not only of the order row.
+                    # The delivery charge is money too, so the trail records it.
                     "shipping_method": shipping_quote.method_code
                     if shipping_quote is not None
                     else None,
@@ -907,10 +610,8 @@ def create_order(request):
             )
 
     except ShippingUnavailable as exc:
-        # [R-1.07] The destination cannot be shipped to (or the named method
-        # does not exist), so the whole transaction above rolled back: no
-        # order, no reservations, no audit row, no burnt order number. 400
-        # with the reason -- never a 500, and never a silent free shipment.
+        # The transaction rolled back whole: 400 with the reason, never a 500 and
+        # never a silent free shipment.
         return Response(
             {"error": str(exc)},
             status=status.HTTP_400_BAD_REQUEST,
@@ -919,34 +620,13 @@ def create_order(request):
     return _checkout_response(order, status.HTTP_201_CREATED)
 
 
-# ==================================
-# Guest order lookup (SPEC-1-B04, legacy rows)
-# ==================================
-
-
 @api_view(["GET"])
-# Opened deliberately (conventions.md:26): a guest has no session to
-# authorize against, which is precisely why the credential is a 256-bit token
-# (minted by the pre-refusal checkout path for rows that still exist --
-# TIER1-GUEST-DEADEND mints no new ones). AllowAny here does NOT mean
-# unguarded - the lookup below is the guard, and it is a guard by possession,
-# not by identity: it can only ever return the one row whose stored token
-# equals the presented one.
+# Opened deliberately: a guest has no session, so the 256-bit token is the
+# credential and the lookup below is a guard by possession.
 @permission_classes([AllowAny])
 def guest_order_detail(request, order_number=None):
-    """GET /api/orders/guest/[<order_number>/] - a guest's OWN order.
-
-    Two shapes, one view, because ``guest_token`` is UNIQUE: a token alone
-    identifies exactly one order, and the order number is an optional
-    cross-check on top of it. A caller who has the token can always find the
-    order; a caller who has only the order number cannot, because the number
-    carries a random suffix and is never the credential.
-
-    The failure is one answer for every miss - no token, a wrong token, an
-    unknown number, or somebody else's number with a valid token - so the
-    endpoint confirms nothing about which orders exist (``_guest_lookup_miss``).
-    The token arrives in a header, never the URL, for the same reason.
-    """
+    """GET /api/orders/guest/[<order_number>/] — a guest's OWN order. A unique
+    token alone identifies one order; every miss gets the one uniform answer."""
     token = (request.headers.get(GUEST_TOKEN_HEADER) or "").strip()
 
     if not token or len(token) > GUEST_TOKEN_MAX_LENGTH:
@@ -960,40 +640,22 @@ def guest_order_detail(request, order_number=None):
     if order is None:
         return _guest_lookup_miss()
 
-    # A hit is by definition a guest row (the token is NULL everywhere else),
-    # so no separate user check is needed: the filter IS the authorization.
+    # The token is NULL on non-guest rows, so the filter IS the authorization.
     return Response(OrderSerializer(order).data)
 
 
-# ==================================
-# Coupon preview (public)
-# ==================================
-
-
 def _uniform_coupon_rejection():
-    """Every coupon failure on the public preview returns this same body and
-    status, so the response never reveals whether a code exists or why it
-    was rejected (V-11 existence/validation-state leak). Differentiated
-    feedback stays on the authenticated checkout, where callers are not
-    brute-forcing the code space."""
+    """Every coupon failure on the public preview gets this same body and
+    status, so the response never reveals whether a code exists."""
     return Response(
         {"error": "Invalid coupon code"}, status=status.HTTP_400_BAD_REQUEST
     )
 
 
 def validate_redeemable_coupon(code, cart):
-    """Shared gate for the coupon surfaces that answer against a session
-    cart: the public preview and the cart-state apply (R-9.3.5). Resolves
-    `code` case-insensitively and enforces the full redeemable rule set --
-    active, within the validity window, under the usage limit, and not
-    below the minimum order amount -- rejecting with the ONE uniform body
-    so validation state never leaks (V-11). Extracted from apply_coupon so
-    the cart endpoints delegate to the same rules instead of copying them
-    (SPEC-9-05).
-
-    Returns (coupon, subtotal, None) when redeemable -- subtotal is handed
-    back because the preview needs the exact figure the minimum check used
-    for its discount math -- or (None, None, rejection) otherwise."""
+    """Shared redeemable gate for the coupon surfaces that resolve against a
+    session cart: the full rule set, one uniform body so validation state never
+    leaks. Returns ``(coupon, subtotal, None)`` or ``(None, None, rejection)``."""
     try:
         coupon = Coupon.objects.get(code__iexact=code)
 
@@ -1022,21 +684,9 @@ def validate_redeemable_coupon(code, cart):
 
 
 def coupon_merchandise_discount(coupon, subtotal):
-    """The merchandise discount ``coupon`` grants against ``subtotal``.
-
-    The one place the coupon-type math lives, so the public preview
-    (``apply_coupon``) and the persisted checkout discount can never disagree
-    about what a coupon is worth -- the F-11 quantize parity, and the reason
-    a free-shipping rule added in one caller cannot silently miss the other.
-    Both callers pass their own server-computed subtotal and store exactly
-    what this returns.
-
-    A free-shipping coupon carries NO merchandise discount: it waives the
-    order's delivery charge instead (applied to the server-side quote in
-    ``create_order``). It therefore always returns 0.00 here regardless of
-    ``discount_value``, while still passing every validity and minimum-order
-    check in its callers. The result is never more than the subtotal.
-    """
+    """The merchandise discount ``coupon`` grants on ``subtotal``, the one place
+    the coupon-type math lives. A free-shipping coupon always returns 0.00: its
+    waiver applies to the delivery quote instead."""
     if coupon.discount_type == Coupon.FREE_SHIPPING:
         return Decimal("0.00")
 
@@ -1063,33 +713,27 @@ def apply_coupon(request):
             {"error": "Coupon code is required"}, status=status.HTTP_400_BAD_REQUEST
         )
 
-    # Resolve the cart before the coupon: otherwise a caller with no cart
-    # could still probe code existence by watching for the coupon error
-    # instead of the cart error. With the cart first, every cartless caller
-    # gets the same answer for every code. Ownership follows the credential
-    # (D-04a): account cart for a bearer, session cart for a guest.
+    # Resolve the cart first, so a cartless caller cannot probe code existence
+    # by seeing the coupon error instead of the cart error.
     cart = resolve_cart(request, create=False)
 
     if cart is None:
         return Response({"error": "Cart not found"}, status=status.HTTP_404_NOT_FOUND)
 
-    # From here on every rejection shares one uniform response: unknown,
-    # inactive, not-yet-valid, expired, usage limit, and below minimum.
+    # Every rejection from here shares the one uniform response.
     coupon, subtotal, rejection = validate_redeemable_coupon(code, cart)
 
     if rejection is not None:
         return rejection
 
-    # Same helper and quantize parity as checkout (F-11): the preview shows
-    # the exact 2-dp merchandise discount the order will store. A
-    # free-shipping coupon shows 0.00 here -- its waiver lands on the delivery
-    # charge at checkout, which this merchandise-only preview has no field for.
+    # Same helper and quantize parity as checkout: the preview shows the exact
+    # 2-dp discount the order will store.
     discount = coupon_merchandise_discount(coupon, subtotal)
 
     final_total = subtotal - discount
 
-    # [R-9.3.24] The figures stay Decimal through the math; the serializer is
-    # the boundary that spells them as 2-dp strings on the wire.
+    # Decimals stay through the math; the serializer spells 2-dp strings on the
+    # wire.
     return Response(
         CouponPreviewSerializer(
             {

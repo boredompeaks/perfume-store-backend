@@ -26,42 +26,29 @@ from .models import (
     TOTPDevice,
 )
 
-# Replace auth's default User admin with the store-aware one below.
 admin.site.unregister(User)
 
-# SPEC-20-2 [R-20.18]: a staff-role add/remove is a privilege grant and gets
-# the same interstitial the destructive bulk actions use — same template, same
-# confirm contract, one mechanism. The prompt is deliberately not the bulk
-# action's: unlike a cancel, a role change CAN be undone, so telling the
-# operator otherwise would be a lie on the screen.
+# A staff-role change is a privilege grant, so it gets the same confirm
+# interstitial as the destructive bulk actions; its wording says it can be undone.
 ROLE_CHANGE_ACTION = "staff_role_change"
 ROLE_CHANGE_WARNING = (
     "adds or removes staff authority on this account. Confirm to continue."
 )
 
-# Q-S4 [F8]: the refusal a spent admin-login budget gets. Generic on purpose:
-# it names no account, no ident rule and no remaining time, so it is the same
-# page a caller sees regardless of who they were trying to be.
+# Generic on purpose: it names no account, ident rule or remaining time, so the
+# refusal is identical regardless of who the caller tried to be.
 ADMIN_LOGIN_THROTTLE_MESSAGE = (
     "Too many failed authentication attempts. Try again shortly."
 )
 
 
 class AdminLoginThrottle(SimpleRateThrottle):
-    """Failed-attempt budget for the Django admin login form (Q-S4 [F8]).
+    """Failed-attempt budget for the Django admin login form.
 
-    DRF's ScopedRateThrottle only ever sees DRF views, and AdminSite.login
-    hands this form to a plain Django LoginView — so the API 'auth' budget
-    provably never covered this door (pinned by the non-coverage proof in
-    tests/test_mfa.py). This is the same cache-window primitive DRF uses,
-    keyed per client ident exactly the way DRF keys anonymous budgets
-    (NUM_PROXIES-aware X-Forwarded-For, else REMOTE_ADDR), counting FAILED
-    attempts only: a successful login spends nothing, so honest traffic can
-    never lock an operator out. The rate comes from the env-driven
-    ADMIN_LOGIN_THROTTLE_RATE settings knob ('n/min', same shape as the DRF
-    rates; an empty value disables the bound — the documented kill switch),
-    not from the DRF rate table, because this throttle answers to the Django
-    settings module that already owns the admin/MFA configuration.
+    DRF's throttles only see DRF views, so the API 'auth' budget never covered
+    this plain-Django door; this reuses the same cache-window primitive, keyed
+    per client ident and charged only on failed attempts. The rate is the
+    env-driven ``ADMIN_LOGIN_THROTTLE_RATE`` knob (empty disables it).
     """
 
     scope = "admin-login"
@@ -70,10 +57,8 @@ class AdminLoginThrottle(SimpleRateThrottle):
         return getattr(settings, "ADMIN_LOGIN_THROTTLE_RATE", None) or None
 
     def get_cache_key(self, request, view):
-        # request is the plain HttpRequest the LoginView handed the form;
-        # get_ident reads only headers/META, which it carries. The view is
-        # unused (only ScopedRateThrottle ever reads one) but kept in the
-        # signature to match the base-class contract.
+        # request is the plain HttpRequest the form carries; get_ident reads only
+        # headers/META. The view is unused but kept to match the base-class signature.
         return self.cache_format % {
             "scope": self.scope,
             "ident": self.get_ident(request),
@@ -105,30 +90,13 @@ class AdminLoginThrottle(SimpleRateThrottle):
 
 
 class MFAAdminAuthenticationForm(AdminAuthenticationForm):
-    """Admin login + mandatory TOTP for privileged roles (SPEC-17-05).
+    """Admin login plus mandatory TOTP for privileged roles.
 
-    The second enforcement surface for R-17.9: ``is_privileged`` users
-    (superusers and ``staff.manage`` holders) must present a valid TOTP
-    code in the login form, and an unenrolled privileged account is
-    refused with the enrollment path named — same semantics as the staff
-    API login. ``user_cache`` is set only after the password validates, so
-    MFA errors appear only for correct credentials (nothing is leaked to
-    a caller who failed the first factor). Non-privileged staff and
-    customers log in exactly as before — the field is optional and unused
-    for them.
-
-    SPEC-20-8b: a device this browser was trusted on skips the fresh code
-    here too, through :func:`accounts.mfa_trust.is_trusted_device` — the
-    SAME decision the staff API serializer makes, so the directive "don't
-    challenge me every login" holds on the primary staff door and there is
-    exactly one implementation of the rule to keep honest. ``AdminSite.login``
-    hands the request to ``LoginView``, which passes it to the form, so
-    ``self.request.COOKIES`` is where the signed marker lives. Everything
-    below the skip is the unchanged pre-SPEC-20-8 challenge.
-
-    Q-S4 [F8]: the whole exchange is wrapped in
-    :class:`AdminLoginThrottle` — the API 'auth' scope never covered this
-    plain-Django door, and the form is where that gap is closed.
+    Privileged users must present a valid code (an unenrolled account is refused
+    with the enrollment path named), and a browser trusted through
+    ``accounts.mfa_trust`` skips the challenge via the same decision the staff API
+    makes. MFA errors appear only after the password validates, so nothing leaks
+    to a caller who failed the first factor.
     """
 
     totp = forms.CharField(
@@ -143,15 +111,11 @@ class MFAAdminAuthenticationForm(AdminAuthenticationForm):
     )
 
     def clean(self):
-        """Password + MFA, wrapped in the Q-S4 failed-attempt budget.
+        """Password + MFA, wrapped in the failed-attempt budget.
 
-        The budget is checked BEFORE the first factor is evaluated (a
-        refused attempt must not even get the password check) and spent on
-        every ValidationError the MFA leg raises — wrong password,
-        missing/invalid code, enrollment required — so the bound is on
-        failures, never on honest traffic. Without a request on the form
-        (direct construction, as the form-level tests do) the throttle
-        steps aside entirely.
+        The budget is checked before the password is evaluated and spent on
+        every ValidationError, so it bounds failures, never honest traffic; a
+        form built without a request (as the tests do) skips the throttle.
         """
         request = getattr(self, "request", None)
         throttle = AdminLoginThrottle()
@@ -172,9 +136,8 @@ class MFAAdminAuthenticationForm(AdminAuthenticationForm):
         device = TOTPDevice.active_for(user)
         if device is None:
             raise forms.ValidationError(MFA_ENROLLMENT_REQUIRED)
-        # The shared skip decision — see the class docstring. Read before
-        # the code is demanded, and never instead of the enrollment check
-        # above: a disabled factor must not be answered by a stale grant.
+        # The shared skip decision, read only after the enrollment check:
+        # a stale grant must not answer a disabled factor.
         if mfa_trust.is_trusted_device(getattr(self, "request", None), user, device):
             return cleaned_data
         code = cleaned_data.get("totp")
@@ -198,16 +161,10 @@ class MFAAdminAuthenticationForm(AdminAuthenticationForm):
 class StoreUserChangeForm(UserChangeForm):
     """UserChangeForm plus the role-scoped staff management field.
 
-    The raw ``groups`` M2M stays out of the fieldsets deliberately: the
-    roles surface (spec 6.12, [6.12.1]) manages exactly the staff role
-    Groups, so the form exposes only those — a plain Groups selector would
-    let even an admin grant unmapped, non-role authority. Any other group
-    membership is not this surface's business and survives saves here.
-
-    SPEC-1-B03: the queryset it is seeded with is narrowed per caller by
-    ``StoreUserAdmin.get_form``, so a caller who may not assign a role is
-    never even offered it (least privilege); the write path refuses such a
-    submission regardless.
+    The raw ``groups`` M2M stays out deliberately: only the staff role Groups
+    are exposed, so an admin cannot grant unmapped authority, and other group
+    memberships survive saves. The queryset is narrowed per caller, so a caller
+    who may not assign a role is never offered it.
     """
 
     staff_roles = forms.ModelMultipleChoiceField(
@@ -225,9 +182,8 @@ class StoreUserChangeForm(UserChangeForm):
         roles = cleaned_data.get("staff_roles")
         target_is_staff = cleaned_data.get("is_staff", self.instance.is_staff)
         if roles and not target_is_staff:
-            # Role groups grant staff API authority; a non-staff account
-            # holding one is an escalation channel — the user could never
-            # reach the admin again to have it revoked.
+            # Role groups grant staff API authority; on a non-staff account that
+            # is an escalation channel.
             raise forms.ValidationError(
                 "Staff roles can only be assigned to staff users."
             )
@@ -248,28 +204,15 @@ class OrderInline(admin.TabularInline):
         return False
 
 
+# RoleAwareModelAdmin must come first so its capability methods win the MRO.
 @admin.register(User)
 class StoreUserAdmin(RoleAwareModelAdmin, DjangoUserAdmin):
-    """Customer view: who they are, what they've ordered — plus the staff
-    roles management surface ([6.12.1]).
+    """Customer view plus the staff-roles management surface.
 
-    Role-aware least privilege (spec 6.12): anyone with ``customers.read``
-    may inspect customer records, but the User row is also where
-    ``is_staff`` and the role groups live — viewing/creating/editing/
-    deleting it is privilege management, so every mutation rides
-    ``staff.manage`` (admin, and the superadmin tier above it). This base
-    class must precede ``DjangoUserAdmin`` so the capability-driven
-    permission methods win the MRO.
-
-    The roles field renders only for ``staff.manage`` holders on staff
-    users (hidden otherwise, least privilege); every Group add/remove it
-    causes writes its own LogEntry naming the acting user ([6.12.5]).
-
-    SPEC-1-B03 adds a second, narrower gate on that field: assigning the
-    ``superadmin`` role is itself a high-privilege access change (spec 1.1
-    line 146), so it needs ``platform.configure`` — which ``admin`` does not
-    hold. ``_assignable_roles`` hides the tier from callers who cannot grant
-    it, and ``_refuse_restricted_roles`` refuses the submission itself.
+    Mutating a User row is privilege management, so every mutation rides
+    ``staff.manage``; the roles field renders only for holders on staff users,
+    and assigning the ``superadmin`` tier additionally needs
+    ``platform.configure``.
     """
 
     form = StoreUserChangeForm
@@ -280,9 +223,7 @@ class StoreUserAdmin(RoleAwareModelAdmin, DjangoUserAdmin):
         "delete": "staff.manage",
     }
     # DjangoUserAdmin's fieldsets with the raw groups M2M swapped for the
-    # role-scoped field; the add view keeps DjangoUserAdmin.add_fieldsets,
-    # which never offered group assignment either (roles are assigned on
-    # the change page after the account exists).
+    # role-scoped field; the add view keeps add_fieldsets, which never offered groups.
     fieldsets = (
         (None, {"fields": ("username", "password")}),
         ("Personal info", {"fields": ("first_name", "last_name", "email")}),
@@ -315,11 +256,8 @@ class StoreUserAdmin(RoleAwareModelAdmin, DjangoUserAdmin):
 
     def get_fieldsets(self, request, obj=None):
         fieldsets = super().get_fieldsets(request, obj)
-        # Least privilege (spec 6.12): the roles section exists only for
-        # staff.manage holders, and only on staff users. Stripping it here
-        # removes it from the rendered form, the POSTed form and the
-        # read-only view alike (the class-level fieldsets are rebuilt, not
-        # mutated — per-request state must never leak across requests).
+        # Least privilege: the roles section exists only for staff.manage holders
+        # on staff users; rebuild the tuple, never mutate class state.
         if obj is not None and not (
             self._map_grants(request, "change") and obj.is_staff
         ):
@@ -341,19 +279,11 @@ class StoreUserAdmin(RoleAwareModelAdmin, DjangoUserAdmin):
 
     def get_form(self, request, obj=None, **kwargs):
         form = super().get_form(request, obj, **kwargs)
-        # Note: as a declared field, staff_roles rides in every built form
-        # even when the fieldsets strip it — that is safe because a viewer
-        # without the capability gets 403 on POST (change gate), the
-        # save_model guard refuses off-flow callers, and clean() rejects
-        # roles on non-staff targets. Seeding stays capability-gated so
-        # stripped renders never expose even the choices list.
+        # A declared field rides in every built form even when stripped here; the
+        # POST gate and save_model guard refuse any off-flow use, so that is safe.
         if obj is not None and self._map_grants(request, "change") and obj.is_staff:
-            # Exactly the role groups (never arbitrary Groups), seeded
-            # with the user's current role membership. SPEC-1-B03: the
-            # queryset is narrowed to the roles this caller may actually
-            # assign, so the top tier is not even offered to an Admin that
-            # could not commit it (least privilege — the refusal below is
-            # the authority, this is what keeps the offer honest).
+            # Exactly the role groups, narrowed to what this caller may assign:
+            # the refusal below is the authority, this keeps the offer honest.
             form.base_fields["staff_roles"].queryset = Group.objects.filter(
                 name__in=self._assignable_roles(request)
             ).order_by("name")
@@ -362,16 +292,12 @@ class StoreUserAdmin(RoleAwareModelAdmin, DjangoUserAdmin):
             )
         return form
 
-    # ——— the escalation guard on role assignment (SPEC-1-B03) ———
-
     def _assignable_roles(self, request):
-        """Role names this caller may add or remove on the roles field."""
         return tuple(
             role for role in STAFF_ROLES if user_may_assign_role(request.user, role)
         )
 
     def _restricted_roles(self, request, groups):
-        """The subset of ``groups`` this caller may not add or remove."""
         return sorted(
             group.name
             for group in groups
@@ -381,11 +307,8 @@ class StoreUserAdmin(RoleAwareModelAdmin, DjangoUserAdmin):
     def _refuse_restricted_roles(self, request, groups):
         """Refuse a role change the caller has no authority to make.
 
-        The check is on the DIFF, both directions: minting the top tier is an
-        escalation and so is unminting it, and an Admin may do neither. It
-        raises rather than silently dropping the role from the submission,
-        because a caller who asked for a change they cannot make deserves the
-        refusal, not a save that quietly did something else.
+        The check is on the diff in both directions — unminting the top tier is
+        an escalation too — and it raises rather than silently dropping the role.
         """
         for role in self._restricted_roles(request, groups):
             raise PermissionDenied(
@@ -393,16 +316,9 @@ class StoreUserAdmin(RoleAwareModelAdmin, DjangoUserAdmin):
                 f"{ROLE_GRANT_CAPABILITY[role]} capability."
             )
 
-    # Spec 6.12 (line 2261): a non-superuser editor — the admin role
-    # included — may reassign the staff roles it holds authority over but
-    # must never grant the user flags themselves. is_staff opens the admin
-    # door, is_superuser is the trust anchor, and user_permissions is the
-    # same "permission change" escalation channel. Read-only keeps the
-    # current values visible while ModelForm excludes the fields entirely,
-    # so a crafted POST is ignored rather than validated away — only the
-    # superuser bypass grants flags. Role assignment (staff.manage) is
-    # unaffected; SPEC-1-B03 gates the TOP TIER separately, on
-    # platform.configure, which an admin-role editor does not hold.
+    # Non-superusers may reassign roles but never grant user flags: is_staff
+    # opens the admin door and is_superuser is the trust anchor. Read-only keeps
+    # them visible while excluding them from the form, so a crafted POST is ignored.
     PRIVILEGE_FLAGS = ("is_staff", "is_superuser", "user_permissions")
 
     def get_readonly_fields(self, request, obj=None):
@@ -415,10 +331,8 @@ class StoreUserAdmin(RoleAwareModelAdmin, DjangoUserAdmin):
         if "staff_roles" in form.cleaned_data and not self._map_grants(
             request, "change"
         ):
-            # Defense in depth against unauthorized privilege escalation
-            # (spec 6.12): the field only renders for staff.manage holders,
-            # so role data reaching this point means the caller bypassed
-            # the view flow — refuse before the user row is written at all.
+            # Defense in depth: role data reaching here means the caller bypassed
+            # the view flow.
             raise PermissionDenied("Role changes require the staff.manage capability.")
         super().save_model(request, obj, form, change)
         self._apply_staff_roles(request, obj, form)
@@ -426,21 +340,9 @@ class StoreUserAdmin(RoleAwareModelAdmin, DjangoUserAdmin):
     def _apply_staff_roles(self, request, obj, form):
         """Sync the staff role groups, auditing each add/remove.
 
-        The diff runs only across the role groups — any other group
-        membership is not this surface's business and survives the save.
-        Each direction logs separately via ``log_change``, which records
-        the acting user (``request.user``) and the role changed ([6.12.5]).
-
-        SPEC-1-B03: the diff is checked against the escalation guard before
-        a single membership row moves, so this holds for the confirmed
-        commit leg and for any caller that reaches the sync off the view
-        flow — an Admin can never mint or unmint the tier above itself.
-
-        SPEC-20-4 [R-20.27]/[R-20.29]: those per-direction messages are
-        prose, so they cannot answer what the account's authority was before
-        and after. One structured event records the real before -> after role
-        sets and states the surface as ``admin``; the per-direction LogEntry
-        rows are unchanged, so the shipped audit contract still holds.
+        Only role groups are diffed (other memberships survive), the escalation
+        guard runs before a single row moves, and one structured event records
+        the before/after sets alongside the per-direction LogEntry rows.
         """
         if "staff_roles" not in form.cleaned_data:
             return
@@ -455,8 +357,8 @@ class StoreUserAdmin(RoleAwareModelAdmin, DjangoUserAdmin):
             self.log_change(request, obj, f'Added role "{group.name}".')
         if held == desired:
             return
-        # The changeform view wraps this save in its own atomic block, so the
-        # event commits with the group membership or rolls back with it.
+        # The changeform view wraps this save in an atomic block, so the event
+        # commits with the membership or rolls back with it.
         log_mutation(
             request,
             obj,
@@ -472,13 +374,9 @@ class StoreUserAdmin(RoleAwareModelAdmin, DjangoUserAdmin):
             ],
         )
 
-    # ——— SPEC-20-2 [R-20.18]: the explicit confirm step ———
-
     def changeform_view(self, request, object_id=None, form_url="", extra_context=None):
-        # The seam of the shipped view flow (the same method ModelAdmin's
-        # get_urls wraps), entered before the form is even validated: a
-        # staff-role change must be confirmed, and this is the only place
-        # that can stop the save before save_model/_apply_staff_roles run.
+        # The seam of the shipped view flow, entered before the form is
+        # validated: the only place that can stop the save before save_model runs.
         pending = self._pending_role_change(request, object_id)
         if pending is not None:
             return self.render_confirmation(
@@ -501,30 +399,12 @@ class StoreUserAdmin(RoleAwareModelAdmin, DjangoUserAdmin):
         )
 
     def _pending_role_change(self, request, object_id):
-        """The role add/remove this POST would commit, as a detail payload,
-        or ``None`` when there is nothing to confirm.
+        """The role add/remove this POST would commit, as a detail payload, or None.
 
-        ``None`` means the ordinary view flow runs. The check is a DIFF, never
-        a presence test: an emptied multi-select legitimately submits no
-        ``staff_roles`` key at all, which is exactly a removal — so a
-        presence test would be the bypass.
-
-        Three guards come before the diff, each for a reason:
-
-        - the commit leg returns ``None``: ``confirm=yes`` means the user
-          already confirmed this exact submission and the normal, fully
-          validated save must now run — which is where the SPEC-1-B03
-          escalation guard refuses a role change it has no authority for;
-        - a caller without ``staff.manage`` returns ``None``: it must be
-          refused by the view's own change gate, never shown a confirmation
-          page for a privilege change they may not make;
-        - a non-staff target returns ``None``: roles are not part of a
-          customer's change surface at all (``get_fieldsets``), so that
-          form keeps its own guards and its own pins.
-
-        The confirmation covers the whole submission, not just the role rows,
-        because re-driving the same payload through the ordinary save is what
-        keeps every existing form guard in force on the commit leg.
+        The check is a diff, never a presence test (an emptied multi-select sends
+        no key at all, and that is a removal); the commit leg, callers without
+        ``staff.manage`` and non-staff targets return None so the ordinary view
+        flow keeps its own guards.
         """
         if request.method != "POST" or object_id is None:
             return None
@@ -536,19 +416,14 @@ class StoreUserAdmin(RoleAwareModelAdmin, DjangoUserAdmin):
         if target is None or not target.is_staff:
             return None
         held = set(target.groups.filter(name__in=STAFF_ROLES))
-        # The interstitial REPORTS the diff; it does not validate it. Only
-        # the role groups are resolved (the rendered choices), and a
-        # non-numeric or foreign pk is simply not part of the diff — the
-        # form's own queryset validation stays the authority on the commit
-        # leg, so a crafted value can never 500 the confirmation or, worse,
-        # be reported as if it were a role.
+        # The interstitial reports the diff, it does not validate it: the form's
+        # queryset stays the authority on the commit leg.
         submitted = {pk for pk in request.POST.getlist("staff_roles") if pk.isdigit()}
         desired = set(Group.objects.filter(pk__in=submitted, name__in=STAFF_ROLES))
         added = sorted(desired - held, key=lambda group: group.name)
         removed = sorted(held - desired, key=lambda group: group.name)
-        # SPEC-1-B03: a change this caller may not commit gets a refusal, not
-        # a confirmation — asking an Admin to confirm granting the tier above
-        # itself, only to be refused after they click, would be theatre.
+        # A change this caller may not commit gets the refusal now, not a
+        # confirmation followed by one.
         self._refuse_restricted_roles(request, set(added) | set(removed))
         if not (added or removed):
             return None
@@ -591,17 +466,12 @@ class StoreUserAdmin(RoleAwareModelAdmin, DjangoUserAdmin):
 
 @admin.register(TOTPDevice)
 class TOTPDeviceAdmin(RoleAwareModelAdmin):
-    """Read-only register of enrolled MFA factors.
+    """Read-only register of enrolled MFA factors, answering whether an account
+    has a working second factor without touching a database console.
 
-    Support needs to answer "does this account have a working second factor?"
-    without a database console; this row answers that. Nothing on this surface
-    is writable — not for any staff role and not through the superuser bypass,
-    which is why the three write permissions deny unconditionally instead of
-    following the capability map: a hand-edited row could silently strip a
-    factor from a privileged account or plant one, and enrollment/disable have
-    their own audited flows. ``secret`` appears in no field, column, filter or
-    search target, honouring the model's "returned exactly once, by the
-    enrollment endpoint and by nothing else" discipline.
+    Nothing is writable, even through the superuser bypass: a hand-edited row
+    could strip or plant a factor, and enrollment/disable have their own audited
+    flows. ``secret`` appears in no field, column, filter or search target.
     """
 
     capability_map = {"view": "customers.read"}
@@ -613,8 +483,8 @@ class TOTPDeviceAdmin(RoleAwareModelAdmin):
         "trusted_until",
         "created_at",
     )
-    # The view-only change page renders every field listed above, so pinning
-    # readonly to the same tuple keeps even a superuser from typing into it.
+    # Pinning readonly to the view-only page's fields keeps even a superuser
+    # from typing into it.
     readonly_fields = fields
     list_display = ("user", "enabled", "confirmed_at", "trusted_until", "created_at")
     list_filter = ("enabled",)

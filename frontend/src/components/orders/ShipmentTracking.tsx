@@ -9,13 +9,7 @@ import {
   type Shipment,
 } from "@/lib/tracking-api";
 
-/**
- * Presentation of a status VALUE, never a new status: the backend's five
- * values (label_created, dispatched, in_transit, delivered, exception)
- * spelled the way its own labels spell them. Underscores to spaces, first
- * letter up; nothing renamed, nothing invented (P5). Mirrors /track-order's
- * humanizer — same data, one vocabulary across both tracking surfaces.
- */
+/** Mirrors /track-order's humanizer: same data, one vocabulary. */
 function humanizeStatus(value: string): string {
   const flat = value.replace(/_/g, " ").trim();
   return flat.charAt(0).toUpperCase() + flat.slice(1);
@@ -36,26 +30,10 @@ function formatDeliveryDate(iso: string): string {
 }
 
 /**
- * §5.5 item 5 — shipment tracking, nested under the journey (screen:
- * the tracking panel rides inside the active consignment step). Fed by the
- * SAME endpoint the public tracker uses, `GET /api/shipping/track/
- * {order_number}/` (tracking-api.ts): an authenticated caller's session JWT
- * rides as Bearer and the backend authorises the owner. ONE block per
- * parcel, because a split shipment is explicitly modelled
- * (shipping/views.py:129). Only the six customer-facing fields render —
- * `internal_note` is deliberately absent from the serializer and stays out.
- *
- * This is the order page's ONLY tracking panel. D-02's separate
- * `ShipmentPanel` queried the same endpoint and duplicated the whole block;
- * its `provider` and `tracking_url` treatments are carried here so one
- * panel still shows everything a customer may follow.
- *
- * The miss is the backend's ONE uniform 404 ("no credential", "wrong token",
- * "no such order", "someone else's order", "no shipment yet" are the same
- * byte) — so this panel prints a single quiet line and never differentiates
- * (the anti-oracle rule). A network failure is a different thing entirely
- * (tracking-api.ts) and gets its own line; neither offers a retry here, the
- * page's own refetch covers the order and this query re-runs on remount.
+ * Same endpoint as the public tracker; the session JWT authorises the owner.
+ * One block per parcel because split shipments are explicitly modelled, and
+ * only customer-facing fields render (`internal_note` stays out). The miss is
+ * the backend's uniform 404; a network failure is separate and retryable.
  */
 export default function ShipmentTracking({
   orderNumber,
@@ -123,18 +101,9 @@ export default function ShipmentTracking({
 }
 
 /**
- * One parcel in the screen's nested-tracking treatment: status chip, waybill
- * rectangle (select-all, tabular so digits are unambiguous — §5.5 item 5),
- * carrier, provider, a safe external tracking link, estimated delivery, then
- * the checkpoint rail. Checkpoints keep the API's append order
- * (`ShipmentEvent._meta.ordering = (created_at, id)`, oldest first) with the
- * LATEST scan emphasised — the same semantics /track-order's parcel block
- * already ships; the screen's newest-first list is mockup presentation, not
- * data.
- *
- * `tracking_url` is operator-configured (a provider template), so it is
- * untrusted at render time: `safeExternalUrl` admits only absolute http(s)
- * URLs and every other value produces no anchor at all.
+ * Checkpoints keep the API's oldest-first append order with the latest scan
+ * emphasised. `tracking_url` is operator-configured, so only absolute http(s)
+ * URLs become anchors via `safeExternalUrl`.
  */
 function ParcelPanel({
   parcel,

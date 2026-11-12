@@ -1,77 +1,12 @@
 """Measure comment, docstring, logic and documentation volume.
 
-Why this exists
----------------
-#80's finding asserted a 45% comment/docstring ratio over 12,870 logic lines,
-4,435 comment lines and 6,063 docstring lines. The three figures appear
-nowhere in the tree and no command produced them, so the claim could not be
-checked -- and a policy pinned to an unmeasured number is itself the defect,
-not the ratio.
+Pinned definition ``doc-metrics-v1``: files come from the git INDEX, not the
+worktree (a CRLF checkout must not move a byte ratio); every physical line is
+classified exactly once as blank, docstring, comment or logic, with docstrings
+found by ``ast`` rather than a triple-quote regex. The baseline is a one-way
+ratchet: ``baseline`` refuses a higher ratio without ``--accept-increase``.
 
-This script is the command. It pins the definition below, measures the tree,
-and compares the result with ``scripts/doc_metrics_baseline.json``.
-
-The definition (``doc-metrics-v1``)
------------------------------------
-* **Universe.** Files git lists for this checkout (``git ls-files``), read from
-  the git INDEX (``git cat-file blob :path``), not the working tree.
-  ``core.autocrlf`` can put CRLF in a checkout while the commit stores LF, and
-  a byte ratio that moves with the local line endings is not a measurement;
-  the index is what the next commit contains, and after a commit it equals
-  ``HEAD``. A staged file is measured, an unstaged working-tree edit is not.
-* **App Python.** ``backend/**/*.py`` excluding the ``migrations`` package
-  (Django generates it; nobody wrote it for a reader) and test modules. A test
-  module is a file under a ``tests`` path component, or whose stem is
-  ``tests``, starts with ``test_``, or starts with ``tests_``.
-* **Docs.** ``backend/docs/**/*.md`` bytes, EXCLUDING the append-only
-  ``backend/docs/changes.md`` ledger. The ledger gets one row per change by
-  policy and cannot be cut, so counting it would make the ratio rise on every
-  commit and turn the gate into noise; its size is reported (the ``ledger``
-  scope) but not ratcheted.
-* **Every physical line is classified exactly once**, first match winning:
-    1. blank -- nothing but whitespace, wherever it sits. A blank line inside
-       a docstring is still blank: it is separator, not prose the author
-       wrote, and counting it as a docstring line would make the count depend
-       on how airy a docstring happens to be.
-    2. docstring -- inside the string literal that is the first statement of a
-       module, class, function or async function. Found with ``ast``, not a
-       triple-quote regex, so a triple-quoted constant assigned to a name is
-       logic and a ``#`` inside any string is text, not a comment.
-    3. comment -- the line's first non-whitespace character begins a ``#``
-       token. A line whose first character is code is logic even when a
-       trailing comment sits on it (the comment is visible in review; the line
-       is still logic).
-    4. logic -- everything else, including continuation lines and multi-line
-       non-docstring strings.
-* **Bytes are raw file sizes**, and the documentation ratio is docs bytes /
-  app Python bytes. A line count cannot compare a 20-line doc with a 20-line
-  module.
-* **Density is reported two ways**, because #80's "45% ... on 12,870 logic
-  lines" can be read as either and the difference matters:
-    * ``comment_docstring_per_logic = (comment + docstring) / logic``
-    * ``comment_docstring_share = (comment + docstring) / (logic + comment +
-      docstring)`` -- the share of non-blank-classified lines.
-  Comparisons cross-multiply the integer counts, so no float rounding decides
-  a pass. The floats in the artifact are printed for humans.
-
-Usage::
-
-    python scripts/doc_metrics.py measure          # human-readable table
-    python scripts/doc_metrics.py measure --json   # canonical artifact
-    python scripts/doc_metrics.py check            # 1 on regression
-    python scripts/doc_metrics.py baseline         # record the current state
-    python scripts/doc_metrics.py baseline --accept-increase
-    git add scripts/doc_metrics_baseline.json      # check reads the indexed copy
-
-``baseline`` refuses to record a ratio ABOVE the committed one unless
-``--accept-increase`` is passed: the baseline is a one-way ratchet so a routine
-refresh cannot quietly bless a regression, and an accepted increase is an
-explicit, reviewable line in the diff (its reason belongs in the changelog
-row, as ``conventions.md`` says). The baseline is read from the git index, like
-the measurement, so stage it before ``check`` will see an update.
-
-Exit codes: 0 clean, 1 regression or refused increase, 2 usage, environment or
-unparsable-source failure.
+Exit codes: 0 clean, 1 regression or refused increase, 2 usage/environment.
 """
 
 from __future__ import annotations
@@ -97,11 +32,9 @@ APP_PYTHON_PREFIX = "backend/"
 DOCS_PREFIX = "backend/docs/"
 LEDGER_PATH = "backend/docs/changes.md"
 
-# Git reads repository location from the environment before it looks at the
-# worktree. A hook (or a caller) that exports GIT_INDEX_FILE would make
-# ``git ls-files`` list THAT index -- empty or partial -- so the measurement
-# would silently describe a different tree. The measurement owns its repo and
-# its index, so these variables are stripped from every git subprocess.
+# Git honours repository-location variables before the worktree, and a hook
+# (pre-commit) exports GIT_INDEX_FILE: the measurement would read that index
+# instead of its own, so these are stripped from every git subprocess.
 GIT_LOCATION_ENV_VARS = (
     "GIT_DIR",
     "GIT_WORK_TREE",
@@ -127,14 +60,10 @@ class MeasurementError(Exception):
     """A tree that cannot be measured honestly. Exit 2, never a silent skip."""
 
 
-# --------------------------------------------------------------------------
-# Pure core: classification and ratios. No git, no filesystem, no network.
-# --------------------------------------------------------------------------
 
 
 @dataclass(frozen=True)
 class ScopeCounts:
-    """Line classes for one measurement scope."""
 
     files: int = 0
     total_lines: int = 0
@@ -169,11 +98,8 @@ class ScopeCounts:
 
 @dataclass(frozen=True)
 class Measurement:
-    """The scopes the artifact records.
-
-    ``ledger_markdown`` is reported beside the three ratcheted scopes because
-    it is documentation the policy cannot ask anyone to cut.
-    """
+    """The scopes the artifact records; ``ledger_markdown`` is reported, not
+    ratcheted."""
 
     app_python: ScopeCounts
     test_python: ScopeCounts
@@ -204,7 +130,6 @@ class Metric:
 
 
 def app_metrics(counts: ScopeCounts, docs_bytes: int) -> tuple[Metric, ...]:
-    """The three ratios the baseline ratchets, in reporting order."""
     comment_docstring = counts.comment_lines + counts.docstring_lines
     non_blank = counts.logic_lines + comment_docstring
     return (
@@ -215,34 +140,22 @@ def app_metrics(counts: ScopeCounts, docs_bytes: int) -> tuple[Metric, ...]:
 
 
 def normalise_newlines(source: str) -> str:
-    """Translate the three newline spellings Python accepts to ``\\n``.
-
-    ``ast`` and ``tokenize`` agree on line numbers only for the text they are
-    both given, and a CR-only source is split differently by a default
-    ``StringIO`` reader than by ``split_physical_lines``. Normalising once is
-    what keeps the classifier's line numbers and the tokenizer's rows aligned.
-    """
+    """Normalise the three newline spellings so the classifier's line numbers
+    and the tokenizer's rows stay aligned."""
     return source.replace("\r\n", "\n").replace("\r", "\n")
 
 
 def split_physical_lines(source: str) -> list[str]:
-    """Split into the physical lines the Python parser numbers.
-
-    ``str.splitlines`` would also split on form feed and Unicode line
-    separators, which the tokenizer does NOT number as new lines; that would
-    shift every line number after such a byte and misclassify docstrings. Only
-    the three newline spellings Python accepts are normalised.
-    """
+    """Split on ``\\n`` only: ``str.splitlines`` would split form feed and
+    Unicode separators the tokenizer does not number, shifting later lines."""
     lines = normalise_newlines(source).split("\n")
     if lines and lines[-1] == "":
         # A trailing newline terminates the last line, it does not start one.
-        # Keeping the phantom element would add one blank line per file.
         lines.pop()
     return lines
 
 
 def _docstring_line_numbers(tree: ast.AST) -> set[int]:
-    """Line numbers covered by a real module/class/function docstring."""
     covered: set[int] = set()
     for node in ast.walk(tree):
         if not isinstance(
@@ -273,13 +186,8 @@ def _comment_token_starts(source: str) -> set[tuple[int, int]]:
 
 
 def classify_source(source: str) -> ScopeCounts:
-    """Classify every physical line of one Python source.
-
-    Raises ``SyntaxError`` (from ``ast``) rather than guessing at an
-    unparsable file: a line that cannot be classified is not measured.
-    """
-    # One normalised text feeds the splitter, the parser and the tokenizer, so
-    # their line numbers cannot disagree about where a line starts.
+    """Classify every physical line; raises ``SyntaxError`` rather than
+    guessing at an unparsable file."""
     normalised = normalise_newlines(source)
     lines = split_physical_lines(normalised)
     tree = ast.parse(normalised)
@@ -293,9 +201,6 @@ def classify_source(source: str) -> ScopeCounts:
         elif number in docstrings:
             docstring += 1
         else:
-            # tokenize columns and str offsets both count characters, so the
-            # first non-whitespace offset identifies the token that opens the
-            # line. A line starting with code has no COMMENT token there.
             opening_column = len(line) - len(line.lstrip())
             if (number, opening_column) in comments:
                 comment += 1
@@ -312,7 +217,6 @@ def classify_source(source: str) -> ScopeCounts:
 
 
 def is_test_module(relpath: str) -> bool:
-    """Whether a tracked Python path is a test module by the pinned rule."""
     path = Path(relpath)
     if "tests" in path.parts:
         return True
@@ -374,8 +278,7 @@ def compare_to_baseline(
     """Return ``(metric, baseline_value, current_value)`` for each regression.
 
     Exact integer cross-multiplication, not float comparison: a tie at the
-    baseline's own ratio can round to a false regression if compared as floats.
-    """
+    baseline's own ratio can round to a false regression as floats."""
     old_scopes = baseline.get("scopes")
     if not isinstance(old_scopes, dict):
         raise MeasurementError("baseline is missing a 'scopes' object")
@@ -456,27 +359,17 @@ def validate_baseline(payload: object) -> dict[str, object]:
     scopes = payload.get("scopes")
     if not isinstance(scopes, dict):
         raise MeasurementError("baseline is missing a 'scopes' object")
-    # Validate every scope once here so a corrupt file fails at load, before a
-    # comparison can half-run against it.
     for name in ("app_python", "test_python", "docs_markdown", "ledger_markdown"):
         _scope_from_payload(scopes, name)
     return payload
 
 
-# --------------------------------------------------------------------------
-# Shell: git and the filesystem live here and nowhere else.
-# --------------------------------------------------------------------------
 
 
 def git_environment() -> dict[str, str]:
-    """The process environment with git's repository-location keys removed.
-
-    A hook can export ``GIT_INDEX_FILE`` (pre-commit does) or ``GIT_DIR``, and
-    git honours those before ``-C``: a measurement run from a hook would read
-    the hook's temporary index. The tool measures the repository it lives in,
-    so those inherited pointers are deliberately dropped; unrelated variables
-    (PATH, locale, config) are preserved.
-    """
+    """The process environment with git repository-location keys removed: a
+    hook can export ``GIT_INDEX_FILE``/``GIT_DIR``, and git honours those
+    before ``-C``. Unrelated variables (PATH, locale, config) are kept."""
     environment = dict(os.environ)
     for name in GIT_LOCATION_ENV_VARS:
         environment.pop(name, None)
@@ -497,13 +390,9 @@ def tracked_files(repo_root: Path) -> list[str]:
 
 
 def index_blob(repo_root: Path, relpath: str) -> bytes:
-    """Read one tracked file's staged content, never the working tree.
-
-    ``git cat-file blob :path`` reads the index, whose blobs git normalised on
-    ``add`` (so a CRLF checkout still measures the LF content the commit
-    stores). The index is also what the next commit will contain, which lets a
-    baseline be recorded from a staged tree; after the commit it equals HEAD.
-    """
+    """Read one tracked file's staged content, never the working tree: the
+    index holds git-normalised bytes, so a CRLF checkout still measures the
+    committed content."""
     completed = subprocess.run(
         ["git", "-C", str(repo_root), "cat-file", "blob", f":{relpath}"],
         capture_output=True,
@@ -518,7 +407,6 @@ def index_blob(repo_root: Path, relpath: str) -> bytes:
 
 
 def index_file_or_none(repo_root: Path, relpath: str) -> bytes | None:
-    """The staged bytes of ``relpath``, or ``None`` when it is not in the index."""
     listed = subprocess.run(
         ["git", "-C", str(repo_root), "ls-files", "-z", "--", relpath],
         capture_output=True,
@@ -623,12 +511,9 @@ def load_index_baseline(
 ) -> dict[str, object] | None:
     """The baseline the next commit would carry, or ``None`` if not staged.
 
-    The measurement reads the index, so the baseline it is compared against
-    must come from the same snapshot. Reading the working-tree file would let
-    an unstaged edit (or a deletion) describe a baseline that will not be
-    committed -- and ``record_baseline`` would then miss the very increase it
-    exists to refuse.
-    """
+    The measurement reads the index, so the baseline must come from the same
+    snapshot: an unstaged edit must not describe a baseline that will not be
+    committed."""
     relpath = _relative_to_repo(repo_root, path)
     if relpath is None:
         raise MeasurementError(
@@ -648,15 +533,9 @@ def record_baseline(
 ) -> tuple[bool, list[tuple[str, float, float]]]:
     """Write the baseline, unless that would record a higher ratio.
 
-    Returns ``(written, regressions)``. A refusal writes nothing: a baseline
-    that can be refreshed past a regression without an explicit flag is not a
-    ratchet, it is a snapshot of whatever ran last.
-
-    The previous baseline is read from the INDEX when ``path`` is inside the
-    repository, because that is the snapshot the measurement describes; an
-    unstaged working-tree deletion or edit cannot erase the comparison. After
-    writing, stage the file: ``check`` also reads the indexed copy.
-    """
+    Returns ``(written, regressions)``; a refusal writes nothing, because a
+    baseline refreshable past a regression is not a ratchet. Stage the file
+    afterwards: ``check`` reads the indexed copy."""
     if _relative_to_repo(repo_root, path) is not None:
         previous = load_index_baseline(repo_root, path)
     else:
@@ -677,9 +556,6 @@ def record_baseline(
     return True, regressions
 
 
-# --------------------------------------------------------------------------
-# Reporting.
-# --------------------------------------------------------------------------
 
 
 def _percent(part: int, whole: int) -> str:

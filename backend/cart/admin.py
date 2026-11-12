@@ -16,9 +16,8 @@ class CartItemInline(admin.TabularInline):
 @admin.register(Cart)
 class CartAdmin(RoleAwareModelAdmin):
     # Carts are customer-owned session state: staff may inspect them to help
-    # customers (``customers.read``) but never edit them from the admin —
-    # row edits would bypass the cart API's quantity/stock checks. The
-    # mutation kinds therefore map to no capability (superuser bypass only).
+    # customers but never edit them, because row edits would bypass the cart
+    # API's quantity/stock checks.
     capability_map = {
         "view": "customers.read",
         "add": None,

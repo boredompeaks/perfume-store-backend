@@ -1,72 +1,24 @@
-# SPEC-2-10b: orchestration for the deployable unit.
+# Orchestration: backend image, PostgreSQL, and the async substrate (Redis
+# broker, Celery worker, Celery beat). The storefront deploys separately
+# (frontend-deploy.yml). App configuration comes only from the env contract in
+# backend/.env.example, passed through via env_file; nothing here can drift
+# from what settings.py reads.
 #
-# Five services: the SPEC-2-10a backend image, a PostgreSQL 17 database, and
-# the async substrate the app queues through - Redis (broker), the Celery
-# worker and the Celery beat scheduler. The storefront is deliberately NOT
-# here: it deploys separately through .github/workflows/frontend-deploy.yml.
-# There is deliberately NO parallel configuration here - the app is configured
-# only through the env contract backend/config/settings.py already reads
-# (DATABASE_URL + the DJANGO_* keys), so nothing in this file can drift away
-# from what the code understands.
+# Local: docker compose up -d --build; then curl http://localhost:8000/health/
+# Release (migrations): scripts/release.sh - this file never migrates.
 #
-# Local/dev:
-#   cp <this-block-into-root-.env>        # see the env contract below
-#   docker compose up -d --build
-#   curl http://localhost:8000/health/    # the healthcheck probes this same URL
-# Release (production, migrations, deploy): scripts/release.sh - this file is
-# only orchestration, so it never migrates by itself.
-#
-# ENV CONTRACT (repo-root .env, already git-ignored - never commit it, and
-# scripts/release.sh refuses to run without it). Every value is a placeholder:
-#
-#   DJANGO_SECRET_KEY=<long random string>
-#   DJANGO_ALLOWED_HOSTS=localhost,127.0.0.1
-#   DJANGO_DEBUG=false
-#   # SPEC-22-03: a non-debug boot refuses to start unless it can declare
-#   # which environment it is, so the backend service passes this through
-#   # (default production; set local for local work).
-#   DJANGO_ENV=production
-#   # ...and unless it states the origin it serves, which only the deployment
-#   # knows: compose REFUSES TO START without it rather than letting the
-#   # container crash-loop on the settings import.
-#   CSRF_TRUSTED_ORIGINS=http://localhost:3000
-#   # SPEC-22-08 [R-22.6]: TLS hardening is ON in this file, with a
-#   # production default per key. A deployment behind a TLS-terminating proxy
-#   # needs none of these (the defaults are the hardened posture). A plain-HTTP
-#   # local `docker compose up` must override two of them:
-#   #   SECURE_SSL_REDIRECT=false       # otherwise http://localhost is 301'd
-#   #   SECURE_HSTS_SECONDS=0           # otherwise the browser is told to
-#   #                                  # refuse plain HTTP for a year
-#   SECURE_SSL_REDIRECT=true
-#   SECURE_HSTS_SECONDS=31536000
-#   POSTGRES_USER=perfume
-#   POSTGRES_PASSWORD=<long random string>
-#   POSTGRES_DB=perfume_store
-#   # Optional: a managed database instead of the `db` service below. Keep the
-#   # TLS setting in the URL (backend/.env.example explains why).
-#   # DATABASE_URL=postgres://user:password@host:5432/perfume_store?sslmode=require
-#   # Optional: the Celery broker knob (backend/.env.example documents it in
-#   # full). worker/beat DEFAULT to this compose network's broker
-#   # (redis://redis:6379/0) when it is unset, so a bare `.env` is enough for
-#   # the sweeps to run. Declaring it ALSO moves the backend's DRF throttle
-#   # cache onto that Redis (TIER1-THROTTLE-CACHE) - and when declaring it in
-#   # compose, the host is `redis`, not `localhost`: this file's services talk
-#   # over the compose network, and backend/.env.example's example value is a
-#   # host-local Redis for a venv run, which no container can reach.
-#   # REDIS_URL=redis://redis:6379/0
-#
-# The app-side keys (throttles, SMTP, Razorpay, security flags) are documented
-# in backend/.env.example and flow in through `env_file`; POSTGRES_* are
-# compose's own and are consumed by the interpolation below.
+# A non-debug boot refuses to start without DJANGO_ENV and CSRF_TRUSTED_ORIGINS
+# (compose fails closed on the latter). TLS hardening is ON with production
+# defaults, so a plain-HTTP local run must set SECURE_SSL_REDIRECT=false and
+# SECURE_HSTS_SECONDS=0 in the repo-root .env. DATABASE_URL/REDIS_URL there
+# override the in-network defaults.
 
 name: perfume-store
 
-# The ONE definition of the app's DATABASE_URL, referenced by backend, worker
-# and beat below (compose v2 supports x- extension fields anywhere top-level).
-# Assembled from the same POSTGRES_* variables the db service reads, so the
-# password has exactly one home (.env). The :? operator is a deliberate
-# fail-closed guard: an unset password variable must abort compose rather than
-# boot a half-configured URL - never weaken or remove it.
+# The ONE definition of DATABASE_URL, referenced by backend, worker and beat,
+# assembled from the same POSTGRES_* variables the db service reads so the
+# password has one home (.env). The :? is a fail-closed guard: an unset
+# password must abort compose - never weaken or remove it.
 x-database-url: &database-url "${DATABASE_URL:-postgres://${POSTGRES_USER:-perfume}:${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in the repo-root .env}@db:5432/${POSTGRES_DB:-perfume_store}?sslmode=disable}"
 
 services:
@@ -76,14 +28,13 @@ services:
     environment:
       POSTGRES_USER: ${POSTGRES_USER:-perfume}
       POSTGRES_DB: ${POSTGRES_DB:-perfume_store}
-      # No default on purpose: an unset password would quietly bring up a
-      # world-readable database, so compose refuses to start instead.
+      # No default on purpose: an unset password must abort, not bring up a
+      # world-readable database.
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in the repo-root .env}
     volumes:
       - postgres_data:/var/lib/postgresql/data
     healthcheck:
-      # pg_isready reports "accepting connections", which is the only readiness
-      # the app actually needs before `migrate` may run against it.
+      # "Accepting connections" is the only readiness `migrate` needs.
       test: ["CMD-SHELL", "pg_isready -q -U \"$$POSTGRES_USER\" -d \"$$POSTGRES_DB\""]
       interval: 5s
       timeout: 5s
@@ -92,74 +43,47 @@ services:
 
   backend:
     build:
-      # backend/ is the context, which is what makes backend/.dockerignore apply
-      # (same context the Dockerfile header documents).
+      # backend/ is the context, which is what makes backend/.dockerignore apply.
       context: ./backend
     image: perfume-backend:latest
     restart: unless-stopped
     depends_on:
       db:
-        # Wait for `accepting connections`, not just "started": the release
-        # script migrates before the app is up.
+        # Wait for "accepting connections", not "started": release migrates
+        # before the app is up.
         condition: service_healthy
     env_file:
       - path: .env
         required: false
     environment:
-      # Assembled once in the x-database-url anchor at the top of this file,
-      # from the same POSTGRES_* variables the db service reads, so the
-      # password has exactly one home (.env) and cannot drift out of sync
-      # with the database it names. sslmode=disable is correct HERE and only
-      # here: this is the in-network container, not a remote managed database
-      # (settings forwards query params into the Postgres OPTIONS dict, so the
-      # value is real, not decorative). A DATABASE_URL in .env overrides the
-      # whole thing for a managed database - which is why it is interpolated
-      # once in the anchor above rather than left to env_file, which this
-      # block would outrank.
+      # From the x-database-url anchor so the password has one home and cannot
+      # drift from the database it names. sslmode=disable is correct only here:
+      # in-network container, not a remote database (settings forwards query
+      # params into the Postgres OPTIONS dict, so the value is real). A
+      # DATABASE_URL in .env overrides it, which is why the anchor is
+      # interpolated here rather than left to env_file, which this block
+      # outranks.
       DATABASE_URL: *database-url
-      # Static files live inside the image (SPEC-22-01): whitenoise serves
-      # them from the app process, so the release only has to re-collect.
+      # Static files live inside the image; whitenoise serves them.
       DJANGO_STATIC_ROOT: /app/staticfiles
-      # SPEC-22-03 [R-22.3]: the guards apply to this container exactly as they
-      # apply to any non-debug boot, so the runtime env has to carry their keys
-      # - without DJANGO_ENV and CSRF_TRUSTED_ORIGINS the image refuses to
-      # import, the gunicorn CMD crash-loops, release.sh's migration
-      # checkpoint fails and /health/ never answers.
-      # Both are pass-throughs from the repo-root .env, because only the
-      # deployment knows which environment it is and which origin it serves.
-      # DJANGO_ENV defaults to a real declared name (this file IS the
-      # production orchestrator; set DJANGO_ENV=local for local work). The
-      # origins are REQUIRED rather than defaulted: a localhost default here
-      # is precisely the unconfigured deployment the settings guard exists to
-      # refuse, so compose names the missing key up front instead of letting
-      # the container die on the settings import. Neither is a secret.
+      # Non-debug boot guards: without both keys the image refuses to import
+      # and gunicorn crash-loops. DJANGO_ENV defaults to production (set local
+      # for local work); origins are REQUIRED rather than defaulted, because a
+      # localhost default is exactly the unconfigured deployment the guard
+      # refuses - so compose names the missing key up front.
       DJANGO_ENV: "${DJANGO_ENV:-production}"
       CSRF_TRUSTED_ORIGINS: "${CSRF_TRUSTED_ORIGINS:?set CSRF_TRUSTED_ORIGINS in the repo-root .env}"
-      # SPEC-22-08 [R-22.6]: the SPEC-17-07 transport hardening, turned ON
-      # here so a deployment actually gets it. Those settings are env-gated
-      # with development-safe defaults (SECURE_SSL_REDIRECT=False,
-      # SECURE_HSTS_SECONDS=0, no trusted proxy header), and until now nothing
-      # in the deploy path set any of them - so "HTTPS is enabled" was true of
-      # no real deployment (V-06). The defaults below are the production
-      # posture and each one is a pass-through, so a deployment that serves
-      # plain HTTP (local `docker compose up` over http://localhost) sets
-      # SECURE_SSL_REDIRECT=false / SECURE_HSTS_SECONDS=0 in the repo-root
-      # .env; a TLS-fronted deployment leaves them and gets HTTPS-only.
-      #
-      # SECURE_PROXY_SSL_HEADER_NAME is the WSGI environ NAME (Django reads
-      # request.META[header], and gunicorn maps the wire header
-      # X-Forwarded-Proto to HTTP_X_FORWARDED_PROTO) - not the bare header
-      # name. Setting "X-Forwarded-Proto" here would silently never match, so
-      # every proxied request would look plain HTTP and be redirected to HTTPS
-      # forever. Only set it when a proxy in front of this container actually
-      # sets that header on every request (nginx: `proxy_set_header
-      # X-Forwarded-Proto $scheme;`).
+      # TLS hardening ON with production defaults; a plain-HTTP local run
+      # overrides SECURE_SSL_REDIRECT=false / SECURE_HSTS_SECONDS=0 in .env.
+      # SECURE_PROXY_SSL_HEADER_NAME is the WSGI environ name
+      # (HTTP_X_FORWARDED_PROTO), not the bare header name: the latter silently
+      # never matches and every proxied request looks plain HTTP, looping the
+      # redirect. Set it only behind a proxy that sets the header on every
+      # request.
       SECURE_SSL_REDIRECT: "${SECURE_SSL_REDIRECT:-true}"
       SECURE_HSTS_SECONDS: "${SECURE_HSTS_SECONDS:-31536000}"
-      # Subdomains/preload are deliberately NOT defaulted on: HSTS
-      # includeSubDomains breaks any plain-HTTP subdomain and the preload list
-      # is effectively irreversible, so an operator opts in once the whole
-      # host tree is HTTPS (see backend/.env.example and the deploy runbook).
+      # Not defaulted on: includeSubDomains breaks plain-HTTP subdomains and
+      # preload is effectively irreversible, so operators opt in.
       SECURE_HSTS_INCLUDE_SUBDOMAINS: "${SECURE_HSTS_INCLUDE_SUBDOMAINS:-false}"
       SECURE_HSTS_PRELOAD: "${SECURE_HSTS_PRELOAD:-false}"
       SECURE_PROXY_SSL_HEADER_NAME: "${SECURE_PROXY_SSL_HEADER_NAME:-HTTP_X_FORWARDED_PROTO}"
@@ -167,26 +91,16 @@ services:
     ports:
       - "8000:8000"
     volumes:
-      # Named volume seeded from the image, so /app/media stays owned by the
-      # non-root appuser - /health/ reports degraded if it is not writable.
+      # Named volume seeded from the image so /app/media stays writable by the
+      # non-root appuser; /health/ reports degraded otherwise.
       - media_data:/app/media
     healthcheck:
-      # The REAL endpoint (config/urls.py -> ops.views.health): it queries the
-      # database and probes the media mount, and answers 503 while degraded -
-      # so a failure here is a real signal and not just "the process is up".
-      # urlopen() raises on 503, and the except branch turns that into a
-      # non-zero exit, which is exactly what the health state should mean.
-      # The image's default PORT is 8000 (backend/Dockerfile); keep this URL in
-      # step with it, or /health/ is probed on the wrong port.
-      #
-      # SPEC-22-08: the probe identifies itself the way the TLS front door
-      # does, because the hardening enabled above would otherwise refuse it -
-      # Host is the first entry of DJANGO_ALLOWED_HOSTS (an unlisted Host is a
-      # 400 under the SPEC-22-03 guard) and X-Forwarded-Proto is the scheme
-      # header SECURE_PROXY_SSL_HEADER_NAME reads, so SECURE_SSL_REDIRECT does
-      # not bounce the probe to an https:// this container does not serve.
-      # Both are read from the same env the app itself is configured with, so
-      # the probe cannot drift from the deployment's real values.
+      # Probes the real /health/ (DB + media mount; 503 while degraded), so a
+      # failure is a real signal, not just "process is up". Port must match the
+      # image's PORT=8000. Host is the first ALLOWED_HOSTS entry (an unlisted
+      # Host is a 400) and X-Forwarded-Proto satisfies the proxy pair, so
+      # SECURE_SSL_REDIRECT does not bounce the probe to https:// the container
+      # does not serve. Both read the same env the app is configured with.
       test:
         - CMD
         - python
@@ -208,44 +122,33 @@ services:
       retries: 5
       start_period: 30s
 
-  # The async substrate. Every Celery message crosses this broker, and any
-  # service whose env declares REDIS_URL also keeps its DRF throttle cache
-  # here (TIER1-THROTTLE-CACHE). Tag rationale: backend/requirements.lock pins
-  # the redis CLIENT at 8.1.0, so the server runs the same major - the same
-  # "float the minor, pin the major" posture CI uses for its own redis
-  # service, where the version-sensitive behaviour lives in the client.
+  # Every Celery message crosses this broker; a service declaring REDIS_URL
+  # also keeps its DRF throttle cache here. Pinned to the same major as the
+  # redis client in requirements.lock (8.1.0): "float the minor, pin the
+  # major", as CI does, since the version-sensitive behaviour is in the client.
   redis:
     image: redis:8-alpine
     restart: unless-stopped
     healthcheck:
-      # `redis-cli ping` exits non-zero while the server refuses commands -
-      # the same "ready enough" bar the db healthcheck's pg_isready sets, and
-      # the bar scripts/release.sh's `up --wait` blocks on.
+      # Non-zero while the server refuses commands; release.sh's `up --wait`
+      # blocks on this.
       test: ["CMD", "redis-cli", "ping"]
       interval: 5s
       timeout: 5s
       retries: 12
       start_period: 10s
-    # No volume, deliberately: nothing durable lives here. The queue is
-    # transient by design - the durable copy of a pending notification is the
-    # database outbox that beat's drain reads - so persisting broker state
-    # would only replay old messages after a restart.
+    # No volume, deliberately: the queue is transient (the durable copy is the
+    # database outbox), so persisting would only replay old messages.
 
-  # The Celery worker: executes the queued sweeps (expire_reservations,
-  # drain_notification_outbox, purge_notification_outbox - common/tasks.py
-  # runs each through call_command). Same image as backend, only the CMD
-  # differs: `docker compose build backend` (or `up --build`) produces the tag
-  # this service and beat run, so ONE build releases web and async on ONE
-  # image - which is exactly what makes step 6 of scripts/release.sh able to
-  # recreate all three on the released code.
+  # The Celery worker executes the queued sweeps via common/tasks.py. Same
+  # image/tag as backend (only the CMD differs), so one build releases web and
+  # async together.
   worker:
     image: perfume-backend:latest
     restart: unless-stopped
     depends_on:
       db:
-        # The sweeps write to the database, so they wait for real readiness
-        # ("accepting connections"), not just "container started" - the same
-        # bar the backend service sets.
+        # Sweeps write to the database, so wait for real readiness.
         condition: service_healthy
       redis:
         condition: service_healthy
@@ -253,51 +156,31 @@ services:
       - path: .env
         required: false
     environment:
-      # The same x-database-url anchor the backend service references, for
-      # the same reason: one home for the password (.env) and one database
-      # the sweeps and the app cannot disagree about.
+      # Same anchor as backend: one password home, one database.
       DATABASE_URL: *database-url
-      # The broker, defaulted HERE rather than inherited: settings.py's
-      # fallback is redis://localhost:6379/0, which inside a container is the
-      # container itself, so a worker started without this key would boot and
-      # then fail every publish against an address that never answers. The
-      # default names THIS network's broker instead; a repo-root .env
-      # overrides it exactly the way DATABASE_URL is overridden above (a
-      # managed Redis names its own host). backend intentionally does NOT get
-      # this default - without REDIS_URL the web app boots and serves on
-      # LocMemCache (see the env contract above), which is what keeps the
-      # backend service independent of redis' lifecycle.
+      # Defaulted HERE because settings.py falls back to redis://localhost,
+      # which inside a container is the container itself - a worker would fail
+      # every publish. A .env value overrides it. backend deliberately gets no
+      # such default: without REDIS_URL it serves on LocMemCache, keeping web
+      # independent of redis' lifecycle.
       REDIS_URL: "${REDIS_URL:-redis://redis:6379/0}"
-      # The SPEC-22-03 boot guards apply to a Celery process exactly as they
-      # apply to gunicorn: it imports the same settings module, so it carries
-      # the same declaration keys (defaults mirror the backend service; both
-      # are pass-throughs from the repo-root .env, never secrets themselves).
+      # Celery imports the same settings, so it needs the same boot-guard keys.
       DJANGO_ENV: "${DJANGO_ENV:-production}"
       CSRF_TRUSTED_ORIGINS: "${CSRF_TRUSTED_ORIGINS:?set CSRF_TRUSTED_ORIGINS in the repo-root .env}"
     command: celery -A config worker -l info
-    # The image carries its own HEALTHCHECK probing gunicorn's /health/ - it
-    # is written for the backend container, where something serves that port.
-    # A Celery container serves nothing there, so inheriting the probe marks
-    # a perfectly healthy worker UNHEALTHY (measured: `docker compose ps`
-    # flips to unhealthy once the image's retries run out) - a healthcheck
-    # that lies is worse than none. Disabled rather than replaced: a worker's
-    # readiness IS "broker healthy + db healthy + process alive" (the first
-    # two are healthchecked above; the third is the container state), and an
-    # `inspect ping` would judge readiness through the very broker it is
-    # judging - a second failure mode, not a second signal. Consequence,
-    # measured on Docker Compose v2.40: `up --wait` refuses a service with
-    # no healthcheck ("has no healthcheck configured"), so scripts/release.sh
-    # recreates worker and beat in a separate plain `up -d`, not in its
-    # /health/-gated `--wait`.
+    # The image's HEALTHCHECK probes gunicorn's /health/, but a Celery
+    # container serves nothing there, so inheriting it marks a healthy worker
+    # UNHEALTHY. Disabled rather than replaced (`inspect ping` would judge
+    # readiness through the broker it is judging); readiness is broker+db
+    # healthy+process alive. Consequence: Compose `up --wait` refuses a service
+    # with no healthcheck, so release.sh recreates worker/beat in a separate
+    # plain `up -d`.
     healthcheck:
       disable: true
 
-  # The Celery beat scheduler: fires the CELERY_BEAT_* cadences (expire the
-  # stale reservations, drain the notification outbox, purge expired rows -
-  # the schedule itself lives in config.settings, the tasks in
-  # common/tasks.py). Without this container the worker still executes queued
-  # tasks, but nothing ever schedules the sweeps - a release that ships only
-  # web + worker is the silent version of the hole ASYNC-INFRA closed.
+  # The Celery beat scheduler fires the CELERY_BEAT_* cadences (schedule in
+  # config.settings, tasks in common/tasks.py). Without it nothing schedules
+  # the sweeps, however healthy the worker is.
   beat:
     image: perfume-backend:latest
     restart: unless-stopped
@@ -310,24 +193,17 @@ services:
       - path: .env
         required: false
     environment:
-      # Same x-database-url anchor and boot-guard keys as the worker above -
-      # beat imports the same settings and publishes through the same broker.
+      # Same anchor and boot-guard keys as the worker.
       DATABASE_URL: *database-url
       REDIS_URL: "${REDIS_URL:-redis://redis:6379/0}"
       DJANGO_ENV: "${DJANGO_ENV:-production}"
       CSRF_TRUSTED_ORIGINS: "${CSRF_TRUSTED_ORIGINS:?set CSRF_TRUSTED_ORIGINS in the repo-root .env}"
-    # -s / --schedule: beat's default schedule file lands in the working
-    # directory (/app), which the image leaves root-owned while the process
-    # runs as the non-root appuser - so the file goes to /tmp, which is
-    # writable. Container-local state is enough: the schedule is code (the
-    # env cadences), and after a recreate at most one due sweep fires early -
-    # safe because each sweep is the same idempotent management command a
-    # manual run executes, and a queue drained twice per tick was already
-    # declared safe when the drain was written (backend/.env.example).
+    # -s /tmp/...: beat's default schedule file lands in /app, which the image
+    # leaves root-owned while the process runs as appuser; /tmp is writable.
+    # Container-local state is enough - the schedule is code, and a duplicate
+    # sweep is the same idempotent management command.
     command: celery -A config beat -l info -s /tmp/celerybeat-schedule
-    # Same inherited-HEALTHCHECK problem as the worker above, same fix:
-    # disable the image's gunicorn probe rather than fail `up --wait` on a
-    # scheduler that is running perfectly.
+    # Same inherited-HEALTHCHECK problem as the worker; same fix.
     healthcheck:
       disable: true
 
