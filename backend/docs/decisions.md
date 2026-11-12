@@ -172,3 +172,21 @@ validation — plus regression checks for F1-F8. Full attack catalog lives in
   ~8-10 min wall-clock. Public-repo GitHub-hosted runners are free; today's
   checks are ~3-4 min.
 - SECURITY.md + CONTRIBUTING.md: **QUEUED** (do not require a license).
+
+## 2026-11-11 — #65: variant stock is hidden in the admin, not wired into checkout (option b)
+
+`ProductVariant.stock` stays deliberately inert. The variant row carries a
+count, but `products.stock` is the only order-time authority: checkout and
+`verify_payment` never read the variant column, and the stock-boundary pins in
+`backend/products/test_variant.py` prove a zero-stock variant neither blocks
+nor consumes a sale. The only surface that presented the inert count as real
+inventory was the bare `ProductVariantAdmin` change form, so the administrative
+surface now matches what checkout enforces: `ProductVariantAdmin` excludes
+`stock` from the add and change forms, and the changelist shows no stock
+column. The column and its zero default remain in the schema unchanged.
+
+Option (a) from the issue — variant-level reservation, commit and stock
+movements in `backend/orders/inventory.py` with OrderItem snapshots — is a
+product feature and is deliberately not invented here; SPEC-6-13 remains its
+owner. Reversing the decision is one line in the admin (delete the `exclude`)
+once variant stock becomes enforceable end to end.

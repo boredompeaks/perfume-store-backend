@@ -464,7 +464,20 @@ class ProductAdmin(SavedFilterMixin, RoleAwareModelAdmin):
 
 @admin.register(ProductVariant)
 class ProductVariantAdmin(admin.ModelAdmin):
-    """Bare registration (SPEC-8-02a): the variant entity is visible with
-    default ModelAdmin behaviour, gated by Django's default per-model
-    permissions — no role holds them until SPEC-6-08 wires the capability
-    map. Fieldsets/actions/role matrix are deliberately absent."""
+    """Bare registration (SPEC-8-02a) with one deliberate omission (#65).
+
+    The variant entity is visible with default ModelAdmin behaviour, gated by
+    Django's default per-model permissions — no role holds them until SPEC-6-08
+    wires the capability map. Fieldsets/actions/role matrix are deliberately
+    absent.
+
+    ``stock`` is excluded (#65, option (b)): ``ProductVariant.stock`` is inert
+    by design — ``products.stock`` is the only order-time authority, and
+    checkout/verify_payment never read the variant count (``products/models.py``
+    pins that boundary). An editable box for a number checkout ignores presents
+    it as real inventory, so the admin shows none until SPEC-6-13 wires
+    variant-level stock into reservation, commit and movements. The column and
+    its default stay in the schema unchanged; only this surface hides it.
+    """
+
+    exclude = ("stock",)
