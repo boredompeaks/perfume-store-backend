@@ -14,6 +14,12 @@
 # able to go red on pre-existing findings, and a red run here is a finding to
 # report rather than a reason to baseline the claim away (the same rule
 # backend-tests.yml states for its own scan).
+#
+# A SECOND job measures comment/docstring/doc volume (#80): the line and byte
+# ratios are a trend, and a scheduled run is where a trend is visible without
+# blocking every PR that touches prose. The baseline it checks against is the
+# committed artifact, so the job has the same "red is a finding" contract as
+# the claim scan above.
 name: doc-claims-nightly
 
 on:
@@ -108,4 +114,33 @@ jobs:
             echo "::error::scanner reported ${errors} error(s) but exited 0; its exit-code contract has changed and this workflow can no longer trust it."
             exit 1
           fi
+          exit "${status}"
+
+  # #80 turned comment/docstring/doc volume from an assertion into a ratchet:
+  # scripts/doc_metrics.py pins the definition and
+  # scripts/doc_metrics_baseline.json is the committed baseline. This job is
+  # the trend oracle -- it re-measures the default branch and exits 1 when any
+  # ratio rose above the baseline. It is deliberately SCHEDULED, not a PR
+  # gate: a doc change is a judgement call that deserves the numbers on the
+  # table, and failing every added comment would teach people to bypass the
+  # check. A red run here is a finding to report, exactly like the claim scan
+  # above, and NOT a reason to re-record the baseline.
+  doc-metrics-trend:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: "3.14"
+
+      # No pip install: the tool is stdlib-only, for the same reason the claim
+      # scan's step has none. `git ls-files` needs a checkout, not history, so
+      # the default fetch-depth is enough here (unlike the claim scan above,
+      # which diffs from the root commit).
+      - name: Comment/doc volume against the committed baseline (doc_metrics)
+        run: |
+          set -euo pipefail
+          out="$(python scripts/doc_metrics.py check 2>&1)" && status=0 || status=$?
+          printf '%s\n' "${out}" | tee -a "${GITHUB_STEP_SUMMARY}"
           exit "${status}"
