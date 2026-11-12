@@ -1,13 +1,3 @@
-"""Settings security tests - V-02 (DEBUG fails open) and V-01 containment.
-
-The DEBUG guard lives at settings-import time, so it is exercised in a
-subprocess with a clean environment (no .env is loaded from a neutral cwd,
-and _LEAKED_ENV_NAMES strips what this process inherited from its own .env).
-The same subprocess pattern pins the env-driven DATABASE_URL behaviour
-(SPEC-2-01); its parser is additionally tested as a pure function so every
-branch is covered in-process.
-"""
-
 import os
 import subprocess
 import sys
@@ -33,11 +23,6 @@ import config.settings as config_settings
 
 BACKEND_DIR = Path(__file__).resolve().parent.parent
 
-# A complete non-debug boot - the production shape. config.settings refuses to
-# import an incomplete one (SPEC-22-03 [R-22.3]): the secret key, a declared
-# DJANGO_ENV, a usable DATABASE_URL and explicit hosts/origins are all
-# required. Every subprocess test that boots that shape starts from here, so
-# each missing key stays visible instead of hiding behind a harness default.
 _NON_DEBUG_ENV = {
     "DJANGO_SECRET_KEY": "x" * 50,
     "DJANGO_ENV": "production",
@@ -46,54 +31,30 @@ _NON_DEBUG_ENV = {
     "CSRF_TRUSTED_ORIGINS": "https://example.test",
 }
 
-# The same environment declared as staging: only the name differs.
 _STAGING_ENV = {**_NON_DEBUG_ENV, "DJANGO_ENV": "staging"}
 
-# Local development: DEBUG on, nothing declared, sqlite by default.
 _DEV_ENV = {"DJANGO_DEBUG": "true"}
 
-# Env names the settings module reads outside the DJANGO_/RAZORPAY_/EMAIL_
-# families. config.settings calls load_dotenv() at import, so an untracked,
-# git-ignored backend/.env has already injected these into this process's
-# os.environ before the harness builds its supposedly "clean" child
-# environment. Inheriting them made the documented-default assertions below
-# depend on the developer's local file rather than on the code under test
-# (e.g. a local SESSION_COOKIE_SECURE=false defeated the hardened-cookie
-# default). Scrubbing by name keeps the subprocess hermetic without touching
-# production settings logic. Add a name here whenever a test pins a
-# documented default for it.
+# config.settings calls load_dotenv() at import, so an untracked backend/.env has already injected these names; scrubbing by name keeps the child hermetic. Add a name here whenever a test pins a documented default for it.
 _LEAKED_ENV_NAMES = frozenset(
     {
         "ALERT_CACHE_BACKEND",
         "ALERT_CACHE_LOCATION",
         "CACHE_BACKEND",
         "CACHE_LOCATION",
-        # Same reason as CSRF_TRUSTED_ORIGINS: outside the DJANGO_ family and
-        # now a documented default this module pins.
         "CORS_ALLOWED_ORIGINS",
         "CSRF_COOKIE_SECURE",
-        # Outside the DJANGO_ family, and a documented default this module
-        # pins: without the scrub, an untracked local .env value reached the
-        # child and the SPEC-22-03 refusal for a non-debug boot without it
-        # could never fire.
         "CSRF_TRUSTED_ORIGINS",
         "DASHBOARD_SALES_WINDOW_DAYS",
         "DATABASE_URL",
         "DB_LOCAL_URL",
         "JWT_ACCESS_TOKEN_LIFETIME_SECONDS",
         "JWT_REFRESH_TOKEN_LIFETIME_SECONDS",
-        # Outside the DJANGO_ family, and documented defaults this module
-        # pins: an untracked local .env value would defeat the unset-env
-        # assertions below (SPEC-16-T4).
         "LANGUAGE_CODE",
         "LOW_STOCK_THRESHOLD",
         "MAX_UPLOAD_MB",
         "MFA_TRUST_DAYS",
         "NUM_PROXIES",
-        # Pins a documented default (TIER1-THROTTLE-CACHE): the default
-        # cache alias resolves to RedisCache when REDIS_URL is declared, so
-        # a developer's local .env value would flip the LocMemCache pins in
-        # this module and in tests.test_throttle_shared_cache.
         "REDIS_URL",
         "SECURE_HSTS_INCLUDE_SUBDOMAINS",
         "SECURE_HSTS_PRELOAD",
@@ -123,7 +84,7 @@ def run_settings_import(
         [sys.executable, "-c", snippet],
         capture_output=True,
         text=True,
-        cwd=tempfile.gettempdir(),  # neutral cwd: no .env is discovered
+        cwd=tempfile.gettempdir(),
         env={**env, "PYTHONPATH": str(BACKEND_DIR)},
         timeout=60,
     )
@@ -131,12 +92,6 @@ def run_settings_import(
 
 class DebugDefaultTests(SimpleTestCase):
     def test_v02_debug_fails_closed_by_default(self):
-        """V-02 (fixed): a missing DJANGO_DEBUG env var disables DEBUG
-        (fail-closed) — an unconfigured deployment lands in the hardened
-        configuration, never in verbose/leaky debug mode. Pinned via
-        subprocess because the test runner itself forces DEBUG=False
-        in-process; DJANGO_SECRET_KEY is provided so the import clears the
-        (now-active) DEBUG-false guard and the default itself is observed."""
         res = run_settings_import(
             dict(_NON_DEBUG_ENV),
             snippet="import config.settings as s; print('DEBUG_IS', s.DEBUG)",
@@ -145,23 +100,12 @@ class DebugDefaultTests(SimpleTestCase):
         self.assertIn("DEBUG_IS False", res.stdout)
 
     def test_v02_debug_absent_and_secret_absent_is_refused(self):
-        """The default is observed through the guard: the DEBUG-false
-        SECRET_KEY guard refuses to boot when DJANGO_DEBUG is absent —
-        which only happens if the default flipped to fail-closed (under a
-        fail-open True default the import would succeed unrefused)."""
         res = run_settings_import({})
         self.assertNotEqual(res.returncode, 0, res.stdout)
         self.assertIn("DJANGO_SECRET_KEY", res.stderr)
 
 
 class SimpleJwtConfigTests(SimpleTestCase):
-    """SPEC-17-01 [R-17.5]: both JWT lifetimes are env-driven (integer
-    seconds). Pinned in a subprocess because the point is that a *clean*
-    environment yields the documented defaults and a populated one the
-    operator's values — settings are import-time, like the DEBUG guard
-    above. The in-process lifecycle behaviour lives in accounts/tests.py.
-    """
-
     def test_missing_env_yields_the_documented_default_lifetimes(self):
         res = run_settings_import(
             dict(_NON_DEBUG_ENV),
@@ -215,12 +159,6 @@ class SimpleJwtConfigTests(SimpleTestCase):
 
 
 class SessionCookieConfigTests(SimpleTestCase):
-    """SPEC-17-03 [R-17.18]: the cart session cookie's SameSite policy is
-    explicit deployment config, defaulting to Lax — the same reading as the
-    JWT refresh cookie (SPEC-17-02): cross-site POSTs cannot attach the
-    cookie, same-site navigation keeps the cart working. Import-time
-    setting, so pinned via the subprocess pattern like every env knob."""
-
     def test_missing_env_yields_the_lax_default(self):
         res = run_settings_import(
             dict(_NON_DEBUG_ENV),
@@ -245,14 +183,6 @@ class SessionCookieConfigTests(SimpleTestCase):
 
 
 class InternationalizationConfigTests(SimpleTestCase):
-    """SPEC-16-T4 [R-16.4]: LANGUAGE_CODE and TIME_ZONE are deployment
-    config, resolved once at import.
-
-    The documented defaults are the values the module hardcoded before this
-    task; a valid env value is used as given, and a malformed one falls back
-    with a warning instead of crashing the boot. Import-time settings, so
-    pinned via the subprocess pattern like every other env knob above."""
-
     _SNIPPET = (
         "import config.settings as s; "
         "print('LANGUAGE_CODE', s.LANGUAGE_CODE); "
@@ -279,8 +209,6 @@ class InternationalizationConfigTests(SimpleTestCase):
         self.assertIn("TIME_ZONE Asia/Kolkata", res.stdout)
 
     def test_a_malformed_time_zone_falls_back_to_utc(self):
-        # Both zones the resolver must refuse: an unknown name and a
-        # path-shaped value (zoneinfo raises a different exception for each).
         for raw in ("Mars/Olympus", "../etc/passwd"):
             with self.subTest(value=raw):
                 res = run_settings_import(
@@ -302,12 +230,6 @@ class InternationalizationConfigTests(SimpleTestCase):
 
 
 class InternationalizationResolverTests(SimpleTestCase):
-    """The resolvers' branches, driven in-process.
-
-    The subprocess pins above observe the import; they cannot cover either
-    refusal branch in this process, so both resolvers are called directly
-    (the EmailTimeoutResolverTests precedent) to keep settings.py at 100%."""
-
     def test_valid_values_are_returned_unchanged(self):
         for name, raw, resolver in (
             ("TIME_ZONE", "America/New_York", config_settings._env_time_zone),
@@ -330,8 +252,6 @@ class InternationalizationResolverTests(SimpleTestCase):
                     self.assertEqual(resolver(name, "fallback"), "fallback")
 
     def test_a_malformed_value_falls_back_and_says_so(self):
-        # A silent fallback is how a knob becomes a mystery: the warning has
-        # to name the key and the value it refused.
         for name, raw, resolver in (
             ("TIME_ZONE", "Mars/Olympus", config_settings._env_time_zone),
             ("TIME_ZONE", "../etc/passwd", config_settings._env_time_zone),
@@ -346,14 +266,6 @@ class InternationalizationResolverTests(SimpleTestCase):
 
 
 class MfaTrustConfigTests(SimpleTestCase):
-    """SPEC-20-8: the "trust this device" TTL is deployment config, not code.
-
-    30 days is the documented window, 0 is the documented kill switch that
-    puts every privileged login back behind a fresh code, and a malformed
-    value falls back to the default instead of crashing settings import.
-    Import-time setting, so pinned via the subprocess pattern like every
-    other env knob."""
-
     _BOOT_ENV = _NON_DEBUG_ENV
     _SNIPPET = (
         "import config.settings as s; "
@@ -384,32 +296,12 @@ class MfaTrustConfigTests(SimpleTestCase):
 
 
 class EmailTimeoutConfigTests(SimpleTestCase):
-    """SPEC-ASYNC-2a: the SMTP socket wait is bounded, env-driven, and cannot
-    take the process down at settings import.
-
-    Before this, `EMAIL_TIMEOUT` was unset, so Django handed smtplib no
-    timeout at all: `socket.settimeout` is never called and a provider that
-    accepts the connection then stalls holds the request open forever. Every
-    send in this project is inline and pre-commit (inside the caller's
-    `transaction.atomic()`), so that wait is a checkout-blocking hang rather
-    than a slow request.
-
-    Import-time setting, so the resolution is pinned through the file's
-    subprocess pattern; every expected value below is a hand-written literal,
-    because an expectation recomputed from the constant under test would
-    agree with a wrong default from both sides.
-    """
+    """Before this, EMAIL_TIMEOUT was unset, so smtplib got no timeout and a provider that accepts then stalls held the (pre-commit) request open forever."""
 
     _BOOT_ENV = _NON_DEBUG_ENV
     _SNIPPET = "import config.settings as s; print('TIMEOUT', s.EMAIL_TIMEOUT)"
 
     def test_the_documented_default_is_ten_seconds(self):
-        """The default is the number .env.example documents, written out by
-        hand here rather than read back from the setting.
-
-        `EMAIL_*` is already stripped from the child environment by
-        `run_settings_import`, so this observes the code's own default and
-        not a developer's local .env."""
         res = run_settings_import(dict(self._BOOT_ENV), snippet=self._SNIPPET)
         self.assertEqual(res.returncode, 0, res.stderr)
         self.assertIn("TIMEOUT 10", res.stdout)
@@ -428,14 +320,7 @@ class EmailTimeoutConfigTests(SimpleTestCase):
                 self.assertIn(expected, res.stdout)
 
     def test_a_malformed_or_unusable_value_still_imports_on_the_default(self):
-        """The precedent this guards is a settings-import crash (the quiet
-        NaN in SHIPPING_FREE_THRESHOLD), so the load-bearing half of the pin
-        is `returncode == 0`: five bad values, a clean import every time, and
-        the documented default each time.
-
-        0 and -5 are in the list because they PARSE: the socket consumer is
-        what refuses them (`settimeout(0)` is non-blocking, a negative raises
-        at the send call), so a parse-only resolver would hand them on."""
+        """0 and -5 PARSE, so the socket consumer is what refuses them; a parse-only resolver would hand them on."""
         for raw in ("ten", "", "3.5", "0", "-5"):
             with self.subTest(value=raw):
                 res = run_settings_import(
@@ -446,12 +331,6 @@ class EmailTimeoutConfigTests(SimpleTestCase):
 
 
 class EmailTimeoutResolverTests(SimpleTestCase):
-    """The resolver's two branches, driven in-process.
-
-    The subprocess pins above observe the import; they cannot cover the
-    resolver's refusal branch in this process, so it is called directly (the
-    `DatabaseUrlParsingTests` precedent) to keep settings.py at 100%."""
-
     def test_a_usable_value_is_returned_unchanged(self):
         for raw in ("7", "1", "600"):
             with self.subTest(value=raw):
@@ -462,9 +341,6 @@ class EmailTimeoutResolverTests(SimpleTestCase):
                     )
 
     def test_a_non_positive_value_falls_back_and_says_so(self):
-        # Only this branch warns. `_env_int`'s own malformed-value fallback
-        # is silent (pre-existing, and shared with a dozen other keys), so
-        # nothing here claims a warning the code does not emit.
         for raw in ("0", "-5"):
             with self.subTest(value=raw):
                 with mock.patch.dict(os.environ, {"EMAIL_TIMEOUT": raw}):
@@ -472,17 +348,11 @@ class EmailTimeoutResolverTests(SimpleTestCase):
                         self.assertEqual(
                             config_settings._env_positive_int("EMAIL_TIMEOUT", 10), 10
                         )
-                # A silent fallback is how a knob becomes a mystery: the
-                # warning has to name the key and the value it refused.
                 self.assertTrue(
                     any("EMAIL_TIMEOUT" in line for line in logs.output), logs.output
                 )
 
     def test_an_unparseable_value_falls_back_through_the_int_resolver(self):
-        # Covered in a subprocess by the class above (the property that
-        # matters there is that the import survives); asserted here without a
-        # log expectation, because `_env_int` refuses a malformed value
-        # silently.
         with mock.patch.dict(os.environ, {"EMAIL_TIMEOUT": "ten"}):
             self.assertEqual(config_settings._env_positive_int("EMAIL_TIMEOUT", 10), 10)
 
@@ -497,17 +367,6 @@ _SMTP_PROBE_ENV = {
 
 
 class SmtpTimeoutReachesTheSocketTests(SimpleTestCase):
-    """Why the setting is not decorative: the resolved value has to arrive at
-    the socket, and the faked conversation is the only place that is visible.
-
-    Hermetic by construction - `smtplib.SMTP` is faked, so no socket is
-    opened and no test can wait on a real timeout (the wait itself is
-    deliberately NOT pinned by sleeping; the resolution is what is pinned).
-    The second test is the control that gives the first its meaning: with
-    the setting at Django's own default (None) NO timeout reaches smtplib,
-    which is the unbounded wait this task removed.
-    """
-
     def _send_once(self):
         with mock.patch("smtplib.SMTP") as smtp:
             smtp.return_value.ehlo.return_value = (250, b"ok")
@@ -539,10 +398,6 @@ class SettingsGuardTests(SimpleTestCase):
         self.assertIn("DJANGO_SECRET_KEY", res.stderr)
 
     def test_debug_false_with_a_complete_env_imports_cleanly(self):
-        # The V-02 guard cleared (a secret key is present) and nothing else
-        # refuses the boot - the production shape every other class here
-        # builds on (SPEC-22-03 added the env, database and hosts keys to
-        # what a non-debug boot must declare).
         res = run_settings_import({"DJANGO_DEBUG": "false", **_NON_DEBUG_ENV})
         self.assertEqual(res.returncode, 0, res.stderr)
         self.assertIn("IMPORT_OK", res.stdout)
@@ -554,13 +409,6 @@ class SettingsGuardTests(SimpleTestCase):
 
 
 class DevFrontendOriginTests(SimpleTestCase):
-    """Both loopback spellings of the dev storefront are trusted by default.
-
-    The storefront addresses the API on the host it was served from, so a page
-    at 127.0.0.1:3000 needs the API to accept that origin too; a single-origin
-    default silently refused those sessions.
-    """
-
     def _origins(self, env_overrides):
         res = run_settings_import(
             env_overrides,
@@ -580,8 +428,6 @@ class DevFrontendOriginTests(SimpleTestCase):
         self.assertIn(f"CSRF {expected}", stdout)
 
     def test_an_explicit_origin_list_wins_and_is_stripped(self):
-        # Padding after the commas is a plain typo, not a broken deployment:
-        # stripped, or the origin never matches any browser's Origin header.
         overrides = {
             "DJANGO_DEBUG": "true",
             "CORS_ALLOWED_ORIGINS": " https://shop.example.test , ",
@@ -596,12 +442,6 @@ class DevFrontendOriginTests(SimpleTestCase):
 
 
 class DatabaseUrlParsingTests(SimpleTestCase):
-    """Pure tests for the DATABASE_URL parser (SPEC-2-01).
-
-    The helper is called directly so every parsing branch runs in-process;
-    the import-time wiring is covered by DatabaseUrlImportTests below.
-    """
-
     def _fallback(self):
         return {
             "ENGINE": "django.db.backends.sqlite3",
@@ -621,11 +461,6 @@ class DatabaseUrlParsingTests(SimpleTestCase):
         self.assertEqual(db["ENGINE"], "django.db.backends.postgresql")
         self.assertEqual(db["NAME"], "perfume_store")
         self.assertEqual(db["USER"], "user")
-        # Expected password derived from the fixture URL's percent-encoded
-        # fragment via the stdlib instead of a standalone decoded literal,
-        # so no password-shaped string exists in source (secret scanner
-        # false positive on the previous hardcoded value). If the parser
-        # ever stopped unquoting, the raw 'p%40ss' would fail this assert.
         self.assertEqual(db["PASSWORD"], unquote("p%40ss"))
         self.assertEqual(db["HOST"], "db.example.com")
         self.assertEqual(db["PORT"], "5432")
@@ -640,17 +475,13 @@ class DatabaseUrlParsingTests(SimpleTestCase):
         self.assertNotIn("PORT", db)
 
     def test_postgres_url_forwards_sslmode_into_options(self):
-        # SPEC-22-01: sslmode travels in the URL query and reaches psycopg
-        # through OPTIONS. Dropping it (the previous behaviour) left a remote
-        # production database connecting unencrypted.
+        # SPEC-22-01: sslmode travels in the URL query and reaches psycopg through OPTIONS; dropping it left a remote database connecting unencrypted.
         db = config_settings._database_from_url(
             "postgres://u:p@db.example.com:5432/perfume_store?sslmode=require"
         )
         self.assertEqual(db["OPTIONS"], {"sslmode": "require"})
 
     def test_postgres_url_forwards_multiple_options_with_last_value_winning(self):
-        # Repeated keys: libpq takes the last occurrence, so the parser does
-        # too instead of letting dict-construction order decide.
         db = config_settings._database_from_url(
             "postgres://u:p@h/db?sslmode=disable&connect_timeout=10&sslmode=require"
         )
@@ -666,29 +497,20 @@ class DatabaseUrlParsingTests(SimpleTestCase):
         self.assertEqual(db["OPTIONS"], {"options": "-c statement_timeout=5000"})
 
     def test_postgres_url_without_query_omits_options_entirely(self):
-        # No empty OPTIONS dict: a backend with an empty OPTIONS is a
-        # different connection-setup path than one with none at all, so the
-        # key stays absent when the URL carries no params.
         db = config_settings._database_from_url("postgres://u:p@h:5432/db")
         self.assertNotIn("OPTIONS", db)
 
     def test_malformed_query_params_are_ignored_not_guessed_at(self):
-        # A bare flag (no '='), an empty pair and an empty key carry no
-        # value to forward; they are dropped rather than turned into a
-        # parameter the operator never wrote.
         db = config_settings._database_from_url(
             "postgres://u:p@h/db?sslmode=&novalue&&=orphan&sslmode=require"
         )
         self.assertEqual(db["OPTIONS"], {"sslmode": "require"})
 
     def test_sqlite_url_query_params_are_not_turned_into_options(self):
-        # Only the Postgres branch takes connection params: a sqlite URL
-        # with a stray query must stay a plain file configuration.
         db = config_settings._database_from_url("sqlite:///db.sqlite3?timeout=5")
         self.assertNotIn("OPTIONS", db)
 
     def test_postgres_url_without_host_keeps_name_only(self):
-        # Socket-style URL: no credentials or host to map onto the config.
         db = config_settings._database_from_url("postgres:///appdb")
         self.assertEqual(
             db, {"ENGINE": "django.db.backends.postgresql", "NAME": "appdb"}
@@ -734,23 +556,9 @@ class DatabaseUrlParsingTests(SimpleTestCase):
 
 
 class DatabaseUrlImportTests(SimpleTestCase):
-    """Import-time behaviour: DATABASE_URL drives DATABASES, and an unusable
-    one falls back to sqlite in DEVELOPMENT while refusing the boot in
-    production (SPEC-22-03 [R-22.3] - the refusal half is pinned by
-    NonDebugFailClosedTests below, this class pins the convenience and the
-    parsing wiring).
-
-    Since V-02 flipped DEBUG to fail-closed, a clean-environment settings
-    import needs DJANGO_SECRET_KEY to clear the DEBUG-false guard, so each
-    subprocess here boots with a development key (the tests' subject is
-    DATABASE_URL parsing, not the DEBUG guard, which has its own class).
-    """
-
     _BOOT_ENV = _NON_DEBUG_ENV
 
     def test_missing_database_url_imports_with_sqlite_default_in_development(self):
-        # DJANGO_DEBUG=true is what keeps the sqlite convenience alive; the
-        # production refusal for the same missing var is pinned below.
         res = run_settings_import(
             _DEV_ENV,
             snippet=(
@@ -782,8 +590,6 @@ class DatabaseUrlImportTests(SimpleTestCase):
         self.assertIn("FIELDS db u h 5432", res.stdout)
 
     def test_postgres_sslmode_reaches_the_imported_database_options(self):
-        # The import-time wiring, not just the pure parser: a production
-        # DATABASE_URL with sslmode must end up in DATABASES['default'].
         res = run_settings_import(
             {
                 **self._BOOT_ENV,
@@ -798,7 +604,6 @@ class DatabaseUrlImportTests(SimpleTestCase):
         self.assertIn("OPTIONS {'sslmode': 'require'}", res.stdout)
 
     def test_malformed_database_url_falls_back_in_development(self):
-        # The developer convenience that production no longer gets.
         res = run_settings_import(
             {**_DEV_ENV, "DATABASE_URL": "postgres://u@h:notaport/db"},
             snippet=(
@@ -822,25 +627,12 @@ class DatabaseUrlImportTests(SimpleTestCase):
 
 
 class NonDebugFailClosedTests(SimpleTestCase):
-    """SPEC-22-03 [R-22.3]: a non-debug boot must be COMPLETE, or it must not
-    happen at all.
-
-    The blocker was a silent one: a production host with a missing or
-    typo'd DATABASE_URL booted perfectly on the local sqlite developer
-    database - no error, no log line, developer data in front of customers -
-    and there was no way to tell staging from production at all. Each boot
-    below is one key short of the production shape and must refuse by name;
-    the matching development boot must still come up on sqlite.
-    """
-
     def _refuses(self, env, expected):
-        """Boot with exactly this environment and require a named refusal."""
         res = run_settings_import(env)
         self.assertNotEqual(res.returncode, 0, res.stdout)
         self.assertIn(expected, res.stderr)
 
     def _without(self, key):
-        """The production shape minus one required key."""
         self.assertIn(key, self._BASE)
         return {k: v for k, v in self._BASE.items() if k != key}
 
@@ -865,19 +657,14 @@ class NonDebugFailClosedTests(SimpleTestCase):
         self._refuses({**self._BASE, "DATABASE_URL": "postgres://[::1"}, "DATABASE_URL")
 
     def test_unsupported_database_scheme_refuses_to_boot(self):
-        # The message names the scheme, never the URL: it carries a password.
         self._refuses({**self._BASE, "DATABASE_URL": "mysql://u:p@h/db"}, "mysql")
 
     def test_staging_is_refused_just_like_production(self):
-        # Staging is a real deployment with real data of its own, so it
-        # gets exactly the production treatment - no debug-shaped escape.
         res = run_settings_import({**_STAGING_ENV, "DATABASE_URL": ""})
         self.assertNotEqual(res.returncode, 0, res.stdout)
         self.assertIn("DATABASE_URL", res.stderr)
 
     def test_explicit_sqlite_url_is_honoured_outside_development(self):
-        # An EXPLICIT sqlite:// URL is a deliberate choice (a single-box
-        # staging install), not a silent substitution, so it still boots.
         res = run_settings_import(
             {**self._BASE, "DATABASE_URL": "sqlite:////tmp/staging.sqlite3"},
             snippet=(
@@ -891,8 +678,6 @@ class NonDebugFailClosedTests(SimpleTestCase):
         self.assertIn("NAME /tmp/staging.sqlite3", res.stdout)
 
     def test_debug_true_without_database_url_still_boots_on_sqlite(self):
-        # The other half of the contract: the developer convenience is
-        # intact, so local work and the test suite are unaffected.
         res = run_settings_import(
             _DEV_ENV,
             snippet=(
@@ -905,16 +690,12 @@ class NonDebugFailClosedTests(SimpleTestCase):
         self.assertEqual(res.returncode, 0, res.stderr)
         self.assertIn("ENGINE django.db.backends.sqlite3", res.stdout)
         self.assertIn("ENV local", res.stdout)
-        # The dev host defaults stay a development-only convenience.
         self.assertIn("HOSTS ['localhost', '127.0.0.1']", res.stdout)
 
     def test_debug_false_without_a_declared_environment_refuses_to_boot(self):
-        # Which environment is this? An undeclared one cannot be isolated
-        # from the others, so it is refused instead of assumed.
         self._refuses(self._without("DJANGO_ENV"), "DJANGO_ENV")
 
     def test_unknown_environment_name_refuses_to_boot(self):
-        # A typo must not quietly become "whatever the default was".
         self._refuses({**self._BASE, "DJANGO_ENV": "productionn"}, "productionn")
 
     def test_non_debug_without_allowed_hosts_refuses_to_boot(self):
@@ -924,8 +705,6 @@ class NonDebugFailClosedTests(SimpleTestCase):
         self._refuses(self._without("CSRF_TRUSTED_ORIGINS"), "CSRF_TRUSTED_ORIGINS")
 
     def test_every_declared_environment_boots(self):
-        # The isolation story is only useful if each environment is a
-        # configuration this project can actually boot.
         for name in ("local", "ci", "staging", "production"):
             with self.subTest(env=name):
                 res = run_settings_import(
@@ -936,8 +715,6 @@ class NonDebugFailClosedTests(SimpleTestCase):
                 self.assertIn(f"ENV {name}", res.stdout)
 
     def test_resolver_refusals_name_the_problem_in_process(self):
-        # The pure resolvers behind the boot guards, so the refusal branches
-        # are covered in-process too (a subprocess cannot be).
         with self.assertRaises(ImproperlyConfigured) as caught:
             config_settings._databases_from_url(None, False)
         self.assertIn("DATABASE_URL", str(caught.exception))
@@ -947,14 +724,11 @@ class NonDebugFailClosedTests(SimpleTestCase):
         with self.assertRaises(ImproperlyConfigured) as caught:
             config_settings._deployment_environment(False)
         self.assertIn("DJANGO_ENV", str(caught.exception))
-        # The resolver reads the one documented key, so an invalid value is
-        # set there (and restored) rather than through a test-only name.
         os.environ["DJANGO_ENV"] = "prod"
         try:
             with self.assertRaises(ImproperlyConfigured) as caught:
                 config_settings._deployment_environment(True)
             self.assertIn("'prod'", str(caught.exception))
-            # A declared value is honoured, in development too.
             os.environ["DJANGO_ENV"] = "staging"
             self.assertEqual(config_settings._deployment_environment(True), "staging")
         finally:
@@ -965,8 +739,6 @@ class NonDebugFailClosedTests(SimpleTestCase):
         ):
             with self.assertRaises(ImproperlyConfigured):
                 resolver()
-        # The permitted branches: development keeps its defaults, and a
-        # declared value is honoured.
         self.assertEqual(config_settings._deployment_environment(True), "local")
         self.assertEqual(
             config_settings._env_hosts("MISSING_HOSTS_TEST", "localhost", True),
@@ -979,13 +751,6 @@ class NonDebugFailClosedTests(SimpleTestCase):
 
 
 class StaticFilesProductionTests(SimpleTestCase):
-    """SPEC-22-01: the documented production path is real — STATIC_ROOT exists
-    so `collectstatic` has somewhere to write, and whitenoise serves the
-    result from the app process so DEBUG=false does not strip every asset
-    from the admin. Import-time settings, pinned like every other knob above
-    (the subprocess pattern keeps a developer's local .env out of it).
-    """
-
     _BOOT_ENV = _NON_DEBUG_ENV
 
     def test_static_root_defaults_to_the_conventional_directory(self):
@@ -1013,10 +778,6 @@ class StaticFilesProductionTests(SimpleTestCase):
         self.assertIn("STATIC_ROOT /srv/assets/static", res.stdout)
 
     def test_collectstatic_succeeds_into_the_configured_static_root(self):
-        # The end-to-end proof: a DEBUG=false settings import plus a real
-        # `collectstatic` run writes files into the configured directory.
-        # Nothing here touches the repo's own staticfiles/ — the root is a
-        # temp dir the test owns and removes.
         with tempfile.TemporaryDirectory() as static_root:
             env = {
                 **self._BOOT_ENV,
@@ -1046,9 +807,6 @@ class StaticFilesProductionTests(SimpleTestCase):
     def test_whitenoise_is_wired_behind_security_and_before_session(self):
         middleware = settings.MIDDLEWARE
         self.assertIn("whitenoise.middleware.WhiteNoiseMiddleware", middleware)
-        # Documented slot: SecurityMiddleware may rewrite the response first,
-        # so whitenoise must not run above it; and nothing that touches the
-        # session or the request body should sit between them.
         self.assertLess(
             middleware.index("django.middleware.security.SecurityMiddleware"),
             middleware.index("whitenoise.middleware.WhiteNoiseMiddleware"),
@@ -1059,10 +817,6 @@ class StaticFilesProductionTests(SimpleTestCase):
         )
 
     def test_static_serving_is_not_gated_on_debug(self):
-        # whitenoise sits in MIDDLEWARE unconditionally and STATIC_ROOT is
-        # set unconditionally, so a DEBUG=false boot (the production shape)
-        # still serves assets. USE_FINDERS may follow DEBUG — it only widens
-        # local development, it cannot remove the production path.
         res = run_settings_import(
             {"DJANGO_DEBUG": "false", **self._BOOT_ENV},
             snippet=(
@@ -1078,18 +832,6 @@ class StaticFilesProductionTests(SimpleTestCase):
 
 
 class MediaServingProductionTests(SimpleTestCase):
-    """SPEC-2-04 [V-13]: an uploaded product image must not 404 in production.
-
-    Two independent halves, pinned here. The storage half: where media is
-    written (DJANGO_MEDIA_ROOT) and which backend writes it
-    (DJANGO_MEDIA_BACKEND, settings.STORAGES) are configuration, so a
-    deployment persists uploads on a mounted volume instead of the app
-    container's filesystem. The serving half: the media URL is a real route
-    (config/urls.py -> django.views.static.serve), NOT Django's static()
-    helper, which returns nothing at all when DEBUG=False — that silent
-    no-op is what made every product image 404 in production.
-    """
-
     _BOOT_ENV = _NON_DEBUG_ENV
 
     def test_media_storage_defaults_to_the_documented_django_backends(self):
@@ -1109,9 +851,6 @@ class MediaServingProductionTests(SimpleTestCase):
         )
         self.assertIn("MEDIA_URL /media/", res.stdout)
         self.assertIn("DEFAULT django.core.files.storage.FileSystemStorage", res.stdout)
-        # whitenoise serves what collectstatic gathered, so the staticfiles
-        # backend stays the plain one: a manifest-hashing storage would
-        # rewrite every collected asset URL.
         self.assertIn(
             "STATICFILES django.contrib.staticfiles.storage.StaticFilesStorage",
             res.stdout,
@@ -1126,8 +865,6 @@ class MediaServingProductionTests(SimpleTestCase):
             },
             snippet=(
                 "import config.settings as s; "
-                # as_posix() so the printed path is platform-independent
-                # (a Windows subprocess would render backslashes).
                 "print('MEDIA_ROOT', s.MEDIA_ROOT.as_posix()); "
                 "print('DEFAULT', s.STORAGES['default']['BACKEND'])"
             ),
@@ -1137,17 +874,12 @@ class MediaServingProductionTests(SimpleTestCase):
         self.assertIn("DEFAULT example.bucket.MediaBucket", res.stdout)
 
     def test_malformed_media_backend_refuses_to_boot(self):
-        # A filesystem path is not importable. Left unvalidated it would
-        # surface as an ImportError on the first staff upload in production,
-        # long after the deploy that caused it.
         res = run_settings_import(
             {**self._BOOT_ENV, "DJANGO_MEDIA_BACKEND": "/srv/uploads"},
             snippet="import config.settings",
         )
         self.assertNotEqual(res.returncode, 0, res.stdout)
         self.assertIn("DJANGO_MEDIA_BACKEND", res.stderr)
-        # The resolver itself, in-process: a non-dotted value is refused and
-        # the message names the offending key.
         os.environ["DJANGO_MEDIA_BACKEND_TEST"] = "/srv/uploads"
         try:
             with self.assertRaises(ImproperlyConfigured) as caught:
@@ -1159,9 +891,6 @@ class MediaServingProductionTests(SimpleTestCase):
             del os.environ["DJANGO_MEDIA_BACKEND_TEST"]
 
     def test_media_url_is_served_with_debug_false(self):
-        # The end-to-end proof of V-13: a DEBUG=false boot against a
-        # configured media root returns the uploaded bytes for a product
-        # image URL. Under the previous static() route this was a 404.
         with tempfile.TemporaryDirectory() as media_root:
             product_image = Path(media_root) / "products"
             product_image.mkdir()
@@ -1171,9 +900,6 @@ class MediaServingProductionTests(SimpleTestCase):
                     **self._BOOT_ENV,
                     "DJANGO_DEBUG": "false",
                     "DJANGO_MEDIA_ROOT": media_root,
-                    # django.setup() needs the settings module named, and the
-                    # test client's host is 'testserver' — a non-debug boot
-                    # rejects anything outside ALLOWED_HOSTS.
                     "DJANGO_SETTINGS_MODULE": "config.settings",
                     "DJANGO_ALLOWED_HOSTS": "testserver",
                 },
@@ -1190,10 +916,6 @@ class MediaServingProductionTests(SimpleTestCase):
         self.assertIn("BYTES PNGDATA", res.stdout)
 
     def test_media_url_resolves_to_the_serve_route_either_way(self):
-        # Not DEBUG-conditional. settings.DEBUG is False under the test
-        # runner, so re-resolving under an explicit DEBUG=True shows the
-        # same route: a regression back to static() would leave no match at
-        # all here (its helper emits nothing when DEBUG is false).
         for debug in (False, True):
             with self.subTest(debug=debug), override_settings(DEBUG=debug):
                 match = resolve("/media/products/rose.png")
@@ -1205,10 +927,6 @@ class MediaServingProductionTests(SimpleTestCase):
 
 
 class TransportHardeningTests(SimpleTestCase):
-    """SPEC-17-07 [R-17.11]: transport/cookie hardening flags are env-driven
-    with development-safe defaults. Import-time settings, so pinned via the
-    subprocess pattern like every env knob above."""
-
     _BOOT_ENV = _NON_DEBUG_ENV
 
     def test_defaults_are_safe_off_for_development(self):
@@ -1231,9 +949,6 @@ class TransportHardeningTests(SimpleTestCase):
         self.assertIn("PRELOAD False", res.stdout)
         self.assertIn("REDIRECT False", res.stdout)
         self.assertIn("PROXYHDR None", res.stdout)
-        # DJANGO_DEBUG is absent in the clean env, so DEBUG is false and the
-        # cookie-secure defaults follow it: an unconfigured (DEBUG=false)
-        # deployment lands in the hardened posture without extra env vars.
         self.assertIn("SESSIONSEC True", res.stdout)
         self.assertIn("CSRFSEC True", res.stdout)
 
@@ -1276,8 +991,6 @@ class TransportHardeningTests(SimpleTestCase):
         self.assertIn("PROXYHDR ('X-Forwarded-Proto', 'https')", res.stdout)
 
     def test_proxy_header_half_configured_is_unconfigured(self):
-        # One part without the other is treated as unconfigured: a scheme
-        # header must never be half-trusted.
         for env_overrides in (
             {"SECURE_PROXY_SSL_HEADER_NAME": "X-Forwarded-Proto"},
             {"SECURE_PROXY_SSL_HEADER_VALUE": "https"},
@@ -1296,24 +1009,11 @@ class TransportHardeningTests(SimpleTestCase):
     def test_num_proxies_decides_whose_address_a_throttle_budget_is_keyed_on(
         self,
     ):
-        # Anonymous callers are budgeted per IP address, and behind a proxy
-        # every one of them arrives carrying the SAME REMOTE_ADDR - the proxy's
-        # - so the number of trusted hops is what makes those budgets per
-        # caller or per deployment. It applies to every scope declared in
-        # DEFAULT_THROTTLE_RATES at once, because they share one keying
-        # decision. Left unset it is worse than a shared budget: DRF then
-        # trusts the WHOLE X-Forwarded-For header, which the caller itself
-        # wrote, so varying that header bought a fresh budget per request.
-        # The default therefore trusts nothing (keyed on REMOTE_ADDR); a
-        # deployment behind N appending proxies sets NUM_PROXIES=N and the
-        # budget follows the real client address.
+        # Unset, DRF trusts the WHOLE X-Forwarded-For header, which the caller writes, so varying it buys a fresh budget per request; the default trusts nothing and NUM_PROXIES=N follows the real address.
         for env_overrides, expected in (
             ({}, "NUMPROXIES 0"),
             ({"NUM_PROXIES": "1"}, "NUMPROXIES 1"),
             ({"NUM_PROXIES": "3"}, "NUMPROXIES 3"),
-            # Neither an unparseable count nor a negative one - which would
-            # count back through the forwarded-for list from the wrong end -
-            # may take startup down; both fall back to the documented default.
             ({"NUM_PROXIES": "two"}, "NUMPROXIES 0"),
             ({"NUM_PROXIES": "-1"}, "NUMPROXIES 0"),
         ):
@@ -1328,9 +1028,6 @@ class TransportHardeningTests(SimpleTestCase):
                 self.assertEqual(res.returncode, 0, res.stderr)
                 self.assertIn(expected, res.stdout)
 
-        # The host half of the same proxy question, off by default for the
-        # same reason the scheme header above is: a forwarded host is only as
-        # trustworthy as the proxy that sets it, so it stays opt-in.
         for env_overrides, expected in (
             ({}, "XFHOST False"),
             ({"USE_X_FORWARDED_HOST": "true"}, "XFHOST True"),
@@ -1346,35 +1043,19 @@ class TransportHardeningTests(SimpleTestCase):
                 self.assertEqual(res.returncode, 0, res.stderr)
                 self.assertIn(expected, res.stdout)
 
-        # The forwarded-for headers below are what an APPENDING proxy chain
-        # leaves behind: it appends the address it saw, so the entry a proxy
-        # added is the caller itself and any earlier entry is whatever the
-        # caller claimed. The budget follows the resolved address, not the
-        # proxy and not the claim.
-        proxy_ip = "198.18.0.1"  # RFC 2544 benchmarking range, unique to this test
+        proxy_ip = "198.18.0.1"
         factory = APIRequestFactory()
         view = SimpleNamespace(throttle_scope="auth")
 
         def probe(throttle, forwarded_for):
-            """(throttle key, allowed?) for one anonymous request."""
             request = factory.post("/api/accounts/register/")
             request.META["REMOTE_ADDR"] = proxy_ip
             request.META["HTTP_X_FORWARDED_FOR"] = forwarded_for
             request.user = AnonymousUser()
             return throttle.get_ident(request), throttle.allow_request(request, view)
 
-        # Each case is a PAIR of requests against a one-request budget, and it
-        # deletes its own keys before it runs (from DRF's own cache_format, not
-        # a key spelled out here). That is what makes the table order-
-        # independent: the previous shape let each case spend the budget the
-        # next one read, so running this method twice in one process failed on
-        # the second run - a green test that could not be re-run.
-        #   (NUM_PROXIES, first XFF, second XFF, first key, second key, 2nd ok?)
+        # Each case is a PAIR of requests against a one-request budget and deletes its own keys first, so the table is order-independent and re-runnable.
         cases = (
-            # Trusting nothing: two different callers both resolve to the
-            # PROXY, so the second shares the first's budget and is refused -
-            # one budget for the whole deployment, and nothing the caller
-            # writes into the header moves it.
             (
                 0,
                 "198.51.100.7, 203.0.113.5",
@@ -1383,12 +1064,7 @@ class TransportHardeningTests(SimpleTestCase):
                 proxy_ip,
                 False,
             ),
-            # ... including a header that names no proxy-appended shape at all.
             (0, "203.0.113.99", "203.0.113.98", proxy_ip, proxy_ip, False),
-            # One trusted hop: two callers resolve to two addresses, so each
-            # keeps its own budget and the second is served. A throttle keyed on
-            # the proxy instead would refuse it here, which is the regression
-            # this table exists to catch.
             (
                 1,
                 "198.51.100.7, 203.0.113.5",
@@ -1397,10 +1073,6 @@ class TransportHardeningTests(SimpleTestCase):
                 "203.0.113.6",
                 True,
             ),
-            # The same caller twice is refused, so the finer keying is the
-            # throttle working and not the throttle being off; and forging the
-            # leading entry - the part the caller writes - resolves to the same
-            # address, so it buys no budget either.
             (
                 1,
                 "198.51.100.7, 203.0.113.5",
@@ -1409,7 +1081,6 @@ class TransportHardeningTests(SimpleTestCase):
                 "203.0.113.5",
                 False,
             ),
-            # Two trusted hops count back two entries, per caller again.
             (
                 2,
                 "198.51.100.12, 203.0.113.7, 192.0.2.8",
@@ -1428,9 +1099,6 @@ class TransportHardeningTests(SimpleTestCase):
                         "NUM_PROXIES": num_proxies,
                     }
                 ):
-                    # DRF binds THROTTLE_RATES into the throttle class at
-                    # import, so the rate is patched on the class rather than
-                    # declared here.
                     with mock.patch.object(
                         ScopedRateThrottle, "THROTTLE_RATES", {"auth": "1/min"}
                     ):
@@ -1446,8 +1114,6 @@ class TransportHardeningTests(SimpleTestCase):
                         )
 
     def test_cookie_secure_flags_follow_debug_for_local_dev(self):
-        # DJANGO_DEBUG=true keeps both Secure flags off, so plain-HTTP local
-        # development (and the cookie-bearing login flows) keep working.
         res = run_settings_import(
             {"DJANGO_DEBUG": "true"},
             snippet=(
@@ -1471,12 +1137,6 @@ class TransportHardeningTests(SimpleTestCase):
         self.assertIn("HSTS 0", res.stdout)
 
     def test_malformed_bool_falls_back_to_the_default(self):
-        # _env_bool treats any non-truthy spelling as the documented
-        # default, never as a crash. Pinned in-process via the pure helper
-        # with a temporarily-set env var (the in-process environment carries
-        # no truthy SECURE_* values), so the truthy-comparison branch of the
-        # resolver is covered without another subprocess boot. The truthy
-        # result itself is pinned by the subprocess tests above (SUBD True).
         os.environ["SECURE_SSL_REDIRECT_TEST"] = "garbage"
         try:
             self.assertFalse(
@@ -1486,13 +1146,7 @@ class TransportHardeningTests(SimpleTestCase):
             del os.environ["SECURE_SSL_REDIRECT_TEST"]
 
     def test_dotenv_leaked_flags_cannot_defeat_the_hardened_defaults(self):
-        # Regression: settings.py runs load_dotenv() at import, so an
-        # untracked backend/.env has already pushed these names into this
-        # process's os.environ. The harness must scrub them, otherwise the
-        # documented defaults observed above are really the developer's
-        # local file: a local SESSION_COOKIE_SECURE=false turned the
-        # hardened-cookie default off and failed the defaults test on a
-        # clean checkout.
+        # settings.py runs load_dotenv() at import, so an untracked backend/.env has already pushed these names into os.environ; the harness must scrub them.
         leaked = {
             "SESSION_COOKIE_SECURE": "false",
             "CSRF_COOKIE_SECURE": "false",
@@ -1520,18 +1174,6 @@ class TransportHardeningTests(SimpleTestCase):
 
 
 class CacheAliasTests(SimpleTestCase):
-    """ASYNC-2d: the admin-alert cooldown has to hold across gunicorn
-    workers, so it gets its own `alerts` cache alias on a shared backend
-    instead of living on the per-process default cache. The default alias
-    stays LocMemCache when REDIS_URL is undeclared and flips to RedisCache
-    when it is declared (TIER1-THROTTLE-CACHE, pinned in
-    tests.test_throttle_shared_cache.py); this class pins the shape that
-    a Redis-less run sees, plus the alerts alias itself.
-
-    Pinned in a subprocess because the aliases are built at settings-import
-    time from the environment, like every other documented default here.
-    """
-
     _PRINT_ALIASES = (
         "import config.settings as s; "
         "print('ALIASES', sorted(s.CACHES)); "
@@ -1551,10 +1193,6 @@ class CacheAliasTests(SimpleTestCase):
         )
 
     def test_empty_alert_cache_location_does_not_resolve_to_the_cwd(self):
-        """FileBasedCache turns an empty LOCATION into the process working
-        directory and creates it, so a bare `ALERT_CACHE_LOCATION=` copied
-        out of .env.example must fall back to the documented directory
-        rather than scattering cache files wherever the app was started."""
         res = run_settings_import(
             {**_DEV_ENV, "ALERT_CACHE_LOCATION": ""},
             snippet=(
@@ -1573,9 +1211,6 @@ class CacheAliasTests(SimpleTestCase):
         self.assertEqual(os.path.basename(location.strip()), "alert_cache")
 
     def test_a_malformed_alert_cache_backend_refuses_to_boot(self):
-        """A typo in the shared-backend knob must fail loudly at boot, not
-        quietly fall back to a per-process cache and silently restore the
-        bug this alias exists to fix."""
         res = run_settings_import({**_DEV_ENV, "ALERT_CACHE_BACKEND": "/srv/cache"})
         self.assertNotEqual(res.returncode, 0, res.stdout)
         self.assertIn("ALERT_CACHE_BACKEND", res.stderr)

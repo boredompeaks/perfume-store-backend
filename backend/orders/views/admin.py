@@ -1,15 +1,7 @@
-"""The staff-facing order seam: the unscoped order book plus the two
-lifecycle writers a staff member drives directly (fulfil one step, cancel).
-
-One of six modules split out of the former single-file `orders/views.py`.
-Authorization is entirely declarative here - `permission_classes` carries
-`orders.read`, `orders.fulfill` and `orders.cancel` - and every state change
-goes through the shared machine in `orders.state` rather than a status write
-of its own. The money-moving counterpart of this seam is `refund.py`.
-
-The page-size contract is imported from `order.py` rather than restated: the
-staff listing and the customer's history are deliberately the same envelope
-with the same cap.
+"""Staff-facing order seam: the unscoped order book plus the two lifecycle
+writers staff drive directly (fulfil one step, cancel). State changes go
+through ``orders.state``, and the page-size contract is shared with
+``order.py``.
 """
 
 from django.contrib.admin.models import CHANGE
@@ -28,18 +20,15 @@ from common.permissions import (
     user_has_capability,
 )
 
-# [SPEC-12-02] StockReservation: a cancelled checkout releases its holds in
-# this same transaction (admin_order_cancel below).
+# A cancelled checkout releases its holds in the same transaction.
 from products.models import StockReservation
 
-# [R-10.16] SPEC-10-05: the per-transition side-effect contract (one
-# dispatch point, shared with the payment writer).
+# Per-transition side effects, shared with the payment writer.
 from ..events import notify_transition
 from ..models import Order, OrderStatusEvent
 from ..serializers import OrderSerializer
 
-# [R-10.1] The order machine (transition table, gate, fulfilment step map)
-# lives in orders.state - the single source; this module only consumes it.
+# Order machine (transition table, gate, step map) lives in orders.state.
 from ..state import (
     ADMIN_FULFILMENT_NEXT,
     ALLOWED_TRANSITIONS,
@@ -51,31 +40,15 @@ from ..state import (
     transition_allowed,
 )
 
-# Same house page-number envelope and page-size config as the customer
-# history - the paginator cap exists so no caller, staff included, can
-# request an unbounded page.
+# Same page-number envelope and page-size cap as the customer history.
 from .order import HISTORY_PAGE_SIZE_QUERY_PARAM, _history_page_size
-
-# ==================================
-# Admin orders JSON seam (SPEC-9-07, spec 9.4 Orders module)
-# ==================================
-
-# SPEC-9-07: the fulfilment endpoint drives the order one legal step per
-# call along the flow the admin surface's bulk actions encode.
-# ADMIN_FULFILMENT_NEXT (the step map) and transition_allowed (the gate)
-# live in orders.state — [R-10.1] single source.
 
 
 @api_view(["GET"])
 @permission_classes([HasOrdersRead])
 def admin_order_list(request):
-    """[R-9.4.8] GET /api/admin/orders/ — every order, staff eyes only.
-
-    The customer list scopes to ``user=request.user``; this seam is reached
-    only through ``orders.read`` (support/finance/admin roles), so it serves
-    the unscoped queryset. Same house page-number envelope and page-size
-    config as the customer history — the paginator cap exists so no caller,
-    staff included, can request an unbounded page."""
+    """GET /api/admin/orders/ — every order, staff eyes only: ``orders.read``
+    is the gate, so the queryset is unscoped unlike the customer list."""
     orders = Order.objects.select_related("coupon").order_by("-created_at", "-id")
 
     paginator = Paginator(
@@ -100,11 +73,9 @@ def admin_order_list(request):
 @api_view(["GET"])
 @permission_classes([HasOrdersRead])
 def admin_order_detail(request, order_id):
-    """[R-9.4.9] GET /api/admin/orders/:id/ — one order, staff eyes only.
-
-    Unlike the customer detail endpoint there is no ownership scoping to
-    enforce, so an unknown id is a plain uniform 404 (never an existence
-    leak — the caller has already passed the orders.read gate)."""
+    """GET /api/admin/orders/:id/ — one order, staff eyes only. Unlike the
+    customer detail there is no ownership scoping, so an unknown id is a
+    plain uniform 404."""
     try:
         order = Order.objects.select_related("coupon").get(id=order_id)
     except Order.DoesNotExist:
@@ -114,24 +85,9 @@ def admin_order_detail(request, order_id):
 
 
 def _may_fulfil(user, order):
-    """Whether ``user`` may advance ``order`` one fulfilment step.
-
-    Two questions, not one. A caller holding ``orders.read`` sees the whole
-    order book, so the fulfilment walk is unscoped for it (support and admin,
-    the two roles that hold both capabilities; finance holds ``orders.read``
-    but not ``orders.fulfill``, so it never reaches this seam at all). A
-    caller holding ONLY ``orders.fulfill`` is the packing operator, whose
-    authority is the queue — the statuses the walk can still advance, the
-    same constant ``OrderAdmin``'s scoped grid lists — and nothing else.
-
-    Django's ``is_superuser`` flag is preserved as the bypass every other
-    surface keeps (mirroring ``capability_required``): the trust anchor must
-    not be narrowed by a least-privilege rule meant for staff roles.
-
-    Deny-by-default in both directions: an unknown capability grants nothing,
-    and a caller with no role at all has already been refused by
-    ``HasOrdersFulfill`` before this runs.
-    """
+    """Whether ``user`` may advance ``order`` one fulfilment step. There are two
+    authorities: ``orders.read`` (or superuser) is unscoped, while a caller
+    holding only ``orders.fulfill`` is scoped to the fulfilment queue."""
     if user.is_superuser or user_has_capability(user, "orders.read"):
         return True
     return user_has_capability(user, "orders.fulfill") and (
@@ -142,28 +98,10 @@ def _may_fulfil(user, order):
 @api_view(["POST"])
 @permission_classes([HasOrdersFulfill])
 def admin_order_fulfill(request, order_id):
-    """[R-9.4.10] POST /api/admin/orders/:id/fulfill — advance one step.
-
-    The gate-then-update pair runs under the row lock: two concurrent
-    fulfils cannot both pass the gate on the same stale status, so an order
-    can never skip two steps in one call. Deliberately NOT idempotent —
-    each accepted call performs one visible transition; the machine itself
-    rejects re-running a step from the new status (409). No business-event
-    stamp is written here: the admin surface's mark_shipped/mark_delivered
-    do not write shipped_at/delivered_at either, and the named-stamp
-    writers are their own later task — the JSON seam never invents a richer
-    record than the admin surface for the same transition.
-
-    [R-1-B03] The fulfilment capability is not order visibility (spec 1.1
-    line 110 splits them), so a caller holding ``orders.fulfill`` WITHOUT
-    ``orders.read`` — the inventory/fulfilment operator — is scoped to the
-    queue its own admin surface lists (``FULFILMENT_QUEUE_STATUSES``) and
-    cannot advance an order outside it by guessing a pk. An out-of-queue
-    order is answered with the SAME uniform 404 an unknown id gets: it must
-    not confirm that the order exists, nor name its status, to a role that
-    was deliberately not given order visibility. A caller that does hold
-    ``orders.read`` (support, finance, admin) and Django's superuser flag
-    keep the unrestricted contract above."""
+    """POST /api/admin/orders/:id/fulfill — advance one step under the row
+    lock, so concurrent calls cannot skip a step; deliberately not idempotent.
+    Callers holding only ``orders.fulfill`` are scoped to the fulfilment
+    queue, and an out-of-queue order gets the same 404 as an unknown id."""
     with transaction.atomic():
         try:
             order = Order.objects.select_for_update().get(id=order_id)
@@ -188,12 +126,8 @@ def admin_order_fulfill(request, order_id):
                 status=status.HTTP_409_CONFLICT,
             )
 
-        # [R-10.19]/[R-10.14] SPEC-10-03: the fulfil seam advances
-        # confirmed→shipped too, so the shipped preconditions (payment
-        # captured + items present) gate it here with the same authority
-        # as the admin surface (insertion-only hunk; the 9-07 write below
-        # stays byte-identical). The envelope middleware wraps this body,
-        # so callers read the reasons at details.preconditions.
+        # Shipped preconditions gate here too; the envelope exposes the
+        # reasons at ``details.preconditions``.
         precondition_reasons = precondition_failures(order, target)
         if precondition_reasons:
             return Response(
@@ -204,19 +138,15 @@ def admin_order_fulfill(request, order_id):
                 status=status.HTTP_409_CONFLICT,
             )
 
-        # [R-10.12] SPEC-10-02: capture the pre-transition status for the
-        # audit row written below (insertion-only hunk).
         previous_status = order.status
         order.status = target
-        # [R-10.1] SPEC-10-01b: the fulfilment dimension rides the same
-        # transition. Insertion-only hunk (the 9-07 save below stays
-        # byte-identical), so the dimension persists via a second
-        # same-transaction write to the row locked above.
+        # Fulfilment dimension rides the transition, in a second
+        # same-transaction write to the already-locked row.
         order.fulfilment_status = fulfilment_for_status(target)
         order.save(update_fields=["status"])
         order.save(update_fields=["fulfilment_status"])
-        # [R-10.12]/[R-10.18] SPEC-10-02: the audit row lands in this same
-        # transaction — a rolled-back fulfil never leaves a phantom event.
+        # Audit row lands in the same transaction, so a rolled-back fulfil
+        # leaves no phantom event.
         OrderStatusEvent.objects.create(
             order=order,
             from_status=previous_status,
@@ -224,12 +154,9 @@ def admin_order_fulfill(request, order_id):
             actor=request.user,
             trigger=TRIGGER_ADMIN_API_FULFIL,
         )
-        # [R-10.16] SPEC-10-05: the side-effect hook rides the same
-        # atomic block, after the transition + its audit row
-        # (insertion-only hunk).
+        # Side effects ride the same atomic block, after the audit row.
         notify_transition(order, previous_status, target)
-        # [6.12.6] API-side staff write: land the privileged-action record
-        # the admin surface would have written (audit-log route reads it).
+        # Privileged-action record the admin surface would have written.
         log_api_action(
             request,
             order,
@@ -249,17 +176,10 @@ def admin_order_fulfill(request, order_id):
 @api_view(["POST"])
 @permission_classes([HasOrdersCancel])
 def admin_order_cancel(request, order_id):
-    """[R-9.4.11] POST /api/admin/orders/:id/cancel — cancel an unpaid order.
-
-    The same machine gate the admin uses decides: only ``pending`` carries
-    a cancel edge, so a paid order cannot be cancelled at all - its money
-    comes back through the refund seam below instead, which records a
-    Refund and moves the payment dimension without moving the status. The
-    409 names that path.
-    Idempotent: the machine's self-transition makes a re-cancel a no-op
-    200 (no second stamp, no duplicate audit row). cancelled_at rides the
-    transition exactly like admin ``cancel_pending`` — the is-none guard
-    keeps a set event time immutable ([R-8.16])."""
+    """POST /api/admin/orders/:id/cancel — cancel an unpaid order; only
+    ``pending`` carries a cancel edge, so a paid order's money returns through
+    the refund seam instead. Idempotent: a re-cancel is a no-op 200 with no
+    second audit row, and ``cancelled_at`` is written once."""
     with transaction.atomic():
         try:
             order = Order.objects.select_for_update().get(id=order_id)
@@ -289,18 +209,14 @@ def admin_order_cancel(request, order_id):
                 status=status.HTTP_409_CONFLICT,
             )
 
-        # [R-10.12] SPEC-10-02: capture the pre-transition status for the
-        # audit row written below (insertion-only hunk).
         previous_status = order.status
         order.status = "cancelled"
         order.cancelled_at = order.cancelled_at or timezone.now()
-        # [R-10.1] SPEC-10-01b: fulfilment dimension rides the cancel
-        # transition (insertion-only; second same-transaction write).
+        # Fulfilment dimension rides the cancel transition.
         order.fulfilment_status = fulfilment_for_status("cancelled")
         order.save(update_fields=["status", "cancelled_at"])
         order.save(update_fields=["fulfilment_status"])
-        # [R-10.12]/[R-10.18] SPEC-10-02: the audit row lands in this same
-        # transaction; the idempotent replay above returns before reaching
+        # Audit row lands in this transaction; the replay above returns before
         # it, so a re-cancel never appends a second event.
         OrderStatusEvent.objects.create(
             order=order,
@@ -309,17 +225,13 @@ def admin_order_cancel(request, order_id):
             actor=request.user,
             trigger=TRIGGER_ADMIN_API_CANCEL,
         )
-        # [R-12.8] SPEC-12-02 §12.1 step 6: a cancelled checkout releases
-        # its holds in this same transaction — cancelled units return to
-        # available-to-sell immediately, not at the TTL sweep. The
-        # idempotent replay above returns before this site, and the
-        # active-only filter is a no-op on already-released holds.
+        # Cancelled units return to available-to-sell now, not at the TTL
+        # sweep; the replay above returns before this site.
         order.stock_reservations.filter(status=StockReservation.Status.ACTIVE).update(
             status=StockReservation.Status.RELEASED
         )
-        # [R-10.16] SPEC-10-05: the side-effect hook rides the same
-        # atomic block; the idempotent replay above returns before this
-        # site, so a re-cancel never notifies twice (insertion-only hunk).
+        # The replay returns before this site, so a re-cancel never notifies
+        # twice.
         notify_transition(order, previous_status, "cancelled")
         log_api_action(request, order, CHANGE, "Cancelled via API.")
 

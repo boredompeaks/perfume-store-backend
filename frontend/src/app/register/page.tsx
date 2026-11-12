@@ -11,15 +11,8 @@ export const metadata: Metadata = {
 
 type SearchParams = Record<string, string | string[] | undefined>;
 
-/**
- * D2 (U-W10-T2): /checkout funnels anonymous visitors here with
- * `?next=/checkout`, so this door reads the param exactly the way /login
- * does — `safeNext` keeps it an internal path, `GuestOnly` hands it to a
- * visitor who is already signed in (router.replace, no history entry), and
- * the param stays in the URL for the rest of this page's navigation. The
- * account-created state itself is the server's (email verification comes
- * first); the leg that completes after sign-in is the login door's.
- */
+// /checkout funnels anonymous visitors here with ?next=; safeNext keeps it an
+// internal path and GuestOnly skips the form for signed-in visitors.
 export default async function RegisterPage({
   searchParams,
 }: {

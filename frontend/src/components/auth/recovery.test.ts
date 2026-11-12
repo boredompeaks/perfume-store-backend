@@ -13,10 +13,8 @@ const pageSource = (route: string) =>
   readFileSync(join(appDir, route, "page.tsx"), "utf8");
 
 /**
- * The uniform server answers (backend/accounts/views.py). The client must
- * never hardcode them — the message always arrives from the server and
- * renders verbatim — and must never grow copy that branches on whether an
- * account exists (uniform-response rule, conventions.md Security / §5.10).
+ * The server's uniform messages must never be hardcoded in the client, and no
+ * copy may branch on whether an account exists.
  */
 const UNIFORM_SERVER_COPIES = [
   "If an active account exists for this email",
@@ -40,15 +38,14 @@ describe("uniform-response discipline (§5.10)", () => {
   });
 
   it("EmailOnlyForm renders the server's message verbatim, never branched", () => {
-    // The success panel renders the message state directly — no rewrite, no
-    // substring, no conditional on its content.
+    // The message renders directly: no rewrite, substring or branch.
     expect(emailOnlySource).toContain("{state.message}");
     expect(emailOnlySource).not.toMatch(/state\.message\s*[!=]==?/);
     expect(emailOnlySource).not.toMatch(/state\.message\.(includes|slice|replace)/);
   });
 
   it("EmailOnlyForm's success state is a field-border panel with a polite status", () => {
-    // §5.10: the form→message swap is a visible container change.
+    // The form-to-message swap is a visible container change.
     expect(emailOnlySource).toContain("border border-field-border p-8");
     expect(emailOnlySource).toContain('role="status" aria-live="polite"');
   });
@@ -56,15 +53,14 @@ describe("uniform-response discipline (§5.10)", () => {
 
 describe("reset-password (§5.10)", () => {
   it("renders server failures and success verbatim", () => {
-    // rejected: ApiError message straight through; done: server message.
+    // Rejected: ApiError message straight through; done: server message.
     expect(resetSource).toContain("{state.message}");
     expect(resetSource).toContain("err.message");
     expect(resetSource).toContain("res.message");
   });
 
   it("renders validate_password errors per message, wired to the field", () => {
-    // {password: [msgs]} → one <p> per message under the password input,
-    // with the AddressForm aria wiring (the reference implementation).
+    // One <p> per password-policy message, wired like AddressForm.
     expect(resetSource).toContain("err.fieldErrors?.password");
     expect(resetSource).toContain("fieldErrors.map((msg) =>");
     expect(resetSource).toContain('htmlFor="reset-password"');
@@ -77,7 +73,7 @@ describe("reset-password (§5.10)", () => {
   it("keeps the missing-query state distinct from a server rejection", () => {
     expect(resetSource).toContain('kind: "incomplete"');
     expect(resetSource).toContain('kind: "rejected"');
-    // uid && token gate — the form never posts without both.
+    // uid && token gate: the form never posts without both.
     expect(resetSource).toContain("uid && token");
   });
 
@@ -87,7 +83,7 @@ describe("reset-password (§5.10)", () => {
   });
 
   it("states errors in --color-danger, never the accent", () => {
-    // CHANGE-2: bronze must never mean "this failed".
+    // Bronze must never mean "this failed".
     expect(emailOnlySource).toContain('role="alert" className="text-sm text-danger"');
     expect(resetSource).not.toMatch(/role="alert"[^>]*text-bronze/);
     expect(resetSource).not.toMatch(/text-sm text-bronze/);
@@ -130,16 +126,14 @@ describe("motion: none (§5.10)", () => {
 
 describe("recovery family parity (U-W13-T11 screens)", () => {
   it("closes every email-only column with the rule + link stack", () => {
-    // Screen r_cup_ration_de_compte: hairline rule under the CTA, then the
-    // underlined links. The stack renders under form AND sent panel.
+    // Rule under the CTA, then the link stack, under form and sent panel.
     expect(emailOnlySource).toContain("border-t border-hairline");
     expect(emailOnlySource).toContain('href="/login"');
     expect(emailOnlySource).toContain('href="/contact"');
   });
 
   it("reset states keep the plate + full-width CTA + link stack", () => {
-    // Screen nouveau_mot_de_passe: white plate on paper, full-width ink CTA
-    // inside the panel, rule + links closing the column.
+    // Plate + full-width ink CTA inside the panel, rule and links below.
     expect(resetSource).toContain("border border-hairline bg-surface p-8");
     expect(resetSource).toContain("block w-full bg-ink");
     expect(resetSource).toContain("border-t border-hairline");
@@ -147,9 +141,7 @@ describe("recovery family parity (U-W13-T11 screens)", () => {
   });
 
   it("verify states wear the register-panel status line (refined screen)", () => {
-    // Refined v_rification_de_courriel: eyebrow status line over the inner
-    // hairline; bronze only ever on the confirmed line, danger on the
-    // refusal, never bronze on a failure (CHANGE-2).
+    // Bronze only on the confirmed line; danger on refusal, never bronze.
     expect(verifySource).toContain("border border-hairline bg-surface p-8");
     expect(verifySource).toContain("text-eyebrow");
     expect(verifySource).toContain('statusLabel = "Status: confirmed"');

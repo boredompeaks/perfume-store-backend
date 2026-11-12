@@ -1,19 +1,7 @@
 """Staff onboarding: what each role can do, derived from the live registry.
 
-SPEC-D-06 asks for an admin page that explains a staff role in terms of the
-capabilities it holds and the admin surfaces those capabilities unlock. The
-content is DERIVED, never hand-maintained:
-
-* ``common.roles.CAPABILITY_ROLES`` says which capabilities a role holds;
-* ``django.contrib.admin.site._registry`` says which registered ModelAdmin
-  declares each capability (``capability_map``), which bulk action needs it
-  (``action_capabilities``), and which surface has a second door
-  (``scoped_view_capability``).
-
-A hand-written table beside those three sources would be a fourth authority
-that drifts silently. Deriving instead means a newly registered admin appears
-here on the next request, and a capability moved from one surface to another is
-reported correctly with no edit to this module.
+Deriving from ``CAPABILITY_ROLES`` and the admin registry means a newly registered
+admin or a moved capability is reported without editing this module.
 """
 
 from django.contrib import admin
@@ -27,15 +15,8 @@ from .roles import CAPABILITY_ROLES, STAFF_ROLES
 
 
 def staff_only(view):
-    """Staff gate with the admin's exact answers.
-
-    ``staff_member_required`` sends EVERY failing caller to the login page,
-    including an authenticated customer, while the admin itself answers such a
-    caller with 403. This route lives in the admin's namespace and follows the
-    admin contract: anonymous -> login, authenticated non-staff -> 403. The
-    predicate is the same one ``staff_member_required`` uses (active AND
-    staff); only the failure response differs.
-    """
+    """Staff gate with the admin's answers: anonymous goes to login, an
+    authenticated non-staff caller gets 403."""
 
     @login_required(login_url="admin:login")
     def guarded(request, *args, **kwargs):
@@ -52,21 +33,13 @@ def _surface_url(model):
     try:
         return reverse(f"admin:{opts.app_label}_{opts.model_name}_changelist")
     except NoReverseMatch:
-        # A ModelAdmin can be registered without a changelist (Django still
-        # builds one for every model in practice); the page must not 500 on
-        # a registry shape it did not anticipate.
+        # A registry shape the page did not anticipate must not 500 the page.
         return reverse("admin:index")
 
 
 def admin_surfaces():
-    """Every registered surface that declares RBAC metadata.
-
-    Django registers a handful of models that are not part of this store's
-    role model (and third-party apps may add more). A ModelAdmin with no
-    ``capability_map``, no ``action_capabilities`` and no
-    ``scoped_view_capability`` is not described by ``CAPABILITY_ROLES`` at all,
-    so it is omitted rather than presented as if it were ungated.
-    """
+    """Every registered surface that declares RBAC metadata; admins with none
+    are omitted rather than shown as if ungated."""
     surfaces = []
     for model, model_admin in admin.site._registry.items():
         capability_map = {
@@ -128,12 +101,10 @@ def _capability_access(surfaces, capability):
 
 
 def _role_capabilities(role, surfaces, user):
-    """Capabilities held by ``role`` and what each one unlocks.
+    """Capabilities held by ``role`` and what each unlocks.
 
-    ``held_by_user`` is computed against the REQUESTING user, not the role
-    being described, so the page can highlight the capabilities the caller
-    already has. A superuser bypasses the map exactly as ``RoleAwareModelAdmin``
-    does, which is why the flag is not just a role comparison.
+    ``held_by_user`` is computed against the requesting user, including the
+    superuser bypass, so the page highlights what the caller already has.
     """
     entries = []
     for capability in sorted(CAPABILITY_ROLES):
@@ -154,10 +125,7 @@ def _role_capabilities(role, surfaces, user):
 def onboarding(request):
     """Render the role-by-role onboarding page.
 
-    ``staff_only`` is the route's only gate: the page names capabilities and
-    surfaces but contains no customer rows, no secrets and no per-order data,
-    so reading it needs staff membership rather than any one operational
-    capability.
+    ``staff_only`` is its only gate: the page contains no customer data or secrets.
     """
     surfaces = admin_surfaces()
     user_roles = get_user_roles(request.user)

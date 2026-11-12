@@ -1,18 +1,10 @@
-# SPEC-22-11: every action is pinned to a full commit SHA with the tag in a
-# trailing comment. A mutable tag (@v4) is a remote-controlled pointer to
-# whatever that tag says today, so pinning is supply-chain hardening: to move
-# an action, resolve the new tag with
-# `git ls-remote https://github.com/<owner>/<action>.git refs/tags/<tag>^{}`
-# (the `^{}` peel matters for an annotated tag) and replace the SHA - never
-# widen the pin back to a tag.
+# Every action is pinned to a full commit SHA with the tag in a trailing
+# comment: a mutable tag is a remote-controlled pointer, so pinning is
+# supply-chain hardening. Resolve bumps with `git ls-remote ... refs/tags/<tag>^{}`
+# and replace the SHA - never widen the pin back to a tag.
 #
-# NODE24 (P1-4): every pin here targets an action whose `runs.using: node24`.
-# GitHub deprecates the Node 20 runtime, and these two jobs were warned about it
-# on every run ("actions/checkout@11d5… and actions/setup-node@4993… target
-# Node.js 20"). Pinned releases: actions/checkout v7.0.1, actions/setup-node
-# v7.1.0 (setup-node v7's NODE_AUTH_TOKEN behaviour change does not apply here:
-# this workflow sets no `registry-url`, so no auth token is published). A future
-# bump must keep `runs.using` at node24 or newer -- check it, do not assume it.
+# Every pin targets an action running on node24: GitHub deprecates the Node 20
+# runtime. A future bump must keep `runs.using` at node24 or newer.
 name: frontend-tests
 
 on:
@@ -23,23 +15,19 @@ on:
     branches: [spec-comp, feat/add-frontend, master]
     paths: ["frontend/**", ".github/workflows/frontend-tests.yml"]
 
-# Least privilege: the suite only needs to read the checkout.
+# The suite only needs to read the checkout.
 permissions:
   contents: read
 
-# One run per ref; a new push to the same ref cancels the stale run.
 concurrency:
   group: frontend-tests-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
-  # Hermetic: vitest unit tests (node env, no network) + next build.
-  # Env-independence with ONE documented exception: every NEXT_PUBLIC_* has a
-  # code fallback EXCEPT NEXT_PUBLIC_ADMIN_ORIGIN, which is fail-if-unset by
-  # owner contract (src/app/admin/page.tsx: `next build` FAILS when it is
-  # unset; no localhost default, no code fallback). The build step below
-  # supplies that single value so CI stays hermetic without weakening the
-  # product guard.
+  # Hermetic: vitest (node env, no network) + next build. Every NEXT_PUBLIC_*
+  # has a code fallback EXCEPT NEXT_PUBLIC_ADMIN_ORIGIN, which is fail-if-unset
+  # by owner contract (src/app/admin/page.tsx); the build step supplies that one
+  # value without weakening the guard.
   unit-build:
     runs-on: ubuntu-latest
     defaults:
@@ -61,41 +49,25 @@ jobs:
         run: npm run test
 
       - name: Production build (next build)
-        # Single workflow-provided exception to the env-independent comment
-        # above: the admin redirect origin is fail-if-unset by owner contract
-        # (no code fallback, no localhost default), so CI supplies the same
-        # value as frontend/.env.local.example:30. Hermetic constant, not a
-        # product fallback -- the guard in src/app/admin/page.tsx stands.
+        # The one workflow-provided value: the admin origin has no fallback and
+        # `next build` fails without it; the product guard stands.
         env:
           NEXT_PUBLIC_ADMIN_ORIGIN: https://api.boredompeaks.me
         run: npm run build
 
-      # R-17.27 (P1-1): the frontend half of the dependency vulnerability gate.
-      # `--audit-level=high` IS the policy, and it is the same rule the backend
-      # applies through pip-audit: npm exits non-zero for high/critical and stays
-      # green for moderate/low, so a low-severity advisory cannot freeze the
-      # pipeline.
-      #
-      # It runs LAST in this job so the functional evidence (vitest + next build)
-      # is always produced first: a red audit must not hide whether the app still
-      # builds, and this job is path-filtered to frontend/**, so it can never
-      # fail a backend-only change.
-      #
-      # Registry caveat, deliberate: `npm audit` reads the registry's advisory
-      # database rather than a checked-in file, so an unreachable registry fails
-      # this step. A scan that could not run must not read as a clean scan.
+      # Dependency vulnerability gate; `--audit-level=high` is the policy
+      # (mirrors pip-audit): high/critical fail, moderate/low stay green.
+      # Runs LAST so functional evidence is produced before a red audit, and the
+      # job is path-filtered to frontend/** so it cannot fail a backend change.
+      # Deliberate caveat: npm audit reads the registry's advisory DB, so an
+      # unreachable registry fails the step rather than reading as a clean scan.
       - name: Dependency vulnerability audit (npm audit, high/critical)
         run: npm audit --audit-level=high
 
-  # Playwright e2e is DISABLED-BY-DEFAULT by design: the current suite
-  # (frontend/e2e/) drives the REAL Razorpay widget (test-mode keys, wallet
-  # flows) against live Django + Next servers with seeded users/products.
-  # That is not hermetic and would require Razorpay credentials as repo
-  # secrets -- CI policy forbids secrets in workflows (Razorpay is always
-  # mocked). Flip the repository variable E2E_ENABLED to "true" ONLY after
-  # the e2e suite is reworked to be hermetic (mocked payment backend,
-  # checked-in DB seed fixture, playwright webServer wiring). Until then
-  # this job self-skips and does not gate merges.
+  # Disabled by default BY DESIGN: the suite drives the real Razorpay widget
+  # against live servers, which is not hermetic and would need credentials as
+  # repo secrets (forbidden; Razorpay is always mocked). Flip E2E_ENABLED to
+  # "true" only after the suite is reworked to be hermetic.
   e2e:
     needs: unit-build
     if: vars.E2E_ENABLED == 'true'

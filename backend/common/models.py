@@ -1,25 +1,7 @@
-"""Append-only business-event audit ledger (spec 7.1 Audit module, [R-7.20]).
+"""Append-only business-event audit ledger and the notification outbox.
 
-The privileged-action trail (``common/audit.py``) records what staff did
-through the admin and the gated API as Django ``LogEntry`` rows; this model
-records what the business did — order lifecycle (created, paid), payment
-verification outcomes (intent, success, and every verify failure branch),
-and authentication events (registration, login attempts, email
-verification, password reset) — the audit-trail half of the section-1 gap
-SPEC-1-11 [1.22]. The two trails are complementary: LogEntry answers "which
-staff member changed which row", AuditEvent answers "which business events
-happened".
-
-Events are written by ``AuditEvent.record`` inside the same
-``transaction.atomic()`` block as the side effect they record (the
-``StockMovement`` ledger pattern from SPEC-6-02), so trail and effect
-commit or roll back together and can never disagree.
-
-``NotificationOutbox`` joins it in ASYNC-2c1 on the same principle, for the
-other half of a business event: the notification a customer is owed. The
-audit trail records what the system did; the outbox records what it still
-owes a person, and — for the same reason — commits or rolls back with the
-write that earned it.
+Each is written inside the same transaction as the side effect it records, so trail
+and effect commit or roll back together.
 """
 
 import logging
@@ -36,17 +18,12 @@ from common.middleware import (
     current_request_id,
 )
 
-# A dedicated channel name (not this module's __name__) so deployments can
-# route or filter the business trail in log tooling independently of model
-# noise; settings.LOGGING pins it at INFO (SPEC-7-02).
+# Dedicated channel (not __name__) so log tooling can route the trail; pinned
+# at INFO in settings.LOGGING.
 audit_logger = logging.getLogger("common.audit")
 
-# A queued notification's expiry is a property of writing one, not something
-# each caller should be able to forget, so it is a field default rather than a
-# required argument: ``NotificationOutbox.objects.create()`` cannot produce a
-# row that never expires. The bound is deployment-shaped (it decides how long a
-# copy of a one-time token may sit in this table), so it is env-driven through
-# settings rather than written here.
+# A field default, not a required argument, so a created row can never lack an
+# expiry; the bound itself is env-driven.
 NOTIFICATION_OUTBOX_DEFAULT_TTL_SECONDS = 3 * 24 * 60 * 60
 
 
@@ -64,11 +41,8 @@ def default_notification_outbox_expiry():
 class AuditEvent(models.Model):
     """One immutable business event: what happened, to what, by whom, when.
 
-    ``detail`` carries the JSON payload (gateway identifiers, amounts,
-    attempted usernames) and keeps the trail meaningful after the
-    referenced rows are gone — both foreign keys use ``SET_NULL`` so the
-    event outlives the order or user it describes, with the identifying
-    values preserved in ``detail``.
+    Both foreign keys use ``SET_NULL`` so the event outlives the rows it names,
+    with identifying values preserved in ``detail``.
     """
 
     class Category(models.TextChoices):
@@ -78,31 +52,21 @@ class AuditEvent(models.Model):
         CATALOGUE = "catalogue", "Catalogue"
         STAFF = "staff", "Staff"
 
-    # SPEC-20-4 [R-20.29]: which surface the mutation arrived through. A real
-    # field, not prose in a change message, so "did staff do this in the admin
-    # or through the API" is a filter rather than a text search. ``SYSTEM`` is
-    # the honest label for a business event whose writer does not attribute
-    # itself to a staff surface (checkout, payment verification, auth) — it
-    # says "not attributable", never "admin".
+    # The surface the mutation arrived through, as a filterable field. ``SYSTEM``
+    # means "not attributable", never "admin".
     class Source(models.TextChoices):
         ADMIN = "admin", "Admin"
         API = "api", "API"
         SYSTEM = "system", "System"
 
     class EventType(models.TextChoices):
-        # Order lifecycle. The from->to status machine's own transitions
-        # (SPEC-10-05) are named here so the lifecycle notification hook
-        # sites dispatch vocabulary members rather than bare strings —
-        # see orders/events.py for why a name outside this enum is a
-        # registry that resolves nothing. Membership is NOT delivery:
-        # _EVENT_HANDLERS in common.notifications is the separate question
-        # of whether a name has a handler, and these three have none.
+        # Order lifecycle transitions. Membership here is NOT delivery:
+        # _EVENT_HANDLERS in common.notifications decides what has a handler.
         ORDER_CREATED = "order.created", "Order created"
         ORDER_PAID = "order.paid", "Order paid"
         ORDER_SHIPPED = "order.shipped", "Order shipped"
         ORDER_DELIVERED = "order.delivered", "Order delivered"
         ORDER_CANCELLED = "order.cancelled", "Order cancelled"
-        # Payment intent + verify outcomes/failures.
         PAYMENT_INITIATED = "payment.initiated", "Payment intent created"
         PAYMENT_SIGNATURE_REJECTED = (
             "payment.signature_rejected",
@@ -128,30 +92,21 @@ class AuditEvent(models.Model):
             "payment.coupon_invalid",
             "Payment coupon invalid",
         )
-        # The capture-path over-redemption: a confirmed sale whose coupon
-        # increment pushed used_count past usage_limit. The consumption is a
-        # RECORD, never a gate (see orders.inventory.commit_order_sale), so
-        # this event is what makes the deliberate over-grant legible to an
-        # operator instead of invisible in the usage counter alone.
+        # A confirmed sale whose coupon increment passed usage_limit: a RECORD,
+        # never a gate (see orders.inventory.commit_order_sale).
         PAYMENT_COUPON_OVER_LIMIT = (
             "payment.coupon_over_limit",
             "Payment coupon over limit",
         )
         PAYMENT_VERIFIED = "payment.verified", "Payment verified"
-        # Authentication lifecycle.
         AUTH_REGISTERED = "auth.registered", "Account registered"
         AUTH_LOGIN = "auth.login", "Login succeeded"
         AUTH_LOGIN_FAILED = "auth.login_failed", "Login failed"
         AUTH_EMAIL_VERIFIED = "auth.email_verified", "Email verified"
         AUTH_PASSWORD_RESET = "auth.password_reset", "Password reset"
-        # Catalogue mutations with their structured before -> after values
-        # (SPEC-20-4 [R-20.27]) — the API surface, which could previously
-        # only say "Updated via API.".
         CATALOGUE_CREATED = "catalogue.created", "Catalogue item created"
         CATALOGUE_UPDATED = "catalogue.updated", "Catalogue item updated"
         CATALOGUE_DELETED = "catalogue.deleted", "Catalogue item deleted"
-        # A staff-role grant/revoke: the most consequential mutation the admin
-        # performs, and previously recorded only as per-direction prose.
         STAFF_ROLES_UPDATED = "staff.roles_updated", "Staff roles updated"
 
     category = models.CharField(max_length=20, choices=Category.choices, db_index=True)
@@ -173,21 +128,15 @@ class AuditEvent(models.Model):
         related_name="audit_events",
     )
     detail = models.JSONField(default=dict, blank=True)
-    # SPEC-20-4 [R-20.29]: the surface the mutation arrived through — a field
-    # so an audit query can separate admin work from API work instead of
-    # pattern-matching change messages. Defaults to SYSTEM, meaning the writer
-    # makes no staff-surface claim (see ``Source``).
+    # Defaults to SYSTEM: the writer makes no staff-surface claim (see
+    # ``Source``).
     source = models.CharField(
         max_length=10,
         choices=Source.choices,
         default=Source.SYSTEM,
         db_index=True,
     )
-    # SPEC-20-3 [R-20.26]: the correlation id of the request that produced
-    # the event, so an audit row can be joined to the request's log lines and
-    # to the id echoed on the response. Blank (never NULL) for events written
-    # outside a request — management commands, the test fixtures' direct
-    # calls — where there is no request to correlate with.
+    # Correlation id of the request, blank for events written outside one.
     request_id = models.CharField(
         max_length=REQUEST_ID_MAX_LENGTH, blank=True, db_index=True
     )
@@ -205,22 +154,9 @@ class AuditEvent(models.Model):
     def record(cls, event_type, actor=None, order=None, detail=None, source=None):
         """Append one event; the single sanctioned write path.
 
-        Call inside the same ``transaction.atomic()`` block as the side
-        effect being recorded. ``category`` derives from the event-type's
-        dotted prefix (``order.``/``payment.``/``auth.``/``catalogue.``/
-        ``staff.``), so an unknown or unprefixed identifier fails loudly
-        instead of writing a row that no category query will ever find.
-        Anonymous/system actors store NULL, mirroring
-        ``StockMovement.created_by``.
-
-        ``source`` defaults to :attr:`Source.SYSTEM` — a writer that does not
-        name its surface makes no claim about one. The guarded staff
-        mutations state it explicitly (``Source.ADMIN`` / ``Source.API``).
-
-        The detail is passed through ``common.audit.clean_audit_payload``
-        here rather than at each call site: since SPEC-20-4 began storing
-        real before/after values, this is the one place that decides what may
-        be written, so no caller can bypass it.
+        Call inside the same transaction as the side effect. ``category`` derives
+        from the dotted prefix, and the detail is sanitized here so no caller can
+        bypass the scrubber.
         """
         event = cls.objects.create(
             category=cls.Category(event_type.split(".", 1)[0]),
@@ -231,18 +167,9 @@ class AuditEvent(models.Model):
             source=source or cls.Source.SYSTEM,
             request_id=current_request_id(),
         )
-        # [SPEC-7-02] Observability baseline: the trail is DB-only
-        # otherwise, so a log reader has no surface for it. Emitted after
-        # the insert with the stored identity; the call writes no rows, so
-        # the transaction placement above is untouched.
-        #
-        # [SPEC-17-09] [R-17.32] "Avoid putting personal information in
-        # logs" — decision: usernames are RETAINED here (pseudonymizing to
-        # the actor pk would keep only an unreadable id in the abuse/
-        # dispute forensics stream), because a username is the login
-        # credential, not sensitive PII, and dies with the account row's
-        # association. Email/phone/address/full name are FORBIDDEN in
-        # this output; the full rationale lives in docs/retention.md.
+        # Emit after the insert with the stored identity, so a log reader has a
+        # surface for the DB-only trail. Usernames are retained; email, phone,
+        # address and full name are FORBIDDEN (docs/retention.md).
         audit_logger.info(
             "audit %s id=%s actor=%s order=%s request_id=%s detail=%s",
             event.event_type,
@@ -269,77 +196,12 @@ class AuditEvent(models.Model):
 
 
 class NotificationOutbox(models.Model):
-    """One durable, not-yet-sent customer notification (ASYNC-2c1).
+    """One durable, not-yet-sent customer notification, written inside the
+    business transaction that owes it.
 
-    The substrate the post-commit sends in this project still lack. Rows are
-    written by ``common.notifications.enqueue`` INSIDE the transaction of the
-    business write they describe, so an order that commits leaves its
-    notification behind and an order that rolls back leaves nothing — the
-    dual-write window (business effect committed, notification lost) that
-    ``dispatch_on_commit`` still has is closed by storing the intent rather
-    than performing the send.
-
-    What a row holds is deliberately thin. ``payload`` carries identifiers
-    and scalars only — a model reference is its label plus primary key, never
-    the instance — because the request that enqueued the row is gone by the
-    time anything reads it, and an instance or a lazily-evaluated string
-    would hold that request's values rather than the row's. The worker
-    re-reads each reference at drain time through
-    ``common.notifications.resolve_context``, which is also why the row
-    stores no template name and no subject: the handler builds those, from
-    live state, when it runs.
-
-    ``dedup_key`` is the **enqueue-time** idempotence guard, discussed at
-    ``notifications._dedup_key``: it collapses two paths that fire for one
-    business event, so the same notification is queued once. It is NOT the
-    send-side at-least-once guard and cannot be - it is derived only from the
-    event type and the payload, is byte-identical before and after any send,
-    and is unique, so it carries no send state and can never match a second
-    row. What actually makes the queue at-least-once is this row's own
-    ``status``/``sent_at`` under a claim that locks the row: a worker that
-    dies between sending and stamping re-sends *this* row. ASYNC-2c2 built
-    that claim (``notifications.claim_next_notification``): it takes the row
-    lock, re-checks the claim predicate, and pushes ``next_attempt_at`` out by
-    a lease - which is what makes two workers incapable of claiming the same
-    row, because the lease makes the predicate false for everyone else the
-    instant the first claim commits.
-
-    **The delivery guarantee is at-least-once, and it is bounded.** A row whose
-    send did not complete is re-sent once its lease lapses, so a crashed or
-    killed worker costs a duplicate email at worst - never a silent loss,
-    which is the failure this table exists to remove. It is *not* exactly-once:
-    a send that succeeded and was lost before the stamp cannot be un-sent, and
-    the queue prefers the duplicate over the loss. Bounded is the other half:
-    ``attempts`` is the bound, and a row that reaches
-    ``NOTIFICATION_OUTBOX_MAX_ATTEMPTS`` goes to ``DEAD`` and stops being
-    claimable.
-
-    ``expires_at`` bounds how long the row — and any token material in its
-    payload — may sit, and is what makes the table safe to fill with
-    notifications built from one-time codes: the payload is deliberately not
-    scrubbed, so deletion on a clock is the compensating control. The deletion
-    owner is named and in-tree (``manage.py purge_notification_outbox``);
-    nothing schedules it yet, which is stated in that command's docstring.
-    The drain loop treats it as a second gate alongside the backoff: a row
-    whose ``expires_at`` has passed is NOT claimed and NOT sent, because
-    ``PASSWORD_RESET_TIMEOUT`` has almost certainly invalidated whatever
-    one-time material its payload carries and a link that no longer works is
-    worse than no mail at all. Such a row ages out and the purge command
-    deletes it. **The operator's manual retry honours the same gate and will
-    not extend it** — a dead row past this instant is refused and left
-    ``DEAD``, so the status report still shows it, rather than being re-opened
-    to a ``PENDING`` state nothing will ever claim.
-
-    **The status vocabulary, every value driven by a test.** ``PENDING`` is a
-    row owed a send that has not been attempted yet; ``SENT`` is terminal and
-    carries its stamp; ``FAILED`` is a row whose last attempt failed with
-    retries still in hand, which is why it is a NON-terminal value and why it
-    is claimable again once its backoff lapses; ``DEAD`` is the dead-letter —
-    terminal, not claimable, reached either by exhausting ``attempts`` or by a
-    stored reference that cannot be resolved at all. ``FAILED`` being claimable
-    and ``DEAD`` not is the whole of the dead-letter mechanism: a row that can
-    never succeed stops consuming the batch without the loop having to be told
-    which rows are poison.
+    ``dedup_key`` prevents double-queuing, the row-locked claim makes delivery
+    at-least-once and bounded by ``attempts``, and ``expires_at`` bounds how long
+    any token material in ``payload`` may sit.
     """
 
     class Status(models.TextChoices):
@@ -348,22 +210,13 @@ class NotificationOutbox(models.Model):
         FAILED = "failed", "Failed"
         DEAD = "dead", "Dead-lettered"
 
-    # An AuditEvent.EventType value (``order.paid``) or the bare transition
-    # names the registry keys on. db_indexed because the drain query filters
-    # and groups on it.
+    # An AuditEvent.EventType value; indexed because the drain query filters on it.
     event_type = models.CharField(max_length=50, db_index=True)
-    # TextField, not a bounded CharField: the key is DERIVED (a canonical
-    # encoding of the event type, the payload and any caller-supplied
-    # occurrence discriminator), so a length cap would either truncate a key
-    # into a collision — silently swallowing a distinct notification — or
-    # demand a bound on payload scalars that has no honest justification.
-    # Still unique, so the database enforces idempotence rather than a
-    # convention.
+    # Derived and unique, so the database enforces idempotence. TextField because
+    # a length cap would truncate keys into collisions.
     dedup_key = models.TextField(unique=True)
     payload = models.JSONField(default=dict, blank=True)
-    # db_indexed: the worker's claim query is "oldest row whose status is
-    # claimable and whose next_attempt_at has passed", and the operator's
-    # status report groups on it.
+    # Indexed: the claim query and the status report both filter on it.
     status = models.CharField(
         max_length=10,
         choices=Status.choices,
@@ -371,51 +224,24 @@ class NotificationOutbox(models.Model):
         db_index=True,
     )
     created_at = models.DateTimeField(auto_now_add=True)
-    # Stamped by the worker when it sends. NULL means "never confirmed sent",
-    # which is not the same as PENDING — a row can fail and be retried — so it
-    # is a nullable stamp rather than a status value.
+    # Stamped on send; NULL means never confirmed, which is not the same as PENDING.
     sent_at = models.DateTimeField(null=True, blank=True)
-    # Written at enqueue from settings.NOTIFICATION_OUTBOX_TTL_SECONDS (via
-    # the field default, so it cannot be omitted) and db_indexed because the
-    # purge command's only query is "everything past this instant". A row that
-    # outlives it has either been drained or stranded; either way its payload is
-    # no longer needed and may hold credential material that should not still
-    # be sitting in a table.
+    # Set by the field default (NOTIFICATION_OUTBOX_TTL_SECONDS) and indexed for
+    # the purge query; payload token material must not outlive it.
     expires_at = models.DateTimeField(
         db_index=True, default=default_notification_outbox_expiry
     )
-    # How many times this row has been CLAIMED, which is the bound on retries
-    # (settings.NOTIFICATION_OUTBOX_MAX_ATTEMPTS). It counts claims, not
-    # sends, on purpose: a worker that claims a row and then dies before the
-    # send has still consumed an attempt, and pretending otherwise is how an
-    # unbounded retry loop gets written. Counting claims also means the number
-    # is written by exactly one statement - the claim - so it cannot drift
-    # from what the loop actually did.
+    # Counts CLAIMS, not completed sends: a worker that dies after claiming still
+    # consumes an attempt, which is what bounds retries. Only the claim writes it.
     attempts = models.PositiveIntegerField(default=0)
-    # The earliest instant this row may be claimed. Two independent things
-    # write it and both are "not before", which is why one field is enough:
-    #
-    # - the CLAIM pushes it out by NOTIFICATION_OUTBOX_LEASE_SECONDS. That is
-    #   what stops two workers taking the same row: the claim predicate is
-    #   `next_attempt_at <= now`, so the instant the first claim commits the
-    #   predicate is false for every other worker. Without this the predicate
-    #   would still hold after the first claim and the second worker would
-    #   lock, re-check, find the row unchanged and send it a second time.
-    # - a FAILURE pushes it out by the backoff for that attempt.
-    #
-    # db_indexed because it is the second half of the claim predicate, which
-    # is the query that runs on every pass of every worker.
+    # Earliest claimable instant: the claim pushes it out by the lease (so two
+    # workers cannot take one row) and a failure by that attempt's backoff.
     next_attempt_at = models.DateTimeField(default=timezone.now, db_index=True)
-    # Why the last attempt failed, as short text, for the operator surface and
-    # for observability. Cleared on success. Deliberately a plain column and
-    # not an AuditEvent: this is the worker's own diagnosis of one row, not a
-    # record of a privileged action.
+    # Short failure text for the operator surface; cleared on success.
     last_error = models.TextField(blank=True, default="")
 
     class Meta:
-        # FIFO drain order, with the pk as the tiebreak so two rows written
-        # in the same clock tick still have a total order (a worker's LIMIT
-        # claim needs one).
+        # FIFO drain order; pk tiebreaks rows written in the same clock tick.
         ordering = ("created_at", "pk")
         verbose_name = "Notification outbox row"
         verbose_name_plural = "Notification outbox rows"
@@ -425,25 +251,10 @@ class NotificationOutbox(models.Model):
 
 
 class SavedFilter(models.Model):
-    """One staff user's named changelist filter (SPEC-20-6 [R-20.11]).
+    """One staff user's named changelist filter, private to the account and model.
 
-    Spec 20.1 lists "Saved filters/views where useful" among the data-table
-    capabilities and Django ships no equivalent, so the two highest-traffic
-    changelists get one. It is a *preference*, not business data: a small
-    set of changelist query parameters (``{"status__exact": "pending"}``)
-    the user named, scoped to one account and one model.
-
-    Three deliberate properties, all of which the test suite pins:
-
-    - scoped by ``(user, content_type)`` so a saved view is private and is
-      deleted with the account, never shared between staff;
-    - ``params`` holds a validated subset of what the changelist itself
-      accepts — the same gate the changelist applies on replay, so a stored
-      spec can only narrow a listing, never widen one;
-    - the table holds no domain data of its own. The parameters can name a
-      customer's phone or email as a search term, which is why the row
-      belongs to the staff user rather than to a shared "team view": it
-      lives and dies with the account that typed it.
+    ``params`` is a validated subset of what the changelist accepts, so replaying
+    a stored spec can only narrow a listing, never widen one.
     """
 
     NAME_MAX_LENGTH = 60
@@ -453,9 +264,8 @@ class SavedFilter(models.Model):
         on_delete=models.CASCADE,
         related_name="saved_admin_filters",
     )
-    # A ContentType rather than two char columns: the model identity is then
-    # a real reference (a row cannot outlive the model it points at, and the
-    # uniqueness scope is enforced by the database, not by convention).
+    # A real reference, so uniqueness is DB-enforced and the row dies with the
+    # model.
     content_type = models.ForeignKey(
         "contenttypes.ContentType",
         on_delete=models.CASCADE,
@@ -467,9 +277,8 @@ class SavedFilter(models.Model):
 
     class Meta:
         ordering = ("name",)
-        # One filter per name per user per model: re-saving a name replaces
-        # the selection (it is an update, not a duplicate), and the
-        # constraint is what says so.
+        # Re-saving a name replaces its selection: one filter per name per user
+        # per model.
         constraints = [
             models.UniqueConstraint(
                 fields=("user", "content_type", "name"),

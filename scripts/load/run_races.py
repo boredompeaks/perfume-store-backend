@@ -1,61 +1,21 @@
 #!/usr/bin/env python
-"""SPEC-T2a — concurrent money-invariant race runner for Phase T2.
+"""SPEC-T2a concurrent money-invariant race runner (stdlib urllib + threads).
 
-Executes the real-parallel HTTP races (stdlib urllib + threads; NO k6
-dependency, NO new packages) and then evaluates the post-run DB invariant
-checks the Phase T2 queue names: ledger consistency, no negative stock,
-exactly-once capture. Celery-free. This file is the AUTHORITATIVE capture-
-level racer; the k6 file's race legs are HTTP-level mirrors that print the
-same T2-INV markers.
+Races: ``oversell`` (N buyers for the last unit, parallel checkout/capture;
+exactly one wins), ``coupon`` (usage_limit=1, one burn), ``double-capture``
+(one order, M identical verifies; stock/money moves once). Signatures are
+minted locally with HMAC-SHA256 over "<order>|<payment>", so no gateway call
+is made beyond the bounded intent mints; the secret comes from the
+environment and is never printed.
 
-The races (each mirrors a T1a BLOCKED row that needs live deployment state):
+DB invariants have two honest modes (the runner refuses to claim
+"invariants pass" without one): live-DB (LOAD_PG_DSN/DATABASE_URL plus
+psycopg) or a server-side round trip (``--emit-sql`` then ``--verify-json``),
+so no DB credentials cross the airgap in round-trip mode.
 
-  oversell       N distinct buyers each hold a cart line for the last unit
-                 of LOAD_PRODUCT_SLUG; all fire checkout simultaneously, all
-                 winners mint an intent, then all captures (payment/verify)
-                 fire simultaneously. Exactly one capture may win.
-  coupon         Same shape, every checkout carries LOAD_COUPON_CODE (a
-                 usage_limit=1 coupon). The single-use burn must land once.
-  double-capture ONE order, ONE minted intent, M parallel verifies replaying
-                 the SAME (razorpay_order_id, payment_id, signature) triple.
-                 Capture must move stock/money exactly once.
-
-The Razorpay signature is minted LOCALLY with hmac over
-"<razorpay_order_id>|<payment_id>" using RAZORPAY_KEY_SECRET — the same
-computation the gateway SDK performs — so no call to Razorpay's API is made
-by this script beyond the bounded intent mints (create_payment). The secret
-is read from the environment and never printed, logged, or committed.
-
-DB invariant checks — TWO honest modes (pick one; the runner refuses to
-claim "invariants pass" without one of them):
-
-  A. live-DB mode      set LOAD_PG_DSN (preferred) or DATABASE_URL to a
-                       postgres DSN and have psycopg importable (it already
-                       is inside backend/venv). The runner connects AFTER
-                       the HTTP waves and evaluates every check itself.
-  B. server-side       `--emit-sql out.json` writes the exact parameterized-
-     round-trip        as-literal SQL + expectations for this run's ids;
-                       the operator runs those queries on the box (psql /
-                       manage.py dbshell), captures the rows as JSON, and
-                       the runner evaluates them with `--verify-json
-                       rows.json`. Nothing but row data crosses the airgap —
-                       the runner never needs DB credentials in this mode.
-
-Credentials: NEVER pass them as arguments and never commit them. The runner
-reads LOAD_PG_DSN / DATABASE_URL / RAZORPAY_KEY_ID / RAZORPAY_KEY_SECRET /
-LOAD_BUYER_LOGINS from the environment (see backend/docs/run/T2-plan.md).
-
-Usage:
-  backend\\venv\\Scripts\\python scripts\\load\\run_races.py run \\
-      --phase all|oversell|coupon|double-capture [options]
-  backend\\venv\\Scripts\\python scripts\\load\\run_races.py mint-signature \\
-      --razorpay-order-id order_XXX --payment-id payLOADrun0001
-
-Exit codes (run): 0 = HTTP phase complete AND every DB invariant holds (or
---skip-db was given EXPLICITLY, in which case results are stamped
-UNVERIFIED); 1 = at least one DB invariant violated; 2 = setup/preflight
-error (nothing was raced); 3 = HTTP phase ran but invariants could not be
-evaluated (no DB mode available).
+Exit codes (run): 0 = HTTP done and every invariant holds (or explicit
+--skip-db, results stamped UNVERIFIED); 1 = an invariant violated; 2 =
+setup/preflight error; 3 = raced but invariants could not be evaluated.
 """
 
 from __future__ import annotations
@@ -74,10 +34,6 @@ import urllib.request
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 
-# ---------------------------------------------------------------------------
-# Constants (endpoints verified against config/urls.py + app urlconfs on
-# lane/b @32f0467; behaviour facts from the T1a red-team report).
-# ---------------------------------------------------------------------------
 
 LOGIN_PATH = "/api/v1/account/storefront/login/"
 CART_PATH = "/api/v1/store/cart/"
@@ -92,8 +48,7 @@ DEFAULT_UA = (
     "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
 )
 
-# Shipping payload the checkout view requires (orders/views/checkout.py
-# required_fields / _SHIPPING_FIELDS, mirrored by common/testing.py).
+# Shipping payload the checkout view requires (mirrors common/testing.py).
 CHECKOUT_SHIPPING = {
     "full_name": "Race Buyer",
     "phone": "9876543210",
@@ -105,13 +60,11 @@ CHECKOUT_SHIPPING = {
 
 LOGIN_PACE_S = float(os.getenv("LOAD_LOGIN_PACE_S", "7"))
 # 'auth' throttle is 10/min per ident and anonymous logins key on the
-# client ident: pace logins across ALL threads so the wave never starts
-# with a buyer stuck at 429.
+# client ident: pace logins across ALL threads so no buyer starts at 429.
 # Default aligned with k6_profiles.js LOAD_MAX_INTENTS (both 20): one
-# ceiling value, two files, no silent divergence (auditor BUG-4).
+# ceiling value, two files, no silent divergence.
 INTENT_CAP = int(os.getenv("LOAD_MAX_INTENTS", "20"))
-# 'payment' scope is 10/min per user — the double-capture replay width
-# stays under it by construction.
+# 'payment' scope is 10/min per user; the replay width stays under it.
 CAPTURE_REPLAYS = int(os.getenv("LOAD_CAPTURE_REPLAYS", "6"))
 RACE_N = int(os.getenv("LOAD_RACE_N", "8"))
 REQUEST_TIMEOUT_S = float(os.getenv("LOAD_HTTP_TIMEOUT_S", "30"))
@@ -125,9 +78,6 @@ def log(msg: str) -> None:
     print(f"[{utcnow()}] {msg}", flush=True)
 
 
-# ---------------------------------------------------------------------------
-# HTTP plumbing (stdlib only).
-# ---------------------------------------------------------------------------
 
 
 class HttpClient:
@@ -242,9 +192,6 @@ class Buyer:
         self.username = username
 
 
-# ---------------------------------------------------------------------------
-# Preflight.
-# ---------------------------------------------------------------------------
 
 
 def load_buyer_logins() -> list[dict]:
@@ -323,9 +270,6 @@ def mint_signature(razorpay_order_id: str, payment_id: str, secret: str) -> str:
     return hmac.new(secret.encode(), message, hashlib.sha256).hexdigest()
 
 
-# ---------------------------------------------------------------------------
-# Race phases.
-# ---------------------------------------------------------------------------
 
 
 class IntentBudget:
@@ -468,8 +412,7 @@ def phase_oversell(ctx: dict, results: dict) -> None:
     for i, c in enumerate(checkouts):
         if c["status"] not in (200, 201) or not c["order_id"]:
             continue
-        # Pair each order with the buyer at the SAME position as its
-        # checkout attempt (checkouts and buyers are positional).
+        # Checkouts and buyers are positional, so pair them by index.
         buyer = buyers[i]
         intents.append((buyer, c, mint_intent(buyer, c["order_id"], budget)))
     results["intents"] = [i[2] for i in intents]
@@ -490,8 +433,8 @@ def phase_oversell(ctx: dict, results: dict) -> None:
     log(f"oversell: firing parallel capture wave ({len(triples)} winners)")
     captures = run_parallel_capture_wave(triples)
     results["captures"] = captures
-    # Who actually captured is decided by the DB invariant checks below, not
-    # by wire statuses (a replayed verify also answers 200).
+    # Who captured is decided by the DB checks below, not by wire statuses
+    # (a replayed verify also answers 200).
     results["expected_captured"] = min(ctx["stock"], need)
     results["race_order_ids"] = [c["order_id"] for c in ok]
 
@@ -571,14 +514,9 @@ def phase_double_capture(ctx: dict, results: dict) -> None:
     results["expected_captured"] = 1
 
 
-# ---------------------------------------------------------------------------
-# DB invariant checks — SQL, evaluation, and the two delivery modes.
-# ---------------------------------------------------------------------------
-#
-# Every SQL string below is PostgreSQL (the UAT DB engine): ILIKE/regex and
-# substr() are PG spellings, and the round-trip mode documents that. Order
-# references live in StockMovement.note as "Order #<id>" (the sale writer in
-# orders/inventory.py); substr(note, 8) extracts the id after "Order #".
+# Every SQL string below is PostgreSQL (the UAT engine): ILIKE/regex and
+# substr() are PG spellings. Order references live in StockMovement.note as
+# "Order #<id>" (orders/inventory.py); substr(note, 8) extracts the id.
 
 INVARIANT_DEFS = {
     "T2-INV-1-no-negative-stock": {
@@ -737,7 +675,7 @@ def checks_for_phase(phase: str, results: dict) -> list[dict]:
             "T2-INV-7-no-double-decrement",
             {"capture_order_id": str(int(results["capture_order_id"]))},
         )
-    # expect_from resolution (the value the operator/runner compares against).
+    # expect_from resolution: the value the runner/operator compares against.
     for c in checks:
         if c["expect_from"] == "expected_captured":
             c["expect"] = {
@@ -746,12 +684,9 @@ def checks_for_phase(phase: str, results: dict) -> list[dict]:
                 "value": int(results["expected_captured"]),
             }
         c.pop("expect_from", None)
-        # value_from resolution: a row_eq whose expected columns name run
-        # results (e.g. razorpay_payment_id -> the capture_payment_id this
-        # phase minted) becomes a concrete row_eq/value before it leaves
-        # this function, so both live mode and the --verify-json round trip
-        # compare against real values, never against key names (auditor
-        # BUG-1: the form was emitted but nothing consumed it).
+        # value_from resolution: a row_eq naming run results becomes a
+        # concrete row_eq/value here, so live mode and the round trip compare
+        # against real values, never key names.
         exp = c.get("expect") or {}
         if exp.get("rule") == "row_eq" and "value_from" in exp:
             c["expect"] = {
@@ -764,13 +699,10 @@ def checks_for_phase(phase: str, results: dict) -> list[dict]:
 def resolve_value_from(mapping: dict, context: dict) -> dict:
     """Resolve a value_from expectation against the run's results context.
 
-    A STRING names a context key iff that key exists in the context (so
-    "capture_payment_id" becomes the minted payment id); any other string
-    stays a literal (so "captured" remains "captured"), and non-strings
-    pass through untouched. Never raises on a missing key: an unresolved
-    name compares as itself and shows up as a visible column mismatch
-    rather than a crash.
-    """
+    A STRING names a context key iff that key exists (so
+    "capture_payment_id" becomes the minted id); anything else stays a
+    literal. A missing key never raises: it compares as itself and shows up
+    as a visible column mismatch."""
     resolved = {}
     for col, want in mapping.items():
         if isinstance(want, str) and want in context:
@@ -801,9 +733,7 @@ def evaluate_checks(
     """Pure evaluation shared by live-DB mode and --verify-json mode.
 
     ``context`` is the run's results dict, used only when a check still
-    carries the raw ``value_from`` form (live mode passes it; the emitted
-    round-trip file already carries the resolved ``value`` form).
-    """
+    carries the raw ``value_from`` form."""
     verdicts = []
     for c in checks:
         rows = rows_by_id.get(c["id"])
@@ -826,10 +756,8 @@ def evaluate_checks(
             if not rows:
                 ok, detail = False, "query returned no rows"
             else:
-                # value_from is resolved here too (belt to checks_for_phase's
-                # suspenders): a hand-written or stale checks file that still
-                # names context keys must evaluate, not report "unsupported
-                # expect form" and fail every run on a clean DB (BUG-1).
+                # value_from is resolved here too: a hand-written or stale
+                # checks file that still names context keys must evaluate.
                 want_map = (
                     expect["value"]
                     if "value" in expect
@@ -843,8 +771,7 @@ def evaluate_checks(
                 ok = not mismatches
                 detail = "; ".join(mismatches) if mismatches else "all columns match"
         elif rule == "row_eq" and "computed" in expect:
-            # Column-vs-column equality inside the same row (T2-INV-7:
-            # mv_rows must equal item_rows — no hand-typed expected count).
+            # Column-vs-column equality in the same row: no hand-typed count.
             if not rows:
                 ok, detail = False, "query returned no rows"
             else:
@@ -888,9 +815,6 @@ def run_live_db_checks(checks: list[dict]) -> dict:
     return rows_by_id
 
 
-# ---------------------------------------------------------------------------
-# Reporting.
-# ---------------------------------------------------------------------------
 
 
 def write_json(path: str, payload: dict) -> None:
@@ -901,15 +825,11 @@ def write_json(path: str, payload: dict) -> None:
     log(f"wrote {path}")
 
 
-# ---------------------------------------------------------------------------
-# Commands.
-# ---------------------------------------------------------------------------
 
 
 def cmd_mint_signature(args: argparse.Namespace) -> int:
     _, secret = razorpay_credentials()
     sig = mint_signature(args.razorpay_order_id, args.payment_id, secret)
-    # Prints the SIGNATURE only — never the secret.
     print(sig)
     return 0
 
@@ -925,7 +845,6 @@ def cmd_run(args: argparse.Namespace) -> int:
         if args.phase == "all"
         else [args.phase]
     )
-    # Distinct buyers needed: race legs need RACE_N; double-capture needs 1.
     need_buyers = RACE_N if any(p in phases for p in ("oversell", "coupon")) else 1
 
     results: dict = {
@@ -938,9 +857,8 @@ def cmd_run(args: argparse.Namespace) -> int:
     }
     try:
         info = preflight(base, ua, need_buyers)
-        # DB mode capability is checked BEFORE any HTTP wave: racing and
-        # then discovering invariants cannot be evaluated would spend the
-        # window (throttles, intents) for a run that cannot report.
+        # DB mode is checked BEFORE any HTTP wave: racing and then finding no
+        # way to evaluate invariants would burn the window for nothing.
         if not args.emit_sql and not args.skip_db:
             dsn = os.getenv("LOAD_PG_DSN") or os.getenv("DATABASE_URL") or ""
             if not dsn:
@@ -1109,7 +1027,6 @@ def main(argv: list[str] | None = None) -> int:
     try:
         return args.func(args)
     except SetupError as exc:
-        # Missing env/credentials: a clean FATAL line, never a traceback.
         log(f"FATAL: {exc}")
         return 2
 

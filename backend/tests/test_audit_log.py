@@ -1,16 +1,3 @@
-"""SPEC-6-05b: privileged-action logging for API-side ops + audit-log route.
-
-- Every privileged write through the capability-gated DRF API (today: the
-  product surface, the only staff-privileged DRF mutations) lands a LogEntry
-  naming the acting staff user, so the audit trail covers both the admin
-  chrome and API operations (spec 6.12, [6.12.6] "Log privileged actions").
-- Denied or invalid attempts are not privileged actions: nothing is written,
-  so nothing is logged.
-- /admin/audit-log/ is the single LogEntry reader, gated by ``staff.manage``
-  (admin role) with Django's superuser bypass preserved: anonymous callers
-  are sent to the admin login, unprivileged staff get 403.
-"""
-
 import json
 
 from django.contrib.admin.models import ADDITION, CHANGE, DELETION, LogEntry
@@ -56,8 +43,6 @@ def write_payload(name):
 
 @tag("e2e")
 class ApiPrivilegedActionLoggingTests(ApiTestCase):
-    """The capability-gated product writes emit LogEntry records ([6.12.6])."""
-
     def setUp(self):
         self.writer = make_role_user(ROLE_CATALOGUE, "scribe")
         self.client = self.fresh_client()
@@ -91,7 +76,7 @@ class ApiPrivilegedActionLoggingTests(ApiTestCase):
         )
         self.assertEqual(res.status_code, 200, res.data)
         updates = LogEntry.objects.filter(change_message="Updated via API.")
-        self.assertEqual(updates.count(), 2)  # one per privileged write
+        self.assertEqual(updates.count(), 2)
         for entry in updates:
             self.assertEqual(entry.user, self.writer)
             self.assertEqual(entry.action_flag, CHANGE)
@@ -105,13 +90,11 @@ class ApiPrivilegedActionLoggingTests(ApiTestCase):
         entry = LogEntry.objects.get(change_message="Deleted via API.")
         self.assertEqual(entry.user, self.writer)
         self.assertEqual(entry.action_flag, DELETION)
-        # The record keeps the last-known identity after the row is gone.
         self.assertEqual(entry.object_repr, "Doomed Rose")
         self.assertEqual(str(entry.object_id), str(product.pk))
         self.assertFalse(products.objects.filter(pk=product.pk).exists())
 
     def test_denied_and_invalid_attempts_log_nothing(self):
-        """A refused request is not a privileged action: no write, no record."""
         make_role_user(ROLE_SUPPORT, "blocked-scribe")
         support_client = self.fresh_client()
         self.api_login("blocked-scribe", client=support_client)
@@ -131,8 +114,6 @@ class ApiPrivilegedActionLoggingTests(ApiTestCase):
 
 @tag("e2e")
 class AuditLogRouteTests(ApiTestCase):
-    """The /admin/audit-log/ route: capability-gated LogEntry reader."""
-
     def setUp(self):
         self.admin_user = make_role_user(ROLE_ADMIN, "chief")
 
@@ -142,9 +123,6 @@ class AuditLogRouteTests(ApiTestCase):
         self.assertTrue(res.url.startswith("/admin/login/"))
 
     def test_every_role_without_staff_manage_is_403(self):
-        # staff.manage is the map's privilege-tier capability (admin +
-        # superadmin), so the route is invisible to the five operational
-        # roles: a visible 403, not a redirect.
         non_grantees = [
             r for r in STAFF_ROLES if r not in CAPABILITY_ROLES["staff.manage"]
         ]
@@ -181,9 +159,7 @@ class AuditLogRouteTests(ApiTestCase):
         self.assertContains(page, "No audit entries yet.")
 
     def test_admin_chrome_json_change_messages_render_human(self):
-        # The admin's own form saves store JSON-shaped change messages; the
-        # page must render LogEntry.get_change_message's human form, never
-        # the raw JSON.
+        # The admin's form stores JSON-shaped change messages; the page must render get_change_message's human form.
         LogEntry.objects.log_actions(
             self.admin_user.pk,
             [self.admin_user],

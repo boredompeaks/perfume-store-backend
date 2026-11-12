@@ -1,44 +1,3 @@
-"""[R-1.08] SPEC-1-B06: shipment tracking, its trail and who may see either.
-
-The requirement is one sentence - "a shipment exists with a history of
-events, staff can see and update it, and a customer can track their order by
-order number" - and the whole module is arranged around where the danger in
-that sentence sits: the LAST clause. An order number is a guessable per-year
-sequence and a tracking page is the one place where a parcel's carrier, its
-status and its delivery estimate are all worth stealing, so this file treats
-"an order number alone discloses nothing" as the property under test and the
-rest as ordinary feature coverage.
-
-Every probe here answers one of the questions the task is graded on:
-
-* thirteen miss inputs - no credential, a wrong token, an over-wide token, an
-  empty or whitespace token, a token minted for a DIFFERENT order, a token
-  pointing at an order with no parcel, an absent order number, an
-  authenticated stranger, a stranger against an absent order, the owner of an
-  order with no parcel, the owner against an absent order, and a bare session
-  cookie - ONE byte-identical answer (``UniformMissTests``);
-* the authenticated customer sees their own shipment - proved with a REAL JWT
-  from the login endpoint, because ``force_authenticate`` bypasses the entire
-  auth stack and would pass whether or not the credential contract works
-  (``OwnershipTests``);
-* a guest order tracks end to end on the B04 credential (``GuestTrackingTests``);
-* a SPLIT shipment reports every parcel, not the newest one
-  (``SplitShipmentTests``);
-* staff with the capability see and update it (``StaffSurfaceTests``);
-* the trail records every move once, immutably, with an aware timestamp, and
-  refuses to be rewritten, deleted or forged through the OBJECT or the
-  QUERYSET (``EventTrailTests``, ``AppendOnlyGuardTests``);
-* a parcel's status cannot be moved behind the trail by a bulk update
-  (``StatusCannotBeMovedInBulkTests``);
-* no column is written a value wider than the column declares, on either
-  engine's terms (``WidthGateTests``);
-* a role WITHOUT the capability is refused, and the packing operator's exact
-  capability set is byte-for-byte what SPEC-1-B03 pinned
-  (``LeastPrivilegeTests``);
-* the order's money and its shipping snapshot are untouched by a tracking
-  update (``MoneyIsUntouchedTests``).
-"""
-
 import json
 from datetime import datetime, timedelta
 from datetime import timezone as dt_timezone
@@ -87,8 +46,6 @@ TRACK_LEGACY = "/api/shipping/track/{}/"
 CHANGELIST = "/admin/shipping/shipment/"
 TRAIL_CHANGELIST = "/admin/shipping/shipmentevent/"
 
-# Spec 10.2 line 3465, asserted against the model so a future edit cannot
-# quietly rename a customer-facing status.
 SPEC_STATUSES = {
     "label_created",
     "dispatched",
@@ -116,8 +73,6 @@ def request_for(user):
 
 
 class ShipmentTestCase(ApiTestCase):
-    """Fixtures: one account order, one guest order, one parcel each."""
-
     def setUp(self):
         self.buyer = self.make_user("track-buyer")
         self.stranger = self.make_user("track-stranger")
@@ -151,8 +106,6 @@ class ShipmentTestCase(ApiTestCase):
         return Order.objects.create(**fields)
 
     def _guest_order(self, order_number, guest_email, guest_token):
-        # SPEC-1-B04's two-owner constraint: a guest row is user IS NULL with
-        # BOTH guest columns set, and the database enforces it.
         return Order.objects.create(
             order_number=order_number,
             guest_email=guest_email,
@@ -184,45 +137,25 @@ class ShipmentTestCase(ApiTestCase):
         return self.client.get(TRACK.format(order_number), **headers)
 
     def login_as(self, user):
-        """A REAL JWT for ``user``, minted by the login endpoint.
-
-        ``force_authenticate`` assigns ``request.user`` directly, so it bypasses
-        every authenticator in ``DEFAULT_AUTHENTICATION_CLASSES`` and a test
-        built on it passes whether or not the credential contract works at
-        all. This mints a token the way a browser does - POST the credentials,
-        read the ``access`` the endpoint returns - and leaves it attached as a
-        bearer, so the request that follows is carried by the same auth stack
-        production uses. It is what makes "an authenticated customer reads
-        their own shipment" a statement about the product rather than about
-        the test client.
-        """
+        """A REAL JWT for user, minted by the login endpoint: force_authenticate bypasses every authenticator, so a test built on it passes whether the credential contract works."""
         res, token = self.api_login(user.username)
         self.assertEqual(res.status_code, 200, res.data)
         self.assertTrue(token, res.data)
         return token
 
     def parcels(self, response):
-        """The parcel bodies of a 200 tracking response, in report order."""
         return response.data["shipments"]
 
     def one_parcel(self, response):
-        """The single parcel of a 200 response for a one-parcel order."""
         bodies = self.parcels(response)
         self.assertEqual(len(bodies), 1, response.data)
         return bodies[0]
 
     def logout(self):
-        """Drop the bearer token, so the next request is anonymous again."""
         self.auth(None)
 
     def staff_post(self, url, **fields):
-        """A complete change-form POST, exactly as the grid renders it.
-
-        The defaults are read off the PERSISTED row, so a test that moves the
-        status twice posts the second move from where the first left it - the
-        alternative (a fixture object that has gone stale) would silently test
-        a two-step move instead of the step being asked for.
-        """
+        """The defaults are read off the PERSISTED row, so a test moving the status twice posts the second move from where the first left it."""
         live = Shipment.objects.get(pk=self.shipment.pk)
         payload = {
             "order": live.order_id,
@@ -242,8 +175,6 @@ class ShipmentTestCase(ApiTestCase):
 
 
 class ModelContractTests(ShipmentTestCase):
-    """The two entities are the spec's two, with the spec's vocabulary."""
-
     def test_the_status_vocabulary_is_spec_10_2_verbatim(self):
         self.assertEqual({value for value, _ in Shipment.Status.choices}, SPEC_STATUSES)
 
@@ -258,8 +189,6 @@ class ModelContractTests(ShipmentTestCase):
         self.assertEqual(str(event), f"{self.guest_shipment.pk}: None->label_created")
 
     def test_the_trail_is_ordered_oldest_first_for_the_customer(self):
-        # The model ordering IS what the tracking page reads forward through,
-        # so it is pinned here rather than left to the serializer to re-sort.
         self.assertEqual(ShipmentEvent._meta.ordering, ("created_at", "id"))
 
     def test_an_order_carries_its_shipments_and_cascades_their_trail(self):
@@ -275,10 +204,8 @@ class ModelContractTests(ShipmentTestCase):
         )
 
     def test_the_deletion_policy_is_the_one_the_model_documents(self):
-        # Spec 8.3 line 2485 asks for an EXPLICIT deletion policy, and this is
-        # the explicit one: the shipment cascades with its order, the actor is
-        # SET_NULL. Both halves are asserted so neither can be changed silently
-        # - the asymmetry is a decision, recorded in shipping/models.py.
+        # Spec 8.3's explicit deletion policy: the shipment cascades with its order, the actor is
+        # SET_NULL -- an asymmetry asserted in both directions.
         order_field = Shipment._meta.get_field("order")
         actor_field = ShipmentEvent._meta.get_field("actor")
 
@@ -286,8 +213,6 @@ class ModelContractTests(ShipmentTestCase):
         self.assertIs(actor_field.remote_field.on_delete, models.SET_NULL)
 
     def test_deleting_a_staff_account_does_not_take_the_trail_with_it(self):
-        # The other half of the asymmetry above: the same delete that takes a
-        # shipment's trail with it leaves a STAFF account's attribution behind.
         self.shipment.events.create(
             from_status=None,
             to_status=Shipment.Status.LABEL_CREATED,
@@ -304,15 +229,11 @@ class ModelContractTests(ShipmentTestCase):
         self.assertEqual(event.shipment_id, self.shipment.pk)
 
     def test_a_tracking_number_can_never_answer_for_two_parcels(self):
-        # Spec 8.3 line 2565's "Shipment tracking reference" index is this
-        # unique index; the assertion is the reason it is one.
         with self.assertRaises(IntegrityError):
             self._shipment(self.guest_order, "TRK-401")
 
 
 class SerializerContractTests(ShipmentTestCase):
-    """Spec 6.9 line 2027: customer-appropriate information, and only that."""
-
     def test_the_tracking_body_carries_no_staff_or_customer_pii(self):
         body = ShipmentTrackingSerializer(self.shipment).data
 
@@ -333,8 +254,6 @@ class SerializerContractTests(ShipmentTestCase):
             self.assertNotIn(absent, body)
 
     def test_the_parcel_body_keeps_its_eight_keys_in_a_split_response(self):
-        # The envelope changed for split shipments; the parcel body did not.
-        # This is what keeps every key's sensitivity unchanged by the nesting.
         self._shipment(self.order, "TRK-SPLIT-C")
         self.login_as(self.buyer)
 
@@ -358,28 +277,21 @@ class SerializerContractTests(ShipmentTestCase):
                 self.assertNotIn("internal_note", parcel)
 
     def test_a_hit_body_leaks_nothing_sensitive_in_its_raw_bytes(self):
-        # The anti-leak sweep on the RENDERED body rather than on the parsed
-        # dict, because the envelope change (a parcel is now nested under
-        # "shipments") is exactly the kind of edit that could drop a key, hoist
-        # one or leak a new one, and a dict-level key-set assertion is blind to
-        # a value that leaks inside a key nobody thought to check. Asserted on
-        # the raw bytes for BOTH credential classes: the guest's own email and
-        # token are the two values the account-side fixtures do not have.
+        # The anti-leak sweep runs on the RENDERED body, because the envelope change (a parcel nested
+        # under "shipments") is exactly the edit that could drop, hoist or leak a key.
         self._shipment(self.order, "TRK-LEAK")
         self.shipment.events.create(
             from_status=None,
             to_status=Shipment.Status.LABEL_CREATED,
             actor=self.support,
         )
-        # `make_user` leaves email unset, and an empty needle matches every
-        # haystack - the assertion would be vacuous rather than passing.
+        # make_user leaves email unset, and an empty needle matches every haystack, so the assertion would
+        # be vacuous rather than passing.
         self.buyer.email = "track-buyer@example.com"
         self.buyer.save(update_fields=["email"])
         bodies = {}
-        # Guest FIRST, while still anonymous: the view resolves an
-        # authenticated caller through `order__user` and never reads the guest
-        # header, so a guest token presented alongside a bearer is not a
-        # second door - it is simply ignored, and the request misses.
+        # Guest FIRST, while still anonymous: the view resolves an authenticated caller through order__user
+        # and never reads the guest header, so a guest token alongside a bearer is not a second door.
         bodies["guest"] = self.track(
             self.guest_order.order_number, token=self.guest_order.guest_token
         ).content
@@ -405,31 +317,22 @@ class SerializerContractTests(ShipmentTestCase):
             for label, value in forbidden.items():
                 with self.subTest(credential=credential, forbidden=label):
                     self.assertNotIn(value, body)
-            # And the six keys are all still there, at their new depth.
             self.assertIn("shipments", body)
 
     def test_every_tracking_field_is_read_only(self):
-        # A ModelSerializer is writable by default, so this is the structural
-        # half of "a client can never post a tracking number".
         for name, field in ShipmentTrackingSerializer().fields.items():
             with self.subTest(field=name):
                 self.assertTrue(field.read_only)
 
     def test_the_public_endpoint_reads_the_same_credential_as_the_guest_read(self):
-        # The credential is B04's, by name and by width. Pinning both
-        # constants here is what makes the duplication in shipping/views.py
-        # safe rather than a drift waiting to happen.
+        # The credential is B04's, by name and by width; pinning both constants here is what makes the
+        # duplication in shipping/views.py safe rather than a drift waiting to happen.
         self.assertEqual(GUEST_ORDER_TOKEN_HEADER, GUEST_TOKEN_HEADER)
         self.assertEqual(GUEST_TOKEN_MAX_LENGTH, ORDERS_TOKEN_MAX_LENGTH)
 
 
 class UniformMissTests(ShipmentTestCase):
-    """An order number alone must disclose NOTHING - not even existence.
-
-    Byte-identity of the raw response content is the property, not a set of
-    status codes, because a body that differs is as good an oracle as a code
-    that differs.
-    """
+    """An order number alone must disclose NOTHING, not even existence: byte-identity of the raw response is the property, not a set of status codes."""
 
     def setUp(self):
         super().setUp()
@@ -442,9 +345,6 @@ class UniformMissTests(ShipmentTestCase):
     def test_the_baseline_miss_is_the_one_documented_answer(self):
         self.assertEqual(self.baseline.status_code, 404)
         self.assertEqual(self.baseline.data["error"], "Shipment not found")
-        # The view's own helper is exactly that one body; the surrounding
-        # envelope (code/details) is the repo-wide middleware, identical on
-        # every response in the suite and not this endpoint's business.
         self.assertEqual(_tracking_lookup_miss().data, {"error": "Shipment not found"})
 
     def test_an_order_number_with_no_credential_discloses_nothing(self):
@@ -454,13 +354,9 @@ class UniformMissTests(ShipmentTestCase):
         self._assert_uniform(self.track(self.order.order_number, token="not-the-token"))
 
     def test_an_over_wide_token_is_refused_identically(self):
-        # B04's width cap: a value too long for the column is rejected before
-        # it can reach the index.
         self._assert_uniform(self.track(self.order.order_number, token="x" * 65))
 
     def test_a_token_valid_for_a_different_order_is_refused_identically(self):
-        # A guest holds a VALID token - for their own parcel - and points it
-        # at somebody else's order number.
         self._assert_uniform(
             self.track(self.order.order_number, token=self.guest_order.guest_token)
         )
@@ -469,16 +365,12 @@ class UniformMissTests(ShipmentTestCase):
         self._assert_uniform(self.track("ORD-2026-999999"))
 
     def test_an_authenticated_stranger_is_refused_identically(self):
-        # A REAL JWT, not force_authenticate: the property is that the
-        # credential contract itself refuses a stranger, which a
-        # force_authenticate request never exercises.
+        # A REAL JWT, not force_authenticate: the property is that the credential contract itself refuses
+        # a stranger, which force_authenticate never exercises.
         self.login_as(self.stranger)
         self._assert_uniform(self.track(self.order.order_number))
 
     def test_a_valid_credential_on_an_order_with_no_shipment_is_the_same_answer(self):
-        # The caller proved ownership, so there is nothing left to hide - and
-        # the answer still matches, so "has a shipment" is not observable even
-        # by an owner probing their own missing parcel.
         order = self._account_order("ORD-2026-000403")
         self.login_as(self.buyer)
         self._assert_uniform(self.track(order.order_number))
@@ -488,21 +380,13 @@ class UniformMissTests(ShipmentTestCase):
         self._assert_uniform(self.track("ORD-2026-000404", token="tok-404"))
 
     def test_a_split_order_with_no_visible_parcel_is_the_same_answer(self):
-        # A STRANGER's split order: the multi-parcel path must not become the
-        # one shape that answers differently just because it looks at more
-        # rows.
         self._shipment(self.order, "TRK-409")
         self.login_as(self.stranger)
         self._assert_uniform(self.track(self.order.order_number))
 
     def test_every_miss_shape_is_one_shape(self):
-        # The whole matrix in one assertion, so "one byte-identical answer" is
-        # a measured fact about a listed set rather than an impression from
-        # reading the tests above it. Ordered deliberately: the anonymous
-        # probes all run FIRST, because authenticating partway through would
-        # carry into every later probe and silently reclassify it as an
-        # authenticated one - the shape list would then look exhaustive while
-        # quietly testing fewer anonymous shapes than it claims.
+        # The whole matrix in one assertion; the anonymous probes run FIRST because authenticating partway
+        # through would carry into every later probe and silently reclassify it.
         empty_order = self._account_order("ORD-2026-000405")
         empty_guest = self._guest_order(
             "ORD-2026-000406", "shape@example.com", "tok-shape"
@@ -522,11 +406,6 @@ class UniformMissTests(ShipmentTestCase):
             ),
         }
 
-        # The credential decides WHETHER the list is empty, never what an empty
-        # one looks like - so the authenticated classes are in the same matrix,
-        # each against an existing order number AND an absent one, because
-        # "an order that exists but is not yours" and "an order that does not
-        # exist" are the two a stranger/owner mix-up could get wrong.
         self.login_as(self.stranger)
         shapes["authenticated stranger"] = self.track(self.order.order_number)
         shapes["authenticated stranger, unknown order"] = self.track("ORD-2026-999999")
@@ -536,9 +415,6 @@ class UniformMissTests(ShipmentTestCase):
         )
         shapes["owner, unknown order number"] = self.track("ORD-2026-999999")
 
-        # A bare session cookie resolves to AnonymousUser (the session
-        # authenticator is not installed), so it is the no-credential shape and
-        # belongs in the matrix rather than in the class above.
         self.logout()
         self.client.force_login(self.buyer)
         shapes["session cookie only"] = self.track(self.order.order_number)
@@ -550,15 +426,7 @@ class UniformMissTests(ShipmentTestCase):
 
 
 class OwnershipTests(ShipmentTestCase):
-    """The two credentials spec 3.9 line 1189 names, and nothing else.
-
-    Every test here obtains its credential the way a browser does - a real JWT
-    from ``POST /api/accounts/login/`` - so these assertions are about the
-    shipped auth stack reaching the tracking view, not about a test client
-    being handed a user object. ``common/authentication.py:41-57`` records that
-    JWT remains the only credential in the chain, and that is the contract
-    these tests now actually hold the endpoint to.
-    """
+    """Every credential here is obtained the way a browser does -- a real JWT from the login endpoint -- so these assertions are about the shipped auth stack, not a test client handed a user object."""
 
     def test_the_authenticated_customer_sees_their_own_shipment(self):
         self.login_as(self.buyer)
@@ -571,14 +439,11 @@ class OwnershipTests(ShipmentTestCase):
         self.assertEqual(parcel["tracking_number"], "TRK-401")
 
     def test_the_account_alone_is_the_credential(self):
-        # Proved by the absence of the header: signing in is enough.
         self.login_as(self.buyer)
         res = self.track(self.order.order_number, token=None)
         self.assertEqual(res.status_code, 200, res.data)
 
     def test_signing_in_is_never_a_way_to_read_a_guest_order(self):
-        # A guest order's `user` is NULL, so `user=request.user` cannot match
-        # it - even with the guest's own token attached.
         self.login_as(self.buyer)
 
         res = self.track(
@@ -589,9 +454,6 @@ class OwnershipTests(ShipmentTestCase):
         self.assertEqual(res.data["error"], "Shipment not found")
 
     def test_a_real_credential_from_a_stranger_is_refused(self):
-        # The load-bearing negative, on a real credential: an authenticated
-        # STRANGER holding a valid JWT for their OWN account still cannot read
-        # this customer's parcel by guessing the order number.
         self.login_as(self.stranger)
 
         res = self.track(self.order.order_number)
@@ -600,9 +462,6 @@ class OwnershipTests(ShipmentTestCase):
         self.assertEqual(res.data["error"], "Shipment not found")
 
     def test_a_dropped_token_is_never_a_credential(self):
-        # The other half of "JWT is the credential": a token that is no longer
-        # presented must stop authorizing. Without this, a leaked token in a
-        # stale client would keep reading an order forever.
         self.login_as(self.buyer)
         self.assertEqual(self.track(self.order.order_number).status_code, 200)
 
@@ -613,14 +472,8 @@ class OwnershipTests(ShipmentTestCase):
         self.assertEqual(res.data["error"], "Shipment not found")
 
     def test_a_forged_bearer_token_is_refused_by_the_auth_stack(self):
-        # The test that makes the JWT claim load-bearing rather than
-        # decorative. ``force_authenticate`` assigns ``request.user`` before any
-        # authenticator runs, so it can never produce this answer: the
-        # Authorization header really is presented and JWTAuthentication
-        # really does reject it. The refusal is DRF's 401, raised in the
-        # authenticator BEFORE the view runs, so it is a statement about the
-        # credential and carries no order information at all - the next test
-        # pins that half.
+        # force_authenticate assigns request.user before any authenticator runs, so it can never produce
+        # this answer; the Authorization header really is presented and JWTAuthentication really does reject it.
         self.auth("not.a.real.token")
 
         res = self.track(self.order.order_number)
@@ -629,10 +482,6 @@ class OwnershipTests(ShipmentTestCase):
         self.assertEqual(res.data["code"], "not_authenticated")
 
     def test_a_rejected_credential_discloses_nothing_about_the_order(self):
-        # The anti-oracle half of the test above: whatever the auth stack
-        # answers for a bad credential, it answers IDENTICALLY whether or not
-        # the order number exists, so a 401 is not a cheaper existence oracle
-        # than the 404. Asserted on the raw bytes, like UniformMissTests does.
         self.auth("not.a.real.token")
 
         known = self.track(self.order.order_number)
@@ -642,10 +491,6 @@ class OwnershipTests(ShipmentTestCase):
         self.assertEqual(known.content, unknown.content)
 
     def test_a_token_whose_account_is_gone_stops_working(self):
-        # The other direction: a token that WAS valid once stops working when
-        # the account behind it is deleted. Pinned on the same anti-oracle
-        # property, because simplejwt raises "User not found" from the
-        # authenticator rather than falling through to the anonymous branch.
         token = self.login_as(self.buyer)
         self.assertEqual(self.track(self.order.order_number).status_code, 200)
 
@@ -658,11 +503,8 @@ class OwnershipTests(ShipmentTestCase):
         self.assertEqual(known.content, unknown.content)
 
     def test_a_bare_session_login_is_not_a_credential_here(self):
-        # The endpoint is DRF-on-DRF, and DRF's session authenticator is not in
-        # DEFAULT_AUTHENTICATION_CLASSES, so a session cookie resolves to
-        # AnonymousUser and the token branch is the only way in. Pinned so a
-        # future authenticator added to that tuple has to decide about this
-        # endpoint deliberately.
+        # DRF's session authenticator is not in DEFAULT_AUTHENTICATION_CLASSES, so a session cookie resolves
+        # to AnonymousUser; pinned so a future authenticator must decide about this endpoint deliberately.
         self.client.force_login(self.buyer)
 
         res = self.track(self.order.order_number)
@@ -680,8 +522,6 @@ class OwnershipTests(ShipmentTestCase):
 
 
 class GuestTrackingTests(ShipmentTestCase):
-    """A guest tracks on the credential B04 minted, end to end."""
-
     def test_a_guest_order_tracks_end_to_end_on_its_own_token(self):
         res = self.track(
             self.guest_order.order_number, token=self.guest_order.guest_token
@@ -704,8 +544,6 @@ class GuestTrackingTests(ShipmentTestCase):
         self.assertNotIn("internal_note", body)
 
     def test_a_guest_needs_no_account_row_to_be_tracked(self):
-        # SPEC-1-B04 requirement 6: `user is None` must not crash any path this
-        # task touches, and a guest order is the only order with no user.
         self.assertIsNone(self.guest_order.user_id)
         res = self.track(
             self.guest_order.order_number, token=self.guest_order.guest_token
@@ -729,20 +567,10 @@ class GuestTrackingTests(ShipmentTestCase):
 
 
 class SplitShipmentTests(ShipmentTestCase):
-    """Spec 6.9 line 2021 "Split shipments, if needed" - every parcel, always.
-
-    The pre-fix view answered with ``.first()`` over a queryset ordered
-    newest-first, so a two-parcel order reported only the parcel that left
-    LAST. The sharp end of that: an order whose FIRST parcel was already
-    delivered reported the still-moving second parcel and never mentioned the
-    delivery at all.
-    """
+    """A .first() over a newest-first queryset reports only the parcel that left LAST, so every parcel must be returned."""
 
     def setUp(self):
         super().setUp()
-        # A dedicated order: the shared fixtures already put one parcel on
-        # each, and a split order that also carries an unrelated parcel would
-        # test the count rather than the split.
         self.split_order = self._account_order("ORD-2026-000408")
         self.first = self._shipment(
             self.split_order,
@@ -775,8 +603,6 @@ class SplitShipmentTests(ShipmentTestCase):
         )
 
     def test_the_delivered_parcel_is_not_hidden_behind_the_moving_one(self):
-        # The exact pre-fix failure: TRK-SPLIT-A is delivered and must appear,
-        # whatever the model's newest-first ordering would have picked.
         self.login_as(self.buyer)
 
         res = self.track(self.split_order.order_number)
@@ -801,8 +627,6 @@ class SplitShipmentTests(ShipmentTestCase):
         self.assertEqual(trails["TRK-SPLIT-B"], ["in_transit"])
 
     def test_the_parcels_are_reported_in_the_order_they_were_dispatched(self):
-        # Oldest first, so the customer reads them in dispatch order rather
-        # than in the admin grid's newest-activity order.
         self.login_as(self.buyer)
 
         res = self.track(self.split_order.order_number)
@@ -829,8 +653,6 @@ class SplitShipmentTests(ShipmentTestCase):
         )
 
     def test_the_lookup_helper_itself_returns_every_visible_parcel(self):
-        # The helper is the guard, so its return value is pinned directly and
-        # not only through the view.
         request = RequestFactory().get("/")
         request.user = self.buyer
         request.headers = {}
@@ -843,7 +665,6 @@ class SplitShipmentTests(ShipmentTestCase):
         )
 
     def test_a_one_parcel_order_still_reports_exactly_one(self):
-        # The split path must not double-count a plain order.
         order = self._account_order("ORD-2026-000407")
         self._shipment(order, "TRK-SOLO")
         self.login_as(self.buyer)
@@ -855,8 +676,6 @@ class SplitShipmentTests(ShipmentTestCase):
         )
 
     def test_the_shipment_model_ordering_is_not_what_the_timeline_uses(self):
-        # The split answer is ordered in the query, so this states the two
-        # orderings apart rather than letting one silently stand for both.
         self.assertEqual(Shipment._meta.ordering, ("-created_at", "-id"))
         newest_first = list(
             Shipment.objects.filter(order=self.split_order).order_by(
@@ -870,8 +689,6 @@ class SplitShipmentTests(ShipmentTestCase):
 
 
 class StaffSurfaceTests(ShipmentTestCase):
-    """Staff see and update the parcel - through the shipped RBAC seam."""
-
     def test_a_capability_holder_sees_the_shipment_changelist(self):
         self.client.force_login(self.support)
 
@@ -890,8 +707,6 @@ class StaffSurfaceTests(ShipmentTestCase):
         self.assertEqual(self.shipment.status, "dispatched")
 
     def test_the_admin_role_creates_the_shipment_and_its_reference(self):
-        # Spec 6.9 line 2009 "Shipment creation": the add form is the writer
-        # that mints the tracking reference of line 2013.
         self.client.force_login(self.chief)
 
         res = self.staff_post(
@@ -938,15 +753,11 @@ class StaffSurfaceTests(ShipmentTestCase):
         self.assertEqual(self.client.get(f"{TRAIL_CHANGELIST}add/").status_code, 403)
 
     def test_the_named_permission_classes_are_pinned_to_the_new_capabilities(self):
-        # Requirement 4: tests/test_rbac_foundation.py pins one named class per
-        # capability in CAPABILITY_ROLES, so the map and these two cannot drift.
         self.assertEqual(HasShipmentsRead.capability, "shipments.read")
         self.assertEqual(HasShipmentsWrite.capability, "shipments.write")
 
 
 class LeastPrivilegeTests(ShipmentTestCase):
-    """A role WITHOUT the capability gets nothing, and nothing widened."""
-
     def test_a_role_without_the_capability_is_refused_the_changelist(self):
         self.client.force_login(self.marketing)
         self.assertEqual(self.client.get(CHANGELIST).status_code, 403)
@@ -965,9 +776,6 @@ class LeastPrivilegeTests(ShipmentTestCase):
         self.assertEqual(self.client.get(TRAIL_CHANGELIST).status_code, 403)
 
     def test_the_packers_exact_capability_set_is_unchanged(self):
-        # Requirement 5: SPEC-1-B03's pin, imported rather than restated, so a
-        # widening of shipments.* into the fulfilment operator's role fails
-        # HERE as well as in the task that shipped the pin.
         held = frozenset(
             capability
             for capability in CAPABILITY_ROLES
@@ -1000,8 +808,6 @@ class LeastPrivilegeTests(ShipmentTestCase):
 
 
 class EventTrailTests(ShipmentTestCase):
-    """Every move is recorded once, immutably, with an aware timestamp."""
-
     def _move(self, status):
         self.client.force_login(self.support)
         return self.staff_post(self.change_url(), status=status)
@@ -1055,9 +861,8 @@ class EventTrailTests(ShipmentTestCase):
         self.assertEqual(self.shipment.carrier, "Ecom Express")
 
     def test_the_status_and_its_event_commit_together(self):
-        # Requirement 7, atomicity half: the status write and the row that
-        # records it are one transaction, so a failing event cannot leave a
-        # parcel that moved with no record of where it moved from.
+        # The status write and the row that records it are one transaction, so a failing event cannot leave
+        # a parcel that moved with no record of where it moved from.
         self.client.force_login(self.support)
 
         with patch.object(
@@ -1082,8 +887,6 @@ class EventTrailTests(ShipmentTestCase):
             event.save()
 
     def test_a_recorded_event_survives_a_refused_rewrite(self):
-        # The refusal must be a refusal, not a partial write: the row still
-        # holds what it held.
         event = ShipmentEvent.objects.create(
             shipment=self.shipment,
             from_status=None,
@@ -1107,8 +910,6 @@ class EventTrailTests(ShipmentTestCase):
         self.assertEqual(event.shipment_id, self.shipment.pk)
 
     def test_the_customer_trail_is_the_operator_trail(self):
-        # The customer's timeline IS this table, so an operator's view and the
-        # customer's view cannot disagree about what happened.
         self._move("dispatched")
         self.login_as(self.buyer)
 
@@ -1126,8 +927,6 @@ class EventTrailTests(ShipmentTestCase):
 
 
 class MoneyIsUntouchedTests(ShipmentTestCase):
-    """Requirement 7: a tracking update moves no money and no snapshot."""
-
     def _order_with_shipping_snapshot(self):
         method = ShippingMethod.objects.create(code="express", name="Express")
         return self._account_order(
@@ -1175,14 +974,7 @@ class MoneyIsUntouchedTests(ShipmentTestCase):
 
 
 class AppendOnlyGuardTests(ShipmentTestCase):
-    """No code path can rewrite, delete or forge a recorded step.
-
-    The pre-fix guard was a ``save()`` check only, which is one layer short of
-    the claim its own docstring made. These are the four paths that reach the
-    table without calling ``save()``; each is asserted to be refused AND to
-    leave the recorded step exactly as it was, because a guard that raised
-    after writing would be no guard at all.
-    """
+    """A save() check is one layer short: these are the four paths that reach the table without calling save(), each asserted to be refused AND to leave the row unchanged."""
 
     def setUp(self):
         super().setUp()
@@ -1203,8 +995,6 @@ class AppendOnlyGuardTests(ShipmentTestCase):
         self.assertEqual(self.event.to_status, Shipment.Status.DISPATCHED)
 
     def test_a_queryset_update_cannot_retarget_a_recorded_step(self):
-        # Not just the status column: the shipment and the actor are part of
-        # the record too.
         with self.assertRaises(ValueError):
             ShipmentEvent.objects.filter(pk=self.event.pk).update(
                 shipment=self.guest_shipment
@@ -1246,13 +1036,8 @@ class AppendOnlyGuardTests(ShipmentTestCase):
         self.assertEqual(ShipmentEvent.objects.count(), self.before)
 
     def test_deleting_the_shipment_still_takes_its_trail_with_it(self):
-        # The over-blocking check for the queryset guard above. ``QuerySet
-        # .delete`` is refused, but Django's collector issues its own DELETE and
-        # never routes through the queryset, so the CASCADE is NOT blocked by
-        # it - which is the whole reason the guard can be this blunt. If a
-        # future Django or a refactor made the cascade go through
-        # ``QuerySet.delete``, THIS is the test that would fail, and the right
-        # answer would be to narrow the guard rather than to un-cascade.
+        # QuerySet.delete is refused, but Django's collector issues its own DELETE and never routes through
+        # the queryset, so the CASCADE is NOT blocked by it -- which is why the guard can be this blunt.
         self.assertTrue(ShipmentEvent.objects.filter(pk=self.event.pk).exists())
 
         self.shipment.delete()
@@ -1262,8 +1047,6 @@ class AppendOnlyGuardTests(ShipmentTestCase):
         self.assertEqual(ShipmentEvent.objects.count(), self.before - 1)
 
     def test_the_refusals_name_the_model_and_the_reason(self):
-        # A guard whose message names nothing is a guard an operator cannot
-        # act on from a traceback.
         for call, expected in (
             (
                 lambda: ShipmentEvent.objects.filter(pk=self.event.pk).update(
@@ -1291,13 +1074,8 @@ class AppendOnlyGuardTests(ShipmentTestCase):
                 self.assertIn(expected, str(caught.exception))
 
     def test_bulk_update_cannot_rewrite_a_recorded_step(self):
-        # The remaining bulk path, and the one a reader is most likely to miss:
-        # ``QuerySet.bulk_update`` looks like an object method but is not - it
-        # compiles a CASE expression and issues it through
-        # ``queryset.filter(...).update(...)`` internally (Django 6.1,
-        # ``QuerySet.bulk_update``), so it runs into the queryset guard without
-        # any model method of ours running. Asserted on the message, so a
-        # Django-internal refusal would not satisfy this.
+        # QuerySet.bulk_update looks like an object method but compiles a CASE expression and issues it
+        # through queryset.filter(...).update(), so it runs into the queryset guard without any model method running.
         with self.assertRaises(ValueError) as caught:
             ShipmentEvent.objects.bulk_update([self.event], ["to_status"])
 
@@ -1306,8 +1084,6 @@ class AppendOnlyGuardTests(ShipmentTestCase):
         self.assertEqual(self.event.to_status, Shipment.Status.DISPATCHED)
 
     def test_the_admin_surface_is_still_the_only_place_a_step_is_written(self):
-        # The sanctioned writer is unchanged: the change form still records the
-        # move, in the same transaction (EventTrailTests pins the rollback).
         self.client.force_login(self.support)
 
         res = self.staff_post(self.change_url(), status="in_transit")
@@ -1322,13 +1098,7 @@ class AppendOnlyGuardTests(ShipmentTestCase):
 
 
 class StatusCannotBeMovedInBulkTests(ShipmentTestCase):
-    """A parcel cannot move to a new status with no event recording it.
-
-    ``ShipmentAdmin.save_model`` writes the row and the event in one
-    transaction, and that is the only writer of a status move. The one write
-    path that never reaches it is a bulk ``update()``, which is what moved a
-    parcel to "delivered" with the trail still saying "label_created".
-    """
+    """ShipmentAdmin.save_model writes the row and the event in one transaction and is the only writer of a status move; the bulk update() path never reaches it."""
 
     def test_a_bulk_update_cannot_move_the_status(self):
         with self.assertRaises(ValueError):
@@ -1339,12 +1109,6 @@ class StatusCannotBeMovedInBulkTests(ShipmentTestCase):
         self.assertFalse(ShipmentEvent.objects.filter(shipment=self.shipment).exists())
 
     def test_a_bulk_update_cannot_move_the_status_either(self):
-        # ``QuerySet.bulk_update`` on a list of objects looks like an object
-        # method but never calls ``save()``: Django compiles the values into a
-        # CASE expression and issues it through ``queryset.filter(...).update()``
-        # (Django 6.1). That is why the refusal lives on the QUERYSET rather
-        # than on ``Shipment.save``, and without this probe the pair would look
-        # equally protected while one of them was open.
         self.shipment.status = Shipment.Status.DELIVERED
 
         with self.assertRaises(ValueError) as caught:
@@ -1355,16 +1119,12 @@ class StatusCannotBeMovedInBulkTests(ShipmentTestCase):
         self.assertEqual(self.shipment.status, Shipment.Status.LABEL_CREATED)
 
     def test_a_bulk_update_of_other_columns_is_still_allowed(self):
-        # The guard is scoped to the one column the trail claims to hold, so
-        # it does not turn Shipment into a read-only table.
         Shipment.objects.filter(pk=self.shipment.pk).update(carrier="Ecom Express")
 
         self.shipment.refresh_from_db()
         self.assertEqual(self.shipment.carrier, "Ecom Express")
 
     def test_a_bulk_update_of_a_non_status_column_is_still_allowed(self):
-        # Same scoping on the object-list form, so refusing `status` does not
-        # refuse the whole method.
         self.shipment.carrier = "Ecom Express"
 
         Shipment.objects.bulk_update([self.shipment], ["carrier"])
@@ -1373,8 +1133,8 @@ class StatusCannotBeMovedInBulkTests(ShipmentTestCase):
         self.assertEqual(self.shipment.carrier, "Ecom Express")
 
     def test_a_bulk_update_cannot_write_an_over_wide_column_either(self):
-        # A bulk write does not call save(), so the width gate has to be
-        # repeated here or `bulk_update` is a way round it.
+        # A bulk write does not call save(), so the width gate has to be repeated here or bulk_update is a
+        # way round it.
         self.shipment.carrier = "x" * (
             Shipment._meta.get_field("carrier").max_length + 1
         )
@@ -1387,15 +1147,11 @@ class StatusCannotBeMovedInBulkTests(ShipmentTestCase):
         self.assertEqual(self.shipment.carrier, "BlueDart")
 
     def test_a_bulk_update_refusal_leaves_the_caller_able_to_carry_on(self):
-        # The reason the refusal is raised before Django opens its
-        # `transaction.atomic(savepoint=False)` block rather than inside it: an
-        # error raised inside that block marks the caller's transaction as
-        # needing a rollback, so a caught-and-logged guard would leave the
-        # caller unable to run another query at all.
+        # The refusal is raised before Django opens its atomic(savepoint=False) block: an error raised inside
+        # marks the caller's transaction as needing rollback, leaving it unable to run another query.
         with self.assertRaises(ValueError):
             Shipment.objects.bulk_update([self.shipment], ["status"])
 
-        # Would raise TransactionManagementError if the refusal had poisoned it.
         self.assertEqual(
             Shipment.objects.filter(pk=self.shipment.pk).count(),
             1,
@@ -1425,15 +1181,7 @@ class StatusCannotBeMovedInBulkTests(ShipmentTestCase):
 
 
 class WidthGateTests(ShipmentTestCase):
-    """No column is ever written a value wider than the column declares.
-
-    SQLite ignores a ``varchar(n)`` width and Postgres enforces it, so an
-    over-length value is a clean save in this suite and a ``DataError`` 500 on
-    the production database. The bound is read off the model field rather than
-    restated, so these tests are also what stops the gate drifting from the
-    schema. Every bounded column on both new models is exercised, not just the
-    one the audit happened to trip over.
-    """
+    """SQLite ignores a varchar(n) width and Postgres enforces it, so an over-length value is a clean save in this suite and a DataError 500 in production; the bound is read off the model field."""
 
     def _over(self, model, field, width=None):
         field_obj = model._meta.get_field(field)
@@ -1489,16 +1237,12 @@ class WidthGateTests(ShipmentTestCase):
         self.assertIn("from_status", str(caught.exception))
 
     def test_a_value_exactly_at_the_bound_is_accepted(self):
-        # The gate is a width, not a mood: the last legal value must still be
-        # writable, or the fix would be a truncation bug wearing a hat.
         exact = self._over(Shipment, "tracking_number", width=100)
         shipment = self._shipment(self.order, exact, carrier="BlueDart")
 
         self.assertEqual(len(shipment.tracking_number), 100)
 
     def test_a_field_with_no_declared_width_is_not_gated(self):
-        # internal_note is a TextField: there is no width to exceed, so the
-        # gate must pass it rather than invent a limit.
         long_note = "N" * 5000
         self.shipment.internal_note = long_note
 
@@ -1508,8 +1252,6 @@ class WidthGateTests(ShipmentTestCase):
         self.assertEqual(self.shipment.internal_note, long_note)
 
     def test_a_value_at_the_bound_writes_on_a_re_save_too(self):
-        # The pre-fix symptom was a value that stored once and then 400'd on
-        # re-save; the bound is enforced on every write, not only the first.
         exact = self._over(Shipment, "carrier", width=60)
         self.shipment.carrier = exact
         self.shipment.save()
@@ -1523,9 +1265,6 @@ class WidthGateTests(ShipmentTestCase):
         self.assertEqual(len(self.shipment.carrier), 60)
 
     def test_a_bulk_update_cannot_write_an_over_wide_value(self):
-        # The width gate has to ride the queryset path too, not only save():
-        # a bulk update writes straight to the column, so this was the same
-        # SQLite-says-yes/Postgres-DataError trap one layer down.
         with self.assertRaises(ValueError) as caught:
             Shipment.objects.filter(pk=self.shipment.pk).update(
                 carrier=self._over(Shipment, "carrier")
@@ -1544,20 +1283,14 @@ class WidthGateTests(ShipmentTestCase):
         self.assertEqual(len(self.shipment.carrier), 60)
 
     def test_a_bulk_update_of_a_field_with_no_width_is_allowed(self):
-        # internal_note is a TextField, so a long note through the queryset is
-        # legal exactly as it is through save().
         Shipment.objects.filter(pk=self.shipment.pk).update(internal_note="N" * 5000)
 
         self.shipment.refresh_from_db()
         self.assertEqual(len(self.shipment.internal_note), 5000)
 
     def test_a_computed_value_is_left_to_the_database_not_measured(self):
-        # Django hands a `bulk_update`'s values to the same `QuerySet.update`
-        # as a CASE expression rather than as the string that produced it, and
-        # an expression reaches the gate through any `F()` update too. The gate
-        # measures strings; measuring an expression would crash the write with
-        # a TypeError about `len()`, which is the opposite of what a guard is
-        # for.
+        # bulk_update hands values to QuerySet.update as a CASE expression rather than the string that produced
+        # it; the gate measures strings, and measuring an expression would crash the write with a TypeError.
         Shipment.objects.filter(pk=self.shipment.pk).update(
             carrier=models.F("tracking_number")
         )
@@ -1566,8 +1299,6 @@ class WidthGateTests(ShipmentTestCase):
         self.assertEqual(self.shipment.carrier, "TRK-401")
 
     def test_the_admin_form_still_refuses_an_over_wide_value(self):
-        # The width gate at the model is a second line of defence; the form is
-        # the first, and it must not have been weakened.
         self.client.force_login(self.support)
 
         res = self.staff_post(
@@ -1580,14 +1311,7 @@ class WidthGateTests(ShipmentTestCase):
 
 
 class OrderLifecycleSyncTests(ShipmentTestCase):
-    """A parcel's status drives its order's visible lifecycle (SPEC-D-01).
-
-    The two records stay separate - the shipment vocabulary is never pushed
-    through the order machine - so every probe here is about the SEAM: a move
-    the machine allows is mirrored, a move it refuses is skipped, and a replay
-    writes no second audit row. The order fixtures name their own state
-    because the machine, not this module, decides which edges exist.
-    """
+    """The order and shipment records stay separate -- the shipment vocabulary is never pushed through the order machine -- so every probe is about the SEAM: mirrored, skipped, or replayed."""
 
     def setUp(self):
         super().setUp()
@@ -1646,8 +1370,6 @@ class OrderLifecycleSyncTests(ShipmentTestCase):
         event = OrderStatusEvent.objects.get(order=order)
         self.assertEqual((event.from_status, event.to_status), ("confirmed", "shipped"))
         self.assertEqual(event.actor, self.support)
-        # The move happened through the admin change form; the trigger is the
-        # registered surface, not a new unregistered source.
         self.assertEqual(event.trigger, "admin_change_form")
 
     def test_an_in_transit_parcel_ships_its_confirmed_order(self):
@@ -1675,10 +1397,8 @@ class OrderLifecycleSyncTests(ShipmentTestCase):
         )
 
     def test_one_delivered_parcel_does_not_deliver_a_split_order(self):
-        # A split order is several parcels, so "one parcel arrived" is not "the
-        # order arrived": the customer reads the order, and it is not delivered
-        # while a sibling parcel is still in the warehouse. The order advances
-        # only when the LAST parcel does.
+        # A split order is several parcels, so "one parcel arrived" is not "the order arrived": the order
+        # advances only when the LAST parcel does.
         order = self._order_in("confirmed")
         first = self._parcel(order, "TRK-421")
         second = self._parcel(order, "TRK-422")
@@ -1703,10 +1423,6 @@ class OrderLifecycleSyncTests(ShipmentTestCase):
         )
 
     def test_an_exception_parcel_blocks_the_order_delivery(self):
-        # A delivery failure is a parcel the customer does not have, so it
-        # blocks the order exactly as a parcel in transit does. The order
-        # machine has no "partially delivered" state; leaving the order at
-        # shipped is the honest record until the failure is resolved.
         order = self._order_in("confirmed")
         arrived = self._parcel(order, "TRK-423")
         failed = self._parcel(order, "TRK-424")
@@ -1721,10 +1437,8 @@ class OrderLifecycleSyncTests(ShipmentTestCase):
         self.assertEqual(self._order_events(order), [("confirmed", "shipped")])
 
     def test_a_parcel_driven_move_refreshes_the_order_updated_at(self):
-        # orders/admin.py's bulk writer pins the same invariant: a transition
-        # is a write to the row, so its freshness marker moves with it. A
-        # shipment-driven move that omits updated_at from update_fields leaves
-        # the order looking untouched on any "changed since" query.
+        # A transition is a write to the row, so its freshness marker must move with it: a shipment-driven
+        # move that omits updated_at leaves the order looking untouched on any "changed since" query.
         order = self._order_in("confirmed")
         shipment = self._parcel(order)
         stale = datetime(2026, 1, 1, tzinfo=dt_timezone.utc)
@@ -1739,9 +1453,6 @@ class OrderLifecycleSyncTests(ShipmentTestCase):
         self.assertGreater(order.updated_at, stale)
 
     def test_a_delivered_parcel_never_skips_confirmed_to_delivered(self):
-        # "delivered" maps to an order edge that starts at "shipped"; a parcel
-        # marked delivered straight from label creation must not force the
-        # machine across a state the order never visited.
         order = self._order_in("confirmed")
         shipment = self._parcel(order)
 
@@ -1814,8 +1525,6 @@ class OrderLifecycleSyncTests(ShipmentTestCase):
         self.assertEqual(self._order_events(order), [])
 
     def test_a_confirmed_but_unpaid_order_is_not_shipped(self):
-        # The status edge exists, so the precondition is the only thing holding
-        # the order back: shipping it would be un-reconcilable money.
         order = self._order_in("confirmed", payment_status="pending")
         shipment = self._parcel(order)
 
@@ -1857,8 +1566,8 @@ class OrderLifecycleSyncTests(ShipmentTestCase):
         self.assertEqual(self._order_events(order), [("confirmed", "shipped")])
 
     def test_the_parcel_and_order_moves_roll_back_together(self):
-        # The order sync rides the transaction that wrote the parcel event, so
-        # a failure after the parcel move leaves neither half behind.
+        # The order sync rides the transaction that wrote the parcel event, so a failure after the parcel
+        # move leaves neither half behind.
         order = self._order_in("confirmed")
         shipment = self._parcel(order)
 
@@ -1876,15 +1585,7 @@ class OrderLifecycleSyncTests(ShipmentTestCase):
 
 
 class OrderBindingAndRefusalTests(ShipmentTestCase):
-    """[B-2] A parcel's order is fixed at creation, and a refused order move
-    is explained to the operator instead of happening silently.
-
-    The order is the thing the customer reads, so two rules meet here: the
-    binding is chosen once (read-only afterwards) and the order machine - not
-    this surface - decides whether a parcel's status may move it. When the
-    machine refuses, the parcel still saves; the operator is told which rule
-    held the order back, in the machine's own words.
-    """
+    """The order binding is chosen once and read-only afterwards, and the order machine -- not this surface -- decides whether a parcel's status may move it; a refusal is explained to the operator."""
 
     def setUp(self):
         super().setUp()
@@ -1936,8 +1637,6 @@ class OrderBindingAndRefusalTests(ShipmentTestCase):
 
         self.assertEqual(res.status_code, 200)
         self.assertNotIn("order", res.context["adminform"].form.fields)
-        # Read-only, not hidden: the operator still sees which order owns it
-        # (the admin renders the FK's own label, ``Order.__str__``).
         self.assertContains(res, f"Order #{self.order.pk}")
 
     def test_the_order_is_selectable_on_the_add_form_with_binding_help(self):
@@ -1952,9 +1651,8 @@ class OrderBindingAndRefusalTests(ShipmentTestCase):
         )
 
     def test_a_posted_order_cannot_re_point_an_existing_parcel(self):
-        # ``get_readonly_fields`` makes Django EXCLUDE the field from the
-        # change form, so a hand-posted id is not even a form field. The
-        # stored binding survives, rather than the POST winning.
+        # get_readonly_fields makes Django EXCLUDE the field from the change form, so a hand-posted id is
+        # not even a form field; the stored binding survives rather than the POST winning.
         self._post_status(
             self.shipment,
             Shipment.Status.LABEL_CREATED,
@@ -2027,18 +1725,8 @@ class OrderBindingAndRefusalTests(ShipmentTestCase):
         self.assertNotContains(res, "Order not moved")
 
 
-# ==================================
-# [SPEC-B-02] The provider link and the tracking URL it renders
-# ==================================
-
-
 class ProviderTrackingUrlTests(ShipmentTestCase):
-    """A parcel is tied to a provider so the customer can follow it THERE.
-
-    The link is rendered from the provider's own template and this parcel's own
-    reference, so the storefront never has to know a carrier's URL shape and
-    the backend never has to reach the carrier.
-    """
+    """The link is rendered from the provider's own template and this parcel's own reference, so the storefront never needs to know a carrier's URL shape and the backend never reaches the carrier."""
 
     def provider(self, template="https://track.delhivery.com/{tracking_number}"):
         return ShippingProvider.objects.create(
@@ -2067,9 +1755,6 @@ class ProviderTrackingUrlTests(ShipmentTestCase):
         self.assertIsNone(self.shipment.tracking_url)
 
     def test_a_parcel_with_no_reference_has_no_tracking_url(self):
-        # Every parcel the admin mints carries a reference; the guard is for
-        # the empty string a direct ORM write could still leave behind. The
-        # provider link is real here, so only the reference is absent.
         self.linked()
         self.shipment.tracking_number = ""
         self.assertIsNone(self.shipment.tracking_url)
@@ -2082,8 +1767,8 @@ class ProviderTrackingUrlTests(ShipmentTestCase):
         )
 
     def test_a_brace_in_the_template_is_url_text_not_a_format_field(self):
-        # str.replace, not str.format: an operator's brace is part of the URL,
-        # and a format string here would raise on the ``{lang}`` query token.
+        # str.replace, not str.format: an operator's brace is part of the URL, and a format string here
+        # would raise on the {lang} query token.
         self.linked(
             self.provider(template="https://t.example/{tracking_number}?lang={lang}")
         )
@@ -2093,8 +1778,6 @@ class ProviderTrackingUrlTests(ShipmentTestCase):
         )
 
     def test_rendering_the_link_makes_no_network_call(self):
-        # Rendering a URL is not fetching it: the browser the customer already
-        # has follows the link, and this property stays pure string work.
         self.linked()
         with patch("urllib.request.urlopen") as urlopen:
             self.assertEqual(
@@ -2105,15 +1788,7 @@ class ProviderTrackingUrlTests(ShipmentTestCase):
 
 
 class TrackingTemplateValidationTests(ShipmentTestCase):
-    """[B-1] The template is rendered into an ``href``, so it is a URL.
-
-    Staff configure it, but the customer's browser follows what it produces.
-    A ``javascript:`` template would run in that customer's session and a
-    ``data:`` one would serve a document this store never published, so the
-    scheme is a boundary rather than a formatting preference. The model's
-    ``clean`` is the one place the rule lives (Django's admin forms call it),
-    and the renderer re-checks the scheme for a row written through the ORM.
-    """
+    """The template is rendered into an href, so it is a URL: staff configure it, but the customer's browser follows it, which makes the scheme a boundary rather than a formatting preference."""
 
     def provider(self, template):
         return ShippingProvider(
@@ -2149,8 +1824,8 @@ class TrackingTemplateValidationTests(ShipmentTestCase):
         self.assert_rejected("track.example.com/{tracking_number}", "absolute http(s)")
 
     def test_a_scheme_relative_url_is_rejected(self):
-        # ``//host/path`` inherits the page's scheme and is not the absolute
-        # http(s) link the store promises the customer.
+        # //host/path inherits the page's scheme and is not the absolute http(s) link the store promises
+        # the customer.
         self.assert_rejected(
             "//track.example.com/{tracking_number}", "absolute http(s)"
         )
@@ -2173,8 +1848,6 @@ class TrackingTemplateValidationTests(ShipmentTestCase):
         self.assertIsNone(shipment.tracking_url)
 
     def test_http_is_rejected_outside_debug(self):
-        # The test runner forces DEBUG off, which is also the production
-        # posture: the customer's link must not be cleartext.
         self.assert_rejected("http://track.example.com/{tracking_number}", "https://")
 
     @override_settings(DEBUG=True)
@@ -2182,8 +1855,6 @@ class TrackingTemplateValidationTests(ShipmentTestCase):
         self.provider("http://localhost:8000/track/{tracking_number}").clean()
 
     def test_a_non_http_template_written_through_the_orm_renders_no_link(self):
-        # Defense in depth: a direct ORM write never runs clean(), and the
-        # property is the last place before the storefront's href.
         for index, template in enumerate(
             (
                 "javascript:alert({tracking_number})",
@@ -2238,12 +1909,7 @@ class TrackingTemplateValidationTests(ShipmentTestCase):
 
 
 class ProviderLinkDeletionTests(ShipmentTestCase):
-    """The FK is PROTECT, and that is the recorded decision, not an accident.
-
-    A tracking link is part of what an already-shipped customer was given, so a
-    careless provider delete must be REFUSED rather than quietly orphan the
-    link. ``is_active`` on the provider is the supported retirement path.
-    """
+    """The FK is PROTECT by recorded decision: a tracking link is part of what an already-shipped customer was given, so a careless provider delete must be REFUSED; is_active is the retirement path."""
 
     def test_a_new_parcel_may_have_no_provider(self):
         self.assertIsNone(self.shipment.provider_id)
@@ -2267,8 +1933,6 @@ class ProviderLinkDeletionTests(ShipmentTestCase):
         self.assertEqual(self.shipment.provider_id, provider.pk)
 
     def test_deleting_a_provider_no_parcel_points_at_is_still_allowed(self):
-        # PROTECT refuses the delete that would orphan a parcel, and only that
-        # one: a provider nothing references stays removable.
         provider = ShippingProvider.objects.create(name="Unused", code="unused")
 
         provider.delete()
@@ -2277,8 +1941,6 @@ class ProviderLinkDeletionTests(ShipmentTestCase):
 
 
 class TrackingLinkSerializerTests(ShipmentTestCase):
-    """[SPEC-B-02] The storefront gets the link, never the provider's insides."""
-
     def linked_body(self, template="https://track.delhivery.com/{tracking_number}"):
         provider = ShippingProvider.objects.create(
             name="Delhivery",
@@ -2307,7 +1969,6 @@ class TrackingLinkSerializerTests(ShipmentTestCase):
         for hidden in ("tracking_url_template", "is_active", "internal_note"):
             with self.subTest(hidden=hidden):
                 self.assertNotIn(hidden, rendered)
-        # The provider is named by its code, never by a row id.
         self.assertNotIn('"id"', rendered)
 
     def test_the_two_new_fields_are_read_only(self):
@@ -2318,11 +1979,7 @@ class TrackingLinkSerializerTests(ShipmentTestCase):
 
 
 class ProviderLinkAdminTests(ShipmentTestCase):
-    """[SPEC-B-02] The operator links a parcel to an order and a provider, and
-    a parcel is discoverable afterwards."""
-
     def staff_add(self, **fields):
-        """A complete add-form POST, with every field the form renders."""
         payload = {
             "order": self.guest_order.pk,
             "tracking_number": "",
@@ -2337,12 +1994,8 @@ class ProviderLinkAdminTests(ShipmentTestCase):
         return self.client.post(f"{CHANGELIST}add/", payload)
 
     def test_the_provider_field_is_a_plain_select_not_a_gated_autocomplete(self):
-        # ``shipments.write`` (support + admin) and ``shipping.manage``
-        # (finance + admin) are different capabilities, and the provider
-        # autocomplete endpoint resolves through ShippingProviderAdmin's view
-        # permission - shipping.manage. An autocomplete widget therefore 403s
-        # for support, the role this surface exists to serve. A plain select
-        # needs no endpoint and adds no read authority on the provider table.
+        # shipments.write (support + admin) and shipping.manage (finance + admin) differ, and the provider
+        # autocomplete resolves through shipping.manage -- so it 403s for support, the role this surface serves. A plain select needs no endpoint.
         model_admin = admin.site._registry[Shipment]
         provider = ShippingProvider.objects.create(name="Delhivery", code="delhivery")
 
@@ -2352,9 +2005,6 @@ class ProviderLinkAdminTests(ShipmentTestCase):
         self.assertIn(provider, field.queryset)
 
     def test_a_support_holder_links_a_provider_and_gets_the_tracking_url(self):
-        # The headline output of SPEC-B-02, reachable by the role that writes
-        # shipments: support holds shipments.write but NOT shipping.manage, so
-        # this is the case the autocomplete widget silently broke.
         provider = ShippingProvider.objects.create(
             name="Delhivery",
             code="delhivery",
@@ -2386,10 +2036,6 @@ class ProviderLinkAdminTests(ShipmentTestCase):
         )
 
     def test_a_role_without_shipments_write_cannot_link_a_provider(self):
-        # The other half of the pair: the plain select must not become a
-        # general read door onto providers for a role that cannot write a
-        # shipment at all. The packing operator is the closest caller to
-        # fulfilment and is still refused.
         provider = ShippingProvider.objects.create(name="Delhivery", code="delhivery")
         self.client.force_login(self.packer)
 
@@ -2425,12 +2071,6 @@ class ProviderLinkAdminTests(ShipmentTestCase):
         self.assertEqual(created.provider_id, provider.pk)
 
     def test_the_provider_autocomplete_endpoint_refuses_the_shipments_writer(self):
-        # The auditor's repro, kept as the reason the field is a plain select:
-        # the endpoint resolves through ShippingProviderAdmin's view
-        # permission (shipping.manage), so support - which holds
-        # shipments.write - gets 403. If a future change makes this endpoint
-        # answer for support, that is a capability decision to take
-        # deliberately, not a widget choice to sneak in.
         ShippingProvider.objects.create(name="Delhivery", code="delhivery")
         self.client.force_login(self.support)
 

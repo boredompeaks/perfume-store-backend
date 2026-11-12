@@ -17,9 +17,8 @@ function CartSkeleton() {
           key={n}
           className="flex flex-col gap-4 border-b border-hairline py-8 sm:flex-row"
         >
-          {/* Mirrors the populated row's plate and its mobile stacking
-              (screen: 96x128, 112x144 at sm) so the fallback cannot cause
-              the CLS it exists to prevent (§5.3). */}
+          {/* Mirrors the populated row's plate so the fallback cannot cause
+              the CLS it exists to prevent. */}
           <div className="skeleton h-32 w-24 shrink-0 sm:h-36 sm:w-28" />
           <div className="flex-1 space-y-3 py-1">
             <div className="skeleton h-4 w-1/2" />
@@ -32,21 +31,7 @@ function CartSkeleton() {
   );
 }
 
-/**
- * The purchase-path rail from the screen ("01 Panier - 02 Expedition -
- * 03 Paiement", U-W12-T7 design override D1: media/designs/
- * maison_ther_votre_panier), restyled to what is actually true: membership
- * and labels mirror CheckoutView's real STEPS (Delivery -> Review ->
- * Payment, CheckoutView.tsx) with this page as step 01, so the rail cannot
- * promise a path the checkout does not run. Static by intent - the brief
- * says "don't fake progress state": the checkout's scaleX fill answers
- * "which step am I on" over there, and replaying it here would claim
- * progress the cart page does not have. The screen draws the future steps
- * with a pointer cursor, but they are states inside /checkout rather than
- * routes, so nothing here is a link (a hover affordance that goes nowhere
- * is scaffolding). The screen's em-dash separators are dropped (house rule:
- * no em dashes in copy) for the gap spacing CheckoutView's own rail uses.
- */
+/** Static rail: mirrors checkout's real steps and never fakes progress. */
 function StepRail() {
   return (
     <ol
@@ -62,11 +47,6 @@ function StepRail() {
           }
         >
           {i === 0 && (
-            /* The screen marks the current step with a small filled dot;
-               square here because the radius language is 0 everywhere but
-               the cart counter (DESIGN.md / ui-taste). The state is also
-               carried by aria-current and the ink/secondary split, so the
-               bullet is decoration only. */
             <span aria-hidden="true" className="size-1.5 bg-bronze" />
           )}
           {`0${i + 1} ${label}`}
@@ -77,22 +57,9 @@ function StepRail() {
 }
 
 /**
- * §5.3 `/cart` — line items (left) and the sticky summary (right), under the
- * screen's title band.
- *
- * The band renders above the state switch, so the h1 ships in every state
- * (skeleton, error, empty, populated). Its count suffix is the real unit
- * total from the cart payload; the screen's "reserved" wording is not
- * shipped - stock holds begin at checkout (SPEC-12-01) and the cart payload
- * carries no hold, so the claim would be invented (P5). The screen's
- * reservation banner is omitted on the same basis (BACKEND_REQUESTS P2
- * "Cart-level reservation banner state").
- *
- * Money here is display arithmetic on server-provided prices only: the
- * subtotal has no server field yet (BACKEND_REQUESTS P1 "Totals in the cart
- * payload"), so it is labelled an estimate, and the applied coupon's discount
- * and post-coupon total are rendered verbatim by `CouponForm` from the
- * apply-coupon preview. No pricing rule is implemented in this component.
+ * The title band renders above the state switch so the h1 ships in every
+ * state. The subtotal is display arithmetic over server prices (no server
+ * totals field yet), hence the "estimate" label.
  */
 export default function CartView() {
   const { status } = useAuth();
@@ -108,11 +75,6 @@ export default function CartView() {
 
   return (
     <div>
-      {/* Screen title band: the maison's French brand eyebrow (the products
-          page kept "Catalogue Raisonne" the same way), the screen's English
-          h1, the live count in the screen's italic serif slot (no em dash,
-          no hold claim), the static step rail, and the screen's hairline
-          rule beneath. */}
       <div className="border-b border-hairline pb-6">
         <div className="flex flex-col gap-4 md:flex-row md:items-end md:justify-between">
           <div>
@@ -169,21 +131,16 @@ export default function CartView() {
         </div>
       ) : (
         /* grid-cols-1 below lg: without a definite base track the implicit
-           auto column sizes to max-content and the page scrolls sideways at
-           390 (the stacked rows' money/Remove hang past the viewport). The
-           lg template then overrides it, unchanged from 5.3. */
+           auto column sizes to max-content and the page scrolls sideways.
+           The lg template then overrides it. */
         <div className="grid grid-cols-1 gap-12 lg:grid-cols-[1fr_360px]">
-          {/* The screen's ledger: a rule above the first line, one between
-              every pair, and one closing the list (border-y) - the same
-              rule topology CheckoutView and the orders list already use,
-              layered onto §5.3's KEEP'd divide-y. */}
           <div className="divide-y divide-hairline border-y border-hairline">
             {cart.items.map((item) => (
               <CartLineItem
                 key={item.id}
                 item={item}
-                /* §3 "Cart - line removed": one snapshot per visible line, and the
-                   row's own cap — snapshot memory scales with the captured area. */
+                /* One snapshot per visible line; snapshot memory scales with
+                   the captured area, so cap it. */
                 vtName={
                   cart.items.length <= 20 ? `cart-line-${item.id}` : undefined
                 }

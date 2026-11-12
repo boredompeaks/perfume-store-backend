@@ -9,19 +9,13 @@ from django.db import IntegrityError, models, transaction
 from django.utils import timezone
 from django.utils.text import slugify
 
-# A dedicated channel name (mirrors common.notifications/ops.alerts) so
-# deployments can route restock-send failures independently in log tooling.
+# Dedicated channel (mirrors common.notifications/ops.alerts) so restock
+# failures route independently in log tooling.
 logger = logging.getLogger("products.restock")
 
 
-# SPEC-17-08 [R-17.21]: "File upload abuse -> Type/size validation". The
-# type half is ImageField's Pillow verification (a non-image payload never
-# validates); the size half is this ceiling, enforced before anything is
-# written to storage. Env-driven with a 5 MB default because the right cap
-# is a per-deployment trade-off between image quality and abuse budget, not
-# a code constant. Read through django.conf.settings (not a module-level
-# literal) so deployments can override it without a code change and tests
-# can exercise the override.
+# The type half is ImageField's Pillow check; this ceiling is the size half,
+# enforced before storage. Read at call time so settings overrides apply.
 def _max_upload_bytes():
     return settings.MAX_UPLOAD_MB * 1024 * 1024
 
@@ -29,14 +23,9 @@ def _max_upload_bytes():
 def validate_image_size(image):
     """Reject image files above MAX_UPLOAD_MB with a field-level error.
 
-    Attached as a model-field validator so DRF's ModelSerializer copies it
-    onto the API form field (400 with the uniform error envelope) and
-    Django's ModelForm (the admin change/add pages) picks it up too — one
-    enforcement point covering every entry surface. The size is read via
-    seek/tell on the underlying file handle: upload wrappers vary (BytesIO
-    under the 2.5 MB in-memory threshold, TemporaryFile past it) and only
-    some expose .size themselves, while File wrappers always keep the
-    handle positioned at the start of the payload.
+    Attached as a model-field validator so DRF and ModelForm both inherit one
+    enforcement point; size is read via seek/tell because upload wrappers do
+    not all expose .size.
     """
     if not image or not image.file:
         return
@@ -62,21 +51,11 @@ class products(models.Model):
     size = models.PositiveBigIntegerField()
     stock = models.PositiveBigIntegerField(default=0)
     category = models.CharField(max_length=50)
-    # MERCHANT-DELIST: whether the storefront may sell this row. A delist
-    # is a reversible state flip ONLY -- it must never touch ``stock`` or
-    # write a StockMovement row (that ledger is for inventory changes;
-    # destroying history is what ``delete`` is for). The default is on-sale
-    # so the migration that adds the column leaves every existing row
-    # buyable: a False default would silently empty a live catalogue the
-    # moment the deploy ran.
+    # Delist flips state only: never touch ``stock`` or write a StockMovement.
+    # Default on-sale (a False default would empty the live catalogue).
     is_active = models.BooleanField(default=True)
-    # SPEC-C-03: a merchant-set delivery rule for this row. Default False so
-    # the migration that adds the column leaves every existing product
-    # charged exactly as it was; checkout applies it to the one order-level
-    # shipping charge, and the public store payload does not carry it: the
-    # storefront's identically named field is the shipping OPTION's
-    # threshold flag, a different column, and a bare product flag would add
-    # no buying information the total does not already show.
+    # Merchant delivery rule; False default keeps existing rows unchanged. Not
+    # in the public payload: the storefront's same-named field is a shipping flag.
     free_shipping = models.BooleanField(default=False)
     image = models.ImageField(
         upload_to="products/",
@@ -87,16 +66,8 @@ class products(models.Model):
     created_at = models.DateTimeField(auto_now_add=True)
 
     class Meta:
-        # [R-8.17] SPEC-8-05: spec 8.3 "Indexes" starting set for the
-        # catalogue (2551 "Product status and category relationships").
-        # Category is the public listing/filter key, so it gets the explicit
-        # index. The other catalogue prescriptions are covered without new
-        # indexes: slug (2549) is satisfied by unique=True (2479) — its
-        # backing unique index IS the slug lookup index — and the status
-        # half of 2551 is N/A because this table has no lifecycle-status
-        # column (stock health is derived by ``stock_health``, not stored
-        # state). ProductVariant.sku (2553) is likewise satisfied by its
-        # unique constraint (2481).
+        # ``category`` is the public listing/filter key. ``slug`` and
+        # ``ProductVariant.sku`` already have unique indexes; no status column.
         indexes = [
             models.Index(fields=["category"], name="products_category_idx"),
         ]
@@ -104,46 +75,20 @@ class products(models.Model):
     def _slug_candidates(self):
         """Yield slug candidates for a row that arrived without one.
 
-        slugify(name), held inside the column's own declared bound, made
-        unique with a numeric suffix. No existence check: the database's
-        unique constraint is the concurrency authority (conventions.md:17),
-        so ``save()`` walks this sequence and retries on IntegrityError
-        rather than testing first -- the check-then-act shape this replaced
-        let two concurrent creations of the same name both pass the read
-        and one of them 500 on the insert.
-
-        Split out of ``save()`` because the bound is only reachable through
-        input that the column cannot store, and the two engines disagree about
-        what an overshoot costs. PostgreSQL enforces a declared length and
-        raises StringDataRightTruncation; SQLite enforces nothing, so the
-        identical write is silent there. An over-long name is precisely the
-        input this clamp exists for, and ``name`` is bounded the same way as
-        ``slug`` -- so a test that drove the clamp through ``save()`` could
-        only ever have run on the engine that does not enforce the bound, which
-        is the whole reason a latent overshoot survived here unnoticed.
+        The DB unique constraint is the concurrency authority — ``save()``
+        retries on IntegrityError rather than checking first; split from
+        ``save()`` because PostgreSQL enforces the column bound and SQLite
+        does not, so an over-long name fails on only one engine.
         """
-        # The bound is read off this model's own field, never typed here: a
-        # literal in a generation path silently rots the moment the column
-        # changes, and both literals this used to carry (the unclamped first
-        # candidate, and the 95-character collision budget) were already wrong
-        # for any bound other than 100.
+        # Read the bound off the model's own field: hard-coded literals rot
+        # the moment the column changes.
         max_length = self._meta.get_field("slug").max_length
         base_slug = slugify(self.name) or "product"
         yield base_slug[:max_length]
         suffix = 2
         while True:
-            # The suffix is the part that has to fit, so the BASE yields its
-            # characters. Cutting the finished candidate instead would drop
-            # the discriminator off the end of every collision, which is how
-            # two distinct products land on one slug and the unique constraint
-            # turns a truncation bug into a 500 on a different path. Each
-            # candidate here is distinct from the last, so the walk moves off
-            # the taken values and stops at the first free one.
-            #
-            # Truncating the FINISHED candidate instead of the base is the
-            # mutation this shape exists to survive: the cut then lands on the
-            # suffix, every candidate comes out identical to the one before it,
-            # and the walk never terminates at all.
+            # Truncate the base, not the finished candidate: the suffix would be
+            # cut off, collisions would repeat, and the walk would never end.
             marker = f"-{suffix}"
             yield f"{base_slug[: max_length - len(marker)]}{marker}"
             suffix += 1
@@ -157,36 +102,29 @@ class products(models.Model):
         for candidate in self._slug_candidates():
             self.slug = candidate
             try:
-                # Each attempt gets its own atomic block so a rejected insert
-                # rolls back to the savepoint and the outer transaction (if
-                # any) stays usable for the retry.
+                # Each attempt gets its own savepoint so a rejected insert
+                # leaves the outer transaction usable for the retry.
                 with transaction.atomic():
                     super().save(*args, **kwargs)
                 return
             except IntegrityError as exc:
-                # Only the slug unique constraint is retryable through this
-                # loop: both engines name it in the error (PostgreSQL's
-                # constraint name and SQLite's column list both carry
-                # "slug"), so anything else is a real defect and must
-                # propagate rather than burn through the candidate walk.
+                # Only the slug constraint is retryable (both engines name it in
+                # the error); anything else is a real defect and must propagate.
                 if "slug" not in str(exc):
                     raise
                 continue
 
-        # Unreachable: the candidate walk is unbounded, so the loop only
-        # exits by returning or by a non-slug IntegrityError propagating.
         raise AssertionError("slug candidate walk exhausted")  # pragma: no cover
 
     def adjust_stock(self, user, delta: int, reason: str, note: str = "") -> None:
-        """Admin-side manual inventory adjustment. Raises ValueError if the
-        change would push stock below zero. SPEC-6-02 [6.5.17]: there are no
-        silent inventory edits — every mutation path (manual adjustments and
-        payment-time sales alike) lands a StockMovement ledger row."""
+        """Admin-side manual inventory adjustment; raises ValueError below zero.
+
+        Every stock mutation lands a StockMovement row — no silent inventory
+        edits.
+        """
         with transaction.atomic():
-            # `self.stock` is stale the moment it is read: the payment flow
-            # decrements this same row under a lock. Re-read it locked so the
-            # below-zero guard and the ledger's stock_after gate on the real
-            # current value instead of racing a concurrent writer.
+            # ``self.stock`` is stale once read (payment decrements under a
+            # lock): re-read locked so the guard and ledger see the real value.
             locked = products.objects.select_for_update().get(pk=self.pk)
             new_stock = locked.stock + delta
             if new_stock < 0:
@@ -205,39 +143,20 @@ class products(models.Model):
                 stock_after=locked.stock,
                 created_by=user if getattr(user, "is_authenticated", False) else None,
             )
-            # [SPEC-19-4] Back-in-stock trigger ([R-19.11]): fires on the
-            # exact crossing the notification is about — stock arriving
-            # at a positive count from zero (PositiveBigIntegerField
-            # makes below-zero impossible, but the guard keeps the
-            # crossing definition self-contained). The inverse crossing
-            # (positive -> 0) re-arms spent rows: the product sold out
-            # again, so last cycle's notification is relevant again and
-            # the NEXT restock re-mails. Never raises: a notification
-            # outage must not fail the inventory write, mirroring the
-            # alert/dispatch log-only contracts.
+            # Fires on the 0 -> positive crossing (inverse re-arms spent rows)
+            # and never raises: mail must not fail the write.
             previous_stock = locked.stock - delta
             if locked.stock > 0 and previous_stock <= 0:
-                # ASYNC-2b2: REGISTER the fan-out on the commit hook, do
-                # not run it here. It is one SMTP round trip per opted-in
-                # user, and this block holds the product row's
-                # `select_for_update` lock for every one of them — the
-                # same row verify_payment locks, so a restock with N
-                # subscribers parked N x EMAIL_TIMEOUT of checkout traffic
-                # behind the mail. Committing releases the lock before the
-                # sockets open; a rollback drops the callback, so the mail
-                # still cannot outlive an inventory write that never
-                # happened (the reason it was pre-commit at all).
+                # Register on commit, don't send here: N SMTP round trips while
+                # the row lock verify_payment shares is held; rollback drops it.
                 transaction.on_commit(partial(self._notify_back_in_stock, locked))
             elif locked.stock == 0 and previous_stock > 0:
                 self._rearm_restock_notifications(locked)
 
     @staticmethod
     def _rearm_restock_notifications(product):
-        """[SPEC-19-4] Sell-out re-arm (stock positive -> 0): clear the
-        spent stamp on the product's active preferences so the NEXT
-        0 -> positive crossing re-mails the opted-in customers. One
-        stock cycle, one email. Fires beside the restock notify site and
-        never raises (the caller guards the crossings already).
+        """Sell-out re-arm (positive -> 0): clear the spent stamp so the next
+        restock re-mails opted-in customers — one email per stock cycle.
         """
         RestockNotification.objects.filter(
             product=product, active=True, notified_at__isnull=False
@@ -245,99 +164,23 @@ class products(models.Model):
 
     @classmethod
     def register_back_in_stock_release(cls, product):
-        """The relist half of the deferred back-in-stock notification.
+        """Relist half of the deferred back-in-stock notification.
 
-        MERCHANT-DELIST-C2: a restock that lands while the product is off
-        sale is SUPPRESSED — ``_notify_back_in_stock`` refuses an inactive
-        product, because its mail says "you can buy it again" and links a
-        detail page that 404s while the row is delisted. Suppression is
-        not silence, though: the suppressed pass never claims any row, so
-        every waiting opt-in is still armed, and THIS method is what
-        releases them — the same fan-out, registered on the commit hook of
-        the relist that made the product buyable again. One implementation,
-        two doors (the stock crossing and the relist), and the claim
-        machinery keeps one stock cycle to one email whichever door fired.
+        A restock landing while delisted is suppressed rather than silently
+        dropped: nothing is claimed, and the relist registers the same fan-out
+        so waiting opt-ins are released once the product is buyable.
         """
         transaction.on_commit(partial(cls._notify_back_in_stock, product))
 
     @staticmethod
     def _notify_back_in_stock(product):
-        """Email every armed opt-in for ``product`` via the single send
-        path, marking each row spent (``notified_at``) exactly once.
+        """Email every armed opt-in for ``product`` via the single send path.
 
-        ASYNC-2b2. ``adjust_stock`` REGISTERS this on
-        ``transaction.on_commit`` instead of calling it inside its own
-        ``atomic()`` block: the fan-out is one SMTP round trip per
-        opted-in user, and running it under the block held this product's
-        ``select_for_update`` row for every one of them. That is the row
-        ``orders.verify_payment`` locks to decrement stock, so a restock
-        with N subscribers parked N x ``EMAIL_TIMEOUT`` worth of
-        checkout traffic behind the mail — the admin request was slow, the
-        customers queueing to buy the product were the actual defect. The
-        commit hook releases the lock before any socket opens, and a
-        rollback discards the callback, so no email can still escape an
-        inventory write that did not happen.
-
-        The lock is released *because* a commit hook cannot run inside an
-        open ``atomic()`` block - it runs only when the enclosing atomic
-        stack empties and autocommit is restored, which is the same commit
-        that released the row. At the changelist bulk action and the staff
-        REST wrapper ``adjust_stock``'s own block is that outermost one. At
-        the changelist inline stock cell the block is a SAVEPOINT inside
-        the ``transaction.atomic`` that ``ModelAdmin._save_formset`` wraps
-        the whole list-editable loop in, so the fan-out fires at *that*
-        block's commit instead - the same release, one block further out,
-        and further still where a deployment wraps requests in
-        ``ATOMIC_REQUESTS``. No lock survives into the send on any of the
-        three. A caller that wraps this in a longer transaction therefore
-        does not reintroduce one; what a longer transaction does change is
-        how long the armed list waits before it is claimed.
-
-        MERCHANT-DELIST-C2 — the product must be ON SALE for this to send.
-        The mail's whole claim is "you can buy it again", and for a
-        delisted product that is false: its detail page 404s and checkout
-        refuses it, so the mail would promise a purchase the store does
-        not offer. The choice taken is DEFER, not silence: an inactive
-        product's fan-out returns without claiming anything, so every
-        waiting row stays armed, and the relist action registers the same
-        fan-out (``register_back_in_stock_release``) as the moment the
-        promise becomes true. The gate reads the row's CURRENT state
-        rather than the passed instance because both callers hand over an
-        instance captured BEFORE their own write — the stock crossing's
-        locked row, the relist's pre-update targets — and because a
-        product delisted between the crossing and this hook firing must
-        not mail either. The stock>0 half of the trigger stays at the
-        call sites (a 0->positive crossing by construction; the relist
-        registers only rows in stock), so this gate changes nothing about
-        an active product's behaviour.
-
-        Each row is CLAIMED before its send, not after. The claim is the
-        conditional UPDATE whose filter is the arming predicate
-        (``active=True AND notified_at IS NULL``), so it is the mutual
-        exclusion: 0 rows updated means a concurrent stock cycle won this
-        row first and the send is skipped, which is what keeps one stock
-        cycle to one email per opt-in now that nothing else serialises the
-        fan-out. Sending first and stamping second, as this did under the
-        lock, left two rapid crossings free to each reach the same armed
-        row. Carrying ``active=True`` in the claim as well as in the
-        capture is load-bearing rather than decorative: the capture runs
-        inside the inventory transaction and the claim after it commits, so
-        without it a customer who opted out in that window would still be
-        mailed, on a row their own opt-out had already disarmed.
-
-        The claim IS the spent stamp, so it is released when the send
-        fails. The stamp no longer rides the inventory transaction, and a
-        failure that committed it would spend the row on an email that
-        never went out — silently dropping that customer for good, where
-        before ASYNC-2b2 a failed send left the row armed for the next
-        crossing. The release filters on the claimed timestamp rather than
-        the pk alone, so it cannot clear a stamp that a sell-out re-arm or
-        a later cycle has since written.
-
-        Honest limit, not papered over: a process killed between the claim
-        and the send leaves the row spent with no mail behind it. Closing
-        that window needs a real worker with its own retry (ASYNC-2c); the
-        next sell-out re-arms the row.
+        Runs on ``transaction.on_commit`` so no row lock is held across SMTP;
+        each row is claimed by a conditional UPDATE before sending (the claim
+        is both the mutual exclusion and the spent stamp, released if the send
+        fails), and an inactive product claims nothing so the relist's fan-out
+        can deliver later.
         """
         from common import notifications
 
@@ -351,25 +194,18 @@ class products(models.Model):
         ).select_related("user")
         for preference in armed:
             claimed_at = timezone.now()
-            # The claim carries the whole arming predicate, not just "not yet
-            # stamped": the list above was captured inside the inventory
-            # transaction while this claim lands post-commit, so a customer
-            # who opted out in between is still in the list and has to be
-            # re-checked here or they are mailed anyway.
+            # The captured list predates this post-commit claim, so re-check
+            # the whole arming predicate: an opt-out in between must not mail.
             claimed = RestockNotification.objects.filter(
                 pk=preference.pk, active=True, notified_at__isnull=True
             ).update(notified_at=claimed_at)
             if not claimed:
-                # Another stock cycle's claim landed first, or this row is no
-                # longer armed: either way its email for the cycle is
-                # accounted for, so sending would double up or resurrect an
-                # opt-out.
+                # Already claimed or disarmed: its email for this cycle is
+                # accounted for.
                 continue
             try:
-                # SPEC-Q-RS1: the address is owner-shaped, not
-                # user-shaped — an account row mails user.email (a
-                # submitted body email never redirects it), a guest row
-                # mails its normalized email column.
+                # Owner-shaped address: accounts mail user.email (a body email
+                # never redirects it); guests mail the stored email column.
                 recipient = (
                     preference.email
                     if preference.user_id is None
@@ -382,11 +218,8 @@ class products(models.Model):
                     recipient,
                 )
             except Exception:
-                # Log-only: one user's SMTP failure must not abort the
-                # loop for the remaining opt-ins (and the inventory write
-                # itself is unaffected by contract). The claim goes back so
-                # the next crossing retries this row, as it did when the
-                # send ran under the stock lock.
+                # Log-only: one SMTP failure must not abort the remaining
+                # opt-ins; release the claim so the next crossing retries.
                 logger.exception(
                     "Back-in-stock email failed: %s, product %s",
                     (
@@ -413,24 +246,12 @@ class products(models.Model):
 
 
 class ProductVariant(models.Model):
-    """A sellable variant of a product (SPEC-8-02a [R-8.7], spec section 8).
+    """A sellable variant of a product.
 
-    Schema core only, mirroring spec 8.3's rules: an FK to the core product
-    entity (2483), the globally unique merchant-entered SKU (2481 —
-    ``unique=True`` is simultaneously the constraint and its backing unique
-    index, 2553), the attributes the order-item snapshot list reads (variant
-    name/options 2503, SKU 2505, unit price 2507), an on-hand count and
-    distinct created/updated timestamps (2523).
-
-    Boundaries: ``price`` is exact decimal money (2489, conventions.md:15);
-    ``NULL`` means the product's own price applies — no read-side wiring is
-    invented here (OrderItem snapshots are SPEC-8-02b's). ``stock`` is
-    deliberately inert — ``products.stock`` remains the ONLY order-time
-    authority (checkout/verify_payment never read this column); variant-stock
-    reconciliation is SPEC-6-13's inventory-depth work, admin depth (role
-    matrix, fieldsets, actions) is SPEC-6-08's. The SKU has no generation
-    path, so conventions.md:17's IntegrityError retry has nothing to wrap:
-    the DB constraint is the concurrency authority.
+    ``price`` NULL means the product's own price applies; ``stock`` is
+    deliberately inert — ``products.stock`` stays the only order-time
+    authority; the SKU has no generation path, so the unique constraint is the
+    concurrency authority.
     """
 
     product = models.ForeignKey(
@@ -458,9 +279,9 @@ class ProductVariant(models.Model):
 
 
 class StockMovement(models.Model):
-    """Audit ledger for inventory mutations (SPEC-6-02 [6.5.17]): manual
-    admin adjustments via ``adjust_stock`` and payment-time sales via
-    ``verify_payment`` — a stock change without a movement row is a bug."""
+    """Audit ledger for every inventory mutation: a stock change without a
+    movement row is a bug.
+    """
 
     class Reason(models.TextChoices):
         SALE = "sale", "Sale"
@@ -498,53 +319,16 @@ class StockMovement(models.Model):
 
 
 class RestockNotification(models.Model):
-    """A customer's opt-in to one back-in-stock email for one product
-    ([R-19.11], spec 19.1 "Back-in-stock event -> Optional opt-in
-    notification", SPEC-19-4).
+    """A customer's opt-in to one back-in-stock email for one product.
 
-    Lifecycle: created active when the customer opts in while the product
-    is out of stock (an opt-in to a stocked product is meaningless). The
-    restock trigger emails them once and stamps ``notified_at`` — the row
-    keeps active=True but is spent, so a second restock without an
-    intervening sell-out never re-mails (no duplicate sends). Semantics of
-    the flags and the stock cycle:
-    - ``active=False`` is an explicit opt-OUT: no mail is ever sent for
-      the row until the customer opts back in (which flips active=True
-      and clears notified_at, arming a fresh notification);
-    - re-arm on subsequent zero-out: the sell-out crossing (stock
-      positive -> 0) clears ``notified_at`` on the product's active
-      rows, so the next 0 -> positive restock mails the same customer
-      again — one email per stock cycle, the natural reading of "notify
-      me when it's back";
-    - a customer wanting a fresh mail without a sell-out opts out and
-      back in (the opt-in clears notified_at).
-
-    SPEC-Q-RS1 (BE-012): two owner shapes, exactly one per row, enforced
-    by a DB check constraint (the orders account-xor-guest precedent): an
-    ACCOUNT row has a ``user`` and an empty ``email`` column (the
-    account's own address on ``user.email`` remains the only address the
-    trigger mails — a submitted body email never redirects an authed
-    opt-in); a GUEST row has ``user`` NULL and the normalized submitted
-    address in ``email``. The guest half of the surface exists so a
-    signed-out shopper can still be notified; never trust a submitted
-    address blindly — the view validates its format before a row is
-    armed, and the pair of partial/unique constraints below is the race
-    authority for each shape (no check-then-act): accounts stay unique
-    per (user, product), guests per (email, product).
-
-    Unique per owner-shape: at most one preference row per account pair
-    and one per guest (email, product) pair, the DB constraints are the
-    concurrency authority (two concurrent opt-ins race to one row —
-    conventions.md forbids check-then-act). Placement in products/ (not a
-    new app): the write trigger is ``products.adjust_stock`` and every
-    other customer-facing mount lives under the products/cart URL
-    namespaces; a one-model feature does not earn an app.
+    One row per owner shape (account x-or guest address, enforced by a DB
+    check constraint); the unique constraints are the race authority, and a
+    spent ``notified_at`` stamp keeps one email per stock cycle until a
+    sell-out re-arms the row.
     """
 
-    # NULL means the row is a GUEST opt-in: the owner is the normalized
-    # address in ``email``, not an account (SPEC-Q-RS1). CASCADE stays:
-    # deleting an account drops that account's opt-ins; guest rows have
-    # no account to cascade from and die with the product.
+    # NULL means a GUEST opt-in whose owner is ``email``; CASCADE drops an
+    # account's opt-ins, while guest rows die with the product.
     user = models.ForeignKey(
         "auth.User",
         on_delete=models.CASCADE,
@@ -552,10 +336,8 @@ class RestockNotification(models.Model):
         null=True,
         blank=True,
     )
-    # The guest opt-in address (SPEC-Q-RS1), stored normalized (strip +
-    # lower, the view's contract). Empty string on account rows — the
-    # empty/non-empty split is what the XOR check constraint reads, so it
-    # must be "" and never NULL there.
+    # Guest address, stored normalized (strip + lower). Account rows keep ""
+    # and never NULL — the XOR constraint reads the empty/non-empty split.
     email = models.EmailField(max_length=254, blank=True, default="")
     product = models.ForeignKey(
         products,
@@ -573,21 +355,15 @@ class RestockNotification(models.Model):
                 fields=["user", "product"],
                 name="uniq_user_product_restock_optin",
             ),
-            # Guest rows race on their own key: NULL users never collide
-            # under the account constraint (SQL NULLs are distinct), so
-            # the (email, product) pair needs its own uniqueness among
-            # guest rows — get_or_create's IntegrityError-retry semantics
-            # lean on whichever constraint the row shape hits.
+            # Guests need their own key: SQL NULLs are distinct, so (user,
+            # product) never collides — get_or_create relies on this constraint.
             models.UniqueConstraint(
                 fields=["email", "product"],
                 condition=models.Q(user__isnull=True),
                 name="uniq_guest_email_product_restock_optin",
             ),
-            # [R-1.13-style two-owner invariant]: a row is an account
-            # opt-in (user set, email empty) or a guest opt-in (user
-            # null, email non-empty), never neither and never both.
-            # "Neither" is an opt-in no owner could ever act on; "both"
-            # would carry two competing addresses for one trigger send.
+            # An opt-in has exactly one owner: account (user set) xor guest
+            # (email set).
             models.CheckConstraint(
                 condition=(
                     models.Q(user__isnull=False, email="")
@@ -597,8 +373,6 @@ class RestockNotification(models.Model):
             ),
         ]
         indexes = [
-            # The restock trigger's exact lookup: armed (active, unnotified)
-            # prefs for one product.
             models.Index(
                 fields=["product", "active", "notified_at"],
                 name="restock_trigger_idx",
@@ -614,31 +388,14 @@ class RestockNotification(models.Model):
 
 
 class StockReservation(models.Model):
-    """A time-limited hold on units of a product for an in-flight checkout
-    (SPEC-12-01, spec section 12.1).
+    """A time-limited hold on units of a product for an in-flight checkout.
 
-    Section 12.1's inventory split maps onto the schema as follows: on-hand
-    inventory stays ``products.stock`` (the only stock authority); reserved
-    inventory is the sum of a product's active reservations' ``quantity``;
-    available-to-sell is the derived difference — never stored, because the
-    reserved/safety-field accounting depth is SPEC-6-13's; expiry lives in
-    ``expires_at``; the owner/reference pair is ``owner`` + ``order``.
-
-    Boundaries: schema core only. The writers arrive later — SPEC-12-02
-    mints reservations inside create_order's atomic block and converts them
-    inside verify_payment's locked block, SPEC-12-03 expires stale ones via
-    the reconciler — so this model only carries the state they transition.
-    ``quantity`` shares the PositiveBigIntegerField domain of
-    ``products.stock`` / ``StockMovement.stock_after``: one integer domain
-    for unit counts across the inventory schema.
+    Reserved inventory is the sum of active holds' ``quantity`` and
+    available-to-sell is derived, never stored; the schema carries only the
+    state the checkout/reconciliation writers transition.
     """
 
     class Status(models.TextChoices):
-        # §12.1 "Recommended checkout behaviour" names the transitions: the
-        # backend creates a time-limited reservation at checkout (step 3),
-        # a successful confirmation converts it into a committed sale
-        # (step 5), failed/cancelled checkout releases it (step 6), and the
-        # scheduled reconciliation expires stale ones (step 7).
         ACTIVE = "active", "Active"
         CONVERTED = "converted", "Converted"
         RELEASED = "released", "Released"
@@ -649,20 +406,15 @@ class StockReservation(models.Model):
         on_delete=models.CASCADE,
         related_name="stock_reservations",
     )
-    # Cross-app references use the file's existing string-FK pattern (see
-    # StockMovement.created_by): the products app never imports orders/auth
-    # at model load, and orders.models already imports products.models.
+    # String FK to avoid a circular import: orders.models already imports
+    # products.models, so products must not import orders at load.
     order = models.ForeignKey(
         "orders.Order",
         on_delete=models.CASCADE,
         related_name="stock_reservations",
     )
-    # [R-1.13] SPEC-1-B04: nullable because a guest checks out without an
-    # account, and this hold is minted at checkout - so a guest order would
-    # otherwise have no value to put here and its units would never be
-    # reserved (the oversell guarantee is the point of the row). NULL means
-    # "the checkout that minted this hold belonged to a guest"; the order FK
-    # beside it is always present, so the hold still has its reference.
+    # Nullable because guest checkouts have no account; NULL means the hold
+    # belongs to a guest. The order FK beside it is always present.
     owner = models.ForeignKey(
         "auth.User",
         on_delete=models.CASCADE,
@@ -681,22 +433,15 @@ class StockReservation(models.Model):
     updated_at = models.DateTimeField(auto_now=True)
 
     class Meta:
-        # Checkout mints at most one reservation per order line: a duplicate
-        # (order, product) row would double-count reserved stock in the
-        # available-to-sell math, and a retried checkout must re-target the
-        # existing hold instead of minting a second one. §12.1 prescribes
-        # no explicit constraint name; this one is implied by "reserved
-        # inventory" being a per-checkout hold with an owner/reference, and
-        # it is the concurrency authority the DB enforces under races.
+        # One hold per (order, product): a duplicate would double-count reserved
+        # stock, and this constraint is the race authority for retried checkouts.
         constraints = [
             models.UniqueConstraint(
                 fields=["order", "product"],
                 name="uniq_order_product_reservation",
             ),
         ]
-        # The reconciler's sweep (SPEC-12-03) reads status=active AND
-        # expires_at<=now: the composite index serves exactly that shape,
-        # so expiry-based queries never scan the whole reservation table.
+        # Serves the reconciler's sweep (status=active AND expires_at<=now).
         indexes = [
             models.Index(
                 fields=["status", "expires_at"],
@@ -710,10 +455,8 @@ class StockReservation(models.Model):
     def expiry_from_now(cls):
         """``expires_at`` for a reservation minted now: now + RESERVATION_TTL.
 
-        Read at call time, not import time (the ops/services.py pattern):
-        the value is env-driven (settings.RESERVATION_TTL) and overridable
-        per request/per test, so a module-level constant would freeze the
-        first-seen value for the life of the process.
+        Read at call time so env/test overrides apply — a module-level constant
+        would freeze the first-seen value.
         """
         return timezone.now() + timedelta(seconds=settings.RESERVATION_TTL)
 

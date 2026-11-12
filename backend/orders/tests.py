@@ -1,9 +1,3 @@
-"""Orders unit tests - docs/test-gaps.md items 30-39.
-
-Razorpay is always mocked (``self.razorpay_mock``); no test touches the
-network or the real keys from ``.env`` (V-01 containment).
-"""
-
 import hashlib
 import hmac
 import json
@@ -46,15 +40,13 @@ from shipping.models import ShippingMethod, ShippingRate
 
 
 class OrderTestBase(ApiTestCase):
-    """Shared fixtures: a logged-in buyer with a seeded session cart."""
-
     def setUp(self):
         self.buyer = self.make_user("buyer")
         _, self.token = self.api_login("buyer")
         self.product = self.make_product(
             name="Rose Aurum", price="500.00", stock=10, category="Floral"
         )
-        self.cart_data = self.seed_session_cart([(self.product, 2)])  # subtotal 1000.00
+        self.cart_data = self.seed_session_cart([(self.product, 2)])
 
     def create_order(self, coupon=None, product=None, quantity=2):
         payload = {}
@@ -66,9 +58,7 @@ class OrderTestBase(ApiTestCase):
 
 
 def _attach_order_item(order, product, quantity=1):
-    """Fixture helper: give an ORM-created order the checkout lines the
-    real checkout flow always leaves behind (SPEC-10-03 makes items a
-    shipped precondition, so bare ORM rows cannot walk the shipped edge)."""
+    """Give an ORM-created order the checkout lines the real checkout flow always leaves behind: shipped orders require items."""
     return OrderItem.objects.create(
         order=order,
         product=product,
@@ -81,8 +71,6 @@ def _attach_order_item(order, product, quantity=1):
 
 @tag("orders")
 class CurrencyStoreConfigTests(OrderTestBase):
-    """[R-8.11] Currency rides every money column, driven by store config."""
-
     def test_new_order_and_items_default_to_store_currency(self):
         order = self.create_order()
 
@@ -143,18 +131,16 @@ class CurrencyStoreConfigTests(OrderTestBase):
         )
 
     def test_recorded_currency_is_frozen_against_later_setting_changes(self):
-        order = self.create_order()  # minted under the current config
+        order = self.create_order()
         with override_settings(DEFAULT_CURRENCY="USD"):
             order.refresh_from_db()
 
-        # Existing rows keep the currency they were minted with; the setting
-        # only ever steers new rows.
+        # Existing rows keep the currency they were minted with; the setting only ever steers new
+        # rows.
         self.assertEqual(order.currency, "INR")
 
 
 class DefaultCurrencySettingTests(SimpleTestCase):
-    """[R-8.11] _env_currency: env-driven with the fail-safe INR default."""
-
     def test_valid_code_is_normalised_to_uppercase(self):
         with mock.patch.dict(os.environ, {"DEFAULT_CURRENCY": "usd"}):
             self.assertEqual(_env_currency("DEFAULT_CURRENCY", "INR"), "USD")
@@ -163,8 +149,6 @@ class DefaultCurrencySettingTests(SimpleTestCase):
         with mock.patch.dict(os.environ, {"DEFAULT_CURRENCY": "rupees"}):
             with self.assertLogs("config.settings", level="WARNING") as logs:
                 self.assertEqual(_env_currency("DEFAULT_CURRENCY", "INR"), "INR")
-        # The resolver upper-cases before matching, so the warning names
-        # the offending value in its normalised form.
         self.assertIn("RUPEES", logs.output[0])
 
     def test_missing_code_uses_the_documented_default(self):
@@ -175,16 +159,13 @@ class DefaultCurrencySettingTests(SimpleTestCase):
 
 @tag("orders")
 class CurrencyBackfillMigrationTests(TransactionTestCase):
-    """[R-8.11] The 0008 backfill is deterministic: rows that predate the
-    column land 'INR' regardless of the migrating environment's config."""
-
     def test_0008_backfills_preexisting_rows_to_inr(self):
         call_command("migrate", "orders", "0007", verbosity=0, interactive=False)
         user_id = User.objects.create_user(
             "backfill", "backfill@example.com", "S3cure-Passphrase!"
         ).id
-        # The columns do not exist at 0007, so the ORM cannot write these
-        # rows: raw SQL reproduces exactly what a pre-currency store had.
+        # The columns do not exist at 0007, so raw SQL reproduces exactly what a pre-currency store
+        # had.
         with connection.cursor() as cursor:
             cursor.execute(
                 "INSERT INTO orders_order (user_id, full_name, phone, address,"
@@ -201,20 +182,8 @@ class CurrencyBackfillMigrationTests(TransactionTestCase):
                 " '', 'Legacy', 100.00, 1, 100.00)"
             )
 
-        # MERCHANT-DELIST (found while proving 0013): the restore leg MUST
-        # be a full migrate, not an orders-scoped one. The backwards leg
-        # above ("migrate orders 0007") unapplies every applied migration
-        # outside that target's ancestor closure — in EVERY app, because
-        # reaching "orders at 0007 and nothing else" is what the command
-        # promises — which on this tree also strips products 0009+ (and
-        # every other app past the closure). The old orders-scoped forward
-        # leg restored one app and left the shared test database missing
-        # the rest: invisible while products' own table was unchanged from
-        # 0008 to 0012, detonated the moment 0013 added a column — every
-        # test that ran after this one inserted into a products_products
-        # whose schema predated the model. The full migrate leaves the
-        # database as this test found it, which is the roundtrip's own
-        # contract ("migrate to head" per the class docstring).
+        # Restore leg must be a full migrate: the backwards leg strips every app outside the orders
+        # closure, so an orders-scoped forward leg would leave the shared test database stripped.
         call_command("migrate", verbosity=0, interactive=False)
 
         order = Order.objects.get(full_name="Backfill")
@@ -226,10 +195,6 @@ class CurrencyBackfillMigrationTests(TransactionTestCase):
 
 @tag("orders")
 class CurrencyExposureTests(OrderTestBase):
-    """[R-8.11] part 2/2: the minted currency surfaces wherever its money
-    surfaces — customer-facing serializers and the admin — and nowhere is
-    it writable."""
-
     def test_order_currency_exposed_read_only_in_order_serializer(self):
         self.assertIn("currency", OrderSerializer.Meta.fields)
         self.assertIn("currency", OrderSerializer.Meta.read_only_fields)
@@ -242,9 +207,6 @@ class CurrencyExposureTests(OrderTestBase):
         self.assertEqual(res.data["results"][0]["id"], order.id)
 
     def test_checkout_replay_and_item_bodies_carry_the_currency(self):
-        """OrderSerializer is the single surface for the checkout response,
-        the dedup replay, and every order read; OrderItemSerializer rides
-        it via ``items``, so both bodies denominate their amounts."""
         self.assertIn("currency", OrderItemSerializer.Meta.fields)
         self.assertIn("currency", OrderItemSerializer.Meta.read_only_fields)
 
@@ -270,8 +232,6 @@ class CurrencyExposureTests(OrderTestBase):
     def test_admin_list_display_and_read_only_detail_surface_currency(self):
         self.assertIn("currency", OrderAdmin.list_display)
         self.assertIn("currency", OrderAdmin.readonly_fields)
-        # The order change page renders currency inside the read-only
-        # payment fieldset, beside the amounts it denominates.
         payment_fieldset = dict(OrderAdmin.fieldsets)[
             "Payment (server-computed — read only)"
         ]
@@ -285,25 +245,21 @@ class CurrencyExposureTests(OrderTestBase):
         self.client.login(username="opsboss", password="S3cure-Passphrase!")
         changelist = self.client.get("/admin/orders/order/")
         self.assertEqual(changelist.status_code, 200)
-        self.assertContains(changelist, "Currency")  # the list column header
+        self.assertContains(changelist, "Currency")
         change_page = self.client.get(f"/admin/orders/order/{order.id}/change/")
         self.assertEqual(change_page.status_code, 200)
-        self.assertContains(change_page, "INR")  # the read-only value renders
+        self.assertContains(change_page, "INR")
 
 
 @tag("orders")
 class ApplyCouponTests(OrderTestBase):
-    """30-32. Coupon preview validation and math."""
-
     def _preview(self, code):
         return self.client.post(
             "/api/orders/apply-coupon/", {"code": code}, format="json"
         )
 
-    # 30. every rejection shares one uniform body: unknown, inactive,
-    # not-yet-valid, expired, usage-limit and min-order must be
-    # indistinguishable so coupon existence/validation state never leaks
-    # to callers probing the code space (V-11) ----------------------------
+    # Every rejection shares one uniform body so coupon existence and validation state never leak to
+    # callers probing the code space.
     def test_coupon_rejections_are_uniform(self):
         cases = [
             ("unknown", "SAVE404"),
@@ -333,10 +289,6 @@ class ApplyCouponTests(OrderTestBase):
             with self.subTest(case=name):
                 res = self._preview(code)
                 self.assertEqual(res.status_code, 400, res.data)
-                # one body for every failure reason; no configuration detail
-                # (e.g. minimum_order_amount) may ride along (SPEC-9-03: the
-                # uniform envelope adds the status-family code + empty
-                # details, the message stays the top-level string)
                 self.assertEqual(
                     res.data,
                     {
@@ -352,8 +304,6 @@ class ApplyCouponTests(OrderTestBase):
         self.assertEqual(res.data["error"], "Coupon code is required")
 
     def test_cartless_caller_learns_nothing_about_coupon_existence(self):
-        """With no cart, a known-valid and an unknown code must be
-        indistinguishable: the cart error comes first and is uniform."""
         self.make_coupon(code="SAVE10", discount_value="10")
         fresh = self.fresh_client()
         known = fresh.post(
@@ -372,26 +322,24 @@ class ApplyCouponTests(OrderTestBase):
         self.assertEqual(res.status_code, 200, res.data)
         self.assertEqual(res.data["coupon"], "SAVE10")
 
-    # 31. percentage cap via maximum_discount ----------------------------------------------
     def test_percentage_discount_capped_by_maximum_discount(self):
         self.make_coupon(code="HALFCAP", discount_value="50", maximum_discount="300")
         res = self._preview("HALFCAP")
         self.assertEqual(res.status_code, 200, res.data)
         self.assertEqual(res.data["subtotal"], "1000.00")
-        self.assertEqual(res.data["discount"], "300.00")  # 500.00 raw -> capped
+        self.assertEqual(res.data["discount"], "300.00")
         self.assertEqual(res.data["final_total"], "700.00")
 
         self.make_coupon(code="HALF", discount_value="50")
         res = self._preview("HALF")
-        self.assertEqual(res.data["discount"], "500.00")  # uncapped 50%
+        self.assertEqual(res.data["discount"], "500.00")
         self.assertEqual(res.data["final_total"], "500.00")
 
-    # 32. discount clamped at subtotal -------------------------------------------------------
     def test_fixed_discount_clamped_to_subtotal(self):
         self.make_coupon(code="FLAT1500", discount_type="fixed", discount_value="1500")
         res = self._preview("FLAT1500")
         self.assertEqual(res.status_code, 200, res.data)
-        self.assertEqual(res.data["discount"], "1000.00")  # clamped, not negative
+        self.assertEqual(res.data["discount"], "1000.00")
         self.assertEqual(res.data["final_total"], "0.00")
 
         self.make_coupon(code="FLAT40", discount_type="fixed", discount_value="40")
@@ -399,16 +347,11 @@ class ApplyCouponTests(OrderTestBase):
         self.assertEqual(res.data["discount"], "40.00")
         self.assertEqual(res.data["final_total"], "960.00")
 
-    # 33. free-shipping coupons carry no merchandise discount -------------------
     def test_free_shipping_coupon_grants_no_merchandise_discount(self):
-        """A free-shipping coupon waives the delivery charge, so the
-        merchandise preview is untouched: the discount is 0.00 and the
-        subtotal stands -- never the (irrelevant) discount_value, which would
-        make the cart preview and the checkout order disagree."""
         self.make_coupon(
             code="FREESHIP",
             discount_type="free_shipping",
-            discount_value="50",  # deliberately non-zero: it must be ignored
+            discount_value="50",
         )
         res = self._preview("FREESHIP")
         self.assertEqual(res.status_code, 200, res.data)
@@ -417,9 +360,6 @@ class ApplyCouponTests(OrderTestBase):
         self.assertEqual(res.data["final_total"], "1000.00")
 
     def test_free_shipping_coupon_still_honours_the_minimum_order_amount(self):
-        """The free-shipping type composes with the redemption rules: a
-        below-minimum cart is refused with the same uniform body as any
-        other coupon."""
         self.make_coupon(
             code="FREESHIPBIG",
             discount_type="free_shipping",
@@ -440,8 +380,7 @@ class ApplyCouponTests(OrderTestBase):
 
 @tag("orders")
 class ApplyCouponThrottleTests(OrderTestBase):
-    """Conventions: every public mutating endpoint gets a throttle scope.
-    The preview is the coupon brute-force surface (V-11/V-04)."""
+    """Every public mutating endpoint gets a throttle scope; the coupon preview is the brute-force surface."""
 
     def _preview(self, code):
         return self.client.post(
@@ -454,9 +393,6 @@ class ApplyCouponThrottleTests(OrderTestBase):
         self.assertIn("coupon", api_settings.DEFAULT_THROTTLE_RATES)
 
     def test_rate_limit_engages_when_budget_spent(self):
-        """The scope actually enforces: a third preview inside a 2/min budget
-        is 429'd. DRF binds THROTTLE_RATES at import, so the rate is patched
-        on the throttle class rather than via override_settings."""
         self.make_coupon(code="SAVE10", discount_value="10")
         rates = dict(api_settings.DEFAULT_THROTTLE_RATES)
         rates["coupon"] = "2/min"
@@ -468,8 +404,6 @@ class ApplyCouponThrottleTests(OrderTestBase):
         self.assertEqual(throttled.status_code, 429, throttled.data)
 
     def test_rejections_consume_the_same_budget_as_successes(self):
-        """Brute-forcing invalid codes hits the same bucket as valid ones:
-        failures cannot be used to probe indefinitely."""
         rates = dict(api_settings.DEFAULT_THROTTLE_RATES)
         rates["coupon"] = "2/min"
         with mock.patch.object(ScopedRateThrottle, "THROTTLE_RATES", rates):
@@ -482,12 +416,7 @@ class ApplyCouponThrottleTests(OrderTestBase):
 
 @tag("orders")
 class MoneyWireFormatTests(OrderTestBase):
-    """[R-9.3.24] Every money value in the coupon preview and checkout
-    responses is a 2-dp string in the RENDERED JSON, never a float.
-
-    ``.data`` alone cannot prove this: DRF's JSON renderer is where a bare
-    ``Decimal`` becomes a float, so each pin renders the response and reads
-    the bytes/parsed body a client would actually receive."""
+    """Every money value in the coupon preview and checkout responses is a 2-dp string in the RENDERED JSON, never a float."""
 
     TWO_DP = r"^-?\d+\.\d{2}$"
 
@@ -496,12 +425,7 @@ class MoneyWireFormatTests(OrderTestBase):
         return response.content.decode(), json.loads(response.content)
 
     def _wire(self, response):
-        """The bytes a client receives, parsed -- never re-rendered.
-
-        An error response has already been rewritten by the envelope
-        middleware, so ``response.content`` IS the wire; calling ``render()``
-        would judge this test's own serialization of ``response.data`` instead
-        of the body the middleware actually emitted."""
+        """The bytes a client receives, parsed. An error response has already been rewritten by the envelope middleware, so response.content IS the wire; render() would judge this test's own serialization."""
         text = response.content.decode()
         return text, json.loads(text)
 
@@ -517,8 +441,6 @@ class MoneyWireFormatTests(OrderTestBase):
         self.assertRegex(value, self.TWO_DP)
         self.assertEqual(value, "5000.00")
         self.assertIn('"minimum_order_amount":"5000.00"', text)
-        # The defect this closes: the bare Decimal reached the envelope's
-        # encoder as the JSON float 5000.0, losing the second decimal place.
         self.assertNotIn('"minimum_order_amount":5000.0', text)
         self.assertEqual(Order.objects.count(), 0)
 
@@ -542,8 +464,6 @@ class MoneyWireFormatTests(OrderTestBase):
             self.assertRegex(payload[key], self.TWO_DP)
             self.assertEqual(payload[key], value)
             self.assertIn(f'"{key}":"{value}"', text)
-        # The defect this closes: a raw Decimal renders as a JSON float and
-        # loses the second decimal place.
         self.assertNotIn('"subtotal":1000.0', text)
         self.assertNotIn('"final_total":900.0', text)
 
@@ -580,7 +500,6 @@ class MoneyWireFormatTests(OrderTestBase):
         self.assertNotIn('"subtotal":1000.0', text)
         self.assertNotIn('"total_amount":900.0', text)
 
-        # Only the wire representation moved: the stored money stays Decimal.
         order = Order.objects.get(id=payload["id"])
         self.assertIsInstance(order.total_amount, Decimal)
         self.assertEqual(order.total_amount, Decimal("900.00"))
@@ -591,17 +510,9 @@ class MoneyWireFormatTests(OrderTestBase):
 
 @tag("orders")
 class CheckoutTests(OrderTestBase):
-    """33-35. Server-owned pricing, snapshot math, validation."""
-
-    # 33. rounding parity preview vs checkout (F-11) ----------------------------------------
     def test_f11_rounding_parity_between_preview_and_checkout(self):
-        """F-11 regression pin: preview and checkout must agree to the paisa
-        on fractional percentage math — 30% of 2999.99 is 899.997 raw, and
-        both paths quantize it to the same 2-dp amount (900.00). Marker
-        removed when quantize parity shipped (SPEC-7-03); the assertEqual
-        below is unchanged from the original pin."""
         self.make_product(name="Grand Cru", price="1999.99", stock=5)
-        self.seed_session_cart([])  # keep buyer cart; add the expensive item
+        self.seed_session_cart([])
         product = products.objects.get(name="Grand Cru")
         CartItem.objects.create(
             cart=self.current_cart(),
@@ -622,8 +533,6 @@ class CheckoutTests(OrderTestBase):
         )
 
     def test_rounding_parity_holds_for_clean_amounts(self):
-        """Parity invariant for amounts that quantize exactly (guards against
-        regressions in the common case)."""
         coupon = self.make_coupon(code="PCT10", discount_value="10")
         preview = self.client.post(
             "/api/orders/apply-coupon/", {"code": "PCT10"}, format="json"
@@ -632,7 +541,6 @@ class CheckoutTests(OrderTestBase):
         self.assertEqual(Decimal(preview.data["discount"]), order.discount_amount)
         self.assertEqual(Decimal(preview.data["final_total"]), order.total_amount)
 
-    # 34. server-side total from DB prices; client-sent amounts ignored ---------------------
     def test_total_computed_server_side_client_amounts_ignored(self):
         other = self.make_user("someone")
         coupon = self.make_coupon(code="PCT10", discount_value="10")
@@ -647,13 +555,13 @@ class CheckoutTests(OrderTestBase):
 
         self.assertEqual(res.status_code, 201, res.data)
         order = Order.objects.get(id=res.data["id"])
-        self.assertEqual(order.total_amount, Decimal("900.00"))  # 1000 - 10%
+        self.assertEqual(order.total_amount, Decimal("900.00"))
         self.assertEqual(order.discount_amount, Decimal("100.00"))
-        self.assertEqual(order.status, "pending")  # not client-controlled
-        self.assertEqual(order.user, self.buyer)  # not client-controlled
+        self.assertEqual(order.status, "pending")
+        self.assertEqual(order.user, self.buyer)
         self.assertEqual(order.coupon, coupon)
         item = OrderItem.objects.get(order=order)
-        self.assertEqual(item.price, Decimal("500.00"))  # snapshot from DB
+        self.assertEqual(item.price, Decimal("500.00"))
         self.assertEqual(item.subtotal, Decimal("1000.00"))
         self.assertEqual(item.product_name, "Rose Aurum")
 
@@ -670,7 +578,6 @@ class CheckoutTests(OrderTestBase):
         self.assertEqual(order.total_amount, Decimal("1750.00"))
         self.assertEqual(order.discount_amount, Decimal("0.00"))
 
-    # 35. missing required field -> 400 listing the field ------------------------------------
     def test_missing_required_field_returns_400_naming_field(self):
         for field in ("full_name", "phone", "address", "city", "state", "pincode"):
             with self.subTest(field=field):
@@ -687,14 +594,6 @@ class CheckoutTests(OrderTestBase):
         self.assertEqual(Order.objects.count(), 0)
 
     def test_checkout_requires_a_cart_and_an_owner(self):
-        """TIER1-GUEST-DEADEND: the cart still has to exist for an account
-        caller (F-18's documented 404), and an anonymous caller is refused
-        outright with the one uniform guest-checkout refusal -- before the
-        cart is even looked at, creating nothing.
-        """
-        # authenticated, no ACCOUNT cart -> documented 404 (F-18). D-04a
-        # makes that cart per-user, so the buyer's seeded cart is removed
-        # rather than asking for a "session" that no longer owns it.
         client = self.fresh_client()
         self.api_login("buyer", client=client)
         self.current_cart(client).delete()
@@ -704,7 +603,6 @@ class CheckoutTests(OrderTestBase):
         self.assertEqual(res.status_code, 404, res.data)
         self.assertEqual(res.data["error"], "Cart not found")
 
-        # anonymous, cart or no cart: the uniform refusal, never an order.
         guest = self.fresh_client()
         self.seed_session_cart([(self.product, 1)], client=guest)
         res = guest.post(
@@ -728,14 +626,9 @@ class CheckoutTests(OrderTestBase):
 
 @tag("orders")
 class CheckoutStockGateTests(OrderTestBase):
-    """SPEC-6-01 [6.2.22]: a cart line whose stock dropped after the add is
-    rejected at order creation with an actionable 400, so the customer never
-    pays for an unfulfillable order. The gate is advisory and read-only: the
-    authoritative stock check stays in verify_payment, because stock can
-    change again between create and pay."""
+    """The stock gate is advisory and read-only: the authoritative check stays in verify_payment because stock can change between create and pay."""
 
     def test_insufficient_stock_at_creation_returns_400_without_side_effects(self):
-        # stock dropped after the item was added to the cart
         products.objects.filter(pk=self.product.pk).update(stock=1)
 
         res = self.checkout()
@@ -750,17 +643,14 @@ class CheckoutStockGateTests(OrderTestBase):
             res.data["details"]["products"],
             [{"name": "Rose Aurum", "requested": 2, "available": 1}],
         )
-        # nothing was created or mutated: the customer fixes the cart
-        # instead of paying for an order that cannot be fulfilled
         self.assertEqual(Order.objects.count(), 0)
         self.assertEqual(OrderItem.objects.count(), 0)
         cart = self.current_cart()
-        self.assertEqual(cart.items.get().quantity, 2)  # cart line untouched
+        self.assertEqual(cart.items.get().quantity, 2)
         self.product.refresh_from_db()
-        self.assertEqual(self.product.stock, 1)  # no decrement at creation
+        self.assertEqual(self.product.stock, 1)
 
     def test_zero_stock_line_rejected(self):
-        """[6.2.22]: an out-of-stock product is not purchasable."""
         products.objects.filter(pk=self.product.pk).update(stock=0)
 
         res = self.checkout()
@@ -770,7 +660,6 @@ class CheckoutStockGateTests(OrderTestBase):
         self.assertEqual(Order.objects.count(), 0)
 
     def test_exact_remaining_stock_succeeds(self):
-        """Boundary: requested == available is still purchasable."""
         products.objects.filter(pk=self.product.pk).update(stock=2)
 
         res = self.checkout()
@@ -802,8 +691,8 @@ class CheckoutStockGateTests(OrderTestBase):
         self.seed_session_cart([])
         cart = self.current_cart()
         CartItem.objects.create(cart=cart, product=second, quantity=3)
-        products.objects.filter(pk=self.product.pk).update(stock=1)  # wants 2
-        products.objects.filter(pk=second.pk).update(stock=2)  # wants 3
+        products.objects.filter(pk=self.product.pk).update(stock=1)
+        products.objects.filter(pk=second.pk).update(stock=2)
 
         res = self.checkout()
 
@@ -820,16 +709,7 @@ class CheckoutStockGateTests(OrderTestBase):
 
 @tag("orders")
 class CheckoutDedupTests(OrderTestBase):
-    """[R-21.2.6] duplicate checkout submissions create no duplicate orders.
-
-    The accidental double-click / client retry resubmits the byte-identical
-    payload against an unchanged cart (checkout never clears the cart;
-    cleanup happens after payment confirmation), so identical still-payable
-    pending submissions collapse onto the first order instead of minting a
-    second charge target. Deliberate differences (cart lines, coupon,
-    shipping, a settled first order) always create a fresh order, and
-    cross-user contention is untouched -- the oversell decision stays at
-    verify_payment."""
+    """The accidental double-click retry resubmits a byte-identical payload against an unchanged cart, so identical still-payable pending submissions collapse onto the first order."""
 
     def test_double_click_resubmission_replays_the_same_order(self):
         first = self.checkout()
@@ -837,8 +717,6 @@ class CheckoutDedupTests(OrderTestBase):
 
         second = self.checkout()
 
-        # one payable order, one item snapshot, one creation trail row:
-        # the retry is a replay, not a second order
         self.assertEqual(second.status_code, 200, second.data)
         self.assertEqual(second.data["id"], first.data["id"])
         self.assertEqual(second.data["total_amount"], first.data["total_amount"])
@@ -856,8 +734,6 @@ class CheckoutDedupTests(OrderTestBase):
         replay = self.checkout()
         self.assertEqual(replay.status_code, 200, replay.data)
 
-        # the client flow continues on the replayed id: exactly one gateway
-        # order is minted for it, so exactly one charge can ever follow
         client_mock = self.razorpay_mock()
         payment = self.client.post(
             "/api/orders/payment/", {"order_id": replay.data["id"]}, format="json"
@@ -877,8 +753,8 @@ class CheckoutDedupTests(OrderTestBase):
             "/api/orders/checkout/", self.checkout_payload(), format="json"
         )
 
-        # the guard is keyed per user: two buyers racing the same stock keep
-        # two orders, and the oversell decision stays at verify
+        # The guard is keyed per user: two buyers racing the same stock keep two orders, and the
+        # oversell decision stays at verify.
         self.assertEqual(res.status_code, 201, res.data)
         self.assertNotEqual(res.data["id"], first.data["id"])
         self.assertEqual(Order.objects.count(), 2)
@@ -895,7 +771,7 @@ class CheckoutDedupTests(OrderTestBase):
         recouponed_order = Order.objects.get(pk=recouponed.data["id"])
         self.assertEqual(recouponed_order.coupon.code, "SAVE10")
 
-        # a deliberate shipping change is a new purchase, not a retry
+        # A deliberate shipping change is a new purchase, not a retry.
         moved = self.checkout(city="Pune")
         self.assertEqual(moved.status_code, 201, moved.data)
         self.assertEqual(Order.objects.count(), 3)
@@ -923,8 +799,8 @@ class CheckoutDedupTests(OrderTestBase):
 
         res = self.checkout()
 
-        # the guard bounds the accidental window; it must never permanently
-        # block an identical second purchase
+        # The guard bounds the accidental window only; it must never permanently block an identical
+        # second purchase.
         self.assertEqual(res.status_code, 201, res.data)
         self.assertNotEqual(res.data["id"], first.data["id"])
         self.assertEqual(Order.objects.count(), 2)
@@ -932,8 +808,6 @@ class CheckoutDedupTests(OrderTestBase):
     def test_settled_order_does_not_block_a_new_identical_checkout(self):
         first = self.checkout()
         self.assertEqual(first.status_code, 201, first.data)
-        # simulate a completed purchase: no longer payable, so the same cart
-        # legitimately starts a fresh order
         Order.objects.filter(pk=first.data["id"]).update(
             status="confirmed", razorpay_payment_id="pay_SETTLED"
         )
@@ -947,8 +821,6 @@ class CheckoutDedupTests(OrderTestBase):
 
 @tag("orders")
 class CreatePaymentTests(OrderTestBase):
-    """36. Razorpay order creation (mocked), idempotent reuse, ownership."""
-
     def test_payment_creation_mocked_razorpay(self):
         client_mock = self.razorpay_mock(order_id="order_TEST001")
         order = self.create_order()
@@ -959,7 +831,7 @@ class CreatePaymentTests(OrderTestBase):
 
         self.assertEqual(res.status_code, 200, res.data)
         self.assertEqual(res.data["razorpay_order_id"], "order_TEST001")
-        self.assertEqual(res.data["amount"], 100000)  # 1000.00 * 100 paise
+        self.assertEqual(res.data["amount"], 100000)
         self.assertEqual(res.data["amount_in_rupees"], Decimal("1000.00"))
         self.assertEqual(res.data["currency"], "INR")
         self.assertEqual(
@@ -987,7 +859,7 @@ class CreatePaymentTests(OrderTestBase):
         self.assertEqual(
             first.data["razorpay_order_id"], second.data["razorpay_order_id"]
         )
-        client_mock.order.create.assert_called_once()  # idempotent: no second API call
+        client_mock.order.create.assert_called_once()
 
     def test_payment_requires_order_id(self):
         self.razorpay_mock()
@@ -1004,7 +876,6 @@ class CreatePaymentTests(OrderTestBase):
         self.assertEqual(res.data["error"], "Order not found")
 
     def test_payment_for_another_users_order_404(self):
-        """Security: order ids must not be enumerable across accounts."""
         client_mock = self.razorpay_mock()
         other = self.make_user("seller")
         other_order = Order.objects.create(
@@ -1038,9 +909,7 @@ class CreatePaymentTests(OrderTestBase):
 
 @tag("orders")
 class CreatePaymentThrottleTests(OrderTestBase):
-    """SPEC-11-01: minting a payment intent is a public mutating endpoint
-    (conventions.md:24), so it carries its own throttle scope with an
-    env-driven rate, exactly like the coupon scope."""
+    """Minting a payment intent is a public mutating endpoint, so it carries its own throttle scope with an env-driven rate."""
 
     def test_payment_scope_and_rate_are_configured(self):
         self.assertEqual(create_payment.view_class.throttle_scope, "payment")
@@ -1050,11 +919,6 @@ class CreatePaymentThrottleTests(OrderTestBase):
         self.assertEqual(api_settings.DEFAULT_THROTTLE_RATES["payment"], "10/min")
 
     def test_rate_limit_engages_when_budget_spent(self):
-        """The scope actually enforces: a second intent mint inside a 1/min
-        budget is 429'd, even though the order already has an id. Hermetic:
-        the rate is patched on the throttle class (DRF binds THROTTLE_RATES
-        at import) and the cache is cleared around the window so no real
-        time passes and no budget leaks into other tests."""
         self.razorpay_mock()
         order = self.create_order()
         rates = dict(api_settings.DEFAULT_THROTTLE_RATES)
@@ -1067,22 +931,17 @@ class CreatePaymentThrottleTests(OrderTestBase):
             throttled = self.client.post(
                 "/api/orders/payment/", {"order_id": order.id}, format="json"
             )
-            cache.clear()  # leave an empty bucket for the rest of the suite
+            cache.clear()
         self.assertEqual(first.status_code, 200, first.data)
         self.assertEqual(throttled.status_code, 429, throttled.data)
 
 
 @tag("orders")
 class CreatePaymentAtomicityTests(OrderTestBase):
-    """SPEC-11-01 [R-11.1]: the intent persistence is race-safe. The
-    unlocked pre-check is not the concurrency authority -- the unique
-    constraint on razorpay_order_id is, backed by a locked atomic write
-    and an IntegrityError retry (conventions.md:16,17)."""
+    """The unlocked pre-check is not the concurrency authority: the unique constraint on razorpay_order_id is, backed by a locked atomic write and an IntegrityError retry."""
 
     def _flaky_save(self, fail_times):
-        """Order.save that raises IntegrityError for the first
-        ``fail_times`` calls, then delegates to the real save. A plain
-        function so instance binding keeps working under patch."""
+        """Order.save that raises IntegrityError for the first fail_times calls, then delegates to the real save; a plain function so instance binding keeps working under patch."""
         real_save = Order.save
         calls = []
 
@@ -1097,9 +956,6 @@ class CreatePaymentAtomicityTests(OrderTestBase):
         return save, calls
 
     def test_persist_retries_after_a_unique_violation(self):
-        """A unique-violated write retries instead of surfacing a 500: the
-        retry re-reads committed state, re-writes the id and commits the
-        audit trail exactly once."""
         self.razorpay_mock(order_id="order_RETRY01")
         order = self.create_order()
         flaky_save, calls = self._flaky_save(fail_times=1)
@@ -1111,7 +967,7 @@ class CreatePaymentAtomicityTests(OrderTestBase):
 
         self.assertEqual(res.status_code, 200, res.data)
         self.assertEqual(res.data["razorpay_order_id"], "order_RETRY01")
-        self.assertEqual(len(calls), 2)  # violated once, then retried once
+        self.assertEqual(len(calls), 2)
         order.refresh_from_db()
         self.assertEqual(order.razorpay_order_id, "order_RETRY01")
         self.assertEqual(
@@ -1123,9 +979,6 @@ class CreatePaymentAtomicityTests(OrderTestBase):
         )
 
     def test_persist_exhausted_retries_reraise_the_violation(self):
-        """The retry bound is a safety net, not a loop: when every attempt
-        is rejected the original IntegrityError propagates (500 semantics
-        preserved) and no intent or audit row ever commits."""
         self.razorpay_mock(order_id="order_DOOMED")
         order = self.create_order()
         flaky_save, calls = self._flaky_save(fail_times=99)
@@ -1137,7 +990,7 @@ class CreatePaymentAtomicityTests(OrderTestBase):
                 )
 
         order.refresh_from_db()
-        self.assertIsNone(order.razorpay_order_id)  # nothing committed
+        self.assertIsNone(order.razorpay_order_id)
         self.assertEqual(
             AuditEvent.objects.filter(
                 order=order,
@@ -1147,12 +1000,6 @@ class CreatePaymentAtomicityTests(OrderTestBase):
         )
 
     def test_persist_race_adopts_the_committed_winner(self):
-        """Between the unlocked pre-check and the locked re-read, another
-        connection can commit the intent first. The loser must adopt the
-        winner's id, write nothing and emit nothing -- the same contract
-        as the 9-01 reuse path. SQLite runs requests serially, so the
-        interleaving is pinned by making the locked re-read return a row
-        that already carries the winner's id."""
         client_mock = self.razorpay_mock(order_id="order_LOSER")
         order = self.create_order()
         winner = Order.objects.get(pk=order.pk)
@@ -1167,20 +1014,18 @@ class CreatePaymentAtomicityTests(OrderTestBase):
 
         self.assertEqual(res.status_code, 200, res.data)
         self.assertEqual(res.data["razorpay_order_id"], "order_WINNER")
-        client_mock.order.create.assert_called_once()  # the loser minted...
+        client_mock.order.create.assert_called_once()
         self.assertEqual(
             AuditEvent.objects.filter(
                 order=order,
                 event_type=AuditEvent.EventType.PAYMENT_INITIATED,
             ).count(),
-            0,  # ...but emitted nothing
+            0,
         )
 
 
 @tag("orders")
 class VerifyPaymentTests(OrderTestBase):
-    """37-39. Signature check, success side effects, idempotency."""
-
     def _prepare_paid_setup(
         self, coupon=None, order_id="order_TEST001", payment_id="pay_TEST001"
     ):
@@ -1190,7 +1035,7 @@ class VerifyPaymentTests(OrderTestBase):
             "/api/orders/payment/", {"order_id": order.id}, format="json"
         )
         self.assertEqual(res.status_code, 200, res.data)
-        order.refresh_from_db()  # picks up razorpay_order_id written by the payment call
+        order.refresh_from_db()
         payload = {
             "order_id": order.id,
             "razorpay_order_id": order.razorpay_order_id,
@@ -1199,7 +1044,6 @@ class VerifyPaymentTests(OrderTestBase):
         }
         return client_mock, order, payload
 
-    # 37. forged signature -> 400 ------------------------------------------------------------
     def test_forged_signature_rejected_400(self):
         client_mock, order, payload = self._prepare_paid_setup()
         self.razorpay_fail_signature(client_mock)
@@ -1212,14 +1056,9 @@ class VerifyPaymentTests(OrderTestBase):
         self.assertEqual(order.status, "pending")
         self.assertIsNone(order.razorpay_payment_id)
         self.product.refresh_from_db()
-        self.assertEqual(self.product.stock, 10)  # untouched
-
-    # ——— [R-10.4] SPEC-10-04: failed/retryable payment semantics ———
+        self.assertEqual(self.product.stock, 10)
 
     def test_failed_verify_marks_payment_failed_and_stays_retryable(self):
-        """The failed attempt marks the payment dimension failed while the
-        ORDER stays pending: no cancellation, no stock movement, no capture
-        claim — every retry precondition stays intact."""
         client_mock, order, payload = self._prepare_paid_setup()
         self.razorpay_fail_signature(client_mock)
 
@@ -1235,17 +1074,12 @@ class VerifyPaymentTests(OrderTestBase):
         self.assertEqual(self.product.stock, 10)
 
     def test_retry_after_failure_captures_normally(self):
-        """The retry story end to end: failed -> captured on the same
-        order — the already-processed gate passes (nothing moved on the
-        failure), and the successful verify performs the machine's retry
-        edge with the full success side effects."""
         client_mock, order, payload = self._prepare_paid_setup()
         self.razorpay_fail_signature(client_mock)
         first = self.client.post("/api/orders/payment/verify/", payload, format="json")
         self.assertEqual(first.status_code, 400, first.data)
         self.product.refresh_from_db()
 
-        # a fresh, genuine attempt: same gateway refs, signature verifies
         self.razorpay_mock(order_id=order.razorpay_order_id)
         second = self.client.post("/api/orders/payment/verify/", payload, format="json")
 
@@ -1256,12 +1090,9 @@ class VerifyPaymentTests(OrderTestBase):
         self.assertEqual(order.razorpay_payment_id, "pay_TEST001")
         self.assertIsNotNone(order.paid_at)
         self.product.refresh_from_db()
-        self.assertEqual(self.product.stock, 8)  # decremented exactly once
+        self.assertEqual(self.product.stock, 8)
 
     def test_failed_verify_marks_nothing_without_a_matching_order(self):
-        """A forged or mismatched gateway reference can never write payment
-        state: the failure writer scopes to the caller's own order by
-        stored ref, and the uniform 400 leaks no existence hint."""
         client_mock, order, payload = self._prepare_paid_setup()
         self.razorpay_fail_signature(client_mock)
 
@@ -1279,8 +1110,6 @@ class VerifyPaymentTests(OrderTestBase):
         )
 
     def test_failed_verify_writes_nothing_on_an_already_processed_order(self):
-        """The marking guard refuses processed orders: a bad-signature
-        replay against a captured order cannot flap its payment state."""
         client_mock, order, payload = self._prepare_paid_setup()
         self.razorpay_mock(order_id=order.razorpay_order_id)
         ok = self.client.post("/api/orders/payment/verify/", payload, format="json")
@@ -1313,7 +1142,6 @@ class VerifyPaymentTests(OrderTestBase):
                 self.assertEqual(res.status_code, 400, res.data)
                 self.assertEqual(res.data["error"], "Payment details are required")
 
-    # 38. success path: stock, coupon, cart cleanup, status ----------------------------------
     def test_verified_payment_updates_stock_coupon_cart_and_status(self):
         second = self.make_product(name="Oud Royale", price="250.00", stock=4)
         self.seed_session_cart([])
@@ -1346,25 +1174,17 @@ class VerifyPaymentTests(OrderTestBase):
 
         self.product.refresh_from_db()
         second.refresh_from_db()
-        self.assertEqual(self.product.stock, 8)  # 10 - 2
-        self.assertEqual(second.stock, 3)  # 4 - 1
+        self.assertEqual(self.product.stock, 8)
+        self.assertEqual(second.stock, 3)
 
         coupon.refresh_from_db()
         self.assertEqual(coupon.used_count, 1)
 
         cart_items = list(CartItem.objects.filter(cart=cart))
-        self.assertEqual(cart_items, [])  # both paid lines removed
+        self.assertEqual(cart_items, [])
 
     def test_verify_sweeps_a_legacy_session_cart_with_no_order_link(self):
-        """Pre-TIER1-WEBHOOK-CART orders have no Cart.order link, so the
-        browser verify's own session sweep is still the only clear those
-        legacy rows get. D-04a makes that sweep invisible to the ordinary
-        flow (account carts carry no session key), so the legacy shape is
-        built explicitly here: a session cart under this client's cookie
-        that no order points at."""
-        # Mint the browser session cookie through the anonymous boot GET,
-        # then put the legacy line in that session cart and go back to the
-        # bearer for the account checkout.
+        """Orders minted before Cart.order existed have no link, so the browser verify's own session sweep is the only clear those legacy rows get."""
         self.auth(None)
         self.client.get("/api/cart/")
         legacy = self.current_cart()
@@ -1375,14 +1195,12 @@ class VerifyPaymentTests(OrderTestBase):
         res = self.client.post("/api/orders/payment/verify/", payload, format="json")
 
         self.assertEqual(res.status_code, 200, res.data)
-        self.assertEqual(legacy.items.count(), 0)  # the bought line is gone
+        self.assertEqual(legacy.items.count(), 0)
 
     def test_verify_succeeds_when_the_session_has_no_cart_row(self):
-        """The legacy sweep is best-effort: a browser that carries a session
-        cookie but no cart row (expired/cleared) must not turn a successful
-        capture into an error."""
+        """The legacy sweep is best-effort: a browser with a session cookie but no cart row must not turn a successful capture into an error."""
         self.auth(None)
-        self.client.get("/api/cart/")  # mint the session cookie + cart
+        self.client.get("/api/cart/")
         self.current_cart().delete()
         self.auth(self.token)
 
@@ -1394,10 +1212,6 @@ class VerifyPaymentTests(OrderTestBase):
         self.assertEqual(order.payment_status, "captured")
 
     def test_verified_payment_writes_one_sale_movement_per_product(self):
-        """SPEC-6-02 [6.5.17]: payment-time decrements are inventory
-        mutations too — one SALE ledger row per product, system actor (no
-        user), the order number as reference, and stock_after equal to the
-        real post-decrement stock."""
         second = self.make_product(name="Oud Royale", price="250.00", stock=4)
         cart = self.current_cart()
         CartItem.objects.create(cart=cart, product=second, quantity=1)
@@ -1416,14 +1230,14 @@ class VerifyPaymentTests(OrderTestBase):
 
         self.assertEqual(res.status_code, 200, res.data)
         movements = list(StockMovement.objects.order_by("product_id"))
-        self.assertEqual(len(movements), 2)  # exactly one per decremented product
+        self.assertEqual(len(movements), 2)
 
         first, second_move = movements
         self.assertEqual(first.product_id, self.product.id)
         self.assertEqual(first.delta, -2)
         self.assertEqual(first.reason, StockMovement.Reason.SALE)
         self.assertEqual(first.stock_after, 8)
-        self.assertIsNone(first.created_by)  # system actor, not the buyer
+        self.assertIsNone(first.created_by)
         self.assertEqual(first.note, f"Order #{order.id}")
 
         self.assertEqual(second_move.product_id, second.id)
@@ -1433,24 +1247,13 @@ class VerifyPaymentTests(OrderTestBase):
         self.assertIsNone(second_move.created_by)
         self.assertEqual(second_move.note, f"Order #{order.id}")
 
-        # ledger agrees with reality on the products themselves
         self.product.refresh_from_db()
         second.refresh_from_db()
         self.assertEqual(self.product.stock, 8)
         self.assertEqual(second.stock, 3)
 
     def test_verify_without_session_cookie_clears_the_linked_cart(self):
-        """JWT-only client (no cookies): payment succeeds, and the ORDER's
-        linked cart is still emptied.
-
-        Supersedes the pre-TIER1-WEBHOOK-CART pin of the same scenario
-        ("cart untouched, not the verify's job here"): cart cleanup now
-        follows the Cart.order link inside commit_order_sale, so it no
-        longer depends on the request carrying the session cookie — the
-        owner-decided property that also lets the gateway webhook clear the
-        cart. The cookie-less session sweep at the end of verify is not
-        what emptied this cart; the order link is.
-        """
+        """Cart cleanup follows the Cart.order link inside commit_order_sale, so it no longer depends on the request carrying the session cookie."""
         coupon = self.make_coupon(code="PCT10", discount_value="10")
         order = self.create_order(coupon=coupon)
         self.razorpay_mock(order_id="order_NOPAY")
@@ -1474,7 +1277,6 @@ class VerifyPaymentTests(OrderTestBase):
             CartItem.objects.count(), 0
         )  # cleared via the order link, not the (absent) cookie
 
-    # 39. idempotency; insufficient stock -> 409 (V-03: no refund path yet) ------------------
     def test_second_verify_rejected_idempotent(self):
         coupon = self.make_coupon(code="PCT10", discount_value="10", usage_limit=5)
         _, order, payload = self._prepare_paid_setup(coupon=coupon)
@@ -1487,17 +1289,14 @@ class VerifyPaymentTests(OrderTestBase):
 
         order.refresh_from_db()
         self.product.refresh_from_db()
-        self.assertEqual(self.product.stock, 8)  # decremented exactly once
+        self.assertEqual(self.product.stock, 8)
         coupon.refresh_from_db()
-        self.assertEqual(coupon.used_count, 1)  # incremented exactly once
+        self.assertEqual(coupon.used_count, 1)
         self.assertEqual(order.status, "confirmed")
-        # SPEC-6-02: the rejected replay must not double-book the ledger either
         self.assertEqual(StockMovement.objects.count(), 1)
 
     def test_insufficient_stock_at_verify_returns_409(self):
-        """V-03 (documents the charged-but-unfulfilled gap): when stock is
-        gone at verify time the order stays pending with money captured; the
-        refund flow does not exist yet, so this asserts the current contract."""
+        """V-03: when stock is gone at verify the order stays pending with money captured, and no refund flow exists yet."""
         order = self.create_order()
         self.razorpay_mock(order_id="order_RACE")
         self.client.post("/api/orders/payment/", {"order_id": order.id}, format="json")
@@ -1524,7 +1323,6 @@ class VerifyPaymentTests(OrderTestBase):
         self.assertEqual(order.status, "pending")
         self.assertEqual(self.product.stock, 1)
         self.assertIsNone(order.razorpay_payment_id)
-        # no decrement, no ledger row (SPEC-6-02)
         self.assertEqual(StockMovement.objects.count(), 0)
 
     def test_coupon_invalidated_between_checkout_and_verify_returns_409(self):
@@ -1533,7 +1331,6 @@ class VerifyPaymentTests(OrderTestBase):
         self.razorpay_mock(order_id="order_CP")
         self.client.post("/api/orders/payment/", {"order_id": order.id}, format="json")
 
-        # someone else burns the single use before this verify lands
         Coupon.objects.filter(pk=coupon.pk).update(used_count=1)
         order.refresh_from_db()
 
@@ -1553,8 +1350,6 @@ class VerifyPaymentTests(OrderTestBase):
         self.assertEqual(self.product.stock, 10)
 
     def test_verify_rejects_mismatched_razorpay_order_id(self):
-        """Security: a signature valid for another razorpay order must not
-        confirm this order."""
         _, order, payload = self._prepare_paid_setup()
         payload["razorpay_order_id"] = "order_SOMEONE_ELSE"
 
@@ -1616,13 +1411,8 @@ class VerifyPaymentTests(OrderTestBase):
         )
         self.assertEqual(res.status_code, 404, res.data)
 
-    # ——— TIER1-ASYNC-CONVERT: notification queued, never sent inline ———
-
     def test_confirmation_is_enqueued_not_sent_inline(self):
-        """The converted contract: verify_payment writes a NotificationOutbox
-        row inside its money block — it never calls the send paths
-        (dispatch / dispatch_on_commit) and never opens SMTP on the request
-        thread. The beat-scheduled drain worker owns the send."""
+        """verify_payment writes a NotificationOutbox row inside its money block; it never calls the send paths or opens SMTP on the request thread."""
         client_mock, order, payload = self._prepare_paid_setup()
 
         with mock.patch("orders.views.notifications.enqueue") as enqueue_mock:
@@ -1642,10 +1432,6 @@ class VerifyPaymentTests(OrderTestBase):
         post_commit_dispatch.assert_not_called()
 
     def test_no_mail_is_sent_on_the_request_thread_and_the_queue_delivers(self):
-        """End-to-end conversion proof at the view: the verify response
-        sends nothing — the outbox row is already written (inside the
-        money transaction) — and the drain worker is what puts the
-        confirmation in the customer's inbox."""
         client_mock, order, payload = self._prepare_paid_setup()
         mail.outbox.clear()
 
@@ -1661,7 +1447,6 @@ class VerifyPaymentTests(OrderTestBase):
         self.assertEqual(
             row.payload, {"order": {"label": "orders.order", "pk": order.pk}}
         )
-        # The scheduled worker turns the row into the customer's mail.
         with self.assertLogs("common.notifications", level="INFO"):
             notifications.drain_notifications()
         self.assertEqual(len(mail.outbox), 1)
@@ -1671,9 +1456,7 @@ class VerifyPaymentTests(OrderTestBase):
         self.assertEqual(row.status, NotificationOutbox.Status.SENT)
 
     def test_enqueue_failure_never_breaks_the_captured_payment(self):
-        """Notification outage isolation on the money path: an outbox write
-        that raises leaves the captured payment confirmed and the response
-        200 — the SMTP-503 account-still-created behavior, mirrored."""
+        """Notification outage isolation: an outbox write that raises leaves the captured payment confirmed and the response 200."""
         client_mock, order, payload = self._prepare_paid_setup()
 
         with mock.patch(
@@ -1692,8 +1475,7 @@ class VerifyPaymentTests(OrderTestBase):
 
 @tag("orders")
 class CheckoutCouponValidationTests(OrderTestBase):
-    """The checkout path re-validates the coupon server-side (never trust the
-    preview); every rejection branch must be reachable at checkout too."""
+    """The checkout path re-validates the coupon server-side (never trust the preview), so every rejection branch must be reachable here too."""
 
     def test_checkout_coupon_rejections(self):
         cases = [
@@ -1733,7 +1515,7 @@ class CheckoutCouponValidationTests(OrderTestBase):
                 res = self.checkout(coupon_code=code)
                 self.assertEqual(res.status_code, 400, res.data)
                 self.assertEqual(res.data["error"], expected_error)
-        self.assertEqual(Order.objects.count(), 0)  # nothing was created
+        self.assertEqual(Order.objects.count(), 0)
 
     def test_checkout_percentage_cap_reaches_persisted_totals(self):
         self.make_coupon(code="HALFCAP", discount_value="50", maximum_discount="300")
@@ -1755,8 +1537,6 @@ class CheckoutCouponValidationTests(OrderTestBase):
 @tag("orders")
 class CheckoutCartLookupTests(OrderTestBase):
     def test_checkout_with_session_but_no_cart_row_404(self):
-        """Session cookie exists, but the Cart row is gone (expired/cleared
-        server-side) -> the documented 'Cart not found' 404."""
         Cart.objects.all().delete()
         res = self.checkout()
         self.assertEqual(res.status_code, 404, res.data)
@@ -1798,7 +1578,6 @@ class OrderListTests(OrderTestBase):
         ids = [row["id"] for row in res.data["results"]]
         self.assertEqual(ids, [mine.id])
         self.assertNotIn(theirs.id, ids)
-        # serializer shape: coupon rendered as its code, items embedded
         self.assertEqual(res.data["results"][0]["coupon"], "PCT10")
         self.assertEqual(res.data["results"][0]["items"][0]["price"], "500.00")
 
@@ -1811,10 +1590,7 @@ class OrderListTests(OrderTestBase):
 
 @tag("orders")
 class OrderDetailTests(OrderTestBase):
-    """SPEC-9-04 [R-9.2.15] (spec lines 2951-2959, `GET /account/orders/:id`
-    = "Owned order details"): the caller's OWN order only. Ownership is part
-    of the lookup, so a foreign order is a uniform 404 — never a 200 (the
-    IDOR pin) and never a 403 that would confirm existence."""
+    """Ownership is part of the lookup, so a foreign order is a uniform 404 -- never a 200 (the IDOR pin) and never a 403 that would confirm existence."""
 
     def test_owner_gets_own_order_detail(self):
         order = self.create_order()
@@ -1827,7 +1603,6 @@ class OrderDetailTests(OrderTestBase):
         self.assertEqual(res.data["items"][0]["product_name"], "Rose Aurum")
 
     def test_other_users_order_is_404_not_200(self):
-        """The IDOR case: another user's order id must not resolve."""
         mine = self.create_order()
         self.make_user("intruder")
         intruder = self.fresh_client()
@@ -1847,7 +1622,6 @@ class OrderDetailTests(OrderTestBase):
         self.assertEqual(res.status_code, 401, res.data)
 
     def test_order_detail_served_on_the_v1_mirror(self):
-        """New app-urlconf routes are automatically served on both mounts."""
         order = self.create_order()
         res = self.client.get(f"/api/v1/store/orders/{order.id}/")
         self.assertEqual(res.status_code, 200, res.data)
@@ -1856,16 +1630,11 @@ class OrderDetailTests(OrderTestBase):
 
 @tag("orders")
 class OrderHistoryPaginationTests(OrderTestBase):
-    """SPEC-9-04 [R-9.2.14] (spec lines 2938-2946, `GET /account/orders`
-    = "Customer order history"). The spec pins neither a page size nor an
-    envelope shape for this endpoint, so the house page-number envelope
-    (products-listing parity, the shape the frontend's pagination UI is
-    built to) is used with env-driven defaults: ORDER_HISTORY_PAGE_SIZE,
-    capped by ORDER_HISTORY_MAX_PAGE_SIZE for ?page_size callers."""
+    """The spec pins neither page size nor envelope here, so the house page-number envelope (products-listing parity, the shape the frontend builds to) is used with env-driven defaults."""
 
     def _checkout_distinct_orders(self, count):
-        # Distinct shipping payloads so the SPEC-21-1 dedup guard treats
-        # each checkout as a deliberate new purchase, not a replay.
+        # Distinct shipping payloads so the dedup guard treats each checkout as a deliberate new
+        # purchase, not a replay.
         for i in range(count):
             res = self.checkout(city=f"City {i}")
             self.assertEqual(res.status_code, 201, res.data)
@@ -1927,7 +1696,7 @@ class OrderHistoryPaginationTests(OrderTestBase):
         for raw in ("abc", "0", "-5"):
             with self.subTest(page_size=raw):
                 res = self.client.get(f"/api/orders/?page_size={raw}")
-                self.assertEqual(len(res.data["results"]), 2)  # default (10)
+                self.assertEqual(len(res.data["results"]), 2)
 
     def test_invalid_page_number_falls_back_to_first_page(self):
         self._checkout_distinct_orders(2)
@@ -1944,14 +1713,7 @@ class OrderHistoryPaginationTests(OrderTestBase):
 
 @tag("orders")
 class BusinessEventTimestampTests(OrderTestBase):
-    """[R-8.16] Business-event timestamps (spec 8.3 "Timestamps"): the order
-    lifecycle carries one named column per business event, NULL until the
-    event happens, written exactly once by the code path that performs it and
-    never mutated afterwards — ``updated_at`` is never overloaded to stand
-    for an event. paid_at/cancelled_at have live writers (verify_payment /
-    admin cancel); fulfilled_at/shipped_at/delivered_at/refunded_at are the
-    named pattern the later fulfilment and refund sections write.
-    """
+    """One named column per business event, NULL until it happens, written once by the code path that performs it; updated_at is never overloaded to stand for an event."""
 
     BUSINESS_FIELDS = (
         "paid_at",
@@ -1971,9 +1733,7 @@ class BusinessEventTimestampTests(OrderTestBase):
         }
 
     def _admin_client(self):
-        """Superuser session on a fresh client: logging in on the API client
-        would swap the session and drop the buyer's session cart under the
-        order being created."""
+        """Superuser session on a fresh client: logging in on the API client would swap the session and drop the buyer's cart under the order being created."""
         if not User.objects.filter(username="tsboss").exists():
             User.objects.create_superuser(
                 "tsboss", "tsboss@example.com", "S3cure-Passphrase!"
@@ -1985,7 +1745,6 @@ class BusinessEventTimestampTests(OrderTestBase):
         return admin_client
 
     def _run_admin_action(self, action, orders):
-        """Bulk action through the real admin UI (mirrors test_e2e_admin_ops)."""
         admin_client = self._admin_client()
         return admin_client.post(
             "/admin/orders/order/",
@@ -2030,8 +1789,8 @@ class BusinessEventTimestampTests(OrderTestBase):
         self.assertGreaterEqual(order.paid_at, order.created_at)
         first_paid_at = order.paid_at
 
-        # the already-processed gate rejects the replay; paid_at must keep
-        # the exact first value — a re-verify never re-stamps the event
+        # The already-processed gate rejects the replay, and paid_at must keep the exact first value --
+        # a re-verify never re-stamps the event.
         replay = self.client.post(
             "/api/orders/payment/verify/", self._verify_payload(order), format="json"
         )
@@ -2059,23 +1818,21 @@ class BusinessEventTimestampTests(OrderTestBase):
         self.assertIsNone(order.paid_at)
 
     def test_admin_cancel_bulk_stamps_cancelled_at_once(self):
-        order = self.create_order()  # pending, unpaid
+        order = self.create_order()
 
         res = self._run_admin_action("cancel_pending", [order])
         self.assertEqual(res.status_code, 200)
         order.refresh_from_db()
         self.assertEqual(order.status, "cancelled")
         self.assertIsNotNone(order.cancelled_at)
-        # cancelling before payment writes exactly one event timestamp:
-        # a cancelled order was never paid, shipped or refunded
+        # Cancelling stamps exactly one event: a cancelled order was never paid, shipped or refunded.
         self.assertIsNone(order.paid_at)
         self.assertIsNone(order.fulfilled_at)
         self.assertIsNone(order.shipped_at)
         self.assertIsNone(order.delivered_at)
         self.assertIsNone(order.refunded_at)
 
-        # the pending filter skips already-cancelled rows, so a re-run of
-        # the action never mutates the stamp
+        # The pending filter skips already-cancelled rows, so a re-run never mutates the stamp.
         first_cancelled_at = order.cancelled_at
         res = self._run_admin_action("cancel_pending", [order])
         self.assertEqual(res.status_code, 200)
@@ -2083,8 +1840,6 @@ class BusinessEventTimestampTests(OrderTestBase):
         self.assertEqual(order.cancelled_at, first_cancelled_at)
 
     def test_admin_change_form_cancel_stamps_cancelled_at(self):
-        """The single-object path: pending -> cancelled through the change
-        form is a legal transition, so it must stamp cancelled_at too."""
         self._admin_login()
         order = Order.objects.create(
             user=self.buyer,
@@ -2130,7 +1885,6 @@ class BusinessEventTimestampTests(OrderTestBase):
                 self.assertIn(field, OrderAdmin.readonly_fields)
                 self.assertIn(field, dict(OrderAdmin.fieldsets)["Timestamps"]["fields"])
 
-        # the changelist carries the two live event stamps beside the row
         self.assertIn("paid_at", OrderAdmin.list_display)
         self.assertIn("cancelled_at", OrderAdmin.list_display)
 
@@ -2139,22 +1893,12 @@ class BusinessEventTimestampTests(OrderTestBase):
         row = listing.data["results"][0]
         self.assertEqual(row["id"], order.id)
         for field in self.BUSINESS_FIELDS:
-            self.assertIsNone(row[field])  # NULL until the event
+            self.assertIsNone(row[field])
 
 
 @tag("orders")
 class OrderIndexSchemaTests(ApiTestCase):
-    """SPEC-8-05: spec 8.3 "Indexes" starting set for orders_order.
-
-    The two prescribed composites (2557 "Customer ID and order creation
-    date", 2567 "Frequently queried status/date combinations") land as
-    explicit Meta.indexes; the order-number (2555) and payment-provider
-    reference (2559) prescriptions stay satisfied by their UNIQUE
-    constraints — a unique constraint already implies a backing index, so
-    minting a second index on those columns would be a duplicate. These
-    pins make both halves conscious: the composites must exist at the DB
-    level, and the constraint-covered columns must not grow duplicates.
-    """
+    """The prescribed composites land as explicit Meta.indexes; the order-number and payment-provider prescriptions stay satisfied by their UNIQUE constraints, which already imply an index."""
 
     def _order_constraints(self):
         with connection.cursor() as cursor:
@@ -2170,10 +1914,7 @@ class OrderIndexSchemaTests(ApiTestCase):
         ]
 
     def test_meta_declares_exactly_the_spec_starting_composites(self):
-        """The model-level starting set: newest-first per customer (2557)
-        and the status/date combination (2567). Later indexes must come
-        from measured query patterns (2569), i.e. as a conscious edit to
-        this set, never by silent accretion."""
+        """Later indexes must come from measured query patterns, i.e. a conscious edit to this set, never silent accretion."""
         declared = {tuple(index.fields) for index in Order._meta.indexes}
         self.assertEqual(
             declared,
@@ -2197,16 +1938,7 @@ class OrderIndexSchemaTests(ApiTestCase):
         self.assertTrue(matching, "no (status, created_at) index on orders_order")
 
     def test_order_number_stays_satisfied_by_its_unique_constraint(self):
-        """2555: order_number's covering constraint(s) are all UNIQUE —
-        unique=True already provides the lookup index (and doubles as the
-        IntegrityError concurrency authority for number minting) — so no
-        duplicate explicit index is stacked on top.
-
-        The one non-unique covering index a correct schema may carry is the
-        engine's own ``varchar_pattern_ops`` LIKE index, which exists for
-        ``icontains`` and must not be unique; ``redundant_covering_indexes``
-        excludes it by the name Django itself would have generated.
-        """
+        """2555: order_number's UNIQUE constraint already provides the lookup index (and the IntegrityError authority), so no duplicate explicit index is stacked on top."""
         covering = covering_indexes(Order, "order_number")
         self.assertTrue(covering, "no constraint on order_number at all")
         self.assertTrue(
@@ -2220,9 +1952,7 @@ class OrderIndexSchemaTests(ApiTestCase):
         )
 
     def test_payment_provider_references_stay_constraint_covered(self):
-        """2559: no Payment model exists — the provider references live on
-        Order (razorpay_order_id / razorpay_payment_id), each unique=True,
-        whose backing unique indexes are the prescribed starting indexes."""
+        """2559: the provider references live on Order, each unique=True, whose backing unique indexes are the prescribed starting indexes."""
         for column in ("razorpay_order_id", "razorpay_payment_id"):
             with self.subTest(column=column):
                 covering = covering_indexes(Order, column)
@@ -2240,13 +1970,6 @@ class OrderIndexSchemaTests(ApiTestCase):
 
 @tag("orders")
 class AdminOrdersApiTests(ApiTestCase):
-    """SPEC-9-07 [R-9.4.8]-[R-9.4.11] (spec lines 3285-3317, Orders module):
-    the admin orders JSON seam. Reads serve every order under ``orders.read``;
-    writes reuse the admin state machine (``transition_allowed``) and the
-    capability permission classes that were defined but unmounted. Errors
-    land in the uniform envelope (SPEC-9-03) — every error assertion pins
-    the ``error``/``code``/``details`` shape."""
-
     LIST_URL = "/api/admin/orders/"
     V1_LIST_URL = "/api/v1/admin/orders/"
 
@@ -2283,7 +2006,6 @@ class AdminOrdersApiTests(ApiTestCase):
         user.groups.add(Group.objects.get_or_create(name=role)[0])
         return user
 
-    # permission matrix -------------------------------------------------------
     def test_anonymous_list_is_403_in_the_uniform_envelope(self):
         res = self.client.get(self.LIST_URL)
         self.assertEqual(res.status_code, 403)
@@ -2300,8 +2022,6 @@ class AdminOrdersApiTests(ApiTestCase):
         self.assertEqual(res.data["code"], "permission_denied")
 
     def test_finance_role_reads_every_order_unscoped(self):
-        """orders.read = support/finance/admin: a non-owner staff role still
-        sees the order — this seam is the unscoped twin of the customer list."""
         other_buyer = self.make_user("other_buyer")
         self._make_order(other_buyer)
         finance = self._user_with_role("finmgr", ROLE_FINANCE)
@@ -2329,8 +2049,6 @@ class AdminOrdersApiTests(ApiTestCase):
         self.assertEqual(res.data["status"], "pending")
 
     def test_write_endpoints_deny_orders_read_only_role(self):
-        """The least-privilege split: finance may read but may neither fulfil
-        nor cancel — and nothing moves when they try."""
         from django.contrib.admin.models import LogEntry
 
         finance = self._user_with_role("finmgr", ROLE_FINANCE)
@@ -2346,7 +2064,6 @@ class AdminOrdersApiTests(ApiTestCase):
         self.assertEqual(self.order.status, "pending")
         self.assertEqual(LogEntry.objects.count(), 0)
 
-    # list + detail -------------------------------------------------------------
     def test_list_uses_the_house_page_number_envelope(self):
         admin = self.make_staff()
         self.client.force_authenticate(admin)
@@ -2376,7 +2093,6 @@ class AdminOrdersApiTests(ApiTestCase):
         self.assertEqual(res.status_code, 200, res.data)
         self.assertEqual(res.data["id"], self.order.id)
 
-    # fulfilment ------------------------------------------------------------------
     def test_fulfill_advances_pending_to_confirmed_and_audits(self):
         from django.contrib.admin.models import CHANGE, LogEntry
 
@@ -2395,8 +2111,8 @@ class AdminOrdersApiTests(ApiTestCase):
     def test_fulfill_walks_one_step_per_call(self):
         support = self._user_with_role("supp", ROLE_SUPPORT)
         self.client.force_authenticate(support)
-        # SPEC-10-03: the shipped step requires the row a real checkout
-        # leaves behind — items plus a captured payment.
+        # The shipped step requires the row a real checkout leaves behind -- items plus a captured
+        # payment.
         walk_product = self.make_product(
             name="Walk Rose", price="750.00", stock=5, category="Floral"
         )
@@ -2437,7 +2153,6 @@ class AdminOrdersApiTests(ApiTestCase):
         self.order.refresh_from_db()
         self.assertEqual(self.order.status, "confirmed")
 
-    # cancellation ----------------------------------------------------------------
     def test_cancel_marks_pending_cancelled_and_stamps_cancelled_at(self):
         from django.contrib.admin.models import CHANGE, LogEntry
 
@@ -2465,8 +2180,6 @@ class AdminOrdersApiTests(ApiTestCase):
         self.assertIsNone(paid.cancelled_at)
 
     def test_cancel_rejects_delivered_order(self):
-        """The pinned illegal transition: delivered has no outgoing edges in
-        the machine, so the cancel endpoint can never sweep it."""
         delivered = self._make_order(self.buyer, status="delivered")
         support = self._user_with_role("supp", ROLE_SUPPORT)
         self.client.force_authenticate(support)
@@ -2509,11 +2222,7 @@ class AdminOrdersApiTests(ApiTestCase):
 
 @tag("orders")
 class BulkSetStatusRaceGuardTests(ApiTestCase):
-    """SPEC-6-04 audit advisory, hardened in SPEC-9-07: the bulk updater's
-    UPDATE must re-apply the status__in predicate so an out-of-set row can
-    never be swept. The race is simulated deterministically: the pk snapshot
-    materialises first, then a concurrent actor legally cancels one matched
-    pending order, and only then does the UPDATE run."""
+    """The bulk updater's UPDATE must re-apply the status__in predicate so an out-of-set row can never be swept; the pk snapshot is materialised, a concurrent actor flips one row, then the UPDATE runs."""
 
     def test_out_of_set_row_is_never_swept_by_the_bulk_update(self):
         from django.contrib.admin import site as admin_site
@@ -2556,8 +2265,8 @@ class BulkSetStatusRaceGuardTests(ApiTestCase):
                 pks = list(super().values_list(*args, **kwargs))
                 if not RacingQuerySet.raced:
                     RacingQuerySet.raced = True
-                    # The interleave: the snapshot above already saw both
-                    # rows pending; the victim flips before the UPDATE runs.
+                    # The pk snapshot is taken, then a concurrent actor legally flips the victim before the UPDATE
+                    # runs.
                     Order.objects.filter(pk=victim.pk).update(status="cancelled")
                 return pks
 
@@ -2568,10 +2277,6 @@ class BulkSetStatusRaceGuardTests(ApiTestCase):
         self.assertEqual(victim.status, "cancelled")
         self.assertEqual(control.status, "confirmed")
 
-        # [R-10.12] SPEC-10-02: the reworked per-row path keeps the same
-        # skip semantics at the audit layer — the row it skipped gets NO
-        # event for the sweep it never underwent, the swept row gets
-        # exactly one.
         self.assertFalse(
             OrderStatusEvent.objects.filter(
                 order=victim, to_status="confirmed"
@@ -2582,17 +2287,9 @@ class BulkSetStatusRaceGuardTests(ApiTestCase):
         self.assertEqual(swept_event.to_status, "confirmed")
 
 
-# ==================================
-# [R-10.1] SPEC-10-01a: order lifecycle dimensions
-# ==================================
-
-
 @tag("orders")
 class OrderStateSourceTests(SimpleTestCase):
-    """orders.state is the single source of truth for the order machine:
-    the constants that used to live in models/admin/views are aliases of
-    the same objects, and the machine's current edges are pinned here so a
-    consolidation slip (a redefined copy anywhere) cannot go unnoticed."""
+    """orders.state is the single source of truth for the order machine: the constants are aliases of the same objects, and the current edges are pinned so a redefined copy cannot go unnoticed."""
 
     def test_machine_constants_are_single_sourced(self):
         from orders import admin as orders_admin
@@ -2608,7 +2305,6 @@ class OrderStateSourceTests(SimpleTestCase):
         )
 
     def test_transition_allowed_pins_the_current_machine(self):
-        # The legal edges (exactly one step forward, cancel from pending).
         for old, new in [
             ("pending", "confirmed"),
             ("pending", "cancelled"),
@@ -2617,7 +2313,6 @@ class OrderStateSourceTests(SimpleTestCase):
         ]:
             with self.subTest(old=old, new=new):
                 self.assertTrue(order_state.transition_allowed(old, new))
-        # Self-transitions (idempotent replays) and everything else are not.
         for old, new in [
             ("pending", "shipped"),
             ("confirmed", "cancelled"),
@@ -2645,18 +2340,13 @@ class OrderStateSourceTests(SimpleTestCase):
             {s for s, _ in Order.STATUS_CHOICES},
         )
 
-    # ——— [R-10.4] SPEC-10-04: the payment dimension's own machine ———
-
     def test_payment_transition_table_pins_the_retry_semantics(self):
-        """The payment dimension moves only along declared edges. The spec's
-        failure/retry requirement: a failed payment stays retryable, so
-        pending -> failed and failed -> captured are machine edges; money
-        that never arrived cannot refund and captured money cannot un-pay."""
+        """The payment dimension moves only along declared edges: pending -> failed and failed -> captured keep a failed payment retryable, while money that never arrived cannot refund."""
         for old, new in [
-            ("pending", "captured"),  # the normal verify capture
-            ("pending", "failed"),  # SPEC-10-04: the failure writer
-            ("failed", "captured"),  # SPEC-10-04: the retry capture
-            ("authorized", "captured"),  # gateway two-step (declared only)
+            ("pending", "captured"),
+            ("pending", "failed"),
+            ("failed", "captured"),
+            ("authorized", "captured"),
             ("captured", "partially_refunded"),
             ("captured", "refunded"),
             ("partially_refunded", "refunded"),
@@ -2664,8 +2354,8 @@ class OrderStateSourceTests(SimpleTestCase):
             with self.subTest(old=old, new=new):
                 self.assertTrue(order_state.payment_transition_allowed(old, new))
         for old, new in [
-            ("pending", "refunded"),  # never paid, nothing to refund
-            ("captured", "failed"),  # captured money cannot "un-pay"
+            ("pending", "refunded"),
+            ("captured", "failed"),
             ("failed", "refunded"),
             ("refunded", "captured"),
             ("unknown", "captured"),
@@ -2683,9 +2373,6 @@ class OrderStateSourceTests(SimpleTestCase):
         )
 
     def test_payment_method_vocabulary_and_failure_trigger_registered(self):
-        """[R-10.2] The COD/prepaid vocabulary exists machine-side, and the
-        payment-failure trigger is registered in the audit vocabulary (the
-        trail cannot grow unregistered sources, 10-02 contract)."""
         self.assertEqual(
             {v for v, _ in order_state.PAYMENT_METHOD_CHOICES},
             {order_state.PAYMENT_METHOD_PREPAID, order_state.PAYMENT_METHOD_COD},
@@ -2698,11 +2385,6 @@ class OrderStateSourceTests(SimpleTestCase):
 
 @tag("orders")
 class PaymentMethodExposureTests(OrderTestBase):
-    """[R-10.2] SPEC-10-04: the payment-method marker rides order reads
-    read-only, and checkout rows default to prepaid — the store's exact
-    current behavior (the COD choice at checkout is a checkout-section
-    row; no request field exists or is added here)."""
-
     def test_checkout_defaults_to_prepaid_and_exposes_it_read_only(self):
         order = self.create_order()
         self.assertEqual(order.payment_method, order_state.PAYMENT_METHOD_PREPAID)
@@ -2714,16 +2396,12 @@ class PaymentMethodExposureTests(OrderTestBase):
         self.assertEqual(detail.status_code, 200, detail.data)
         self.assertEqual(detail.data["payment_method"], "prepaid")
 
-        # read-only everywhere: the marker is machine-maintained
         self.assertIn("payment_method", OrderSerializer.Meta.fields)
         self.assertIn("payment_method", OrderSerializer.Meta.read_only_fields)
 
 
 @tag("orders")
 class LifecycleDimensionsFieldTests(OrderTestBase):
-    """[R-10.1] The additive dimension fields: initial states, the
-    legacy→dimensions mapping table, and read-only serializer exposure."""
-
     EXPECTED_DIMENSIONS = {
         "pending": ("pending", "unfulfilled"),
         "confirmed": ("captured", "unfulfilled"),
@@ -2778,18 +2456,13 @@ class LifecycleDimensionsFieldTests(OrderTestBase):
 
 @tag("orders")
 class LifecycleBackfillMigrationTests(TransactionTestCase):
-    """[R-10.1] The 0012 backfill is total: a row with any legacy status
-    value migrates to BOTH dimensions per the state.py mapping. Same shape
-    as CurrencyBackfillMigrationTests: drop to 0011, raw-insert rows the
-    way a pre-dimension store had them, migrate to head, assert."""
-
     def test_0012_backfills_both_dimensions_for_every_legacy_status(self):
         call_command("migrate", "orders", "0011", verbosity=0, interactive=False)
         user_id = User.objects.create_user(
             "backfill10", "backfill10@example.com", "S3cure-Passphrase!"
         ).id
-        # The dimension columns do not exist at 0011, so raw SQL is the
-        # only honest way to reproduce a pre-dimension row per legacy status.
+        # The dimension columns do not exist at 0011, so raw SQL is the only honest way to reproduce a
+        # pre-dimension row.
         with connection.cursor() as cursor:
             for legacy_status in [s for s, _ in order_state.STATUS_CHOICES]:
                 cursor.execute(
@@ -2801,10 +2474,8 @@ class LifecycleBackfillMigrationTests(TransactionTestCase):
                     [user_id, f"Backfill-{legacy_status}", legacy_status],
                 )
 
-        # Same reasoning as CurrencyBackfillMigrationTests' restore leg: a
-        # full migrate, because the backwards leg above stripped every app
-        # outside the "orders at 0011" closure and an orders-scoped forward
-        # would leave the suite's shared database in that stripped state.
+        # Same reasoning as CurrencyBackfillMigrationTests: a full migrate, because the backwards leg
+        # stripped every app outside the orders closure.
         call_command("migrate", verbosity=0, interactive=False)
 
         for legacy_status, (
@@ -2819,11 +2490,7 @@ class LifecycleBackfillMigrationTests(TransactionTestCase):
 
 @tag("orders")
 class LifecycleWiringTests(OrderTestBase):
-    """[R-10.1] SPEC-10-01b: the writers keep the two dimension fields in
-    sync with the legacy status. The payment dimension moves ONLY with
-    payment events (verify_payment — COD/failure writers are SPEC-10-04);
-    the admin surface and the 9-07 JSON seam move the fulfilment dimension
-    with every fulfilment transition, and admin never touches payment."""
+    """The writers keep both dimension fields in sync with the legacy status; the payment dimension moves only with payment events, and admin never touches it."""
 
     def _verify_payload(self, order):
         return {
@@ -2845,7 +2512,6 @@ class LifecycleWiringTests(OrderTestBase):
         return admin_client
 
     def _run_admin_action(self, action, orders):
-        """Bulk action through the real admin UI (mirrors the 8-16 tests)."""
         admin_client = self._admin_client()
         return admin_client.post(
             "/admin/orders/order/",
@@ -2871,9 +2537,7 @@ class LifecycleWiringTests(OrderTestBase):
         return client
 
     def _order_with_status(self, user, status):
-        """A row exactly as the writers would have left it: the status AND
-        both dimension columns per the state.py mapping (a raw status-only
-        update would strand the dimensions stale, a state no writer makes)."""
+        """A row exactly as the writers leave it: status AND both dimension columns per the state mapping; a status-only update would strand them stale."""
         order = Order.objects.create(
             user=user,
             full_name="Dim Buyer",
@@ -2892,8 +2556,6 @@ class LifecycleWiringTests(OrderTestBase):
         order.refresh_from_db()
         return order
 
-    # ——— payment dimension: verify_payment only ————————————————
-
     def test_verify_payment_captures_the_payment_dimension(self):
         order = self.create_order()
         self.razorpay_mock(order_id="order_DIM")
@@ -2901,31 +2563,26 @@ class LifecycleWiringTests(OrderTestBase):
             "/api/orders/payment/", {"order_id": order.id}, format="json"
         )
         self.assertEqual(res.status_code, 200, res.data)
-        order.refresh_from_db()  # picks up the minted razorpay_order_id
+        order.refresh_from_db()
 
         res = self.client.post(
             "/api/orders/payment/verify/", self._verify_payload(order), format="json"
         )
         self.assertEqual(res.status_code, 200, res.data)
         order.refresh_from_db()
-        # the legacy status semantics are untouched (8-04 pins stay green)
         self.assertEqual(order.status, "confirmed")
         self.assertIsNotNone(order.paid_at)
-        # ...and the payment dimension moved with the payment event alone
         self.assertEqual(order.payment_status, "captured")
         self.assertEqual(order.fulfilment_status, "unfulfilled")
 
     def test_verify_rollback_leaves_the_payment_dimension_pending(self):
-        """The dimension write sits inside verify_payment's atomic block: an
-        audit failure after it must roll the captured dimension back with
-        everything else — effect and trail never disagree."""
         order = self.create_order()
         self.razorpay_mock(order_id="order_DIMRB")
         res = self.client.post(
             "/api/orders/payment/", {"order_id": order.id}, format="json"
         )
         self.assertEqual(res.status_code, 200, res.data)
-        order.refresh_from_db()  # picks up the minted razorpay_order_id
+        order.refresh_from_db()
         self.client.raise_request_exception = False
         with mock.patch.object(AuditEvent, "record", side_effect=RuntimeError("down")):
             res = self.client.post(
@@ -2940,12 +2597,10 @@ class LifecycleWiringTests(OrderTestBase):
         self.assertEqual(order.payment_status, "pending")
         self.assertEqual(order.fulfilment_status, "unfulfilled")
 
-    # ——— fulfilment dimension: admin surface ————————————————————
     # Admin syncs fulfilment_status and must NEVER set payment_status.
 
     def test_admin_change_form_moves_dimension_with_the_status(self):
         order = self._order_with_status(self.buyer, "confirmed")
-        # SPEC-10-03 fixture: the shipped edge now requires items.
         _attach_order_item(order, self.product)
         admin_client = self._admin_client()
 
@@ -2972,8 +2627,6 @@ class LifecycleWiringTests(OrderTestBase):
         order.refresh_from_db()
         self.assertEqual(order.status, "shipped")
         self.assertEqual(order.fulfilment_status, "fulfilled")
-        # admin never touches the payment dimension: the captured value the
-        # row carried in stays exactly as it was
         self.assertEqual(order.payment_status, "captured")
 
     def test_admin_change_form_illegal_transition_moves_nothing(self):
@@ -3007,24 +2660,20 @@ class LifecycleWiringTests(OrderTestBase):
     def test_bulk_ship_syncs_dimension_per_row_and_skips_out_of_set(self):
         confirmed = self._order_with_status(self.buyer, "confirmed")
         pending = self._order_with_status(self.buyer, "pending")
-        # SPEC-10-03 fixture: the shipped edge now requires items.
         _attach_order_item(confirmed, self.product)
 
         res = self._run_admin_action("mark_shipped", [confirmed, pending])
         self.assertEqual(res.status_code, 200)
         confirmed.refresh_from_db()
         pending.refresh_from_db()
-        # the in-set row sweeps both columns in the SAME UPDATE...
         self.assertEqual(confirmed.status, "shipped")
         self.assertEqual(confirmed.fulfilment_status, "fulfilled")
-        # ...and admin never touches the payment dimension, paid row included
         self.assertEqual(confirmed.payment_status, "captured")
-        # ...the out-of-set row is only counted as skipped (9-07 hardening)
         self.assertEqual(pending.status, "pending")
         self.assertEqual(pending.fulfilment_status, "unfulfilled")
 
     def test_admin_bulk_cancel_keeps_the_payment_dimension_untouched(self):
-        order = self.create_order()  # pending, unpaid
+        order = self.create_order()
 
         res = self._run_admin_action("cancel_pending", [order])
         self.assertEqual(res.status_code, 200)
@@ -3033,11 +2682,8 @@ class LifecycleWiringTests(OrderTestBase):
         self.assertEqual(order.fulfilment_status, "unfulfilled")
         self.assertEqual(order.payment_status, "pending")
 
-    # ——— fulfilment dimension: the 9-07 JSON seam ———————————————
-
     def test_json_seam_fulfil_walk_syncs_fulfilment_dimension(self):
         order = self.create_order()
-        # SPEC-10-03 fixture: the shipped step requires a captured payment.
         Order.objects.filter(pk=order.pk).update(payment_status="captured")
         support = self._staff_client("dimsupp")
 
@@ -3064,8 +2710,6 @@ class LifecycleWiringTests(OrderTestBase):
         self.assertEqual(order.fulfilment_status, "unfulfilled")
         self.assertEqual(order.payment_status, "pending")
 
-    # ——— the dimensions surface through the serializer —————————
-
     def test_serializer_shows_updated_dimensions_after_transitions(self):
         order = self.create_order()
         self.razorpay_mock(order_id="order_DIMSER")
@@ -3073,14 +2717,14 @@ class LifecycleWiringTests(OrderTestBase):
             "/api/orders/payment/", {"order_id": order.id}, format="json"
         )
         self.assertEqual(res.status_code, 200, res.data)
-        order.refresh_from_db()  # picks up the minted razorpay_order_id
+        order.refresh_from_db()
         res = self.client.post(
             "/api/orders/payment/verify/", self._verify_payload(order), format="json"
         )
         self.assertEqual(res.status_code, 200, res.data)
 
         support = self._staff_client("dimser")
-        for _ in range(2):  # confirmed -> shipped
+        for _ in range(2):
             res = support.post(f"/api/admin/orders/{order.id}/fulfill/")
             self.assertEqual(res.status_code, 200, res.data)
 
@@ -3096,20 +2740,9 @@ class LifecycleWiringTests(OrderTestBase):
         self.assertEqual(row["fulfilment_status"], "fulfilled")
 
 
-# ==================================
-# [R-10.12]/[R-10.17]/[R-10.18] SPEC-10-02: transition audit trail
-# ==================================
-
-
 @tag("orders")
 class TransitionAuditTrailTests(OrderTestBase):
-    """[R-10.12] Every legal order-status transition appends one immutable
-    OrderStatusEvent row (from→to, actor, trigger, timestamp) inside the
-    SAME transaction as the transition it records ([R-10.18] append-only:
-    a rolled-back writer leaves no event, a committed event can never lack
-    its transition, and no writer can mutate a row afterwards). The
-    privileged-action LogEntry trail (SPEC-7-01) is a separate record and
-    is not touched here."""
+    """Every legal transition appends one immutable OrderStatusEvent row inside the SAME transaction as the transition; append-only means a rolled-back writer leaves no event."""
 
     def _verify_payload(self, order):
         return {
@@ -3132,7 +2765,6 @@ class TransitionAuditTrailTests(OrderTestBase):
         return User.objects.get(username="auditboss")
 
     def _run_admin_action(self, action, orders):
-        """Bulk action through the real admin UI (mirrors the 8-16 tests)."""
         self._admin_login()
         return self.client.post(
             "/admin/orders/order/",
@@ -3158,9 +2790,7 @@ class TransitionAuditTrailTests(OrderTestBase):
         return client
 
     def _order_with_status(self, user, status):
-        """A row exactly as the writers would have left it (status plus the
-        dimension mapping). The .update() deliberately bypasses auto_now —
-        which is the staleness the bulk path's per-row rework fixes."""
+        """A row exactly as the writers leave it, status plus dimension mapping; .update() deliberately bypasses auto_now, which is the staleness the per-row rework fixes."""
         order = Order.objects.create(
             user=user,
             full_name="Audit Buyer",
@@ -3179,11 +2809,8 @@ class TransitionAuditTrailTests(OrderTestBase):
         order.refresh_from_db()
         return order
 
-    # ——— checkout: the trail opens with the creation event ———
-
     def test_checkout_appends_the_creation_event(self):
-        """[R-10.12] Creation is the lifecycle's first transition (no source
-        state → pending), so the trail opens at checkout."""
+        """Creation is the lifecycle's first transition, so the trail opens at checkout."""
         order = self.create_order()
         events = list(order.status_events.all())
         self.assertEqual(len(events), 1)
@@ -3194,8 +2821,6 @@ class TransitionAuditTrailTests(OrderTestBase):
         self.assertEqual(event.trigger, order_state.TRIGGER_ORDER_CREATE)
         self.assertIsNotNone(event.created_at)
 
-    # ——— verify_payment ———
-
     def test_verify_payment_appends_the_transition_event(self):
         order = self.create_order()
         self.razorpay_mock(order_id="order_AUDV")
@@ -3203,7 +2828,7 @@ class TransitionAuditTrailTests(OrderTestBase):
             "/api/orders/payment/", {"order_id": order.id}, format="json"
         )
         self.assertEqual(res.status_code, 200, res.data)
-        order.refresh_from_db()  # picks up the minted razorpay_order_id
+        order.refresh_from_db()
 
         res = self.client.post(
             "/api/orders/payment/verify/", self._verify_payload(order), format="json"
@@ -3214,16 +2839,12 @@ class TransitionAuditTrailTests(OrderTestBase):
         transition = events[-1]
         self.assertEqual(transition.from_status, "pending")
         self.assertEqual(transition.to_status, "confirmed")
-        # [R-10.17] No admin acts on this path: the trigger records the
-        # source and the actor stays NULL — "actor OR triggering event".
+        # No admin acts on this path: the trigger records the source and the actor stays NULL.
         self.assertIsNone(transition.actor)
         self.assertEqual(transition.trigger, order_state.TRIGGER_PAYMENT_VERIFY)
 
     def test_failed_verify_appends_the_payment_failed_event(self):
-        """[R-10.4] SPEC-10-04 (supersedes the 10-02-era 'no event on
-        failure' pin): the failed attempt IS audited. The order status did
-        not move, so the row records from == to ('pending') with the
-        payment-failure trigger; actor NULL (customer flow, no admin)."""
+        """The failed attempt IS audited: the order status did not move, so the row records from == to with the payment-failure trigger and a NULL actor."""
         order = self.create_order()
         client_mock = self.razorpay_mock(order_id="order_AUDFAIL")
         res = self.client.post(
@@ -3245,16 +2866,13 @@ class TransitionAuditTrailTests(OrderTestBase):
         failure = events[-1]
         self.assertEqual(failure.trigger, order_state.TRIGGER_PAYMENT_FAILED)
         self.assertIsNone(failure.actor)
-        # the retryable story keeps its shape: the trail opens with the
-        # creation event and no order-status transition was recorded
         self.assertEqual(
             list(order.status_events.values_list("to_status", flat=True)),
             ["pending", "pending"],
         )
 
     def test_verify_rollback_takes_the_event_with_it(self):
-        """[R-10.18] Rollback-together pin: the event rides verify_payment's
-        atomic block, so an audit-layer failure after it reverts both."""
+        """Rollback-together: the event rides verify_payment's atomic block, so an audit-layer failure reverts both."""
         order = self.create_order()
         self.razorpay_mock(order_id="order_AUDRB")
         res = self.client.post(
@@ -3272,9 +2890,7 @@ class TransitionAuditTrailTests(OrderTestBase):
         self.assertEqual(res.status_code, 500)
         order.refresh_from_db()
         self.assertEqual(order.status, "pending")
-        self.assertEqual(order.status_events.count(), 1)  # creation only
-
-    # ——— admin change form ———
+        self.assertEqual(order.status_events.count(), 1)
 
     def _change_form_post(self, order, status):
         return self.client.post(
@@ -3319,10 +2935,8 @@ class TransitionAuditTrailTests(OrderTestBase):
         confirmed = self._order_with_status(self.buyer, "confirmed")
         shipped = self._order_with_status(self.buyer, "shipped")
 
-        # no-op: the self-transition is not a transition, so no audit row
         res = self._change_form_post(confirmed, "confirmed")
         self.assertEqual(res.status_code, 200)
-        # illegal: the machine gate aborts the save entirely
         res = self._change_form_post(shipped, "cancelled")
         self.assertEqual(res.status_code, 200)
 
@@ -3330,8 +2944,7 @@ class TransitionAuditTrailTests(OrderTestBase):
         self.assertEqual(shipped.status_events.count(), 0)
 
     def test_admin_change_form_failed_audit_write_reverts_the_transition(self):
-        """[R-10.18] Rollback-together pin for the change form: a failing
-        event write rolls the whole save back with it."""
+        """Rollback-together for the change form: a failing event write rolls the whole save back with it."""
         self._admin_login()
         self.client.raise_request_exception = False
         order = self._order_with_status(self.buyer, "pending")
@@ -3346,16 +2959,10 @@ class TransitionAuditTrailTests(OrderTestBase):
         self.assertEqual(order.status, "pending")
         self.assertEqual(order.status_events.count(), 0)
 
-    # ——— admin bulk actions ———
-
     def test_bulk_action_appends_per_row_events_with_fresh_updated_at(self):
         confirmed = self._order_with_status(self.buyer, "confirmed")
         pending = self._order_with_status(self.buyer, "pending")
-        # SPEC-10-03 fixture: the shipped edge now requires items.
         _attach_order_item(confirmed, self.product)
-        # the pre-fix state: a bulk .update() bypasses auto_now, so
-        # updated_at is stranded at its insert-time value — exactly the
-        # staleness the per-row rework fixes
         stale_updated_at = confirmed.updated_at
 
         res = self._run_admin_action("mark_shipped", [confirmed, pending])
@@ -3364,7 +2971,7 @@ class TransitionAuditTrailTests(OrderTestBase):
         pending.refresh_from_db()
 
         self.assertEqual(confirmed.status, "shipped")
-        # [staleness pin] per-row saves fire auto_now: updated_at is fresh
+        # Per-row saves fire auto_now: updated_at is fresh.
         self.assertGreater(confirmed.updated_at, stale_updated_at)
 
         event = confirmed.status_events.get()
@@ -3373,12 +2980,11 @@ class TransitionAuditTrailTests(OrderTestBase):
         self.assertEqual(event.actor, self._admin_user())
         self.assertEqual(event.trigger, order_state.TRIGGER_ADMIN_BULK_ACTION)
 
-        # the out-of-set row is skipped with no event (9-07 semantics)
         self.assertEqual(pending.status, "pending")
         self.assertEqual(pending.status_events.count(), 0)
 
     def test_bulk_cancel_appends_events(self):
-        order = self.create_order()  # pending, unpaid, has creation event
+        order = self.create_order()
 
         res = self._run_admin_action("cancel_pending", [order])
         self.assertEqual(res.status_code, 200)
@@ -3393,11 +2999,8 @@ class TransitionAuditTrailTests(OrderTestBase):
         self.assertEqual(cancel_event.actor, self._admin_user())
         self.assertEqual(cancel_event.trigger, order_state.TRIGGER_ADMIN_BULK_ACTION)
 
-    # ——— the 9-07 admin JSON seam ———
-
     def test_json_seam_fulfil_appends_events_with_the_staff_actor(self):
         order = self.create_order()
-        # SPEC-10-03 fixture: the shipped step requires a captured payment.
         Order.objects.filter(pk=order.pk).update(payment_status="captured")
         support = self._staff_client("auditsupp")
 
@@ -3423,7 +3026,7 @@ class TransitionAuditTrailTests(OrderTestBase):
         res = support.post(f"/api/admin/orders/{order.id}/cancel/")
         self.assertEqual(res.status_code, 200, res.data)
         res = support.post(f"/api/admin/orders/{order.id}/cancel/")
-        self.assertEqual(res.status_code, 200, res.data)  # idempotent replay
+        self.assertEqual(res.status_code, 200, res.data)
 
         cancel_events = order.status_events.filter(
             trigger=order_state.TRIGGER_ADMIN_API_CANCEL
@@ -3435,11 +3038,7 @@ class TransitionAuditTrailTests(OrderTestBase):
         self.assertEqual(event.actor, User.objects.get(username="auditcancel"))
 
     def test_cancel_pending_skips_a_row_flipped_after_the_snapshot(self):
-        """Deterministic cancel twin of the 9-07 race guard: a row that
-        flips pending→confirmed between the pk snapshot and the per-row
-        write is a PAID order by then — it must be skipped (cancelling a
-        paid order is impossible), with no audit row for a cancel that
-        never happened."""
+        """A row that flips pending -> confirmed between the pk snapshot and the per-row write is a PAID order by then, so it must be skipped with no audit row."""
         from django.contrib.admin import site as admin_site
         from django.contrib.messages.storage.fallback import FallbackStorage
         from django.db import models as django_models
@@ -3480,9 +3079,7 @@ class TransitionAuditTrailTests(OrderTestBase):
                 pks = list(super().values_list(*args, **kwargs))
                 if not CancellingQuerySet.raced:
                     CancellingQuerySet.raced = True
-                    # The interleave: the snapshot above already saw both
-                    # rows pending; the victim gets paid before the write
-                    # runs.
+                    # The snapshot saw both rows pending; the victim gets paid before the write runs.
                     Order.objects.filter(pk=victim.pk).update(status="confirmed")
                 return pks
 
@@ -3503,8 +3100,6 @@ class TransitionAuditTrailTests(OrderTestBase):
             ).exists()
         )
 
-    # ——— immutability ([R-10.18]) ———
-
     def test_events_are_append_only(self):
         order = self.create_order()
         event = order.status_events.get()
@@ -3524,7 +3119,6 @@ class TransitionAuditTrailTests(OrderTestBase):
         event = order.status_events.get()
         event_admin = OrderStatusEventAdmin(OrderStatusEvent, admin_site)
 
-        # staff (orders.read via the roles map): view yes, mutate no
         staff = self.make_staff()
         request = RequestFactory().post("/admin/")
         request.user = staff
@@ -3533,13 +3127,11 @@ class TransitionAuditTrailTests(OrderTestBase):
         self.assertFalse(event_admin.has_change_permission(request, event))
         self.assertFalse(event_admin.has_delete_permission(request, event))
 
-        # even the superuser bypass cannot add or delete: append-only
         self._admin_login()
         request.user = self._admin_user()
         self.assertFalse(event_admin.has_add_permission(request))
         self.assertFalse(event_admin.has_delete_permission(request))
 
-        # every field renders read-only: the change form is a view
         for field in (
             "order",
             "from_status",
@@ -3551,7 +3143,6 @@ class TransitionAuditTrailTests(OrderTestBase):
             self.assertIn(field, OrderStatusEventAdmin.readonly_fields)
 
     def test_event_model_pins(self):
-        """Meta pins + the trigger choices stay single-sourced in state.py."""
         self.assertEqual(
             OrderStatusEvent._meta.get_field("trigger").choices,
             order_state.STATUS_EVENT_TRIGGERS,
@@ -3566,20 +3157,9 @@ class TransitionAuditTrailTests(OrderTestBase):
         )
 
 
-# ==================================
-# [R-10.19]/[R-10.14] SPEC-10-03: shipped-transition preconditions
-# ==================================
-
-
 @tag("orders")
 class ShippedPreconditionTests(OrderTestBase):
-    """[R-10.19]/[R-10.14] SPEC-10-03: the shipped edge is the first edge
-    with row preconditions (spec 10.3: a mark-shipped verifies the payment
-    is real and the order has fulfilment-ready items). The machine gate
-    (transition_allowed) still owns WHICH moves are legal; the precondition
-    registry in orders.state owns WHAT must be true about the row, and
-    EVERY writer that can reach shipped enforces it: the admin bulk action,
-    the admin change form, and the 9-07 JSON fulfil seam."""
+    """The machine gate still owns WHICH moves are legal; the precondition registry owns WHAT must be true about the row, and every writer that can reach shipped evaluates it."""
 
     def _admin_login(self):
         if not User.objects.filter(username="shipboss").exists():
@@ -3614,10 +3194,7 @@ class ShippedPreconditionTests(OrderTestBase):
         return client
 
     def _confirmed_row(self, *, paid, with_item):
-        """A confirmed row as its writers would leave it; the flags un-pay
-        / un-item it to build each rejection fixture (checkout rows always
-        carry items, so with_item=False deletes them to simulate the bare
-        ORM rows no production writer produces)."""
+        """A confirmed row as its writers leave it; with_item=False deletes the checkout lines to simulate the bare ORM rows no production writer produces."""
         order = self.create_order()
         updates = {"status": "confirmed"}
         updates["payment_status"] = "captured" if paid else "pending"
@@ -3648,8 +3225,6 @@ class ShippedPreconditionTests(OrderTestBase):
             follow=True,
         )
 
-    # ——— bulk action (the mark_shipped path) ———
-
     def test_bulk_ship_rejects_uncaptured_payment(self):
         from django.contrib import messages as django_messages
 
@@ -3660,10 +3235,8 @@ class ShippedPreconditionTests(OrderTestBase):
         self.assertEqual(res.status_code, 200)
         unpaid.refresh_from_db()
         paid.refresh_from_db()
-        # the eligible row ships, the unpaid row stays confirmed
         self.assertEqual(paid.status, "shipped")
         self.assertEqual(unpaid.status, "confirmed")
-        # no transition, no event: the rejected row gets no audit row
         self.assertFalse(
             unpaid.status_events.exclude(
                 trigger=order_state.TRIGGER_ORDER_CREATE
@@ -3674,7 +3247,6 @@ class ShippedPreconditionTests(OrderTestBase):
                 trigger=order_state.TRIGGER_ORDER_CREATE
             ).exists()
         )
-        # the skip names the unmet precondition, not a status problem
         admin_warnings = [
             str(m)
             for m in django_messages.get_messages(res.wsgi_request)
@@ -3718,8 +3290,6 @@ class ShippedPreconditionTests(OrderTestBase):
         self.assertEqual(event.trigger, order_state.TRIGGER_ADMIN_BULK_ACTION)
         self.assertEqual(event.actor.username, "shipboss")
 
-    # ——— single-object guard (the admin change form) ———
-
     def test_change_form_rejects_uncaptured_payment(self):
         order = self._confirmed_row(paid=False, with_item=True)
         self._admin_login()
@@ -3749,9 +3319,7 @@ class ShippedPreconditionTests(OrderTestBase):
         )
 
     def test_change_form_delivers_itemless_order_without_preconditions(self):
-        """Only the shipped edge carries preconditions: delivered (from
-        shipped) registers none, so this move still goes — the registry is
-        per-status, never a global gate."""
+        """Only the shipped edge carries preconditions: delivered registers none, so the registry is per-status, never a global gate."""
         order = self._confirmed_row(paid=True, with_item=False)
         Order.objects.filter(pk=order.pk).update(status="shipped")
         order.refresh_from_db()
@@ -3762,8 +3330,6 @@ class ShippedPreconditionTests(OrderTestBase):
         order.refresh_from_db()
         self.assertEqual(order.status, "delivered")
 
-    # ——— the 9-07 JSON seam ———
-
     def test_json_seam_rejects_unpaid_ship_with_precondition_reasons(self):
         order = self._confirmed_row(paid=False, with_item=True)
         support = self._staff_client("shipseam")
@@ -3772,7 +3338,6 @@ class ShippedPreconditionTests(OrderTestBase):
         self.assertEqual(res.status_code, 409, res.data)
         order.refresh_from_db()
         self.assertEqual(order.status, "confirmed")
-        # the envelope middleware wraps the body: reasons at details
         self.assertIn("preconditions", res.data["details"])
         self.assertTrue(
             any("captured" in r for r in res.data["details"]["preconditions"]),
@@ -3789,11 +3354,8 @@ class ShippedPreconditionTests(OrderTestBase):
         self.assertEqual(order.status, "shipped")
         self.assertEqual(order.fulfilment_status, "fulfilled")
 
-    # ——— [R-10.2] SPEC-10-04: the COD branch ———
-
     def _cod_row(self, *, with_item=True, status_value="confirmed"):
-        """A cash-on-delivery row: payment_method cod, payment dimension
-        still pending — nothing captured, the money arrives at delivery."""
+        """A cash-on-delivery row: payment dimension still pending -- nothing captured, the money arrives at delivery."""
         order = self.create_order()
         Order.objects.filter(pk=order.pk).update(
             status=status_value, payment_method=order_state.PAYMENT_METHOD_COD
@@ -3804,10 +3366,7 @@ class ShippedPreconditionTests(OrderTestBase):
         return order
 
     def test_cod_precondition_is_items_only(self):
-        """The COD variant of the shipped precondition, evaluated through
-        the same registry the writers call: no capture required pre-ship
-        (the money is collected at/after delivery), items still required.
-        The prepaid twin of the same row still demands capture."""
+        """The COD variant: no capture required pre-ship (money is collected at/after delivery), items still required."""
         cod = self._cod_row(with_item=True)
         self.assertEqual(order_state.precondition_failures(cod, "shipped"), [])
         itemless = self._cod_row(with_item=False)
@@ -3819,17 +3378,14 @@ class ShippedPreconditionTests(OrderTestBase):
         self.assertNotEqual(order_state.precondition_failures(prepaid, "shipped"), [])
 
     def test_cod_order_ships_through_the_bulk_writer_without_capture(self):
-        """End to end: a COD confirmed row ships with payment_status still
-        pending — the machine's COD branch — and the transition rides the
-        standard audit + dimension contract (10-01b/10-02). No parallel
-        COD writer exists."""
+        """A COD confirmed row ships with payment_status still pending through the standard audit + dimension contract; no parallel COD writer exists."""
         order = self._cod_row()
 
         res = self._run_admin_action("mark_shipped", [order])
         self.assertEqual(res.status_code, 200)
         order.refresh_from_db()
         self.assertEqual(order.status, "shipped")
-        self.assertEqual(order.payment_status, "pending")  # NOT captured
+        self.assertEqual(order.payment_status, "pending")
         self.assertEqual(order.fulfilment_status, "fulfilled")
         event = order.status_events.exclude(
             trigger=order_state.TRIGGER_ORDER_CREATE
@@ -3838,8 +3394,6 @@ class ShippedPreconditionTests(OrderTestBase):
         self.assertEqual(event.to_status, "shipped")
 
     def test_cod_ship_fires_the_shipped_notification_hook(self):
-        """[R-10.16] The COD branch rides the standard writers, so the
-        shipped hook contract (10-05) fires for it too."""
         order = self._cod_row()
 
         with mock.patch("orders.events.notifications.enqueue") as enqueue_mock:
@@ -3848,14 +3402,8 @@ class ShippedPreconditionTests(OrderTestBase):
         self.assertEqual(res.status_code, 200)
         enqueue_mock.assert_called_once_with("order.shipped", {"order": order})
 
-    # ——— the extension hook (the SPEC-1-08 attach point) ———
-
     def test_precondition_registry_shape_and_extension_point(self):
-        """Pin the hook: the shipped status carries exactly the two
-        built-ins, extra checks register against a status and are
-        evaluated by the same precondition_failures the writers call —
-        SPEC-1-08's shipment checks attach here without touching writers.
-        A status with no registered checks evaluates clean."""
+        """The shipped status carries exactly the two built-ins, extra checks register against a status and are evaluated by the same precondition_failures the writers call."""
 
         def _reject_all(order):
             return ["shipment section will replace this"]
@@ -3873,14 +3421,9 @@ class ShippedPreconditionTests(OrderTestBase):
                 order_state.precondition_failures(order, "shipped"),
                 ["shipment section will replace this"],
             )
-        # patch.dict restored the built-ins: the registry is process state,
-        # not per-test leakage
         self.assertEqual(len(order_state.TRANSITION_PRECONDITIONS["shipped"]), 2)
 
     def test_registered_hook_blocks_ship_through_the_bulk_writer(self):
-        """The writers evaluate the registry, not hardcoded checks: a
-        SPEC-1-08 check that fails blocks an otherwise-eligible ship and
-        is reported like any other unmet precondition."""
         from django.contrib.admin import site as admin_site
         from django.contrib.messages.storage.fallback import FallbackStorage
         from django.test import RequestFactory
@@ -3915,26 +3458,13 @@ class ShippedPreconditionTests(OrderTestBase):
         )
 
 
-# ==================================
-# [R-10.16] SPEC-10-05: per-transition side-effect contract
-# ==================================
-
-
 @tag("orders")
 class TransitionNotificationTests(OrderTestBase):
-    """[R-10.16] SPEC-10-05: the shipped/delivered/cancelled transitions
-    each fire ONE call into the shared notifications seam — the same
-    ``notifications.enqueue`` outbox seam verify_payment already uses for
-    order.paid — with the transitioned order as payload. The call writes a
-    NotificationOutbox row inside the transition's transaction (no send on
-    the request thread); a notification failure can never fail or roll
-    back its transition (log-only, rollback isolation pinned), and
-    non-hooked transitions fire nothing."""
+    """The shipped/delivered/cancelled transitions each enqueue ONE notification through the shared outbox seam, inside the transition's transaction -- never a send on the request thread."""
 
     def _paid_itemful_confirmed(self):
-        """A confirmed row as verify_payment leaves it: captured payment
-        and the checkout lines — eligible for the shipped edge."""
-        order = self.create_order()  # checkout rows always carry items
+        """A confirmed row as verify_payment leaves it: captured payment and checkout lines, eligible for the shipped edge."""
+        order = self.create_order()
         Order.objects.filter(pk=order.pk).update(
             status="confirmed", payment_status="captured"
         )
@@ -3994,8 +3524,6 @@ class TransitionNotificationTests(OrderTestBase):
         client.force_authenticate(user)
         return client
 
-    # ——— every hooked transition fires with the right payload ———
-
     def test_bulk_writers_fire_shipped_then_delivered_hooks(self):
         order = self._paid_itemful_confirmed()
 
@@ -4033,11 +3561,9 @@ class TransitionNotificationTests(OrderTestBase):
         self.assertEqual(order.status, "shipped")
 
     def test_both_cancel_writers_fire_the_cancelled_hook(self):
-        # both rows are created on the buyer's session BEFORE the admin
-        # action replaces that session with the admin login; the cart is
-        # reseeded because an identical resubmission would replay the
-        # first order (the checkout dedup guard, SPEC-21-1)
-        bulk_order = self.create_order()  # pending, unpaid
+        # Both rows are created on the buyer's session before the admin action replaces that session;
+        # the cart is reseeded because an identical resubmission would replay the first order.
+        bulk_order = self.create_order()
         self.seed_session_cart([(self.product, 1)])
         seam_order = self.create_order()
         support = self._staff_client("notifycancel")
@@ -4060,12 +3586,8 @@ class TransitionNotificationTests(OrderTestBase):
         seam_order.refresh_from_db()
         self.assertEqual(seam_order.status, "cancelled")
 
-    # ——— rollback isolation: a hook failure can never fail the transition ———
-
     def test_hook_exception_leaves_the_transition_and_event_committed(self):
-        """The notify site sits inside the writer's transaction but is
-        failure-swallowing: an enqueue that raises fails NEITHER the
-        request, nor the transition, nor its audit row."""
+        """The notify site sits inside the writer's transaction but is failure-swallowing: an enqueue that raises fails neither the request, the transition, nor its audit row."""
         order = self._paid_itemful_confirmed()
 
         with mock.patch(
@@ -4083,10 +3605,8 @@ class TransitionNotificationTests(OrderTestBase):
         self.assertEqual(event.from_status, "confirmed")
         self.assertEqual(event.to_status, "shipped")
 
-    # ——— non-hooked transitions fire nothing ———
-
     def test_non_hooked_transitions_fire_nothing(self):
-        confirmed = self.create_order()  # pending
+        confirmed = self.create_order()
 
         with mock.patch("orders.events.notifications.enqueue") as enqueue_mock:
             res = self._run_admin_action("mark_confirmed", [confirmed])
@@ -4096,9 +3616,7 @@ class TransitionNotificationTests(OrderTestBase):
             enqueue_mock.assert_not_called()
 
     def test_hook_map_pins_the_contract(self):
-        """The hook set is exactly the three lifecycle transitions the
-        side-effect contract covers — a fourth transition must be added
-        here deliberately, not by drift."""
+        """The hook set is exactly the three lifecycle transitions the side-effect contract covers; a fourth must be added deliberately, not by drift."""
         self.assertEqual(
             order_events.TRANSITION_EVENTS,
             {
@@ -4107,55 +3625,28 @@ class TransitionNotificationTests(OrderTestBase):
                 "cancelled": "order.cancelled",
             },
         )
-        # confirmed is deliberately unhooked: verify_payment's own
-        # order.paid dispatch (R-19.0) owns the payment notification
+        # confirmed is deliberately unhooked: verify_payment's own order.paid dispatch owns the payment
+        # notification.
         self.assertNotIn("confirmed", order_events.TRANSITION_EVENTS)
 
     def test_every_hooked_name_is_a_member_of_the_audit_vocabulary(self):
-        """ASYNC-2e: the enumeration, and the defect it pins.
-
-        ``_EVENT_HANDLERS`` is keyed on ``AuditEvent.EventType``, so a
-        transition event that is not a member resolves no handler, is not a
-        value the audit trail can record, and — before this task — was
-        absorbed by the same DEBUG no-op as a benign content gap. All three
-        names here were bare strings outside the vocabulary for exactly that
-        long.
-
-        This walks the WHOLE map rather than sampling two names, because the
-        failure mode being guarded is a fourth site nobody enumerated.
-        """
         vocabulary = set(AuditEvent.EventType)
         for transition, event_name in order_events.TRANSITION_EVENTS.items():
             with self.subTest(transition=transition):
                 self.assertIn(event_name, vocabulary)
-                # And it is a member, not merely an equal string: a bare
-                # literal compares equal to a member, so membership alone
-                # cannot tell the fixed code from the broken one. The
-                # identity check can.
+                # A bare string literal compares equal to a member, so membership alone cannot tell the fixed
+                # code from the broken one; the identity check can.
                 self.assertIsInstance(event_name, AuditEvent.EventType)
 
     def test_a_name_outside_the_vocabulary_would_not_resolve(self):
-        """The control: proves the pin above can fail.
-
-        A registry key that resolves everything is a registry that pins
-        nothing. This drives a name of the same shape as the three real ones
-        and shows the lookup misses, so the enumeration test's green is a
-        statement about the code rather than about the assertion's shape.
-        """
+        """The control that proves the pin above can fail: a registry key that resolves everything pins nothing."""
         self.assertNotIn("order.shipped_via_telepathy", set(AuditEvent.EventType))
         self.assertIsNone(
             notifications._EVENT_HANDLERS.get("order.shipped_via_telepathy")
         )
 
     def test_no_handler_is_registered_for_the_three_lifecycle_names(self):
-        """What a reader of this file may NOT claim: no customer receives a
-        shipped, delivered or cancelled notification.
-
-        The order email content set belongs to SPEC-1-12/SPEC-19-2. Until a
-        handler lands, ``dispatch`` for these names sends nothing — this
-        pins that so the gap cannot quietly become a fiction in either
-        direction (a doc claiming a mail, or a handler nobody tested).
-        """
+        """Until a handler lands, dispatch for these names sends nothing; this pins the gap so it cannot quietly become a fiction."""
         for transition, event_name in order_events.TRANSITION_EVENTS.items():
             with self.subTest(transition=transition):
                 self.assertIsNone(notifications._EVENT_HANDLERS.get(event_name))
@@ -4171,8 +3662,6 @@ class TransitionNotificationTests(OrderTestBase):
             AuditEvent.EventType.ORDER_CANCELLED,
             notifications.events_without_handler(),
         )
-        # And order.paid is NOT in the gap: the set distinguishes the two
-        # rather than naming every event.
         self.assertNotIn(
             AuditEvent.EventType.ORDER_PAID,
             notifications.events_without_handler(),
@@ -4181,26 +3670,17 @@ class TransitionNotificationTests(OrderTestBase):
 
 @tag("orders")
 class ReservationLifecycleTests(OrderTestBase):
-    """SPEC-12-02 (spec section 12.2 [R-12.6]/[R-12.7]/[R-12.8]).
-
-    The checkout reservation lifecycle: create_order mints one time-limited
-    hold per line inside its atomic block; verify_payment converts active
-    holds into committed sales behind the unchanged locked sufficiency
-    re-check (the oversell backstop); every failed/cancelled checkout path
-    releases the holds. Razorpay is always mocked; no network.
-    """
+    """checkout mints one time-limited hold per line; verify converts active holds behind the locked sufficiency re-check; every failed/cancelled path releases them."""
 
     def _checkout_and_pay(self, order_id="order_RESV001", **checkout_overrides):
-        """Mirror of VerifyPaymentTests._prepare_paid_setup: a real
-        checkout (so holds are minted), a payment intent, and the verify
-        payload — plus the mock client so a test can flip the signature."""
+        """Mirror of VerifyPaymentTests._prepare_paid_setup: a real checkout (so holds are minted), a payment intent, and the verify payload."""
         client_mock = self.razorpay_mock(order_id=order_id)
         order = self.create_order(**checkout_overrides)
         res = self.client.post(
             "/api/orders/payment/", {"order_id": order.id}, format="json"
         )
         self.assertEqual(res.status_code, 200, res.data)
-        order.refresh_from_db()  # picks up the gateway ref the intent wrote
+        order.refresh_from_db()
         payload = {
             "order_id": order.id,
             "razorpay_order_id": order.razorpay_order_id,
@@ -4209,13 +3689,10 @@ class ReservationLifecycleTests(OrderTestBase):
         }
         return client_mock, order, payload
 
-    # ——— [R-12.6] mint at checkout ———
-
     def test_checkout_mints_one_active_hold_per_line_with_env_ttl(self):
-        """§12.1 step 3: checkout leaves one active, owner-bound hold per
-        order line, sized to the line and expiring on the env-driven TTL."""
+        """Checkout leaves one active, owner-bound hold per order line, sized to the line and expiring on the env-driven TTL."""
         self.product2 = self.make_product(name="Oud Royale", price="700.00", stock=5)
-        self.seed_session_cart([(self.product2, 1)])  # second cart line
+        self.seed_session_cart([(self.product2, 1)])
         with override_settings(RESERVATION_TTL=120):
             before = timezone.now()
             res = self.checkout()
@@ -4230,20 +3707,16 @@ class ReservationLifecycleTests(OrderTestBase):
             self.assertEqual(hold.owner_id, self.buyer.pk)
             self.assertEqual(hold.order_id, order.id)
             self.assertEqual(hold.status, StockReservation.Status.ACTIVE)
-            # expires_at = mint time + RESERVATION_TTL, read at call time
             self.assertGreater(hold.expires_at, before + timedelta(seconds=110))
             self.assertLessEqual(
                 hold.expires_at, timezone.now() + timedelta(seconds=121)
             )
 
     def test_replayed_checkout_collapses_without_touching_the_hold(self):
-        """The dedup guard's reuse path returns the original order before
-        the mint runs: a retried checkout re-targets the existing hold by
-        leaving it exactly as the first attempt minted it — never a second
-        (order, product) row (§12.1: one hold per checkout line)."""
+        """The dedup reuse path returns the original order before the mint runs, so a retried checkout re-targets the existing hold without creating a second (order, product) row."""
         first = self.checkout()
         self.assertEqual(first.status_code, 201, first.data)
-        second = self.checkout()  # identical pending submission
+        second = self.checkout()
         self.assertEqual(second.status_code, 200, second.data)
         self.assertEqual(second.data["id"], first.data["id"])
 
@@ -4253,37 +3726,29 @@ class ReservationLifecycleTests(OrderTestBase):
         self.assertEqual(holds.get().status, StockReservation.Status.ACTIVE)
 
     def test_mint_retargets_the_existing_hold_on_a_lost_unique_race(self):
-        """The (order, product) unique constraint is the concurrency
-        authority for a replay that slips past both collapse guards: the
-        mint's IntegrityError fallback re-targets the surviving hold —
-        re-armed to the retried line's quantity and a fresh TTL — instead
-        of double-creating or crashing the checkout."""
+        """The (order, product) unique constraint is the concurrency authority: the mint's IntegrityError fallback re-targets the surviving hold with the retried size and a fresh TTL."""
         order = self.create_order()
         hold = order.stock_reservations.get()
-        # Simulate the stale survivor of a lost race: wrong size, lapsed
-        # TTL, released by an earlier abandoned attempt.
+        # Simulate the stale survivor of a lost race: wrong size, lapsed TTL, released by an earlier
+        # abandoned attempt.
         StockReservation.objects.filter(pk=hold.pk).update(
             quantity=99,
             status=StockReservation.Status.RELEASED,
             expires_at=timezone.now() + timedelta(seconds=1),
         )
-        # Re-run the view's mint for the same order (the reuse path): the
-        # duplicate create hits the real constraint and the fallback fires.
+        # Re-run the view's mint for the same order; the duplicate create hits the real constraint and
+        # the fallback fires.
         _mint_order_reservations(
             order, order.items.select_related("product").all(), self.buyer
         )
         hold.refresh_from_db()
         self.assertEqual(order.stock_reservations.count(), 1)
-        self.assertEqual(hold.quantity, 2)  # re-armed to the line's size
+        self.assertEqual(hold.quantity, 2)
         self.assertEqual(hold.status, StockReservation.Status.ACTIVE)
         self.assertGreater(hold.expires_at, timezone.now() + timedelta(seconds=800))
 
-    # ——— [R-12.7] convert at verify ———
-
     def test_verify_converts_active_holds_into_committed_sales(self):
-        """§12.1 step 5: confirmation converts the holds; the decrement and
-        its SALE ledger row stay the stock authority (unchanged behavior),
-        and a replayed verify cannot convert twice."""
+        """Confirmation converts the holds; the decrement and its SALE ledger row stay the stock authority, and a replayed verify cannot convert twice."""
         _, order, payload = self._checkout_and_pay()
 
         res = self.client.post("/api/orders/payment/verify/", payload, format="json")
@@ -4301,7 +3766,6 @@ class ReservationLifecycleTests(OrderTestBase):
                 note=f"Order #{order.id}",
             ).exists()
         )
-        # replay hits the already-processed gate: still exactly one hold
         replay = self.client.post("/api/orders/payment/verify/", payload, format="json")
         self.assertEqual(replay.status_code, 400, replay.data)
         self.assertEqual(
@@ -4312,11 +3776,7 @@ class ReservationLifecycleTests(OrderTestBase):
         )
 
     def test_verify_converts_a_lapsed_hold_ttl_never_gates_the_sale(self):
-        """Declared reading of §12.2: expiry is the SPEC-12-03 reconciler's
-        concern, never a conversion gate. The locked sufficiency re-check
-        is the only availability authority for a captured payment, so a
-        hold past its expires_at still converts instead of 409-ing paid
-        money onto a bookkeeping lapse."""
+        """Expiry is the reconciler's concern, never a conversion gate: the locked sufficiency re-check is the only availability authority for a captured payment."""
         _, order, payload = self._checkout_and_pay()
         order.stock_reservations.update(
             expires_at=timezone.now() - timedelta(seconds=1)
@@ -4331,9 +3791,7 @@ class ReservationLifecycleTests(OrderTestBase):
         )
 
     def test_verify_succeeds_for_an_order_without_holds(self):
-        """Legacy compatibility: an order minted before the reservation
-        model (or with its rows gone) verifies exactly as before — the
-        conversion filter simply matches nothing."""
+        """Legacy compatibility: an order minted before the reservation model verifies exactly as before -- the conversion filter simply matches nothing."""
         _, order, payload = self._checkout_and_pay()
         order.stock_reservations.all().delete()
 
@@ -4345,14 +3803,8 @@ class ReservationLifecycleTests(OrderTestBase):
         self.product.refresh_from_db()
         self.assertEqual(self.product.stock, 8)
 
-    # ——— [R-12.8] release on failed/cancelled checkout ———
-
     def test_failed_verify_releases_holds_and_the_retry_rechecks_cleanly(self):
-        """[R-10.4] interplay: the 10-04 failure marks the payment failed
-        AND releases the holds in the same transaction; the retry (the
-        machine's failed->captured edge) then re-checks stock cleanly —
-        the released hold is terminal and is never converted into the
-        eventual sale."""
+        """The failure marks the payment failed AND releases the holds in the same transaction; the retry then re-checks stock cleanly, and the released hold is never converted."""
         client_mock, order, payload = self._checkout_and_pay()
         self.razorpay_fail_signature(client_mock)
 
@@ -4366,29 +3818,23 @@ class ReservationLifecycleTests(OrderTestBase):
             StockReservation.Status.RELEASED,
         )
         self.product.refresh_from_db()
-        self.assertEqual(self.product.stock, 10)  # untouched by the failure
+        self.assertEqual(self.product.stock, 10)
 
-        # a fresh, genuine attempt on the same order
         self.razorpay_mock(order_id=order.razorpay_order_id)
         second = self.client.post("/api/orders/payment/verify/", payload, format="json")
         self.assertEqual(second.status_code, 200, second.data)
         order.refresh_from_db()
         self.assertEqual(order.status, "confirmed")
-        # the released hold stays released — the sale needed no conversion
         self.assertEqual(
             order.stock_reservations.get().status,
             StockReservation.Status.RELEASED,
         )
         self.product.refresh_from_db()
-        self.assertEqual(self.product.stock, 8)  # decremented exactly once
+        self.assertEqual(self.product.stock, 8)
 
     def test_stock_conflict_verify_releases_holds_and_retry_rechecks(self):
-        """The oversell race's loser: the 409 backstop keeps hard oversell
-        impossible and now also releases the loser's holds, so no phantom
-        pressure survives on available-to-sell; after a restock the order
-        is still retryable and re-checks live stock."""
+        """The oversell race's loser: the 409 backstop also releases the loser's holds, and after a restock the order is still retryable."""
         _, order, payload = self._checkout_and_pay()
-        # the units the hold points at were sold out from under it
         products.objects.filter(pk=self.product.pk).update(stock=1)
 
         res = self.client.post("/api/orders/payment/verify/", payload, format="json")
@@ -4398,7 +3844,7 @@ class ReservationLifecycleTests(OrderTestBase):
             "An item is no longer available in the requested quantity",
         )
         order.refresh_from_db()
-        self.assertEqual(order.status, "pending")  # retryable, per 10-04
+        self.assertEqual(order.status, "pending")
         self.assertEqual(
             order.stock_reservations.get().status,
             StockReservation.Status.RELEASED,
@@ -4414,33 +3860,15 @@ class ReservationLifecycleTests(OrderTestBase):
         self.product.refresh_from_db()
         self.assertEqual(self.product.stock, 8)
 
-    # ——— [R-12.12] StockUnavailable handler in verify (summed re-check loser) ———
-
     def _twin_line_stock_race_setup(self):
-        """Reach payment.py's ``except StockUnavailable`` handler — the
-        branch the two 409 tests above cannot fire.
-
-        The customer-facing backstop compares stock to EACH line while
-        commit_order_sale compares it to the SUM per product, so on a
-        single-line order the view answers its own identical 409 and the
-        service never raises. Checkout mints one line per product (the
-        cart is unique per product), but OrderItem carries no such
-        constraint — the service's summed re-check exists for exactly
-        that shape — so the fixture attaches a twin line after the real
-        checkout + payment intent: the order needs 4 units, a concurrent
-        sale leaves 3 — at/above each line's 2 (the view's per-line
-        backstop passes), below the sum (the service refuses)."""
+        """Reach payment.py's except StockUnavailable handler: the customer-facing backstop compares stock per EACH line while commit_order_sale compares the SUM per product, so a single-line order never raises."""
         _, order, payload = self._checkout_and_pay()
         _attach_order_item(order, self.product, 2)
         products.objects.filter(pk=self.product.pk).update(stock=3)
         return order, payload
 
     def test_stock_unavailable_handler_answers_the_wire_envelope(self):
-        """The handler's 409 as the client sees it: SPEC-9-03 envelope
-        bytes exactly once (ENVELOPE-WIRE: res.content, never .data), and
-        the audit row carries the SUMMED demand — the view's per-line
-        backstop would have written requested=2, so requested=4 proves
-        this row came from the service's conflict inside the handler."""
+        """The handler's 409 in the uniform error envelope, and the audit row carries the SUMMED demand -- requested=4 proves it came from the service's conflict, not the per-line backstop."""
         order, payload = self._twin_line_stock_race_setup()
 
         res = self.client.post("/api/orders/payment/verify/", payload, format="json")
@@ -4462,10 +3890,7 @@ class ReservationLifecycleTests(OrderTestBase):
     def test_stock_unavailable_handler_half_applies_nothing_and_releases_holds(
         self,
     ):
-        """commit_order_sale raises BEFORE its first mutation, and the
-        handler only audits, logs and releases the attempt's holds: no
-        ledger row, no decrement, no capture transition, ACTIVE hold ->
-        RELEASED — the failed capture leaves the books untouched."""
+        """commit_order_sale raises BEFORE its first mutation; the handler only audits, logs and releases the attempt's holds, so the books are untouched."""
         order, payload = self._twin_line_stock_race_setup()
         hold = order.stock_reservations.get()
         self.assertEqual(hold.status, StockReservation.Status.ACTIVE)
@@ -4475,14 +3900,12 @@ class ReservationLifecycleTests(OrderTestBase):
         res = self.client.post("/api/orders/payment/verify/", payload, format="json")
 
         self.assertEqual(res.status_code, 409, res.data)
-        # No half-applied sale: stock keeps the degraded value and
-        # SPEC-6-02's movement ledger gains no row.
+        # No half-applied sale: stock keeps the degraded value and the movement ledger gains no row.
         self.product.refresh_from_db()
         self.assertEqual(self.product.stock, 3)
         self.assertEqual(StockMovement.objects.count(), movements_before)
-        # The order did not transition: no capture claim, no paid_at, and
-        # the payment dimension keeps its untouched default — this handler
-        # does NOT mark it failed (only the signature-rejected path does).
+        # The order did not transition: no capture claim, no paid_at, and the payment dimension keeps its
+        # untouched default (only the signature-rejected path marks it failed).
         order.refresh_from_db()
         self.assertEqual(order.status, "pending")
         self.assertEqual(order.payment_status, "pending")
@@ -4492,16 +3915,13 @@ class ReservationLifecycleTests(OrderTestBase):
             OrderStatusEvent.objects.filter(order=order).count(),
             transitions_before,
         )
-        # The handler's hold protocol: release, so the failed attempt
-        # leaves no phantom pressure on available-to-sell.
+        # The handler releases the attempt's holds, so a failed capture leaves no phantom pressure on
+        # available-to-sell.
         hold.refresh_from_db()
         self.assertEqual(hold.status, StockReservation.Status.RELEASED)
 
     def test_stock_unavailable_handler_retry_after_restock_captures(self):
-        """The handler is a failed attempt, not a dead end: once the
-        raced units are back, the same payload verifies again — the
-        released hold stays terminal (never resurrected into the sale)
-        and both twin lines commit from live stock."""
+        """The handler is a failed attempt, not a dead end: once the raced units are back the same payload verifies, and the released hold stays terminal."""
         order, payload = self._twin_line_stock_race_setup()
 
         first = self.client.post("/api/orders/payment/verify/", payload, format="json")
@@ -4518,19 +3938,18 @@ class ReservationLifecycleTests(OrderTestBase):
         self.assertEqual(order.razorpay_payment_id, "pay_RESV001")
         self.assertIsNotNone(order.paid_at)
         self.product.refresh_from_db()
-        self.assertEqual(self.product.stock, 6)  # both twin lines sold: 10-2-2
-        self.assertEqual(StockMovement.objects.count(), 2)  # one ledger row per line
+        self.assertEqual(self.product.stock, 6)
+        self.assertEqual(StockMovement.objects.count(), 2)
         self.assertEqual(
             order.stock_reservations.get().status,
             StockReservation.Status.RELEASED,
         )
 
     def test_coupon_conflict_verify_releases_holds(self):
-        """A verify that fails a checkout precondition (coupon gone) is a
-        failed checkout: the holds release, the order stays pending."""
+        """A verify that fails a checkout precondition (coupon gone) is a failed checkout: the holds release, the order stays pending."""
         coupon = self.make_coupon(code="HOLD10", discount_value="10", usage_limit=1)
         _, order, payload = self._checkout_and_pay(coupon=coupon)
-        Coupon.objects.filter(pk=coupon.pk).update(used_count=1)  # raced away
+        Coupon.objects.filter(pk=coupon.pk).update(used_count=1)
 
         res = self.client.post("/api/orders/payment/verify/", payload, format="json")
 
@@ -4544,9 +3963,7 @@ class ReservationLifecycleTests(OrderTestBase):
         )
 
     def test_admin_cancel_releases_holds(self):
-        """§12.1 step 6: cancelling an unpaid order is a cancelled
-        checkout — its holds release inside the cancel transaction and the
-        units return to available-to-sell immediately."""
+        """Cancelling an unpaid order is a cancelled checkout: its holds release inside the cancel transaction and the units return to available-to-sell."""
         from django.contrib.auth.models import Group
 
         from common.roles import ROLE_SUPPORT
@@ -4568,9 +3985,7 @@ class ReservationLifecycleTests(OrderTestBase):
             StockReservation.Status.RELEASED,
         )
         self.product.refresh_from_db()
-        self.assertEqual(self.product.stock, 10)  # a hold was never stock
-
-    # ——— [R-12.8] the admin surfaces release too (audit cycle 2) ———
+        self.assertEqual(self.product.stock, 10)
 
     def _admin_login(self):
         if not User.objects.filter(username="resvboss").exists():
@@ -4614,12 +4029,9 @@ class ReservationLifecycleTests(OrderTestBase):
         )
 
     def test_admin_change_form_cancel_releases_holds(self):
-        """[R-12.8] admin change form: pending -> cancelled must release
-        the checkout's active holds in the save transaction — the API
-        twin cannot be the only surface that releases, or an admin cancel
-        leaves a phantom hold burning the stock until the TTL sweep."""
-        # checkout BEFORE the admin login: login() rotates the session
-        # key the cart is bound to, so the fixture order is load-bearing
+        """The API twin cannot be the only surface that releases, or an admin cancel leaves a phantom hold burning stock until the TTL sweep."""
+        # Checkout runs BEFORE the admin login: login() rotates the session key the cart is bound to, so
+        # the fixture order is load-bearing.
         order = self.create_order()
         self._admin_login()
 
@@ -4633,10 +4045,8 @@ class ReservationLifecycleTests(OrderTestBase):
             StockReservation.Status.RELEASED,
         )
         self.product.refresh_from_db()
-        self.assertEqual(self.product.stock, 10)  # a hold was never stock
+        self.assertEqual(self.product.stock, 10)
 
-        # idempotent: the machine's cancelled self-transition replays the
-        # save without error and never resurrects the released hold
         replay = self._change_form_post(order, "cancelled")
         self.assertEqual(replay.status_code, 200)
         order.refresh_from_db()
@@ -4647,10 +4057,8 @@ class ReservationLifecycleTests(OrderTestBase):
         )
 
     def test_admin_bulk_cancel_releases_holds(self):
-        """[R-12.8] admin bulk action: cancel_pending releases each
-        cancelled row's active holds inside the same per-row transaction,
-        matching the API twin — the hold never outlives its order."""
-        order = self.create_order()  # checkout first: see the note above
+        """cancel_pending releases each cancelled row's active holds inside the same per-row transaction, matching the API twin."""
+        order = self.create_order()
         self._admin_login()
 
         res = self._run_admin_action("cancel_pending", [order])
@@ -4663,10 +4071,8 @@ class ReservationLifecycleTests(OrderTestBase):
             StockReservation.Status.RELEASED,
         )
         self.product.refresh_from_db()
-        self.assertEqual(self.product.stock, 10)  # a hold was never stock
+        self.assertEqual(self.product.stock, 10)
 
-        # idempotent: the pending filter skips the already-cancelled row,
-        # so a re-run neither errors nor resurrects the released hold
         replay = self._run_admin_action("cancel_pending", [order])
         self.assertEqual(replay.status_code, 200)
         order.refresh_from_db()
@@ -4679,26 +4085,13 @@ class ReservationLifecycleTests(OrderTestBase):
 
 @tag("orders")
 class CartOrderCaptureClearTests(OrderTestBase):
-    """TIER1-WEBHOOK-CART: the Cart->Order link and the capture-time clear.
-
-    Closes the WEBHOOK-CART open item: ``Cart`` carried no user FK and
-    nothing joined an Order to a Cart, so the gateway webhook (no session
-    cookie) could not empty the originating cart and a returning customer
-    saw a phantom full cart. The fix binds ``Cart.order`` at checkout and
-    clears the linked cart inside ``commit_order_sale`` past the
-    idempotency gate — ONE clear, both capture writers.
-    """
-
-    # The webhook contract recomputed here rather than imported from
-    # orders.tests_webhooks: importing that module's TestCase would
-    # re-collect every one of its tests inside this module as well.
+    # The webhook contract is recomputed here rather than imported: importing orders.tests_webhooks
+    # would re-collect every one of its tests inside this module too.
     WEBHOOK_SECRET = "TESTINGONLY-WEBHOOK-SECRET-CART-CLEAR"
 
     def _account_cart(self):
-        """The buyer's account cart, as checkout leaves it (D-04a)."""
         return self.current_cart()
 
-    # (e) The link is SET at order creation, inside the checkout transaction.
     def test_checkout_links_the_cart_to_the_created_order(self):
         order = self.create_order()
 
@@ -4708,7 +4101,6 @@ class CartOrderCaptureClearTests(OrderTestBase):
         # Checkout itself still does not clear: cleanup is capture's job.
         self.assertEqual(cart.items.count(), 1)
 
-    # (a) A successful capture empties the linked cart (cart row survives).
     def test_commit_order_sale_empties_the_linked_cart(self):
         order = self.create_order()
         cart = self._account_cart()
@@ -4718,18 +4110,16 @@ class CartOrderCaptureClearTests(OrderTestBase):
 
         cart.refresh_from_db()
         self.assertEqual(cart.items.count(), 0)
-        self.assertEqual(cart.order, order)  # the row stays, the lines go
+        self.assertEqual(cart.order, order)
         self.product.refresh_from_db()
-        self.assertEqual(self.product.stock, 8)  # the sale still committed
+        self.assertEqual(self.product.stock, 8)
 
-    # (b) Idempotent: a replayed capture no-ops at the gate and cannot
-    # re-clear — a line added AFTER the capture survives the replay.
+    # Idempotent: a replayed capture no-ops at the gate and cannot re-clear -- a line added AFTER
+    # the capture survives the replay.
     def test_a_replayed_capture_does_not_reclear_the_cart(self):
         order = self.create_order()
         cart = self._account_cart()
         commit_order_sale(order)
-        # Both real writers record the capture in their own transaction;
-        # mirror that so the second call meets the payment-dimension gate.
         order.payment_status = "captured"
         order.save(update_fields=["payment_status"])
         extra = self.make_product(name="Post-buy Extra", price="10.00", stock=3)
@@ -4741,10 +4131,9 @@ class CartOrderCaptureClearTests(OrderTestBase):
         self.assertEqual(cart.items.count(), 1)
         self.assertEqual(cart.items.get().product, extra)
         self.product.refresh_from_db()
-        self.assertEqual(self.product.stock, 8)  # once, not twice
+        self.assertEqual(self.product.stock, 8)
         self.assertEqual(StockMovement.objects.count(), 1)
 
-    # (c) An order with NO linked cart captures fine and clears nothing.
     def test_an_order_with_no_linked_cart_captures_without_raising(self):
         order = Order.objects.create(
             user=self.buyer,
@@ -4770,11 +4159,8 @@ class CartOrderCaptureClearTests(OrderTestBase):
 
         self.product.refresh_from_db()
         self.assertEqual(self.product.stock, 8)
-        # The buyer's (unlinked) session cart is untouched by this capture.
         self.assertEqual(self._account_cart().items.count(), 1)
 
-    # (d) on_delete=SET_NULL: deleting the order nulls the link, never
-    # cascades the cart away.
     def test_deleting_the_order_nulls_the_link_and_keeps_the_cart(self):
         order = self.create_order()
         cart = self._account_cart()
@@ -4783,10 +4169,8 @@ class CartOrderCaptureClearTests(OrderTestBase):
 
         cart.refresh_from_db()
         self.assertIsNone(cart.order)
-        self.assertEqual(cart.items.count(), 1)  # no cascade
+        self.assertEqual(cart.items.count(), 1)
 
-    # (f) The reported bug: a gateway webhook capture (no browser, no
-    # session cookie) clears the cart through the order link.
     def test_a_webhook_capture_clears_the_cart_without_a_browser(self):
         user = self.make_user("webhook-buyer")
         product = self.make_product(name="Noir Absolu", price="500.00", stock=10)
@@ -4849,7 +4233,7 @@ class CartOrderCaptureClearTests(OrderTestBase):
         order.refresh_from_db()
         self.assertEqual(order.payment_status, "captured")
         cart.refresh_from_db()
-        self.assertEqual(cart.items.count(), 0)  # the bug this task closes
+        self.assertEqual(cart.items.count(), 0)
         product.refresh_from_db()
         self.assertEqual(product.stock, 8)
         self.assertEqual(
@@ -4857,8 +4241,6 @@ class CartOrderCaptureClearTests(OrderTestBase):
             PaymentEvent.Outcome.APPLIED,
         )
 
-    # (g) TIER1-GUEST-DEADEND regression: the link changes nothing about
-    # the uniform anonymous refusal.
     def test_guest_checkout_is_still_refused_and_links_nothing(self):
         guest = self.fresh_client()
         self.seed_session_cart([(self.product, 1)], client=guest)
@@ -4871,20 +4253,12 @@ class CartOrderCaptureClearTests(OrderTestBase):
         self.assertEqual(Order.objects.count(), 0)
         cart = Cart.objects.get(session_id=guest.session.session_key)
         self.assertIsNone(cart.order)
-        self.assertEqual(cart.items.count(), 1)  # the refusal writes nothing
+        self.assertEqual(cart.items.count(), 1)
 
 
 @tag("orders")
 class ProductFreeShippingCheckoutTests(ApiTestCase):
-    """SPEC-C-04: the product-level free-shipping flag on the money path.
-
-    The flag waives the delivery CHARGE, never the service: the quote still
-    runs (so an unserviceable destination is still refused) and the quoted
-    method is retained exactly as the coupon waiver retains it. Any
-    qualifying merchandise line is enough (the spec's first option), and a
-    free-shipping coupon beside the flag converges on the same 0.00 without
-    a second effect.
-    """
+    """The flag waives the delivery CHARGE, never the service: the quote still runs so an unserviceable destination is still refused, and the quoted method is retained."""
 
     def setUp(self):
         self.buyer = self.make_user("flagbuyer")
@@ -4915,9 +4289,7 @@ class ProductFreeShippingCheckoutTests(ApiTestCase):
         order = Order.objects.get(id=res.data["id"])
         self.assertEqual(order.shipping_amount, Decimal("0.00"))
         self.assertEqual(res.data["shipping_amount"], "0.00")
-        # 500.00 + 2 x 250.00 merchandise, delivery waived.
         self.assertEqual(order.total_amount, Decimal("1000.00"))
-        # The order keeps the method the destination was quoted as.
         self.assertEqual(order.shipping_method, self.standard)
         self.assertEqual(order.shipping_method_code, "standard")
         trail = AuditEvent.objects.get(
@@ -4947,15 +4319,13 @@ class ProductFreeShippingCheckoutTests(ApiTestCase):
         self.assertEqual(order.coupon, self.freeship)
         self.assertEqual(order.shipping_amount, Decimal("0.00"))
         self.assertEqual(order.discount_amount, Decimal("0.00"))
-        # One waiver, not two: the total is the merchandise exactly, never
-        # the merchandise minus a second delivery charge.
         self.assertEqual(order.total_amount, Decimal("500.00"))
         self.assertEqual(order.shipping_method, self.standard)
         self.assertEqual(order.shipping_method_code, "standard")
 
     def test_unserviceable_destination_is_still_refused(self):
-        # A rate that does not serve the destination below: the flag waives
-        # the charge, not the serviceability rule.
+        # The flag waives the charge, not the serviceability rule: a rate that does not serve the
+        # destination below still refuses.
         ShippingRate.objects.all().delete()
         ShippingRate.objects.create(
             method=self.standard, amount=Decimal("49.00"), region="Delhi"

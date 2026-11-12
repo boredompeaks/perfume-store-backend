@@ -1,11 +1,3 @@
-"""SPEC-D-05: legacy ``Shipment.carrier`` -> ``ShippingProvider`` backfill.
-
-Two writers share one rule: the ``0005`` data migration (historical models) and
-the operational command (live models). These pins cover the rule itself, both
-writers, and the two properties that make re-running safe: an already-linked
-parcel is never overwritten and a second apply finds nothing to do.
-"""
-
 import importlib
 from decimal import Decimal
 from io import StringIO
@@ -44,8 +36,8 @@ class BackfillMappingTests(TestCase):
         self.delhivery = ShippingProvider.objects.create(
             code="delhivery", name="Delhivery"
         )
-        # A second provider with the SAME display name is what makes a name
-        # match ambiguous; codes stay unique in the schema.
+        # A second provider with the SAME display name is what makes a name match ambiguous; codes stay
+        # unique in the schema.
         self.delhivery_twin = ShippingProvider.objects.create(
             code="delhivery-copy", name="Delhivery"
         )
@@ -115,7 +107,6 @@ class BackfillMigrationTests(TestCase):
         code_match = self._shipment("MG-CODE", "DELHIVERY")
         name_match = self._shipment("MG-NAME", "Blue Dart")
         ambiguous = self._shipment("MG-AMBIGUOUS", "Delhivery")
-        # Make "Delhivery" ambiguous for the migration's own pass.
         ShippingProvider.objects.create(code="dh-twin", name="Delhivery")
         unmatched = self._shipment("MG-UNMATCHED", "FedEx")
 

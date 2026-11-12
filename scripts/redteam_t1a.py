@@ -1,25 +1,15 @@
 #!/usr/bin/env python
-"""SPEC-T1a red-team runner: families 1-5 (BUILD-QUEUE Phase T, T1 items 1-5).
+"""SPEC-T1a red-team runner: families 1-5 against the live UAT API.
 
-Attacks the REAL UAT API (owner-approved, test mode only, no real money ever)
-over HTTPS from this sandbox with stdlib urllib only - no third-party deps.
-One runner for the whole first half; each attack records attempted /
-invariant / result / severity so the report table is evidence-backed, never
-transcribed from memory.
+Owner-approved, test mode only, over HTTPS with stdlib urllib. Each attack
+records attempted / invariant / result / severity so the report table is
+evidence-backed. Rails: a browser UA (the edge 403s the default Python UA),
+small probes only, and coupon traffic waits for a fresh 60s window before the
+burst so the throttle proof measures the scope, not earlier spend.
 
-Safety rails baked in:
-- browser User-Agent (the edge 403s the default Python UA);
-- every request is a small JSON/HTML probe - no bulk writes, no brute force,
-  no payload above a few hundred bytes (the UAT box may OOM; that is accepted
-  and informative, but volume stays capped);
-- coupon-scope traffic waits for a fresh 60s window before the 12-shot burst,
-  so the throttle proof measures the scope and not our own earlier spend;
-- nothing targets a non-test environment: the base URL is explicit per run.
-
-Evidence JSON (default scripts/t1a_evidence.json, untracked) is rewritten after
-every family phase, so a partial run still leaves usable rows behind.
-Exit code: 0 when the run completes (rows carry PASS/FAIL/BLOCKED), 1 when the
-run itself broke (no connectivity / no rows written).
+Evidence JSON (default scripts/t1a_evidence.json, untracked) is rewritten
+after every family phase, so a partial run leaves usable rows. Exit 0 when
+the run completes (rows carry PASS/FAIL/BLOCKED), 1 when the run broke.
 """
 from __future__ import annotations
 
@@ -35,15 +25,12 @@ from urllib import request as urlrequest
 from urllib.parse import urlencode
 
 DEFAULT_BASE = "https://api.boredompeaks.me"
-# The deployed storefront origin the SPA posts from; must be listed in the
-# box's CSRF_TRUSTED_ORIGINS for checkout to work at all (probed live: a
-# trusted origin passes the referer/origin gate, an evil one is refused by
-# name). Sessioned POSTs are sent browser-shaped: Origin + Referer + the
-# csrftoken replay, otherwise Django's referer check refuses them before the
-# application layer and the row would measure the wrong thing.
+# The deployed storefront origin; must be in CSRF_TRUSTED_ORIGINS for
+# checkout to work. Sessioned POSTs are sent browser-shaped (Origin +
+# Referer + csrftoken) or Django's referer check refuses them before the
+# application layer.
 TRUSTED_ORIGIN = "https://test.boredompeaks.me"
-# Edge bot rule 403s the stdlib UA (measured); a browser-shaped UA is what the
-# storefront itself sends, so attacks run with it to reach the application.
+# The edge bot rule 403s the stdlib UA, so attacks use a browser UA.
 UA = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
     "(KHTML, like Gecko) Chrome/124.0 Safari/537.36"
@@ -53,25 +40,19 @@ SNIP = 170
 UNSET = object()
 
 # Fixture credential for the step-zero register/login probes. Low password
-# shape on purpose (single-case words, spaces, no digits or symbols): the
-# previous mixed-case+digit+symbol literal tripped GitGuardian incident
-# 38291408 (Username+Password) on PR #42, and this repo reshapes such
-# committed fixtures rather than allowlisting them (reshape-over-allow
-# precedent 29ce70a / GATE-FIX-CYCLE1). Same value T1b's fixture proved
-# clears register's validate_password policy - it is neither similar to the
-# probed usernames nor short nor common - and the observed responses are
-# unchanged: register answers 201, the inactive-account login stays the
-# uniform 401 whatever the password.
+# shape on purpose: a stronger literal tripped GitGuardian on PR #42, and
+# this repo reshapes such fixtures rather than allowlisting them. It still
+# clears validate_password; register answers 201 and the login stays a
+# uniform 401.
 FIXTURE_PASS = "quiet harbor lane"
 
-# Every response body the run observed, kept for the POST-F1 payload scan
-# (session material must never appear in any body, so nothing is filtered).
+# Every response body seen this run, for the POST-F1 payload scan
+# (nothing is filtered).
 CAPTURED = []
 
 
 class _NoRedirect(urlrequest.HTTPRedirectHandler):
-    # 30x must surface as data (Location + status), never be followed into an
-    # admin login page that would mask the original status code.
+    # 30x must surface as data, never be followed into a login page.
     def redirect_request(self, req, fp, code, msg, headers, newurl):
         return None
 
@@ -148,7 +129,6 @@ class Ledger:
         self.rows = []
         self.env = []
         self.coupon_times = []
-        # Shared with Http.request's capture: every body seen this run.
         self.all_bodies = CAPTURED
 
     def add(self, row_id, family, attempted, invariant, request, response, result,
@@ -220,10 +200,8 @@ def envelope_ok(resp, statuses=(401, 403)):
 def browser_csrf(jar, origin=None, with_token=True):
     """Headers a same-origin browser sends on a sessioned POST.
 
-    origin=None sends NO Origin/Referer (the server-to-server shape - Django
-    then refuses on the referer check); an explicit foreign origin models a
-    cross-site attacker that somehow replays the cookie.
-    """
+    origin=None sends no Origin/Referer (server-to-server shape); an
+    explicit foreign origin models a cross-site attacker replaying the cookie."""
     hdrs = {}
     if origin:
         hdrs["Origin"] = origin
@@ -241,9 +219,6 @@ def ensure_session(H):
         H.request("/api/v1/store/cart/")
 
 
-# --------------------------------------------------------------------------
-# STEP ZERO: environment capability inventory
-# --------------------------------------------------------------------------
 def phase_env(H: Http, F: Ledger, base):
     probes = [
         ("public-health", "GET", "/health/", UNSET, {}),
@@ -304,7 +279,7 @@ def phase_env(H: Http, F: Ledger, base):
             f"{resp['status']} {snip(resp['body'], 240)}",
         )
 
-    # Edge bot rule: default Python UA measured against the same endpoint.
+    # Edge bot rule: the same endpoint probed with the default Python UA.
     req = urlrequest.Request(
         base + "/health/",
         headers={"User-Agent": "Python-urllib/3.x", "Accept": "*/*"},
@@ -318,7 +293,6 @@ def phase_env(H: Http, F: Ledger, base):
         note = f"transport {e!r}"
     F.env_add("default-python-ua-probe", "GET /health/ (Python-urllib UA)", note)
 
-    # Session cookie attributes on the cart-creating GET (transport hardening).
     resp = H.request("/api/v1/store/cart/")
     sc = resp["headers"].get("set-cookie", "")
     F.env_add(
@@ -328,9 +302,6 @@ def phase_env(H: Http, F: Ledger, base):
     )
 
 
-# --------------------------------------------------------------------------
-# Family 1: order lifecycle / capture
-# --------------------------------------------------------------------------
 def phase1(H: Http, F: Ledger, bare: Http):
     webhook_path = "/api/v1/webhooks/razorpay/"
     good_event = {"event": "payment.captured", "payload": {"x": "y"}}
@@ -364,7 +335,6 @@ def phase1(H: Http, F: Ledger, bare: Http):
     ]
     webhook_resps = []
     for name, event, headers in variants:
-        # bare identity: a gateway call carries no cookies at all.
         resp = bare.request(webhook_path, method="POST", body=event,
                             headers=headers)
         webhook_resps.append(resp)
@@ -391,7 +361,6 @@ def phase1(H: Http, F: Ledger, bare: Http):
         verdict(non2xx),
     )
 
-    # Concurrent double-delivery (the replay-race shape at the transport edge).
     def _fire(_):
         return bare.request(
             webhook_path,
@@ -564,9 +533,6 @@ def phase1(H: Http, F: Ledger, bare: Http):
         )
 
 
-# --------------------------------------------------------------------------
-# Family 2: inventory
-# --------------------------------------------------------------------------
 def phase2(F: Ledger, bare: Http):
     adjust = {"sku_or_slug": "demo-plenty-perfume", "delta": -99}
     a1 = bare.request(
@@ -691,17 +657,11 @@ def phase2(F: Ledger, bare: Http):
         )
 
 
-# --------------------------------------------------------------------------
-# Family 3: coupons
-# --------------------------------------------------------------------------
 def phase3(H: Http, F: Ledger, S: Http):
-    """H = session identity with a cart; S = bare anonymous (cartless)."""
     ensure_session(H)
-    # Browser-shaped sessioned POST: same-origin Origin/Referer + the
-    # csrftoken replay, so the request reaches the coupon layer instead of
-    # Django's referer check (measured separately in family 4).
+    # Browser-shaped sessioned POST (same-origin Origin/Referer + csrftoken)
+    # so the request reaches the coupon layer, not Django's referer check.
     hdrs = browser_csrf(H.jar, origin=TRUSTED_ORIGIN)
-    # Cartless preview oracle: two absent codes, no session at all.
     p1 = S.request("/api/v1/store/orders/apply-coupon/", "POST", {"code": "NOSUCH99"})
     F.note_coupon(p1)
     p2 = S.request("/api/v1/store/orders/apply-coupon/", "POST", {"code": "OTHER99"})
@@ -721,7 +681,6 @@ def phase3(H: Http, F: Ledger, S: Http):
         verdict(ok),
     )
 
-    # Session + empty cart: absent-code uniformity and malformed-input shapes.
     absent_a = H.request(
         "/api/v1/store/orders/apply-coupon/", "POST", {"code": "NOSUCH99"},
         headers=hdrs,
@@ -778,7 +737,6 @@ def phase3(H: Http, F: Ledger, S: Http):
         verdict(no_500 and twin_ok),
     )
 
-    # Deliberate throttle proof LAST, in a guaranteed-fresh window.
     F.wait_fresh_coupon_window()
     burst = [
         H.request(
@@ -813,10 +771,8 @@ def phase3(H: Http, F: Ledger, S: Http):
     )
 
     # Instrument control: a DIFFERENT dedicated tight scope (username-probe,
-    # 5/min default) from this same client. If this never refuses either, the
-    # question moves from the coupon view to how budgets are keyed/holder on
-    # this deployment (worker-count x per-process cache is the documented
-    # open finding; the knobs are unreadable from outside).
+    # 5/min) from this same client. If this never refuses either, the question
+    # moves to how budgets are keyed on this deployment.
     u_statuses = []
     for i in range(30):
         r = H.request(
@@ -842,7 +798,7 @@ def phase3(H: Http, F: Ledger, S: Http):
     )
 
     # Sustained coupon spray in the SAME window as C4 when C4 saw no
-    # refusal: finds the effective budget instead of guessing it.
+    # refusal: find the effective budget instead of guessing it.
     if not throttled:
         extra = []
         for i in range(25):
@@ -907,9 +863,6 @@ def phase3(H: Http, F: Ledger, S: Http):
         )
 
 
-# --------------------------------------------------------------------------
-# Family 4: guest / cart
-# --------------------------------------------------------------------------
 def phase4(H: Http, F: Ledger, cart_ref: Http):
     checkout = "/api/v1/store/orders/checkout/"
     ensure_session(H)
@@ -964,9 +917,9 @@ def phase4(H: Http, F: Ledger, cart_ref: Http):
         verdict(uniform and first["status"] == 403),
     )
 
-    # Session-riding variants: the four CSRF axes a browser-session POST can
-    # take - same-origin+token (reaches the view), no Origin at all, a foreign
-    # Origin, and trusted Origin without the token.
+    # The four CSRF axes a browser-session POST can take: same-origin+token
+    # (reaches the view), no Origin, a foreign Origin, and a trusted Origin
+    # without the token.
     s1 = H.request(checkout, "POST", full_payload, headers=trusted)
     ok_s1 = same(s1, first)
     F.add(
@@ -1087,7 +1040,6 @@ def phase4(H: Http, F: Ledger, cart_ref: Http):
         verdict(ok),
     )
 
-    # Concurrency: 10 simultaneous anonymous checkouts, all refused alike.
     def _co(_):
         return cart_ref.request(checkout, "POST", full_payload)
 
@@ -1106,7 +1058,6 @@ def phase4(H: Http, F: Ledger, cart_ref: Http):
         verdict(par_ok),
     )
 
-    # ---- cart enumeration / cross-session --------------------------------
     jarA, jarB, jarC = (
         Http(cart_ref.base, "A"),
         Http(cart_ref.base, "B"),
@@ -1139,8 +1090,8 @@ def phase4(H: Http, F: Ledger, cart_ref: Http):
         verdict(distinct),
     )
 
-    # jarB's own token: the double-submit must match the cookie that rides
-    # the request, so H's token would be refused as a mismatch.
+    # jarB's own token: the double-submit must match the cookie on the
+    # request, so H's token would be refused as a mismatch.
     trusted_b = browser_csrf(jarB.jar, origin=TRUSTED_ORIGIN)
     item_resps = []
     for item_id in (1, 2, 3):
@@ -1286,7 +1237,6 @@ def phase4(H: Http, F: Ledger, cart_ref: Http):
         "BLOCKED",
     )
 
-    # ---- POST-F1 regression: session material must never appear in payloads
     secret_values = set()
     for jar in (cart_ref, jarA, jarB, jarC, fix, H):
         for name, vals in jar.cookie_values().items():
@@ -1326,12 +1276,8 @@ def phase4(H: Http, F: Ledger, cart_ref: Http):
     )
 
 
-# --------------------------------------------------------------------------
-# Family 5: RBAC matrix + delist uniformity
-# --------------------------------------------------------------------------
 def phase5(H: Http, F: Ledger, bare: Http):
     matrix = [
-        # (id, method, path, data)
         ("dashboard", "GET", "/api/v1/admin/dashboard/", UNSET),
         ("dashboard-legacy", "GET", "/admin/dashboard/", UNSET),
         ("audit-log", "GET", "/api/v1/admin/audit-log/", UNSET),
@@ -1389,7 +1335,6 @@ def phase5(H: Http, F: Ledger, bare: Http):
         verdict(no_data and not bad),
     )
 
-    # Session identity variant: a session cookie must buy no capabilities.
     ensure_session(H)
     sess_hdrs = browser_csrf(H.jar, origin=TRUSTED_ORIGIN)
     sess_matrix = [
@@ -1425,7 +1370,6 @@ def phase5(H: Http, F: Ledger, bare: Http):
         verdict(ok),
     )
 
-    # IDOR probes on the customer order read + guest token read.
     o1 = H.request("/api/v1/store/orders/1/")
     o2 = H.request("/api/v1/store/orders/999999/")
     ok = o1["status"] == 401 and same(o1, o2)
@@ -1475,7 +1419,6 @@ def phase5(H: Http, F: Ledger, bare: Http):
         verdict(ok),
     )
 
-    # ---- delist uniformity: the nonexistent side, live --------------------
     d1 = H.request("/api/v1/store/products/zz-rt-absent-one/")
     d2 = H.request("/api/v1/store/products/zz-rt-absent-two/")
     d1l = H.request("/api/products/zz-rt-absent-one/")
@@ -1574,7 +1517,6 @@ def phase5(H: Http, F: Ledger, bare: Http):
         )
 
 
-# --------------------------------------------------------------------------
 def main():
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--base", default=DEFAULT_BASE)
@@ -1590,8 +1532,8 @@ def main():
     F = Ledger(args.base)
     H = Http(args.base, "identity")   # main identity: anonymous + session
     cart_ref = Http(args.base, "cartless-ref")  # fresh jar per battery shot
-    # Rows this invocation owns; the rest of a previous run's evidence is
-    # preserved so a recovery run (--only f4) never clobbers finished phases.
+    # Rows this invocation owns; a previous run's other phases are preserved
+    # so a recovery run (--only f4) never clobbers finished phases.
     fam_by_phase = {"f1": "1", "f2": "2", "f3": "3", "f4": "4", "f5": "5"}
     refreshed_fams = {fam_by_phase[p] for p in phases if p in fam_by_phase}
 

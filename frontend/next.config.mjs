@@ -1,14 +1,11 @@
 import { initOpenNextCloudflareForDev } from "@opennextjs/cloudflare";
 await initOpenNextCloudflareForDev();
-// src/lib/config.ts addresses the API on the host the page was served from,
-// so development has two valid origins (localhost and 127.0.0.1). A single
-// hardcoded origin here would have the CSP block every request from the other
-// spelling.
+// The API follows the page host, so both loopback spellings are valid; a single
+// hardcoded origin would let the CSP block requests from the other.
 const configuredApiOrigin = process.env.NEXT_PUBLIC_API_BASE_URL;
-// Development runs the API on 8000 and the storefront on 3000 (Playwright and
-// `next dev`), with 3001 as the fallback port when 3000 is taken. They are all
-// loopback spellings of the same local stack, so CSP and the image optimizer
-// admit the whole set. A configured origin (staging/production) replaces it.
+// Dev API on 8000, storefront on 3000 (3001 when taken): all loopback spellings
+// of the same local stack, admitted by CSP and the image optimizer. A configured
+// origin replaces the set.
 const devOrigins = [
   "http://localhost:8000",
   "http://127.0.0.1:8000",
@@ -17,17 +14,13 @@ const devOrigins = [
   "http://localhost:3001",
 ];
 const apiOrigins = configuredApiOrigin ? [configuredApiOrigin] : devOrigins;
-// Razorpay Checkout loads from checkout.razorpay.com and talks to
-// api.razorpay.com; the payment modal is a frame. Without these hosts the
-// SPA reports "Could not load the payment gateway" (script blocked by CSP).
+// Razorpay Checkout loads its script and frames api.razorpay.com; without these
+// hosts the SPA reports "Could not load the payment gateway" (CSP-blocked).
 //
-// Sentry's browser SDK POSTs envelopes to the DSN's ingest origin, and
-// connect-src is an allowlist. Without the exact origin the browser blocks
-// the envelope AFTER beforeSend in src/lib/sentry.ts accepted the event, so
-// the report is lost silently with no server-side trace.
-// The origin is derived from the configured DSN rather than hardcoded so
-// staging and production can use different Sentry regions; an unset or
-// malformed DSN adds nothing (the SDK is not initialised then).
+// Sentry POSTs envelopes to the DSN's ingest origin and connect-src is an
+// allowlist: a missing origin drops the report silently after beforeSend. It is
+// derived from the DSN so regions can differ; an unset/malformed DSN adds
+// nothing.
 const sentryDsn = process.env.NEXT_PUBLIC_SENTRY_DSN;
 let sentryOrigin = null;
 try {
@@ -82,15 +75,9 @@ const nextConfig = {
         ...(port ? { port } : {}),
       };
     }),
-    // §10.3 / U-W15-T17 (W9-T3 deferred F2): AVIF first, WebP fallback.
-    // Without this key Next's default is ["image/webp"] only, so the
-    // optimizer never offers AVIF even to a browser that asks for it.
-    // No new dependency: next@16 declares sharp ^0.35.4 as its own
-    // dependency (node_modules/sharp 0.35.5, libheif + aom, AVIF encode
-    // verified in this tree), so the Accept-header negotiation costs 0
-    // lines outside this file. The browser picks the best format per
-    // request; every URL stays same-origin (/_next/image) under the
-    // existing `img-src 'self'` CSP.
+    // AVIF first, WebP fallback: Next defaults to WebP only, so the optimizer
+    // never offers AVIF. No new dependency (next@16 ships sharp), and URLs stay
+    // same-origin under the existing img-src 'self'.
     formats: ["image/avif", "image/webp"],
   },
 };

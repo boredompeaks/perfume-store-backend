@@ -106,18 +106,76 @@ therefore held to the same standard as code.
 figure cannot be published. Neither judges prose; both refuse to let a checkable
 claim pass unlisted.
 
+## Comments and documentation volume
+
+Comment and docstring volume is measured, not asserted. `scripts/doc_metrics.py`
+pins the definition and `scripts/doc_metrics_baseline.json` is the committed
+baseline: physical lines in tracked app Python (`backend/**/*.py`, excluding
+migrations and test modules) are classified once as blank, docstring, comment or
+logic; docs are tracked `backend/docs/**/*.md` bytes, excluding the append-only
+`backend/docs/changes.md` ledger (reported separately: one row per change is
+mandatory, so its growth cannot be cut). The measurement reads the git index
+(what the next commit contains), never the working tree, so a CRLF checkout and
+an LF checkout produce the same numbers. Run
+`python scripts/doc_metrics.py measure` to print the numbers and
+`python scripts/doc_metrics.py check` to fail when a ratio rose above the
+baseline.
+
+**Baseline (2026-11-12, after the repo-wide comment prune).** App Python:
+12,719 logic, 1,697 comment, 2,023 docstring lines — 0.293 comment/docstring
+lines per logic line and 22.6% of non-blank lines. The docs:app-Python byte
+ratio is recorded in the baseline artifact (≈1.14 bytes of cuttable docs per
+byte of app code; the append-only ledger is ≈1.07 MB on top and is reported, not
+ratcheted). Comment pruning shrank the app-code denominator, so the byte ratio
+rose even though no doc was added; that increase is recorded with
+`--accept-increase`, and it is not a licence to grow docs. These figures are a
+snapshot; the artifact is the source of truth. The figures #80 filed (12,870 /
+4,435 / 6,063) are reproduced exactly by this definition at the audit commit, so
+the "unmeasured" half of the finding was the absence of a tool, not an
+irreproducible number. The owner-directed prune that produced this baseline hit
+backend code and tests, scripts, frontend, templates and configuration; it is a
+one-off pass, not a standing invitation to mass-rewrite files.
+
+The policy:
+
+- **A comment earns its place only by being non-obvious.** The test: would a
+  competent reader know this from the code, the types, or git? If yes, delete
+  it. Say *why*, an invariant, a concurrency authority, a deliberate omission,
+  a cross-module coupling — never restate the next line (`# Check stock`),
+  narrate the diff, or preserve history (`SPEC-`/`TIER-` ids, "used to",
+  "previously"). History belongs to git and `docs/changes.md`; a decision that
+  outlives its commit belongs in an ADR, starting from
+  `docs/adr/0000-template.md`.
+- **Docs are cut, not grown.** A change that raises the docs:code byte ratio
+  must remove at least as many doc bytes, or carry an ADR that says why the
+  growth earns its place. Prefer editing an existing doc to adding a new one;
+  the ledger does not need a summary of every file it already names. The
+  append-only ledger is exempt from the ratio for the same reason it is
+  excluded from the measurement: its row is the record, not documentation
+  that can be cut. A pure comment prune can raise this ratio mechanically by
+  shrinking the denominator, which is why such an increase is recorded
+  explicitly rather than paid for by deleting docs.
+- **The baseline only ratchets down.** `doc_metrics.py baseline` refuses to
+  record a higher ratio unless `--accept-increase` is passed, and an accepted
+  increase needs its reason in the changelog row. Align existing comments when
+  a file is next touched; the 2026-11-12 repo-wide prune is the one-off
+  exception, and future cleanup stays targeted.
+- **The nightly job reports the trend.** The `doc-metrics-trend` job in
+  `.github/workflows/doc-claims-nightly.yml` checks the default branch; a red
+  run is a finding to report, not a reason to raise the baseline.
+
 ## Style
 
 - Black-compatible formatting (88 cols), no tabs.
-- No commented-out code blocks; remove dead code (e.g. `orders/views.py:280-282`).
+- No commented-out code blocks; remove dead code.
 - Comments explain *why*; the code explains *how*. Comment the WHY and the
   invariant, never the WHAT: a comment that restates the next line (`#
   Check stock` above a stock check, a banner naming the function beneath
   it) rots the moment the line changes and tells a reader nothing the code
   did not. The comment-worthy invariant is the one the code cannot show on
   its own — a concurrency authority, a deliberate omission, a cross-module
-  coupling. Change history does not belong in a comment; it belongs in
-  `docs/changes.md`.
+  coupling. Change history does not belong in a comment; it belongs in git and
+  `docs/changes.md`, and a durable decision belongs in an ADR (see above).
 
   Before (what + history):
 

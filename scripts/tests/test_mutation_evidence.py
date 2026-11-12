@@ -1,13 +1,8 @@
 """Unit tests for scripts/mutation_evidence.py.
 
-The safety-critical behaviour -- that a mutated file is always restored, even
-when the test run explodes -- is tested here against a temporary tree with
-the runner stubbed. That is the one property that must never be taken on
-trust: a replay that leaves the worktree mutated is worse than no replay.
-
-Run from the repo root::
-
-    python -m unittest discover -s scripts -p "test_*.py"
+The safety-critical property -- a mutated file is always restored, even when
+the test run explodes -- is pinned here against a temp tree with the runner
+stubbed.
 """
 
 from __future__ import annotations
@@ -69,8 +64,7 @@ class ApplyMutationTests(unittest.TestCase):
         self.assertEqual(me.apply_mutation(b"aXa", b"X", b"Y"), b"aYa")
 
     def test_refuses_when_find_occurs_twice(self):
-        # This is the SPEC-1-B07d M3/M4 trap: two parties measured different
-        # edits and each believed the other was wrong.
+        # Two matches mean two parties measured different edits.
         with self.assertRaises(me.EvidenceError) as caught:
             me.apply_mutation(b"aXaXa", b"X", b"Y")
         self.assertIn("occurs 2 times", str(caught.exception))
@@ -83,9 +77,9 @@ class ApplyMutationTests(unittest.TestCase):
         self.assertEqual(me.apply_mutation(b"abc", b"b", b""), b"ac")
 
     def test_lf_needle_matches_a_crlf_worktree_file(self):
-        # core.autocrlf is on with no .gitattributes, so the worktree copy is
-        # CRLF while a manifest is authored from the LF committed blob. Without
-        # this the needle occurs zero times and every real replay refuses.
+        # core.autocrlf with no .gitattributes: the worktree is CRLF while a
+        # manifest is authored from the LF blob, so an LF needle occurs zero
+        # times without translation.
         crlf = b"    return now <= anchor\r\n    return None\r\n"
         mutated = me.apply_mutation(crlf, b"return now <= anchor", b"return True")
         self.assertEqual(mutated, b"    return True\r\n    return None\r\n")
@@ -101,8 +95,7 @@ class ApplyMutationTests(unittest.TestCase):
         self.assertEqual(mutated, b"    x = 1\n    y = 3\n")
 
     def test_the_exactly_once_guard_survives_the_translation(self):
-        # Translating the needle must not weaken the guard: two CRLF matches
-        # are still two.
+        # Translation must not weaken the guard: two CRLF matches are still two.
         crlf = b"x = 1\r\nx = 1\r\n"
         with self.assertRaises(me.EvidenceError) as caught:
             me.apply_mutation(crlf, b"x = 1\n", b"x = 2\n")
@@ -132,20 +125,18 @@ class ParseFailureTests(unittest.TestCase):
         self.assertEqual(me.parse_failure_count(SAMPLE_OUTPUT), 1)
 
     def test_green_output_has_no_failure_count(self):
-        # Reading the run summary instead is how "0 dirty everywhere" and its
-        # relatives get believed: the summary says nothing when there is no
-        # failure, and nothing is not zero.
+        # Reading the run summary is how "0 dirty everywhere" gets believed: it
+        # says nothing on a green run, and nothing is not zero.
         self.assertIsNone(me.parse_failure_count(GREEN_OUTPUT))
 
     def test_an_errors_only_line_is_not_a_failure_count(self):
-        # unittest prints "FAILED (errors=1)" with no `failures=` component
-        # when nothing failed. Reading 1 off it would let a mutant that merely
-        # breaks an import satisfy a claimed figure.
+        # unittest prints "FAILED (errors=1)" with no failures component; reading
+        # 1 off it would let an import break satisfy a claimed figure.
         self.assertIsNone(me.parse_failure_count(ERRORS_ONLY_OUTPUT))
         self.assertTrue(me.ran_red(ERRORS_ONLY_OUTPUT))
 
     def test_a_green_run_is_not_red(self):
-        # "no count is readable" and "the run was green" are different facts.
+        # "No count is readable" and "the run was green" are different facts.
         self.assertFalse(me.ran_red(GREEN_OUTPUT))
         self.assertTrue(me.ran_red(SAMPLE_OUTPUT))
 
@@ -162,7 +153,6 @@ class ConfirmTests(unittest.TestCase):
         self.assertEqual(missing, ["test_z"])
 
     def test_manifest_naming_nothing_is_refused(self):
-        # An expectation set that cannot be satisfied would certify anything.
         ok, missing = me.confirm_expected_failures([], ["test_a"])
         self.assertFalse(ok)
         self.assertIn("no expected_failing_tests", missing[0])
@@ -238,7 +228,7 @@ class ReplayRestoreTests(unittest.TestCase):
         self.assertEqual(content, b"def gate():\n    return now <= anchor\n")
 
     def test_a_surviving_mutant_is_named_as_one(self):
-        # A green suite under mutation is the finding of the whole exercise. It
+        # A green suite under mutation is the finding of the whole exercise; it
         # must not read as "replay could not find the name".
         outcome, _, _ = self.replay(GREEN_OUTPUT)
         self.assertIn("SURVIVED", outcome.detail)
@@ -308,8 +298,7 @@ class ManifestTests(unittest.TestCase):
         self.assertIn("non-empty list", str(caught.exception))
 
     def test_mutation_missing_a_key_is_refused_by_name(self):
-        # A KeyError halfway through a replay would leave the operator reading
-        # a traceback instead of a malformed manifest.
+        # A KeyError mid-replay would leave the operator with a traceback.
         with tempfile.TemporaryDirectory() as tmp:
             self.write(tmp, {"mutations": [{"id": "M1", "path": "a.py"}]})
             with mock.patch.object(me, "MANIFEST_DIR", Path(tmp)):

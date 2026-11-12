@@ -1,11 +1,8 @@
 """Unit tests for scripts/doc_claims.py.
 
-Pure core only: no git, no filesystem, no network, no Django. The shell in
-doc_claims.py is exercised by running it, not by mocking it.
-
-Run from the repo root::
-
-    python -m unittest discover -s scripts -p "test_*.py"
+Pure core only: no git, filesystem, network or Django; the shell is
+exercised by running the script. Run from the repo root with
+``python -m unittest discover -s scripts -p "test_*.py"``.
 """
 
 from __future__ import annotations
@@ -282,10 +279,8 @@ class ByteIntegrityTests(unittest.TestCase):
         self.assertEqual(result["control_detail"][0]["byte"], "0x07")
 
     def test_every_control_byte_on_a_line_is_counted(self):
-        # The real backend/docs/changes.md carries THREE control bytes on line
-        # 675. Recording only the first baselines that line at one byte, and a
-        # second corruption there is then invisible -- which is the whole
-        # defect this check exists to catch, reproduced inside the check.
+        # changes.md carries three control bytes on one real line; recording
+        # only the first would hide the next corruption there.
         result = check_byte_integrity(b"a\x07b\x0cc\x07d\n", {})
         self.assertEqual(result["control_bytes"], 3)
         self.assertEqual(
@@ -312,21 +307,18 @@ class ByteIntegrityTests(unittest.TestCase):
         self.assertIn("content was lost", " ".join(result["problems"]))
 
     def test_growth_is_allowed(self):
-        # docs/changes.md grows by a row on every commit. Equality on the line
-        # count would make the byte check unusable for the only file it covers,
-        # which is why the invariant is "must not shrink", not "must match".
+        # changes.md grows on every commit, so the invariant is "must not
+        # shrink", never equality.
         result = check_byte_integrity(b"a\nb\nc\n", {"lines": 3})
         self.assertTrue(result["ok"], result["problems"])
 
 
 class PartialPathResolutionTests(unittest.TestCase):
-    """BUG-3 (TOOL-01): an app-relative citation must not be an error.
+    """An app-relative citation must not be an error.
 
-    Four apps each own a ``views.py``, so the basename fallback is ambiguous
-    for all of them and prose that cites ``orders/views.py`` -- which is what
-    this changelog writes several hundred times -- was reported as a missing
-    file. 94 of the 121 errors on the wide base were exactly this.
-    """
+    Four apps each own a ``views.py``, so a bare basename is ambiguous and
+    prose citing ``orders/views.py`` was reported as missing (94 of the 121
+    errors on the wide base)."""
 
     KNOWN = {
         "backend/orders/views.py": 900,
@@ -401,20 +393,12 @@ class PartialPathResolutionTests(unittest.TestCase):
 
 
 class TestStemmedModuleVersusMethodTests(unittest.TestCase):
-    """BUG-1 (TOOL-01): a `test_`-stemmed MODULE is not a `test_*` METHOD.
+    """A `test_`-stemmed MODULE citation is not a `test_*` METHOD claim.
 
-    ``RE_TEST_NAME`` matches the ``test_`` inside ``test_e2e_concurrency.py``,
-    so a prose citation of the file was reported as a missing ``def`` for the
-    name ``test_e2e_concurrency``. The gate was red on correct prose, which is
-    worse than no gate: the two available responses are to delete the check or
-    to stop citing real files.
-
-    The rule is one rule, in both directions. A token that is part of a cited
-    PATH is a path claim and is verified as a path -- file resolves, line in
-    range. A token that is not part of a path is still verified as a method.
-    Every test below that says "still an error" is the loophole guard: the fix
-    must not become a way to dress a real error up as a path.
-    """
+    ``RE_TEST_NAME`` matched the ``test_`` inside ``test_e2e_concurrency.py``
+    and reported correct prose as a missing ``def``. The rule is one rule in
+    both directions: a token inside a cited PATH is verified as a path, and a
+    token outside one is still verified as a method."""
 
     KNOWN = {
         "backend/orders/views.py": 900,
@@ -600,18 +584,11 @@ class TestStemmedModuleVersusMethodTests(unittest.TestCase):
 
 
 class DottedTestIdModuleVersusMethodTests(unittest.TestCase):
-    """BUG-2: a `test_` MODULE SEGMENT in a DOTTED id is not a METHOD.
+    """A `test_` MODULE SEGMENT in a DOTTED id is not a METHOD claim.
 
-    A failure id is written down dotted -- ``package.module.Class.test_method``
-    -- and in that form the module's own ``test_`` stem is an interior segment
-    with no ``def`` anywhere in the tree. ``RE_TEST_NAME`` matched it and the
-    gate reported correct prose as a missing test: the same defect BUG-1 fixed
-    one syntax level up for a cited PATH, left open for the dotted spelling.
-
-    Only an INTERIOR (non-final) segment is exempt. The final segment is the
-    method, which is the claim the gate exists to check, so this cannot launder
-    a quoted method name -- every "still an error" test below is that guard.
-    """
+    A dotted failure id carries the module stem as an interior segment with no
+    ``def``. Only an INTERIOR segment is exempt; the final segment is the
+    method and stays checked."""
 
     # A tuple of pairs rather than a dict: `ruff check` flags a mutable class
     # attribute (RUF012), and the sibling classes below carry that flag already
@@ -717,18 +694,10 @@ class DottedTestIdModuleVersusMethodTests(unittest.TestCase):
 class NonDotPySuffixTests(unittest.TestCase):
     """A tail after `.py` that does not start with a dot is still a tail.
 
-    The residual left open when ``test_e2e_concurrency.py.bak`` was caught: the
-    tail was ``(?:\\.\\w+)*``, so it only claimed a suffix that BEGAN with a
-    dot. ``views.pyx``, ``test_e2e_concurrency.pyt`` and ``foo.pyc`` each named
-    a file nobody has and were truncated to the real ``.py`` beside them, so
-    prose could cite a nonexistent path and the scan passed -- the same
-    laundering as ``.bak``, one character class out. ``\\w*`` closes it.
-
-    Each of the three below FAILS against the ``(?:\\.\\w+)*`` tail and passes
-    against ``\\w*(?:\\.\\w+)*``. Every "still" test in here is the other
-    direction: a tail that claims too much is a false positive, and a fix that
-    refuses correct prose is worse than the hole it closed.
-    """
+    ``views.pyx``, ``test_e2e_concurrency.pyt`` and ``foo.pyc`` name files
+    nobody has and were truncated to the real ``.py`` beside them. The wider
+    tail closes it; every "still" test below guards the false-positive
+    direction."""
 
     KNOWN = {
         "backend/orders/views.py": 900,
@@ -835,14 +804,11 @@ class NonDotPySuffixTests(unittest.TestCase):
 
 
 class PathSpanContainmentTests(unittest.TestCase):
-    """The decision BUG-1 rests on, pinned on its own: exact containment.
+    """The decision the path/method split rests on: exact containment.
 
-    Pinned here rather than only through ``extract_claims`` because the
-    difference between containment and overlap is not reachable from prose --
-    the boundary patterns make a partially-overlapping token impossible -- and
-    a rule that is only correct by accident of two other regexes is a rule that
-    one edit away from being a loophole.
-    """
+    Pinned alone because a partial overlap is unreachable from prose, so a
+    rule correct only by accident of two other regexes is one edit from a
+    loophole."""
 
     def test_a_span_inside_a_path_span_is_consumed(self):
         self.assertTrue(_inside_any_span((5, 10), [(0, 20)]))
@@ -862,12 +828,10 @@ class PathSpanContainmentTests(unittest.TestCase):
 
 
 class CounterExampleDirectiveTests(unittest.TestCase):
-    """BUG-4 (TOOL-01): a quoted absent name is not a claim that it exists.
+    """A quoted absent name is not a claim that it exists.
 
-    Both directions are pinned, because a directive that only ever suppresses
-    is as broken as one that never does: a real missing-name claim must still
-    fail, and a genuine counter-example must stop failing.
-    """
+    Both directions are pinned: a real missing-name claim must still fail, and
+    a genuine counter-example must stop failing."""
 
     KNOWN = {"test_real_one"}
     PATHS = {"backend/orders/tests_returns.py": 2600}
@@ -984,13 +948,10 @@ class CounterExampleDirectiveTests(unittest.TestCase):
 
 
 class DirectiveQuotaTests(unittest.TestCase):
-    """BUG-A [P2]: the documented invariant was false and is now enforced.
+    """At most ONE accepted directive per line is now enforced.
 
-    Cycle 1 claimed a directive "names ONE test, and only that test, and only
-    on its own line, so a sibling claim on the same sentence is still checked".
-    Two well-formed directives on one line silenced both. The cap is one
-    ACCEPTED directive per line: over quota, the line is read as carrying none.
-    """
+    Two well-formed directives on one line once silenced both; over quota the
+    line is read as carrying none."""
 
     KNOWN = {"test_real_one"}
     PATHS = {"backend/orders/tests_returns.py": 2600}
@@ -1044,13 +1005,10 @@ class DirectiveQuotaTests(unittest.TestCase):
 
 
 class DirectiveReasonTests(unittest.TestCase):
-    """BUG-B [P3]: a length floor is a length floor, and now says so.
+    """The reason must ALSO name a commit sha or a task id.
 
-    `reason: the the the ...` cleared MIN_REASON_CHARS and silenced an absent
-    name with zero machine verification. The floor stays and is restated for
-    what it buys; the reason must ALSO name a commit sha or a task id, which is
-    what makes it traceable to a ledger row.
-    """
+    A length floor alone let `reason: the the the ...` silence a name; the
+    reference requirement makes the statement traceable to a ledger row."""
 
     KNOWN = {"test_real_one"}
     PATHS = {}
@@ -1127,11 +1085,8 @@ class DirectiveReasonTests(unittest.TestCase):
         self.assertEqual([c.kind for c in errors], ["test_name"])
 
     def test_the_shipped_rule_is_a_shape_test_not_proof(self):
-        # Recorded deliberately, so the residual cannot be forgotten: a
-        # hyphenated token containing a digit still satisfies the rule. It is
-        # pinned as the KNOWN boundary of what ships, not as an endorsement --
-        # an uppercase-led token would close it, and that is a decision for a
-        # later cycle rather than a quiet change here.
+        # Known residual, pinned deliberately: a hyphenated token containing a
+        # digit (`utf-8`, `sha-1`) still satisfies the reference shape.
         for filler in (
             "aaaaaaaaaaaaaaaaaaaa a-1",
             "aaaaaaaaaaaaaaaaaaaa utf-8",
@@ -1168,13 +1123,11 @@ class DirectiveReasonTests(unittest.TestCase):
 
 
 class PathCounterExampleTests(unittest.TestCase):
-    """BUG-C [P3]: the corruption evidence in the ledger is a COUNTER-EXAMPLE.
+    """Corruption evidence in the ledger is a COUNTER-EXAMPLE.
 
-    backend/docs/spec-run-state.md quotes what a byte-eaten write left behind
-    -- "the file now reads `ests_returns.py`, `iews.py`" -- in order to REPORT
-    that those paths do not exist. Cycle 1 called them prose typos and covered
-    only test_name, so the motive for the directive was half-closed.
-    """
+    ``spec-run-state.md`` quotes what a byte-eaten write left behind in order
+    to report that those paths do not exist, so a path target needs the kind
+    too."""
 
     KNOWN = {"test_real_one"}
     PATHS = {
@@ -1405,10 +1358,8 @@ class BaselineShapeTests(unittest.TestCase):
 class RestructureMapTests(unittest.TestCase):
     """The map resolves historical cites; it never suppresses a claim.
 
-    Every branch is driven BOTH ways -- the pass, and the case where the
-    map's own target has vanished -- because a map that can only ever pass
-    is a baseline wearing a new name.
-    """
+    Every branch is driven both ways, including the case where the map's own
+    target has vanished."""
 
     KNOWN_TESTS = {"test_real_one", "test_successor_one"}
     PATHS = {
@@ -1585,11 +1536,8 @@ class RestructureMapTests(unittest.TestCase):
         self.assertIn("no such file in the tree", errors[0].detail)
 
     def test_an_entry_scoped_to_one_doc_does_not_resolve_anothers_cite(self):
-        # The token-keyed false pass, pinned shut: the entry resolves the
-        # historical cite in its own file, and the IDENTICAL token in any
-        # other doc falls through to the plain tree lookup and errors --
-        # an entry written for one file's rows must not green unrelated
-        # prose that happens to cite the same bare token.
+        # The entry resolves its own file's cite; the IDENTICAL token in any
+        # other doc falls through to the tree lookup and errors.
         entry = {"orders/views.py": self.entry(targets=["backend/orders/views/"])}
         errors, warnings = self.verify("changed `orders/views.py`", entry)
         self.assertEqual(errors, [])
@@ -1617,10 +1565,8 @@ class RestructureMapTests(unittest.TestCase):
         self.assertIn("line is past the end", errors[0].detail)
 
     def test_an_external_entry_cannot_green_another_docs_cite(self):
-        # The concrete P3 case: the external entry (written for one backlog
-        # row) greens the cite in its own file, but a new doc claiming the
-        # same bare token names a repo file that does not exist -- that must
-        # be an error, not a silent "external" pass.
+        # The external entry greens its own file's cite; a new doc citing the
+        # same bare token names a repo file that does not exist and is an error.
         entry = {"handlers/base.py": self.entry(external=True)}
         errors, warnings = self.verify("gate: `handlers/base.py`", entry)
         self.assertEqual(errors, [])
@@ -1683,9 +1629,8 @@ class RestructureMapTests(unittest.TestCase):
 class RestructureMapValidationTests(unittest.TestCase):
     """Shape is checked at load and a structurally broken map aborts.
 
-    Existence deliberately is not: a rotted TARGET fails the cite that named
-    it (naming the missing path) instead of taking the whole scan down.
-    """
+    Existence deliberately is not: a rotted target fails the cite that named
+    it, naming the missing path, instead of taking the scan down."""
 
     REASON = "a reason long enough to clear the floor and say what moved"
 
@@ -1839,11 +1784,10 @@ class RestructureMapValidationTests(unittest.TestCase):
 
 
 class ShippedRestructureMapTests(unittest.TestCase):
-    """The shipped map held to the tree, in the unit suite and not only at
-    night: the map rots the way prose does -- by target -- so a deleted
-    package or a lost successor has to be red on every push (GATE-5), not
-    just on the nightly's schedule.
-    """
+    """The shipped map held to the tree in the unit suite.
+
+    The map rots the way prose does -- by target -- so a deleted package or a
+    lost successor is red on every push, not only on the nightly."""
 
     @classmethod
     def setUpClass(cls):
@@ -1873,20 +1817,16 @@ class ShippedRestructureMapTests(unittest.TestCase):
                 )
 
     def test_every_shipped_untracked_path_is_out_of_the_index(self):
-        # Index-scoped: the root-level scratch names are not under a walked
-        # source root, so the load-bearing check for those is run()'s
-        # ls-tree one; this still catches the in-tree cases (a seed command
-        # built before its row is rewritten).
+        # Index-scoped: a root-level scratch name is not under a walked source
+        # root, so run()'s ls-tree check is the load-bearing one for those.
         for cited, entry in self.map["paths"].items():
             for target in entry.get("untracked", []):
                 with self.subTest(cited=cited, target=target):
                     self.assertNotIn(target, self.known_paths)
 
     def test_every_shipped_cites_in_file_exists(self):
-        # A scope naming a file that no longer exists can never hold a
-        # claim: the entry would resolve nothing while looking well-formed.
-        # Shape validation is pure, so the existence half lives here, next
-        # to the same check for targets and successors.
+        # A scope naming a file that no longer exists can never hold a claim,
+        # so that is a validation error next to the target checks.
         for cited, entry in self.map["paths"].items():
             for doc in entry["cites_in"]:
                 with self.subTest(cited=cited, doc=doc):

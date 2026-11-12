@@ -1,14 +1,8 @@
 """Link legacy ``Shipment.carrier`` text to a ``ShippingProvider`` row.
 
-Before SPEC-B-02 a parcel carried only the carrier's display name, so the
-tracking page had no provider to render a link from. The provider FK is the new
-authority, and this module is the one mapper used by the backfill command (and
-mirrored, for historical-model safety, in the migration).
-
-The rule is deliberately conservative: a carrier value maps only when exactly
-one provider matches it, either case-insensitively by ``code`` or exactly by
-``name``. Ambiguity is left unresolved rather than guessed, because linking the
-wrong carrier would send a paying customer to somebody else's tracking page.
+A carrier maps only when exactly one provider matches (code case-insensitively
+or name exactly); ambiguity is left unresolved because linking the wrong
+carrier sends a customer to someone else's tracking page.
 """
 
 from .models import Shipment, ShippingProvider
@@ -17,11 +11,9 @@ from .models import Shipment, ShippingProvider
 def matching_provider_ids(carrier, providers):
     """Every provider id ``carrier`` names, with no guessing.
 
-    ``code`` is compared case-insensitively because it is a machine identifier
-    that operators type by hand; ``name`` is compared exactly because it is the
-    human label the old ``carrier`` column held verbatim. Both comparisons run
-    together, so a value that matches one provider by code and another by name
-    is ambiguous by construction.
+    ``code`` is compared case-insensitively (a hand-typed identifier); ``name``
+    exactly (the verbatim old label), so a cross-match is ambiguous by
+    construction.
     """
     carrier = (carrier or "").strip()
     if not carrier:
@@ -37,15 +29,9 @@ def matching_provider_ids(carrier, providers):
 def backfill_shipments(*, apply):
     """Map every unlinked parcel, returning ``matched/ambiguous/unmatched``.
 
-    Only parcels whose ``provider`` is still NULL are considered: a link an
-    operator (or an earlier run) already made is a decision, and a backfill is
-    not allowed to overwrite it. ``apply=False`` runs the identical matching
-    pass and writes nothing, so the dry-run and the real run cannot disagree
-    about what would happen.
-
-    Idempotence is a property of the filter rather than of a marker column:
-    after an apply the matched rows no longer have a NULL provider, so a second
-    run sees nothing to do and reports zero matches.
+    Only NULL-provider parcels are considered — an existing link is a decision
+    — and ``apply=False`` runs the identical pass without writing, so dry run
+    and apply cannot disagree.
     """
     providers = list(ShippingProvider.objects.all())
     counts = {"matched": 0, "ambiguous": 0, "unmatched": 0, "already_linked": 0}

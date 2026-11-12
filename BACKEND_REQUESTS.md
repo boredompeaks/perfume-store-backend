@@ -3,6 +3,10 @@
 Gaps in the backend that the frontend needs, logged instead of worked around silently.
 Format per entry: priority, where needed, what's missing, why, suggested contract (proposal only), current workaround.
 
+Line references in these dated entries are historical audit anchors. The 2026-11-12
+comment prune shifted lines in many source files, so treat any `file.py:NNN` here as
+the line at the time of the entry, not as a current anchor.
+
 ---
 
 ## [P0] Razorpay webhook + server-side reconciliation

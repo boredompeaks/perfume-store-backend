@@ -1,19 +1,7 @@
-"""Staff role definitions for RBAC (spec 6.12, tiers per spec 1.1).
+"""Staff role definitions and the single capability map for RBAC.
 
-This module is the single source of truth for staff roles and their
-capabilities. Later micro-tasks (permissions.py, staff admin endpoints)
-resolve authorization checks against ``CAPABILITY_ROLES`` instead of
-re-hardcoding role names, and Django Groups are synced from ``STAFF_ROLES``
-so group membership can back the role assignment.
-
-Spec 1.1 (lines 133-150) ends the role table with two tiers rather than one:
-Admin "manage[s] users, roles, settings and operational access" (line 137)
-and Superadmin "manage[s] high-privilege settings, access and platform
-configuration" (line 146), under the rule that "admin is not one giant
-permission". So the top tier is NOT admin-plus-everything: it shares admin's
-two privilege-management capabilities and adds one of its own,
-``platform.configure``, which admin deliberately does not hold. It holds no
-operational capability at all — the spec grants the tier none.
+It is the one source of truth for roles and capabilities; Django Groups are synced
+from ``STAFF_ROLES``.
 """
 
 from django.contrib.auth.models import Group
@@ -26,9 +14,8 @@ ROLE_FINANCE = "finance"
 ROLE_ADMIN = "admin"
 ROLE_SUPERADMIN = "superadmin"
 
-# Stable, ordered tuple of the seven staff roles (spec 6.12; the top tier
-# from spec 1.1 lines 142-146). The order is the tier order: the six
-# operational roles first, the tier above them last.
+# The seven staff roles in tier order: six operational roles, then the two
+# privilege tiers.
 STAFF_ROLES = (
     ROLE_SUPPORT,
     ROLE_CATALOGUE,
@@ -39,10 +26,8 @@ STAFF_ROLES = (
     ROLE_SUPERADMIN,
 )
 
-# Capability identifier (spec 6.12 examples) -> roles granted that capability.
-# Least privilege by default: each role holds only what its function needs,
-# and only the two privilege tiers hold the sensitive staff/settings
-# capabilities, so role changes themselves stay a privileged concern.
+# capability -> roles granted it. Least privilege by default: only the two
+# privilege tiers hold the staff/settings capabilities.
 CAPABILITY_ROLES = {
     "products.read": frozenset(
         {ROLE_SUPPORT, ROLE_CATALOGUE, ROLE_INVENTORY, ROLE_MARKETING, ROLE_ADMIN}
@@ -52,100 +37,46 @@ CAPABILITY_ROLES = {
     "inventory.read": frozenset({ROLE_INVENTORY, ROLE_CATALOGUE, ROLE_ADMIN}),
     "inventory.adjust": frozenset({ROLE_INVENTORY, ROLE_ADMIN}),
     "orders.read": frozenset({ROLE_SUPPORT, ROLE_FINANCE, ROLE_ADMIN}),
-    # Spec 1.1 line 110 puts packing and shipping on the inventory/fulfilment
-    # operator ("Manage stock, packing, shipping and returns"), so it shares
-    # the fulfilment capability with support (line 92, "permitted order
-    # issues") rather than holding it alone. That capability is exactly the
-    # order-status walk pending->confirmed->shipped->delivered, which is the
-    # packing/shipping authority and nothing more: orders.read (order
-    # visibility), orders.cancel, refunds.create and customers.read stay with
-    # the roles spec 1.1 names them for.
+    # Spec 1.1 puts packing/shipping on the inventory operator, so fulfilment is
+    # shared with support; order visibility, cancellation and refunds stay with
+    # the roles named for them.
     "orders.fulfill": frozenset({ROLE_SUPPORT, ROLE_INVENTORY, ROLE_ADMIN}),
     "orders.cancel": frozenset({ROLE_SUPPORT, ROLE_ADMIN}),
-    # [R-1.07] SPEC-1-B05: shipping methods and their rates. A rate is money
-    # every future order will be charged, so it follows the money capability
-    # `refunds.create` already sets rather than the fulfilment one: finance
-    # and admin, not the packing operator. Spec 1.1 line 110's "shipping"
-    # IS delivered to the inventory/fulfilment role - as `orders.fulfill`,
-    # the authority to ship an order (SPEC-1-B03, whose exact role set is
-    # pinned by tests/test_superadmin_tier.py) - but WORKING a shipment and
-    # SETTING the prices it will cost are different powers, and widening the
-    # operator's set here would undo a shipped decision. Support is excluded
-    # for the same reason it holds no refunds.create: its order power is
-    # working one specific order, not setting prices. The whole surface is one
-    # capability because reading the rate table is part of managing it (staff
-    # who can see a rate can work out what an order will be charged), and no
-    # shipping row holds customer data.
+    # A rate is money every future order will be charged, so it follows
+    # finance/admin rather than the packing operator: working a shipment and
+    # setting its price are different powers.
     "shipping.manage": frozenset({ROLE_FINANCE, ROLE_ADMIN}),
-    # [R-1.08] SPEC-1-B06: working a shipment and its tracking trail, split
-    # from every other order power on purpose. Spec 6.9 line 1749/1757/1759
-    # files "View shipment and tracking history", "Create shipment" and "Add
-    # tracking number" under the ADMIN ORDER ACTIONS -- ordinary order work,
-    # which is the support role's job ("Handle customer enquiries and
-    # permitted order issues", line 92) and admin's. The inventory/fulfilment
-    # operator is deliberately NOT granted it: spec 1.1 line 110's "shipping"
-    # is already delivered to that role as `orders.fulfill` (SPEC-1-B03), and
-    # widening it here would break that task's exact-set pin on the role.
-    # Read and write are separate capabilities so a future read-only support
-    # role can take the trail without taking the pen, and a shipment row is
-    # the one shipping row that carries a CUSTOMER's address by association
-    # (through its order), which is the reason `shipping.manage` did not get
-    # them for free.
+    # Working a shipment and its tracking trail is support/admin work; the
+    # inventory operator is deliberately excluded because B03 pinned its set.
+    # Read/write are split so a read-only role can take the trail without the pen.
     "shipments.read": frozenset({ROLE_SUPPORT, ROLE_ADMIN}),
     "shipments.write": frozenset({ROLE_SUPPORT, ROLE_ADMIN}),
-    # [R-1.16] SPEC-1-B07a: the return-request queue and the lifecycle walk
-    # over it. Support + admin, and the division of labour is spec 6.8's own:
-    # "Return request review" (line 1957) is customer order-issue work, which
-    # is the support agent's mandate (spec 1.1 line 92, "Handle customer
-    # enquiries and permitted order issues") and admin's. Read and write are
-    # split for the same reason B06 split shipments: a return row reaches one
-    # customer's order and their address through ``order``, so the review queue
-    # is customer data, and a role can be given the queue without the decision.
-    #
-    # NOT granted to the inventory/fulfilment operator, and that is a RECORDED
-    # DEVIATION from spec 1.1 line 110 ("Manage stock, packing, shipping and
-    # returns") rather than an oversight: SPEC-1-B03 pinned that role's
-    # capability set to exactly {products.read, inventory.read,
-    # inventory.adjust, orders.fulfill} in tests/test_superadmin_tier.py, and
-    # widening it here would undo a shipped, audited contract. The consequence,
-    # stated plainly: the physical half of a return - receiving and inspecting
-    # the parcel back - is not reachable by that role today. The task that
-    # revisits the B03 pin is the one to grant it; this one must not.
+    # Return review is support/admin work, split read/write because a return row
+    # reaches a customer's order and address. Deliberately NOT granted to the
+    # inventory operator: B03 pinned that role's capability set, and widening it
+    # would undo a shipped contract.
     "returns.read": frozenset({ROLE_SUPPORT, ROLE_ADMIN}),
     "returns.write": frozenset({ROLE_SUPPORT, ROLE_ADMIN}),
     "refunds.create": frozenset({ROLE_FINANCE, ROLE_ADMIN}),
     "customers.read": frozenset({ROLE_SUPPORT, ROLE_FINANCE, ROLE_ADMIN}),
     "discounts.write": frozenset({ROLE_MARKETING, ROLE_ADMIN}),
     "reports.read": frozenset({ROLE_FINANCE, ROLE_MARKETING, ROLE_ADMIN}),
-    # The two privilege-management capabilities of spec 1.1: access (role and
-    # staff management) and settings. Admin holds both per line 137, and the
-    # top tier holds them too per line 146 ("access and high-privilege
-    # settings") — that is what makes it a tier above admin rather than a
-    # separate label.
+    # Access (role/staff management) and settings: admin holds both, and the
+    # superadmin tier holds them plus platform configuration.
     "staff.manage": frozenset({ROLE_ADMIN, ROLE_SUPERADMIN}),
     "settings.manage": frozenset({ROLE_ADMIN, ROLE_SUPERADMIN}),
-    # Spec 1.1 line 146: platform configuration. Granted to the top tier and
-    # to no other role, which is what stops an Admin from minting or
-    # unminting the tier above itself (see ROLE_GRANT_CAPABILITY).
+    # Granted only to the top tier, which stops an Admin from granting the tier
+    # above itself (see ROLE_GRANT_CAPABILITY).
     "platform.configure": frozenset({ROLE_SUPERADMIN}),
 }
 
-# Roles whose own grant/revoke is a high-privilege access change, mapped to
-# the capability that authorises it. Minting or unminting the top tier is
-# spec 1.1 line 146 authority ("platform configuration"), so it needs a
-# capability ``admin`` does not hold: an Admin manages staff roles through
-# ``staff.manage`` but can never promote anyone — or itself — above its own
-# tier. Django's ``is_superuser`` stays the bypass, as on every admin
-# surface (see ``common.permissions.user_may_assign_role``).
+# Roles whose grant is a high-privilege access change, mapped to the capability
+# that authorises it, so an Admin can never promote above its own tier. Django's
+# ``is_superuser`` bypass remains (see ``common.permissions.user_may_assign_role``).
 ROLE_GRANT_CAPABILITY = {ROLE_SUPERADMIN: "platform.configure"}
 
 
 def sync_role_groups():
-    """Create the staff role groups, returning them keyed by role name.
-
-    Idempotent via ``get_or_create``: safe to call repeatedly (bootstrap data
-    migrations, ops scripts) without duplicating groups or clobbering existing
-    memberships. Permission objects for the capability identifiers do not
-    exist yet; they are wired up by the later permissions micro-tasks.
-    """
+    """Create the staff role groups, keyed by role name; idempotent via
+    ``get_or_create``."""
     return {role: Group.objects.get_or_create(name=role)[0] for role in STAFF_ROLES}

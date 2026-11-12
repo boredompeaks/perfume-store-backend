@@ -17,9 +17,7 @@ from .models import (
     TOTPDevice,
 )
 
-# SPEC-20-10: raised by the storefront serializer only, so it lives beside
-# its single raiser rather than in accounts.models with the login/admin
-# messages (that module is the shared R-17.9 wording and stays untouched).
+# Raised only by the storefront serializer, so it lives beside its single raiser.
 MFA_STAFF_LOGIN_REQUIRED = (
     "This is a staff account. Staff sign in on the staff sign-in page, "
     "where multi-factor authentication is part of the login."
@@ -67,14 +65,9 @@ class RegisterSerializer(serializers.ModelSerializer):
     def validate(self, attrs):
         password = attrs.get("password")
         if password:
-            # Conventions.md: registration and reset must run the same
-            # validate_password policy. The reset path validates against the
-            # target user; here the account does not exist yet, so build a
-            # transient one from the submitted attributes — that is what makes
-            # UserAttributeSimilarityValidator see the username/email being
-            # registered. Errors surface under the `password` key as a list of
-            # messages, the exact field-error shape the reset endpoint and the
-            # frontend's fieldErrors renderer already handle.
+            # Same validate_password policy as reset. The account does not exist
+            # yet, so build a transient user from the submitted attributes for
+            # UserAttributeSimilarityValidator; errors go under `password`.
             candidate = User(
                 username=attrs.get("username", ""), email=attrs.get("email", "")
             )
@@ -86,29 +79,17 @@ class RegisterSerializer(serializers.ModelSerializer):
 
 
 class MFATokenObtainPairSerializer(TokenObtainPairSerializer):
-    """Login serializer with mandatory TOTP for privileged roles (SPEC-17-05).
+    """Login serializer with mandatory TOTP for privileged roles.
 
-    BACKEND_REQUESTS.md defines no MFA contract, so the simpler
-    single-request shape is used and declared: privileged users
-    (:func:`common.permissions.is_privileged` — superusers and
-    ``staff.manage`` holders) must include a valid ``totp`` code in the
-    login body; everyone else is untouched. Failures raise after
-    ``super().validate()`` has accepted the password, so LoginView's
-    existing rejection path audits them as AUTH_LOGIN_FAILED and no tokens
-    are ever minted without the second factor. Rollout: a privileged user
-    with no confirmed device is blocked at login (mandatory means
-    mandatory) with the enrollment path named in the message.
-
-    SPEC-20-8: the ONLY change to the rule above is the guard around it —
-    a device the user explicitly trusted, whose TTL has not lapsed, and that
-    this very request is coming from, skips the challenge. Everything inside
-    that guard (require a code, verify, consume the replay counter) is
-    byte-for-byte the pre-SPEC-20-8 code path, so an untrusted device cannot
-    be made to skip a code, and trust can never make a code replayable.
+    After ``super().validate()`` accepts the password, privileged users
+    (superusers and ``staff.manage`` holders) must include a valid ``totp`` code,
+    so no tokens are minted without the second factor and the existing rejection
+    path audits the failure. A device this browser explicitly trusted may skip
+    the challenge, but the code/replay path behind that guard is unchanged.
     """
 
-    # Optional at the field level so non-privileged logins stay
-    # byte-compatible; enforcement adds the requirement in validate().
+    # Optional at the field level so non-privileged logins stay byte-compatible;
+    # enforcement adds the requirement in validate().
     totp = serializers.CharField(required=False)
 
     def validate(self, attrs):
@@ -138,12 +119,11 @@ class MFATokenObtainPairSerializer(TokenObtainPairSerializer):
 
 
 class AddressSerializer(serializers.ModelSerializer):
-    """Saved address, explicit fields and explicit caps (SPEC-9-T4).
+    """Saved address, explicit fields and explicit caps.
 
-    ``user`` is deliberately absent: the owner comes from the request, never
-    from the body. The declared ``max_length`` values are the validation
-    contract the spec calls out (absurd postal/phone values are rejected
-    with a 400 instead of being truncated into the column).
+    ``user`` is deliberately absent: the owner comes from the request, never from
+    the body, and the declared ``max_length`` values keep absurd values a 400
+    instead of a truncated column.
     """
 
     label = serializers.CharField(max_length=40, required=False, allow_blank=True)
@@ -173,21 +153,13 @@ class AddressSerializer(serializers.ModelSerializer):
 
 
 class StorefrontTokenObtainPairSerializer(TokenObtainPairSerializer):
-    """Customer storefront login — no ``totp`` field at all (SPEC-20-10).
+    """Customer storefront login — no ``totp`` field at all.
 
-    The storefront has no TOTP: R-17.9 binds privileged roles only, so a
-    customer was being shown, and could post, an authentication-code field
-    that no server check ever read. This door declares the parent's explicit
-    ``username``/``password`` and nothing more, which makes ``totp`` a
-    non-field in both directions: the storefront form cannot render it, and
-    a body that includes it is ignored rather than half-honoured.
-
-    A privileged account is REFUSED here instead of being authenticated.
-    This serializer has no factor to demand, so letting one through would
-    turn the customer door into a way around the very rule that made it
-    necessary — the caller is pointed at the door that does enforce R-17.9.
-    The answer reveals nothing the caller has not already proven with a
-    correct password.
+    The storefront has no TOTP, and declaring only ``username``/``password``
+    makes ``totp`` a non-field in both directions. A privileged account is
+    refused here rather than authenticated, so the customer door cannot bypass
+    the mandatory second factor; the answer reveals nothing a correct password
+    has not already proved.
     """
 
     def validate(self, attrs):

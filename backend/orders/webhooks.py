@@ -1,71 +1,10 @@
-"""[R-1.15] SPEC-1-06: the payment webhooks family — the server-to-server
-endpoint Razorpay calls, so payment truth stops depending on the customer's
-browser coming back.
+"""The payment webhooks family: the server-to-server endpoint Razorpay calls,
+so payment truth stops depending on the customer's browser returning.
 
-Until this endpoint existed the ONLY statement this store had about a payment
-was the client callback (``verify_payment``): a customer who closed the tab
-after paying left a paid order pending forever, and a client-side verify is
-only as trustworthy as the machine that sent it. Spec section 1 lists webhooks
-in the payments row of the overview, spec 11.2 makes "verify webhook
-signatures" and "handle duplicate webhook deliveries" payment requirements in
-their own right, and the threat table answers webhook spoofing with "signature
-verification and replay/idempotency controls". So the three properties below are
-the endpoint, in order of how badly they are needed:
-
-1. **Signature verification is mandatory.** An unverified webhook that can move
-   money is worse than no webhook at all: it hands anyone who learns an order id
-   a "mark this paid" button. The HMAC-SHA256 of the RAW request body is
-   compared against an env-driven secret with ``hmac.compare_digest``, BEFORE
-   the body is parsed - a signature over a re-serialized payload is not a
-   signature over what was sent. An unconfigured secret fails CLOSED (503,
-   nothing recorded, nothing moved), so a deployment that forgot the key cannot
-   accidentally accept unsigned money.
-2. **Every delivery is recorded, once.** ``PaymentEvent.event_id`` is unique, so
-   a replayed delivery collides in the database instead of applying twice; the
-   IntegrityError-retry loop is the same shape ``create_payment`` uses for the
-   payment-intent uniqueness (conventions.md:17). The insert runs BEFORE the
-   handler, inside one transaction, so "recorded" and "acted on" are the same
-   commit or neither is.
-3. **Only the machine writes payment state.** A capture drives the order through
-   ``orders.state`` — the same transition table, the same dimension mapping and
-   the same audit-trigger vocabulary the customer-callback writer uses — inside
-   ``transaction.atomic()`` with the Order row locked. Nothing here writes a
-   status literal or invents a payment amount. The inventory commit is shared
-   with that writer too, which is the property the next paragraph states.
-
-**Inventory is committed here, through the ONE shared service.** The sale -
-holds to CONVERTED, the ``products.stock`` decrement and the
-``StockMovement`` ledger rows - is ``orders.inventory.commit_order_sale``,
-called by this handler and by ``verify_payment`` in the same transaction that
-writes the capture. It used NOT to be shared: this handler converted the holds
-and stopped, deferring the decrement to a "reconciler" that does not exist, so
-a payment that arrived without a browser callback left a paid order whose stock
-was never decremented with no ledger row to reconcile against - oversell with
-nothing to correct it. Sharing the service also makes the two paths idempotent
-with respect to each other: its guard reads the order's own payment dimension
-under the Order lock, so a delivery arriving after the customer callback
-confirmed the same payment moves no stock, which is the double decrement
-SPEC-1-B01 fixed once for refunds. And because the service re-checks
-availability under its own product locks, a webhook can no longer confirm an
-order whose stock is gone: that delivery is RECORDED and refused, which is what
-the reconciliation this endpoint exists for needs to read.
-
-**Refund events are recorded, not replayed.** A ``payment.refunded`` /
-``refund.processed`` delivery means money went back at the gateway — possibly
-from the refund this store itself just issued through the SPEC-1-05 seam,
-possibly from the provider dashboard, possibly by an operator at Razorpay.
-Turning that into a ``Refund`` row here would double-spend the refundable
-balance against the row the refund writer already recorded, and it would have to
-invent the operator ``reason`` and ``actor`` a financial trail requires
-(``Refund.reason`` is NOT NULL by design). So the delivery is recorded and
-logged, and the finance operator who reconciles payments and refunds ([1.31])
-matches it against the Refund rows — the seam stays the ONE place this store
-asks the gateway to move money back.
-
-Every refusal and every unhandled event type is RECORDED as a row: "the provider
-says this happened and we did nothing" is precisely what a reconciliation needs
-to read.
-"""
+Signature verification is mandatory and fails closed; every delivery is recorded
+exactly once (unique ``event_id``) before the handler runs in the same commit;
+only the state machine writes payment state, with inventory committed through
+the shared ``commit_order_sale``; and refund events are recorded, not replayed."""
 
 import hashlib
 import hmac
@@ -106,43 +45,35 @@ from .state import (
 
 logger = logging.getLogger(__name__)
 
-# Provider protocol constants, not deployment config: these are the header
-# names Razorpay sends on every webhook delivery (its dashboard writes them
-# into the delivery URL's secret), and the endpoint id they ride on.
+# Provider protocol constants, not deployment config: the header names Razorpay
+# sends on every webhook delivery.
 WEBHOOK_EVENT_ID_HEADER = "X-Razorpay-Event-Id"
 WEBHOOK_SIGNATURE_HEADER = "X-Razorpay-Signature"
 
-# [R-9.3.14]-shaped retry bound for the replay insert, matching
-# create_payment's PAYMENT_INTENT_ATTEMPTS: one turn is the expected path
-# (no collision), and the bound is a safety net against a pathological race,
-# never a substitute for the constraint.
+# Retry bound for the replay insert, matching create_payment's
+# PAYMENT_INTENT_ATTEMPTS: a safety net around the constraint, never a
+# substitute for it.
 PAYMENT_EVENT_INSERT_ATTEMPTS = 3
 
-# The provider counts money in the currency's smallest unit; this store's money
-# is the 2-dp Decimal every other amount in the repo is (common.money). Decimal
-# arithmetic, never float: a provider count must not become binary-float money.
+# The provider counts money in the currency's smallest unit; Decimal
+# arithmetic, never float.
 MINOR_UNITS_PER_MAJOR = Decimal(100)
 
-# The provider's signature is a hex-encoded SHA-256 digest, so its length is
-# fixed by the digest (not by a chosen constant): anything else is not a
-# signature and is refused before the comparison, which keeps the check total.
+# A hex-encoded SHA-256 digest has a fixed length; anything else is refused
+# before the comparison.
 WEBHOOK_SIGNATURE_HEX_LENGTH = hashlib.sha256().digest_size * 2
 
-# A payment dimension that already means "the money is in". A second capture
-# event for one of these is a duplicate delivery of a fact we already hold, and
-# re-applying it would append a second transition to the audit trail.
+# The money is already in for these; a second capture event is a duplicate
+# delivery of a fact already held.
 CAPTURED_PAYMENT_STATES = ("captured", "partially_refunded", "refunded")
 
 
 def _store_money(amount_minor_units):
     """Provider minor units -> the store's Decimal money, or ``None``.
 
-    Deliberately strict: only a non-negative integer count of minor units is
-    money. A float, a string, a bool or a missing value returns ``None`` — the
-    delivery is still recorded, just without an amount — because guessing a
-    Decimal out of a malformed provider value is how float money starts. This
-    is the same conversion ``orders.refunds`` scales with, so paying and
-    reconciling cannot disagree about one amount.
+    Deliberately strict: only a non-negative int is money, because guessing a
+    Decimal out of a malformed provider value is how float money starts; a
+    refused value still leaves the delivery recorded, just without an amount.
     """
     if isinstance(amount_minor_units, bool) or not isinstance(amount_minor_units, int):
         return None
@@ -161,18 +92,10 @@ def _entity(body, name):
 def _signature_matches(raw_body, provided):
     """True when ``provided`` is the HMAC-SHA256 hex digest of the raw body.
 
-    ``hmac.compare_digest`` is constant-time, so a caller cannot learn the
-    expected digest one character at a time from response timing. The secret is
-    a guaranteed non-empty deployment setting here: the view refuses an
-    unconfigured deployment before reaching this function.
-
-    The candidate is normalized and length-checked BEFORE the comparison
-    because the comparison is total only over matching types: a non-ASCII
-    signature header makes ``compare_digest`` raise ``TypeError``, which on an
-    unauthenticated endpoint is an attacker-reachable 500 (and a 500 tells the
-    provider to retry). ``provided`` is compared VERBATIM - the provider signs
-    and compares a hex digest, so a value with surrounding whitespace is not
-    what it sent and must not be quietly accepted.
+    ``hmac.compare_digest`` is constant-time; the candidate is length-checked
+    first because it raises ``TypeError`` on non-ASCII input, which on this
+    unauthenticated endpoint would be an attacker-reachable 500. The value is
+    compared verbatim, never stripped.
     """
     try:
         candidate = provided.encode("ascii")
@@ -192,10 +115,9 @@ def _fits(value, field_name):
     """True when ``value`` fits the ``PaymentEvent`` column it is written to.
 
     SQLite ignores a VARCHAR width and Postgres enforces it, so an unbounded
-    provider string is a silent success in development and a ``DataError`` 500
-    in production - on an unauthenticated money endpoint, which is exactly
-    where it surfaces. The bound is read off the column itself, so the check
-    cannot drift from the schema it protects.
+    provider string is a silent success in development and a 500 on this
+    unauthenticated money endpoint in production. The bound is read off the
+    column, so it cannot drift from the schema.
     """
     return len(value) <= PaymentEvent._meta.get_field(field_name).max_length
 
@@ -203,10 +125,9 @@ def _fits(value, field_name):
 def _stored_reference(value):
     """The provider payment reference as this store can store it.
 
-    A reference that does not fit the column is stored as the empty reference
-    (which the model already means by "the event named no payment") rather than
-    truncated: a truncated id is a plausible-looking reference that reconciles
-    against nothing.
+    A reference that does not fit the column becomes the empty reference (the
+    model's "named no payment") rather than truncated: a truncated id is a
+    plausible-looking reference that reconciles against nothing.
     """
     return value if _fits(value, "gateway_payment_id") else ""
 
@@ -214,18 +135,17 @@ def _stored_reference(value):
 def _apply_captured(event, body):
     """Reconcile a captured payment onto its order; return the outcome.
 
-    Every refusal still records the event (the caller commits it): an event
-    naming an order this store does not know, a mismatched payment reference, a
-    wrong amount or an edge the machine does not declare are all facts
-    reconciliation needs, and none of them may move money.
+    Every refusal still records the event (the caller commits it): an unknown
+    order, a mismatched reference, a wrong amount or an undeclared edge are all
+    facts reconciliation needs, and none may move money.
     """
     payment = _entity(body, "payment")
     gateway_payment_id = str(payment.get("id") or "")
     gateway_order_id = str(payment.get("order_id") or "")
     amount = _store_money(payment.get("amount"))
     target_status = status_for_payment(PAYMENT_CAPTURED)
-    # An oversized reference is refused like any other unbindable one, and the
-    # row keeps no reference rather than a truncated one (see _stored_reference).
+    # An oversized reference is refused like any other unbindable one, keeping
+    # no reference rather than a truncated one.
     oversized_reference = not _fits(gateway_payment_id, "gateway_payment_id")
 
     event.gateway_payment_id = _stored_reference(gateway_payment_id)
@@ -256,10 +176,9 @@ def _apply_captured(event, body):
         return PaymentEvent.Outcome.REFUSED
 
     with transaction.atomic():
-        # The Order row lock is the concurrency authority: this delivery and a
-        # simultaneous customer-callback verify (or a second capture event) both
-        # serialize on it, so the "is this payment already captured" question
-        # below is answered against committed state, not a stale read.
+        # The Order lock is the concurrency authority: this delivery and a
+        # simultaneous callback verify serialize on it, so the "already
+        # captured" question below is answered against committed state.
         order = (
             Order.objects.select_for_update()
             .filter(razorpay_order_id=gateway_order_id)
@@ -288,10 +207,8 @@ def _apply_captured(event, body):
             order.razorpay_payment_id
             and order.razorpay_payment_id != gateway_payment_id
         ):
-            # The order is already bound to a DIFFERENT gateway payment. This
-            # is either a late event for a replaced payment or a provider
-            # mix-up; either way the payload does not get to say what this
-            # order's money was.
+            # The order is already bound to a DIFFERENT gateway payment, so the
+            # payload does not get to say what this order's money was.
             logger.warning(
                 "Payment webhook %s: order %s is bound to gateway payment %s, "
                 "not %s; nothing applied",
@@ -313,8 +230,7 @@ def _apply_captured(event, body):
 
         if amount != quantize_money(order.total_amount):
             # Captured money that is not this order's money is the one number
-            # this endpoint must never reconcile: the amount is the tie between
-            # the gateway's record and the row.
+            # this endpoint must never reconcile: the amount is the tie.
             logger.warning(
                 "Payment webhook %s: captured %s does not match order %s "
                 "total %s; nothing applied",
@@ -335,10 +251,8 @@ def _apply_captured(event, body):
             return PaymentEvent.Outcome.REFUSED
 
         if order.payment_status in CAPTURED_PAYMENT_STATES:
-            # Idempotent no-op: the money is already recorded against this
-            # order (the customer callback, or an earlier delivery of this
-            # same capture under a different event id). The unique event_id
-            # handles the true replay; this handles the duplicate FACT.
+            # Idempotent no-op: the unique event_id handles the true replay,
+            # this handles the duplicate FACT (callback, or another event id).
             logger.info(
                 "Payment webhook %s: order %s is already %s; nothing applied",
                 event.event_id,
@@ -359,10 +273,8 @@ def _apply_captured(event, body):
         if not transition_allowed(order.status, target_status) or (
             not payment_transition_allowed(order.payment_status, PAYMENT_CAPTURED)
         ):
-            # Both machine gates, asked rather than restated: the lifecycle
-            # edge (pending -> confirmed) and the payment-dimension edge
-            # (pending/authorized/failed -> captured). A cancelled or already
-            # advanced order is out of scope for a capture.
+            # Both machine gates, asked rather than restated; a cancelled or
+            # already advanced order is out of scope for a capture.
             logger.warning(
                 "Payment webhook %s: order %s cannot be captured from "
                 "status %s / payment %s; nothing applied",
@@ -374,30 +286,17 @@ def _apply_captured(event, body):
             return PaymentEvent.Outcome.REFUSED
 
         previous_status = order.status
-        # The sale itself - holds -> CONVERTED, the stock decrement and its
-        # [6.5.17] StockMovement ledger rows - is orders.inventory's, called
-        # here exactly as the customer callback calls it. That sharing is the
-        # fix: this handler used to convert the holds and STOP, so a payment
-        # that arrived without a browser callback left the order paid with its
-        # stock never decremented and no ledger row to reconcile against (the
-        # "reconciler" the previous version of this docstring deferred to does
-        # not exist). The service is idempotent against the callback, so a
-        # delivery arriving after the callback confirmed this same payment is a
-        # no-op rather than the second decrement SPEC-1-B01 had to fix once.
-        #
-        # BEFORE the order's capture state is written, deliberately. The
-        # service's idempotency guard IS the order's payment dimension, so
-        # writing "captured" first would make this call skip its own sale - and
-        # verify_payment gets the ordering right only because its capture write
-        # already sits below its commit.
+        # The sale belongs to orders.inventory, shared with the customer
+        # callback, and runs BEFORE the capture state is written: the service's
+        # idempotency guard IS the payment dimension, so writing "captured"
+        # first would make this call skip its own sale.
         try:
             commit_order_sale(order)
         except StockUnavailable as unavailable:
             # The gateway holds this money whatever this store decides, so the
             # capture cannot be un-applied: refusing to move stock is the only
-            # honest answer, and the recorded PaymentEvent plus this audit row
-            # are exactly what the finance operator reconciles the paid-but-
-            # unshipped order from. INFO, like the callback's identical race.
+            # honest answer, and the recorded event plus this audit row are what
+            # the finance operator reconciles the paid-but-unshipped order from.
             logger.info(
                 "Payment webhook %s: order %s has no stock for product %s "
                 "(requested %s, available %s); the capture is recorded but "
@@ -426,8 +325,8 @@ def _apply_captured(event, body):
         order.status = target_status
         order.fulfilment_status = fulfilment_for_status(target_status)
         order.payment_status = PAYMENT_CAPTURED
-        # Binding the provider reference is what makes the next delivery (and
-        # the customer-callback verify) reconcile against the same payment.
+        # Binding the reference makes the next delivery and callback verify
+        # reconcile against this same payment.
         order.razorpay_payment_id = gateway_payment_id
         order.paid_at = order.paid_at or timezone.now()
         order.save(
@@ -464,18 +363,10 @@ def _apply_captured(event, body):
                 "total_amount": str(order.total_amount),
             },
         )
-        # Same customer notification the customer-callback writer queues: a
-        # payment that arrived without a browser callback must still reach
-        # the customer. Since TIER1-ASYNC-CONVERT this is ``enqueue`` —
-        # the NotificationOutbox row is written inside this transaction
-        # (rollback-together with the capture) and the beat-scheduled drain
-        # worker performs the send off the delivery thread. The browser
-        # callback and this hook are the two paths that fire for one
-        # payment; the outbox dedup_key collapses the second enqueue so
-        # the customer gets one confirmation, not two. A failed outbox
-        # write is logged and swallowed (site contract: the notification
-        # never breaks the capture it follows — the gateway will retry a
-        # 5xx, and a half-recorded capture is worse than a retried one).
+        # Same notification the customer-callback writer queues: the outbox row
+        # is written inside this transaction, the drain worker sends it, and the
+        # dedup_key collapses the second enqueue for one payment. A failed
+        # enqueue is logged and swallowed so it never breaks the capture.
         try:
             notifications.enqueue(
                 AuditEvent.EventType.ORDER_PAID,
@@ -494,12 +385,9 @@ def _apply_captured(event, body):
 def _apply_refunded(event, body):
     """Record a settled refund; return the outcome. Moves nothing.
 
-    See the module docstring: the SPEC-1-05 seam owns refunds, and a delivery
-    arriving here is either its echo, an out-of-band refund, or an operator's
-    action at the provider. Reconciling it against the Refund rows is the
-    finance operator's read ([1.31]), so the row is recorded (with the payment
-    it names, and the order when we can prove which one) and the log names the
-    order for a human.
+    The refund seam owns refunds, so a delivery here is its echo, an out-of-band
+    refund or an operator action at the provider: the row (and the order when we
+    can prove which one) is recorded for the finance operator to reconcile.
     """
     refund = _entity(body, "refund")
     gateway_payment_id = str(refund.get("payment_id") or "")
@@ -508,9 +396,7 @@ def _apply_refunded(event, body):
     event.amount = _store_money(refund.get("amount"))
 
     if not event.gateway_payment_id:
-        # Nothing to bind the refund to: either the event named no payment or
-        # the reference does not fit the column (an empty stored reference is
-        # this model's "the event named no payment"). Recorded, moved nothing.
+        # Nothing to bind the refund to; recorded, moved nothing.
         return PaymentEvent.Outcome.RECORDED
 
     with transaction.atomic():
@@ -541,10 +427,8 @@ def _apply_event(event, body):
     if event.event_type in WEBHOOK_REFUND_EVENTS:
         return _apply_refunded(event, body)
 
-    # Genuine, recorded, unhandled: the provider may add event types at any
-    # time, and discarding a delivery it considers real would make this table
-    # an incomplete record of what actually happened to a payment. INFO: the
-    # refusals above are the ones an operator must read.
+    # Genuine, recorded, unhandled: discarding a delivery the provider considers
+    # real would make this table an incomplete record of what happened.
     logger.info(
         "Payment webhook %s: event type %r has no handler; recorded only",
         event.event_id,
@@ -555,35 +439,27 @@ def _apply_event(event, body):
 
 @api_view(["POST"])
 @permission_classes([AllowAny])
-# Server-to-server: the gateway sends no session cookie and no bearer token, so
-# this endpoint opts out of the credential chain entirely. That is what makes
-# it exempt from the SPEC-17-03 CSRF gate (which only fires for requests that
-# ride the session cookie) and it is deliberately NOT exempt from signature
-# verification, which is the credential this endpoint accepts instead.
+# Server-to-server: the gateway sends no session cookie or bearer token, so this
+# opts out of the credential chain (and the session-only CSRF gate) but is
+# deliberately NOT exempt from signature verification, its credential instead.
 @authentication_classes([])
 @throttle_scope("webhook")
 def razorpay_webhook(request):
-    """POST /api/v1/webhooks/razorpay/ — a signed payment event delivery.
+    """POST /api/v1/webhooks/razorpay/ - a signed payment event delivery.
 
-    Answers 200 for every delivery it recorded (applied, refused or recorded
-    only) and for a replay, because the provider must stop retrying a delivery
-    this store has already heard; 400 for a request it will never accept
-    (missing/invalid signature, unparseable body, no event id to deduplicate
-    on); 503 while no webhook secret is configured.
+    Answers 200 for every delivery recorded (applied, refused, recorded only or
+    a replay) so the provider stops retrying; 400 for one it will never accept;
+    503 while no webhook secret is configured.
     """
-    # The RAW body, read before anything parses it: DRF marks request.data
-    # access as having consumed the stream, so this is the only point at which
-    # the exact bytes the provider signed are available. The signature covers
-    # those bytes, so verification must come first and JSON parsing second.
+    # The RAW body, before anything parses it: DRF marks request.data access as
+    # having consumed the stream, and the signature covers the exact bytes.
     raw_body = request.body
 
     secret = getattr(settings, "RAZORPAY_WEBHOOK_SECRET", "")
     if not secret:
-        # Fail closed: with no secret configured no signature could be valid,
-        # so accepting the delivery would be an unverified webhook that can
-        # move money. A deployment error, not a client error — 503, so the
-        # provider's dashboard shows a failing endpoint rather than a quiet
-        # one that looks healthy and loses money.
+        # Fail closed: with no secret no signature could be valid, so 503 (a
+        # deployment error) shows a failing endpoint rather than a quiet one
+        # that loses money.
         logger.error(
             "Payment webhook received but RAZORPAY_WEBHOOK_SECRET is not "
             "configured; refusing event %s",
@@ -596,10 +472,9 @@ def razorpay_webhook(request):
 
     provided_signature = request.headers.get(WEBHOOK_SIGNATURE_HEADER)
     if not provided_signature or not _signature_matches(raw_body, provided_signature):
-        # One uniform answer for "missing" and "wrong": an unsigned or
-        # badly-signed delivery is refused identically, and nothing is
-        # recorded for it (an unauthenticated caller must not be able to write
-        # rows into the financial trail).
+        # One uniform answer for "missing" and "wrong", and nothing recorded:
+        # an unauthenticated caller must not write rows into the financial
+        # trail.
         logger.warning(
             "Payment webhook rejected: %s header missing or invalid (event %s)",
             WEBHOOK_SIGNATURE_HEADER,
@@ -612,8 +487,8 @@ def razorpay_webhook(request):
 
     event_id = (request.headers.get(WEBHOOK_EVENT_ID_HEADER) or "").strip()
     if not event_id:
-        # Without the provider's delivery id there is nothing to deduplicate
-        # on, and the unique constraint is the whole replay defence.
+        # Without the provider's delivery id there is nothing to deduplicate on;
+        # the unique constraint is the replay defence.
         logger.warning(
             "Payment webhook rejected: %s header missing", WEBHOOK_EVENT_ID_HEADER
         )
@@ -625,9 +500,8 @@ def razorpay_webhook(request):
     try:
         body = json.loads(raw_body.decode("utf-8"))
     except (UnicodeDecodeError, ValueError):
-        # The signature was valid over bytes that are not a JSON document:
-        # nothing here can be reconciled, and 400 tells the provider not to
-        # retry a delivery this store can never read.
+        # A valid signature over bytes that are not JSON: 400 tells the provider
+        # not to retry a delivery this store can never read.
         logger.warning("Payment webhook %s: body is not valid JSON", event_id)
         return Response(
             {"error": "Invalid webhook payload"},
@@ -635,8 +509,6 @@ def razorpay_webhook(request):
         )
 
     if not isinstance(body, dict):
-        # A JSON document that is not an object carries no event type, no
-        # entity and nothing to record beyond the string itself.
         logger.warning(
             "Payment webhook %s: body is JSON but not an event object", event_id
         )
@@ -648,12 +520,9 @@ def razorpay_webhook(request):
     event_type = str(body.get("event") or "")
 
     if not _fits(event_id, "event_id") or not _fits(event_type, "event_type"):
-        # A delivery whose identifying columns cannot be stored is refused
-        # rather than truncated: `event_id` is the replay key (a truncated one
-        # would dedupe two different deliveries onto one row) and a truncated
-        # event_type names an event this store never received. Bounding here -
-        # against the column widths, not a hardcoded number - is what keeps the
-        # answer identical on SQLite and Postgres (see _fits).
+        # Refused rather than truncated: event_id is the replay key and a
+        # truncated event_type names an event never received; bounding against
+        # the column widths keeps SQLite and Postgres identical.
         logger.warning(
             "Payment webhook rejected: event id or event type exceeds the "
             "stored width (event id %s chars, event type %s chars)",
@@ -667,12 +536,9 @@ def razorpay_webhook(request):
 
     for attempt in range(PAYMENT_EVENT_INSERT_ATTEMPTS):
         try:
-            # The insert IS the replay defence, and it runs before the handler
-            # inside the same transaction as the effect: a second delivery of
-            # this event id violates the unique constraint, the whole block
-            # rolls back, and the loop's except reports a replay instead of
-            # applying anything twice. Same IntegrityError-retry shape as
-            # create_payment's payment-intent write (conventions.md:17).
+            # The insert IS the replay defence, inside the same transaction as
+            # the effect: a second delivery violates the unique constraint and
+            # the block rolls back.
             with transaction.atomic():
                 event = PaymentEvent.objects.create(
                     event_id=event_id,
@@ -694,9 +560,9 @@ def razorpay_webhook(request):
                 )
         except IntegrityError:
             if PaymentEvent.objects.filter(event_id=event_id).exists():
-                # A replay of an event already recorded: idempotent by
-                # construction, so acknowledge it and let the provider stop
-                # retrying. No second order write, no second audit row.
+                # A replay of an event already recorded: acknowledge it so the
+                # provider stops retrying, with no second order write or audit
+                # row.
                 logger.info(
                     "Payment webhook %s: replay of an already-recorded event",
                     event_id,
@@ -706,15 +572,11 @@ def razorpay_webhook(request):
                     status=status.HTTP_200_OK,
                 )
             if attempt == PAYMENT_EVENT_INSERT_ATTEMPTS - 1:
-                # A collision on some OTHER constraint (a malformed event id,
-                # a locking conflict): not a replay, and not something this
-                # handler can classify. Let it surface as a 500 so the
-                # provider retries. This is also the loop's last turn, so the
-                # loop cannot fall through to an implicit None.
+                # A collision on some OTHER constraint is not a replay: let it
+                # surface as a 500 so the provider retries. Also the loop's last
+                # turn, so it cannot fall through to an implicit None.
                 logger.exception(
                     "Payment webhook %s: could not be recorded",
                     event_id,
                 )
                 raise
-    # Every turn of the loop above either returns a response or re-raises, so
-    # control never reaches this point.

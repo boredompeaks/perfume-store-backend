@@ -1,32 +1,8 @@
-"""Restock opt-in REST surface (SPEC-19-4, [R-19.11]).
+"""Restock opt-in/opt-out REST surface for one product.
 
-POST /api/products/<slug>/restock-notifications/   opt in
-DELETE /api/products/<slug>/restock-notifications/ opt out
-
-SPEC-Q-RS1 (BE-012): the POST half opens to guests — an unauthenticated
-caller who submits an email arms a GUEST row (user NULL, normalized
-address in the model's email column) and the restock trigger mails THAT
-address; the authenticated path is byte-compatible with the pre-task
-contract and keeps mailing user.email, ignoring any submitted address
-entirely. Uniformity is the security property of the guest half: every
-guest success is one 202 with one body — valid or invalid format, first
-or repeat, registered address or not — so the surface cannot be steered
-into a format, history or registration oracle. A guest POST without an
-email — or with a body too malformed to parse, which likewise carries no
-submitted email — and every guest DELETE, keep the exact 401 the endpoint
-answered when it was auth-only (opt-out stays ownership-scoped to
-request.user;
-a guest row has no caller identity to scope a DELETE by, and accepting
-an email on DELETE would let anyone disarm anyone's notification).
-
-Authorization stays in permission_classes (never an inline user check):
-authenticated callers pass for both methods; anonymous callers pass only
-for a POST whose body carries a non-empty string email. Abuse stays
-budgeted on two axes under env-driven rates: the pre-existing 'restock'
-scope (per-IP for anonymous, per-user for authed — volume bound) plus
-the 'restock-guest' scope, a per-(IP + email) pair budget that bounds
-repeat submissions of one pair without letting an attacker starve a
-victim address globally (an email-ONLY key would enable that DoS).
+Guest POSTs may arm an email-keyed row, but every guest response is uniform by
+design so the surface is not a format/history/registration oracle; opt-out
+stays ownership-scoped to the caller.
 """
 
 import hashlib
@@ -48,27 +24,24 @@ from rest_framework.throttling import ScopedRateThrottle, SimpleRateThrottle
 
 from .models import RestockNotification, products
 
-# The model column's own bound: validate_email checks the format, not the
-# length, and SQLite does not enforce varchar lengths — so the length cap
-# has to live here or an overlong "address" would be stored (and armed)
-# on one engine and not the other.
+# validate_email checks format, not length, and SQLite does not enforce
+# varchar lengths — so the cap must live here or it binds on only one engine.
 GUEST_EMAIL_MAX_LENGTH = 254
 
 
 def _normalize_guest_email(raw):
-    """The stored and validated form of a submitted address: strip + case
-    fold, so case and padding variants converge on one row, one throttle
-    identity, and one unique-constraint key."""
+    """Stored/validated form of a submitted address: strip + case-fold so case
+    and padding variants converge on one row, throttle identity and unique key.
+    """
     if not isinstance(raw, str):
         return ""
     return raw.strip().lower()
 
 
 def _guest_email_is_valid(email):
-    """Format gate for arming a guest row — never trust a submitted
-    address blindly. False for empties, overlongs and malformed shapes;
-    the caller still answers the uniform success either way (the response
-    must not betray the format)."""
+    """Format gate before arming a guest row; the caller still answers the
+    uniform success either way, so the response does not betray the format.
+    """
     if not email or len(email) > GUEST_EMAIL_MAX_LENGTH:
         return False
     try:
@@ -81,13 +54,8 @@ def _guest_email_is_valid(email):
 def _uniform_not_found():
     """The one miss this surface answers.
 
-    A DELISTED product must be indistinguishable from a nonexistent one
-    here (MERCHANT-DELIST-C2), and two branches returning "the same"
-    response is how that claim rots -- so the miss is built in exactly
-    one place and both callers share it. The detail GET one endpoint
-    over already answers the byte-identical 404 an unknown slug gets;
-    an opt-in that answered 201 with the product's id would oracle
-    "exists but off sale" against "never existed", defeating it.
+    A delisted product must be indistinguishable from a nonexistent one, so
+    the miss is built in exactly one place rather than duplicated per branch.
     """
     return Response(
         {"error": "Product not found"},
@@ -96,19 +64,11 @@ def _uniform_not_found():
 
 
 class IsAuthenticatedOrSubmittedEmail(BasePermission):
-    """POST is open to guests only when the body carries a submitted
-    email; DELETE, email-less POST, and unparseable-body POST keep the
-    auth-only contract.
+    """POST is open to guests only when the body carries a submitted email.
 
-    Failing this permission for an anonymous caller raises DRF's
-    NotAuthenticated through the standard permission_denied path — the
-    same exception (and therefore the same uniform envelope bytes) the
-    endpoint's former IsAuthenticated class produced, which is what the
-    prior-shape pins measure. An unparseable body carries no submitted
-    email either, so it is denied the same way (a ParseError here would
-    surface as a 400 and make body parseability a probe on this surface).
-    Authenticated callers pass before any body parse matters — the pre-
-    task flow never read the body on this path and still does not.
+    Failing returns DRF's standard NotAuthenticated (the same uniform 401 the
+    former auth-only endpoint produced); ParseError is swallowed so body
+    parseability is not a probe.
     """
 
     def has_permission(self, request, view):
@@ -120,37 +80,22 @@ class IsAuthenticatedOrSubmittedEmail(BasePermission):
         try:
             data = request.data
         except ParseError:
-            # No submitted email can be recovered from an unparseable body:
-            # deny through the normal NotAuthenticated path so the guest
-            # gets the same uniform 401 as an email-less POST. Only
-            # ParseError is swallowed — every other failure stays visible.
+            # No email in an unparseable body: deny via the normal
+            # NotAuthenticated path (uniform 401); only ParseError is swallowed.
             return False
         raw = data.get("email") if hasattr(data, "get") else None
-        # Same normalizer the view and the throttle key on, so a non-string
-        # or blank value is "no email" at every layer — one definition, no
-        # layer disagreeing about what counts as submitted.
+        # Same normalizer the view and throttle key on, so a non-string or
+        # blank value is "no email" at every layer.
         return bool(_normalize_guest_email(raw))
 
 
 class GuestPairThrottle(ScopedRateThrottle):
-    """The per-(IP + email) budget for anonymous opt-ins (SPEC-Q-RS1).
+    """The per-(IP + email) budget for anonymous opt-ins.
 
-    Keyed on the client identity AND the normalized submitted address, so
-    repeat submissions of one pair are bounded while distinct addresses
-    from one origin are left to the per-IP 'restock' budget (both run —
-    DRF applies every throttle class and any refusal wins). An
-    email-ONLY key would let an attacker burn a victim address's whole
-    budget and starve the victim's own opt-in; the pair key cannot.
-
-    Authenticated callers return no key here: their email is ignored by
-    the view and their user-keyed 'restock' budget is the unchanged,
-    pre-task bound.
-
-    The scope is pinned to this class rather than read off the view (both
-    throttle classes share one @throttle_scope) so the pair budget keeps
-    its own env-driven knob: a deployment can tighten the pair bound (the
-    mail-bomb shape — one origin re-arming one address) independently of
-    the per-IP volume budget the authed path also draws on.
+    The pair key bounds repeat submissions without letting an attacker burn a
+    victim address's budget; an email-only key would enable exactly that DoS.
+    Authenticated callers return no key and use the user-keyed 'restock'
+    budget.
     """
 
     pair_scope = "restock-guest"
@@ -187,13 +132,8 @@ def restock_notification(request, slug):
 
     if request.method == "POST":
         if not product.is_active:
-            # A delisted product is not an offer: same miss as an unknown
-            # slug (see _uniform_not_found), and nothing is armed — there
-            # is nothing to be notified about for a product that is not
-            # for sale. A customer whose opt-in predates the delist keeps
-            # their armed row: the trigger suppresses its mail while the
-            # product is off sale and the relist releases it (see
-            # products.models._notify_back_in_stock).
+            # A delisted product is not an offer: same miss as an unknown slug,
+            # nothing is armed; pre-existing armed rows survive the relist.
             return _uniform_not_found()
         if product.stock > 0:
             return Response(
@@ -201,11 +141,8 @@ def restock_notification(request, slug):
                 status=status.HTTP_400_BAD_REQUEST,
             )
         if request.user.is_authenticated:
-            # get_or_create re-checks existence on IntegrityError (the
-            # unique constraint is the race authority). A re-opt-in flips
-            # the row back to armed: active=True, notified_at cleared.
-            # The submitted email, if any, is ignored: an account row's
-            # address is user.email and always has been.
+            # get_or_create re-checks on IntegrityError (the constraint is the
+            # race authority); a re-opt-in re-arms the row, ignoring any email.
             with transaction.atomic():
                 preference, created = RestockNotification.objects.get_or_create(
                     user=request.user,
@@ -225,14 +162,8 @@ def restock_notification(request, slug):
                 status=status.HTTP_201_CREATED if created else status.HTTP_200_OK,
             )
 
-        # Guest path: arm a row keyed by the normalized address. A
-        # malformed or overlong address arms NOTHING (never trust it
-        # blindly) but still gets the byte-identical success — the
-        # response must not double as a format checker. Repeat and
-        # first-time are indistinguishable for the same reason (no
-        # history oracle), hence the single 202 rather than the authed
-        # path's 201/200 split.
-        # Upstream gate: IsAuthenticatedOrSubmittedEmail's hasattr(data, "get") guard means only an object body can pass as "submitted email", so this anonymous-only read never sees a non-object body; pinned by RestockNonObjectPreservationTests.
+        # Guest path: arm a row keyed by the normalized address. A malformed
+        # address arms nothing yet still succeeds (no format/history oracle).
         email = _normalize_guest_email(request.data.get("email"))
         if _guest_email_is_valid(email):
             with transaction.atomic():
@@ -255,12 +186,8 @@ def restock_notification(request, slug):
             status=status.HTTP_202_ACCEPTED,
         )
 
-    # DELETE — uniform response whether or not a preference exists: an
-    # anonymous-shaped existence probe gains nothing, and the caller's
-    # end state is identical ("not opted in"). Authentication was already
-    # required by the permission class; the filter keeps ownership
-    # scoped to the caller (guest rows have no caller and are unreachable
-    # here by design).
+    # Uniform response whether or not a preference exists; authentication is
+    # already required and the filter keeps ownership scoped to the caller.
     RestockNotification.objects.filter(user=request.user, product=product).update(
         active=False, notified_at=None
     )

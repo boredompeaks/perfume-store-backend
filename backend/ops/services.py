@@ -8,32 +8,23 @@ from django.db.models import Count, Sum
 
 
 def _low_stock_threshold() -> int:
-    # Read at call time, not import time: the value is env-driven (settings)
-    # and overridable per test, so a module-level constant would freeze the
-    # first-seen value for the life of the process.
+    # Read at call time, not import time: env-driven and overridable per test.
     return settings.LOW_STOCK_THRESHOLD
 
 
-# "Paid" = money actually captured: verify_payment flips pending -> confirmed
-# the moment Razorpay verification succeeds (orders/views.py), and an order
-# stays paid through shipped/delivered. pending/cancelled never held money.
+# "Paid" = money actually captured: confirmed/shipped/delivered.
+# pending/cancelled never held money.
 REVENUE_STATUSES = ("confirmed", "shipped", "delivered")
 
-# Pending fulfilment = paid orders awaiting shipment: payment captured, but
-# the warehouse has not dispatched yet. "shipped" is already with the carrier
-# and "pending" is payment-pending, not fulfilment-pending.
+# Paid orders awaiting shipment; "shipped" is with the carrier and "pending"
+# is payment-pending, not fulfilment-pending.
 PENDING_FULFILMENT_STATUS = "confirmed"
 
 
 def get_sales_series(days=None):
-    """Daily revenue + order counts over a trailing window of PAID orders.
+    """Daily revenue + order counts over a trailing window of paid orders, zero-filling every day so the chart has no gaps.
 
-    "Paid" is the same REVENUE_STATUSES set the gross-sales KPI uses, so the
-    chart can never disagree with the revenue card. One grouped TruncDate
-    query aggregates all days; Python zero-fills the calendar range so the
-    series has no gaps (the chart needs an entry for every day, including
-    days with no sales). Revenue stays Decimal end to end and is quantized
-    to the paisa before it leaves this function.
+    Uses the same REVENUE_STATUSES set as the gross-sales KPI; revenue stays Decimal and is quantized to the paisa.
     """
     from django.db.models.functions import TruncDate
     from django.utils import timezone
@@ -41,11 +32,9 @@ def get_sales_series(days=None):
     from orders.models import Order
 
     if days is None:
-        # Read at call time, not import time (same reasoning as
-        # _low_stock_threshold): env-driven and overridable per test.
+        # Read at call time, not import time: env-driven and test-overridable.
         days = settings.DASHBOARD_SALES_WINDOW_DAYS
-    # A nonsensical window (0/negative from a malformed env value) must not
-    # produce an empty or reversed date range.
+    # A malformed env window must not produce an empty or reversed range.
     days = max(1, int(days))
 
     today = timezone.localdate()
@@ -101,14 +90,7 @@ def _razorpay_mode() -> str:
 
 
 def _shipping_configured() -> bool:
-    """Whether the store has at least one ACTIVE shipping method.
-
-    Imported lazily inside the function for the same reason the health probe
-    imports its models there: a module-level import would make this ops
-    module depend on the shipping app's models at import time, and the
-    resolver is one cheap ``EXISTS`` on an indexed boolean column - cheap
-    enough for a probe that is safe to poll.
-    """
+    """Whether the store has at least one ACTIVE shipping method; the lazy import keeps the shipping app out of this module's import time."""
     from shipping.pricing import shipping_configured
 
     return shipping_configured()
@@ -135,18 +117,9 @@ def get_health() -> dict:
         settings.EMAIL_HOST_USER and settings.EMAIL_HOST_PASSWORD
     )
     checks["razorpay_mode"] = _razorpay_mode()
-    # SPEC-1-B05 [R-1.07]: the merchant-facing "shipping is switched on"
-    # marker. An unconfigured store prices every order at shipping_amount
-    # 0.00 and that zero is otherwise invisible from outside the order row,
-    # so it is reported here beside the other deployment-configuration
-    # checks a merchant already reads on /health/ and the ops dashboard.
-    #
-    # Deliberately NOT part of the `status` computation below: a store that
-    # has not configured shipping yet is a pre-launch state, not an outage,
-    # and gating `status` on it would turn a fresh deployment into a 503 and
-    # mail the staff mailbox every poll. The information is the point, not
-    # the alarm - the WARNING on the checkout path is the half that must
-    # page a human.
+    # Reported beside the other config checks; deliberately NOT part of
+    # `status`: an unconfigured store is pre-launch, not an outage, and a 503
+    # would page staff on every poll.
     checks["shipping_configured"] = _shipping_configured()
 
     low_stock = 0
@@ -166,10 +139,9 @@ def get_health() -> dict:
         "low_stock": low_stock,
         "out_of_stock": out_of_stock,
         "low_stock_threshold": threshold,
-        # [SPEC-19-2] The stock-breach alert fires from ops.services
-        # check_stock_alerts (polled beside /health/), not from inside
-        # get_health: a raise inside the probe must never flip /health/
-        # itself into a 503 — the monitor must never become the outage.
+        # The stock alert fires from check_stock_alerts (polled beside
+        # /health/), never inside get_health: the monitor must not become the
+        # outage.
         "stock_alert_checked": False,
     }
 
@@ -180,13 +152,7 @@ def _alert_rows(queryset):
 
 
 def check_stock_alerts():
-    """[SPEC-19-2] Low/out-of-stock breach detection + admin alert.
-
-    The alerting half of [R-19.15] rides this existing detection: both
-    breach sets are computed from the same threshold definition the
-    dashboard table shows. Dispatch is log-only on failure and cooldown-
-    deduped in ops.alerts, so a poller can call this freely.
-    """
+    """Low/out-of-stock breach detection + admin alert, using the same threshold the dashboard renders; dispatch is cooldown-deduped and log-only."""
     from products.models import products
 
     from .alerts import notify_low_stock, notify_out_of_stock
@@ -215,9 +181,8 @@ def get_stats() -> dict:
     )
     paid_orders = paid["n"]
     revenue = paid["total"] or 0
-    # Decimal end to end; quantize to the paisa before serializing. The guard
-    # is on the paid count, not the revenue total: an unpaid order contributes
-    # nothing to either, but only an empty paid set makes the division invalid.
+    # Quantize to the paisa; guard on the paid count, the only case where the
+    # division is invalid.
     average_order_value = (
         (paid["total"] / paid_orders).quantize(Decimal("0.01"))
         if paid_orders

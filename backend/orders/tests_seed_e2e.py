@@ -1,15 +1,3 @@
-"""SPEC-E2E-01: ``manage.py seed_e2e``, the owner's end-to-end test data set.
-
-Pins the full seeded state with hand-written literals (never recomputed from
-the command's own tables), the idempotent re-run, the cleanup ownership
-boundary, the summary a human uses to sign in and open the admin, and the two
-independent guards that keep a production-shaped database out of reach: the
-mandatory acknowledgement flag and the test-database check.
-
-The credentials in this module are low-entropy fixtures, passed in through the
-documented env vars. The command itself carries no usable credential.
-"""
-
 import os
 import re
 from contextlib import contextmanager
@@ -40,9 +28,8 @@ from shipping.models import (
 
 FLAG = "--i-know-this-is-a-test-db"
 ORDER_NUMBER_PATTERN = re.compile(r"^ORD-\d{4}-[0-9A-F]{8}$")
-# Low-entropy fixtures, hand-written so an assertion cannot agree with a wrong
-# command constant from both sides. They are values a test hands the command,
-# not credentials: no server anywhere accepts them.
+# Low-entropy fixtures, hand-written so an assertion cannot agree with a wrong command
+# constant from both sides; they are values a test hands the command, not credentials.
 SUPERADMIN_PASSWORD = "seed-superadmin-fixture"  # ggignore 2026-10-22 low-entropy seed_e2e test fixture, not a credential
 CUSTOMER_PASSWORD = "seed-customer-fixture"  # ggignore 2026-10-22 low-entropy seed_e2e test fixture, not a credential
 SEEDED_TOTP_SECRET = "SEEDE2ETOTPFIXTURE"  # ggignore 2026-10-22 seed_e2e test fixture (base32 alphabet, low entropy), not a credential
@@ -67,8 +54,8 @@ def _credentials_env(**overrides):
 
 @contextmanager
 def _no_credentials_env():
-    # An empty value is the resolver's "unset" case, so this needs no deletion
-    # and cannot leave a developer's real env var behind after the test.
+    # An empty value is the resolver's "unset" case, so this needs no deletion and cannot
+    # leave a developer's real env var behind.
     with mock.patch.dict(os.environ, {name: "" for name in CREDENTIAL_ENV}):
         yield
 
@@ -91,8 +78,6 @@ def _seed_then_order_numbers():
 
 
 class CredentialEnvMixin:
-    """Give every test the documented env values instead of literals in code."""
-
     def setUp(self):
         super().setUp()
         self.enterContext(_credentials_env())
@@ -120,8 +105,6 @@ class SeedE2ETests(CredentialEnvMixin, TestCase):
         self.assertTrue(customer.is_active)
         self.assertNotEqual(customer.password, CUSTOMER_PASSWORD)
         self.assertTrue(customer.check_password(CUSTOMER_PASSWORD))
-        # The owner signs in on the storefront, so the customer door must
-        # admit it: the staff door refuses non-staff accounts.
         res = self.client.post(
             "/api/accounts/storefront/login/",
             {"username": "customer", "password": CUSTOMER_PASSWORD},
@@ -206,7 +189,6 @@ class SeedE2ETests(CredentialEnvMixin, TestCase):
         self.assertEqual(order_a.total_amount, Decimal("2548.00"))
         self.assertEqual(order_a.discount_amount, Decimal("0.00"))
         self.assertEqual(order_a.currency, "INR")
-        # The D-01 walk needs the shipped precondition to hold.
         self.assertEqual(order_a.payment_status, "captured")
         item = order_a.items.get()
         self.assertEqual(item.product, marj)
@@ -256,8 +238,6 @@ class SeedE2ETests(CredentialEnvMixin, TestCase):
         self.assertEqual(
             parcel_c.tracking_url, "https://www.bluedart.com/tracking/BD987654321"
         )
-        # No transition was driven by the seed: the owner performs the D-01
-        # walk in the admin.
         self.assertFalse(parcel_a.events.exists())
 
         self.assertIn(f"superadmin: superadmin / {SUPERADMIN_PASSWORD}", out)
@@ -288,9 +268,8 @@ class SeedE2ETests(CredentialEnvMixin, TestCase):
     def test_reseed_resets_the_replay_watermark_and_keeps_one_device(self):
         _run()
         device = TOTPDevice.objects.get(user__username="superadmin")
-        # Simulate a consumed code and a browser trust grant: both must be
-        # cleared by the next seed run, or the printed current code would be
-        # refused (replay guard) or the challenge skipped (stale grant).
+        # Simulate a consumed code and a browser trust grant: the next seed run must clear both,
+        # or the printed current code is refused (replay guard) or the challenge skipped.
         device.last_used_counter = 56_666_666
         device.trusted_until = timezone.now() + timedelta(days=1)
         device.save(update_fields=["last_used_counter", "trusted_until"])
@@ -386,8 +365,8 @@ class SeedE2ETests(CredentialEnvMixin, TestCase):
         self.assertEqual(ShippingRate.objects.count(), 3)
 
     def test_a_lost_order_number_race_retries_and_exhaustion_raises(self):
-        # The generator is the checkout one; a duplicate hits the unique
-        # constraint and the command must retry, exactly as checkout does.
+        # The generator is the checkout one; a duplicate hits the unique constraint and the command
+        # must retry, exactly as checkout does.
         taken = "ORD-2026-AAAAAAAA"
         holder = User.objects.create_user(username="holder", password="fixture")
         Order.objects.create(
@@ -470,8 +449,8 @@ class SeedE2ECleanupTests(CredentialEnvMixin, TestCase):
         buyer, product, coupon, foreign_order = self._foreign_rows()
         _run()
         provider = ShippingProvider.objects.get(code="delhivery")
-        # A parcel the owner linked to a seeded provider AFTER the seed: it is
-        # not the command's row, so PROTECT must not make cleanup crash.
+        # A parcel the owner linked to a seeded provider AFTER the seed: it is not the command's
+        # row, so PROTECT must not make cleanup crash.
         foreign_shipment = Shipment.objects.create(
             order=foreign_order,
             tracking_number="OWNER0001",
@@ -504,20 +483,18 @@ class SeedE2ECleanupTests(CredentialEnvMixin, TestCase):
             ).exists()
         )
 
-        # Foreign rows survive untouched.
         self.assertTrue(User.objects.filter(pk=buyer.pk).exists())
         self.assertTrue(products.objects.filter(pk=product.pk).exists())
         self.assertTrue(Coupon.objects.filter(pk=coupon.pk).exists())
         self.assertTrue(Order.objects.filter(pk=foreign_order.pk).exists())
         self.assertTrue(Shipment.objects.filter(pk=foreign_shipment.pk).exists())
-        # The provider is still referenced by the foreign parcel, so it stays.
         self.assertTrue(ShippingProvider.objects.filter(pk=provider.pk).exists())
 
     def test_cleanup_keeps_the_customer_account_when_it_owns_an_order(self):
         _run()
         customer = User.objects.get(username="customer")
-        # An order the owner placed during the walk is not this command's
-        # row; deleting the account would cascade it away.
+        # An order the owner placed during the walk is not this command's row; deleting the
+        # account would cascade it away.
         order = Order.objects.create(
             user=customer,
             full_name="Customer Walk",
@@ -559,8 +536,6 @@ def _run_lifecycle(*argv):
 
 
 class SeedE2ELifecycleTests(CredentialEnvMixin, TestCase):
-    """D-09: the three states a shipment-driven order walk has to prove."""
-
     def _orders(self):
         return {
             order.idempotency_key: order
@@ -583,7 +558,6 @@ class SeedE2ELifecycleTests(CredentialEnvMixin, TestCase):
         )
         self.assertEqual(Order.objects.count(), 3)
         self.assertEqual(Shipment.objects.count(), 4)
-        # The default A/B/C set is not seeded by this scenario.
         self.assertFalse(
             Order.objects.filter(idempotency_key__startswith="seed-e2e-order-").exists()
         )
@@ -646,8 +620,6 @@ class SeedE2ELifecycleTests(CredentialEnvMixin, TestCase):
             first_numbers,
         )
         parcel.refresh_from_db()
-        # A re-run resets the declared starting state rather than preserving a
-        # human's in-progress walk.
         self.assertEqual(parcel.status, Shipment.Status.LABEL_CREATED)
 
     def test_lifecycle_cleanup_removes_only_the_lifecycle_rows(self):
@@ -693,8 +665,6 @@ class SeedE2ELifecycleTests(CredentialEnvMixin, TestCase):
         delivered = order.shipments.get(status=Shipment.Status.DELIVERED)
         in_transit = order.shipments.get(status=Shipment.Status.IN_TRANSIT)
 
-        # Dispatching the moving parcel advances the order; the delivered one
-        # then asks for "delivered" but the sibling has not arrived.
         self.assertEqual(sync_order_status(in_transit).moved_to, "shipped")
         result = sync_order_status(delivered)
         order.refresh_from_db()
@@ -719,8 +689,6 @@ class SeedE2ECredentialTests(CredentialEnvMixin, TestCase):
             ).group(1)
             totp_secret = re.search(r"secret=([A-Z2-7]+)", first).group(1)
 
-            # token_urlsafe(18) is exactly 24 characters; the assertion pins
-            # the documented generator, not just "some value".
             self.assertEqual(len(password), 24)
             self.assertNotEqual(password, SUPERADMIN_PASSWORD)
             self.assertNotEqual(customer_password, CUSTOMER_PASSWORD)
@@ -757,8 +725,6 @@ class SeedE2ECredentialTests(CredentialEnvMixin, TestCase):
         self.assertTrue(authenticate(username="superadmin", password=rotated))
         self.assertEqual(TOTPDevice.objects.get().secret, "ROTATEDTOTPFIXTURE")
 
-        # A later run with no env keeps the rotated values rather than falling
-        # back to generation (or to a value the operator never saw printed).
         with _no_credentials_env():
             kept = _run()
 
@@ -794,9 +760,8 @@ class SeedE2EGuardTests(CredentialEnvMixin, TestCase):
         self.assertEqual(User.objects.count(), 0)
 
     def test_accepts_the_suite_test_database(self):
-        # The runner forces DEBUG=False, so this acceptance comes from the
-        # resolved engine (sqlite) or localhost host (PostgreSQL) -- the same
-        # two conditions CI's localhost Postgres exercises.
+        # The runner forces DEBUG=False, so this acceptance comes from the resolved engine (sqlite)
+        # or localhost host (PostgreSQL) -- the two conditions CI's Postgres exercises.
         self.assertFalse(settings.DEBUG)
         out = _run()
         self.assertIn("TEST DATA ONLY", out)
@@ -808,9 +773,8 @@ class SeedE2EGuardTests(CredentialEnvMixin, TestCase):
         self.assertIn("TEST DATA ONLY", out)
 
     def test_sqlite_engine_is_an_accepted_condition(self):
-        # Driven directly so the check is exercised on the engine the suite
-        # itself is not running on: a PostgreSQL run still proves the sqlite
-        # arm (and a sqlite run still proves the localhost arm below).
+        # Driven directly so the check is exercised on the engine the suite itself is not running on:
+        # a PostgreSQL run still proves the sqlite arm.
         with (
             mock.patch.dict(
                 settings.DATABASES["default"],
@@ -838,8 +802,6 @@ class SeedE2EGuardTests(CredentialEnvMixin, TestCase):
 
 
 class SeedE2ELifecycleDispatchTests(CredentialEnvMixin, TestCase):
-    """The D-09 unpaid-dispatch half, split out so the class name is unique."""
-
     def _orders(self):
         return {
             order.idempotency_key: order

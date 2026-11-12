@@ -1,31 +1,7 @@
-"""Error reporting with a minimal denylist and Sentry-side spend controls.
+"""Error reporting with a small noise denylist and Sentry-side spend controls.
 
-The Sentry free plan bills in events, and one noisy exception inside a hot
-loop can spend a month's quota in minutes. The tempting local answer - a
-client-side cap that stops sending after N events - is the wrong one: it goes
-quiet exactly when errors spike, which is when telemetry matters most. Spend
-is controlled where it can be enforced without hiding an incident:
-
-* the project's own rate limits (per DSN/client key) and inbound filters are
-  the ceiling, configured in Sentry rather than in this process;
-* ``SENTRY_SAMPLE_RATE`` keeps a fixed fraction of events, which bounds cost
-  without ever turning reporting off completely;
-* ``build_before_send`` is only a small denylist of known noise (exception
-  types and health-check paths), so noise does not spend quota in the first
-  place. It never drops an event because a local counter says so.
-
-``init_sentry`` is the ONLY place the SDK is initialised. It is inert with no
-DSN, imports the SDK inside the DSN gate, and pins the reporting shape (no
-PII, no traces, no stack traces, a small breadcrumb buffer).
-
-Nothing here imports the SDK, opens a socket, or reads Django settings at
-module import time. ``config.settings`` imports this module while it is still
-being executed, so a module-scope dependency on either would break the boot
-in exactly the deployment that is supposed to be observable.
-
-The denylist never raises and never reports its own failure through the SDK
-(that would be the recursion it exists to prevent). An internal failure drops
-the event and logs a warning rather than raising.
+There is no local event cap on purpose: it would go quiet exactly during an
+incident, so Sentry's rate limits and sampling bound spend instead.
 """
 
 import logging
@@ -35,8 +11,7 @@ from urllib.parse import urlparse
 
 logger = logging.getLogger(__name__)
 
-# Paths whose errors are noise, not signal: orchestrator probes hit /health/
-# on a timer, and one unhealthy minute would otherwise be hundreds of events.
+# Probe paths: one unhealthy minute would otherwise be hundreds of events.
 DENIED_PATH_PREFIXES = (
     "/health",
     "/healthz",
@@ -47,9 +22,8 @@ DENIED_PATH_PREFIXES = (
     "/ping",
 )
 
-# Matched both by class (an exception object is available) and by name (a
-# serialised event only carries the type as a string). Keeping both means a
-# denylisted error cannot slip through the hint-less path.
+# Matched by class and by name, because a serialised event carries only the
+# type string.
 DENIED_TYPE_NAMES = frozenset(
     {
         "Http404",
@@ -64,12 +38,8 @@ _DENIED_EXCEPTIONS = None
 
 
 def _denied_exception_types():
-    """Return the exception classes the guard drops, resolved on first use.
-
-    Imported lazily: this module is imported by settings while settings is
-    still being executed, and touching ``django.db`` then is a needless
-    boot-time dependency.
-    """
+    """Return the dropped exception classes, resolved lazily: settings imports
+    this module mid-execution, so touching ``django.db`` at module scope is out."""
     global _DENIED_EXCEPTIONS
     if _DENIED_EXCEPTIONS is None:
         from django.core.exceptions import DisallowedHost, PermissionDenied
@@ -87,13 +57,8 @@ def _denied_exception_types():
 
 
 def _exception_identity(event, hint):
-    """Return ``(class_or_None, type_name, message)`` for an event.
-
-    The hint is the authoritative source when the SDK has a live exception.
-    A serialised event and a log record are the two fallbacks; every branch
-    keeps a type NAME so the denylist stays populated even when only a string
-    survives.
-    """
+    """Return ``(class_or_None, type_name, message)``; the hint is
+    authoritative, with serialised events and log records as fallbacks."""
     hint = hint or {}
     exc_info = hint.get("exc_info")
     if exc_info and exc_info[0] is not None:
@@ -149,10 +114,8 @@ def _is_denied_path(event):
 def build_before_send(*, log=None):
     """Return a ``before_send`` hook that drops known noise and nothing else.
 
-    There is deliberately no counter here. A local cap cannot distinguish a
-    bug from an incident, and the events it drops are invisible to Sentry, so
-    an attack that produces errors would also silence its own report. The
-    project's rate limits and ``SENTRY_SAMPLE_RATE`` bound spend instead.
+    Deliberately no local counter: it would silence its own incident, so rate
+    limits and ``SENTRY_SAMPLE_RATE`` bound spend.
     """
     log = log or logger
 
@@ -177,14 +140,8 @@ def build_before_send(*, log=None):
 
 
 def _validated_sample_rate(sample_rate, log):
-    """Return a usable error sample rate, warning on one Sentry cannot use.
-
-    The SDK keeps every event for a rate above 1, ``NaN`` or infinity, and
-    drops every event for a negative rate. With the local cap gone, either
-    mistake would go unnoticed in the only remaining spend control, so both
-    fall back to the documented default. ``0.0`` stays valid as an explicit
-    "send no errors" setting.
-    """
+    """Return a usable sample rate; invalid, non-finite or out-of-range values
+    fall back to 1.0 with a warning (the SDK would silently mishandle them)."""
     try:
         value = float(sample_rate)
     except (TypeError, ValueError):
@@ -212,22 +169,9 @@ def init_sentry(
 ):
     """Initialise the error tracker when a DSN is configured; inert otherwise.
 
-    Returns True when the tracker is live. The SDK is imported INSIDE the DSN
-    gate, so an unconfigured process (local development, CI, the test suite)
-    never loads it and never touches a transport. Both ways of failing to
-    report degrade to a warning rather than a dead boot: an SDK that is not
-    installed, and a DSN its own parser refuses. ``init_sentry`` is called
-    while ``config.settings`` is executing, so a raise here is a dead
-    deployment, not one broken worker.
-
-    ``sample_rate`` is the spend knob: it is Sentry's own client-side sampling,
-    so a fraction of events is kept instead of reporting going dark after an
-    arbitrary count. An invalid value falls back to 1.0 with a warning rather
-    than reaching the SDK, because the SDK treats a negative rate as "drop
-    every event" and a rate above 1 or NaN as "keep every event". A
-    ``transport`` may be injected (tests use it to prove nothing is sent over
-    a socket); it is passed straight to the SDK and takes no other behaviour
-    with it.
+    The SDK is imported inside the DSN gate. An SDK that is missing or a DSN its
+    parser refuses warns instead of killing the boot, because settings calls this
+    mid-import. A ``transport`` may be injected for tests.
     """
     log = log or logger
     if dsn is None:
@@ -256,17 +200,15 @@ def init_sentry(
             "environment": environment,
             "release": release,
             "sample_rate": sample_rate,
-            # Errors only: this app instruments no transactions, and a
-            # non-zero trace rate would bill for telemetry nothing consumes.
+            # Errors only: no transactions are instrumented, so tracing would
+            # bill for telemetry nothing consumes.
             "traces_sample_rate": traces_sample_rate,
-            # Request bodies, cookies, headers and user identifiers stay in
-            # the process unless an operator deliberately opts in.
+            # PII stays in-process unless an operator opts in.
             "send_default_pii": False,
-            # A breadcrumb buffer is bounded on purpose: 100 default crumbs
-            # times a noisy event is most of a free-tier payload.
+            # 100 default crumbs times a noisy event is most of a free-tier
+            # payload.
             "max_breadcrumbs": 20,
-            # The stack trace is already in the exception; attaching a second
-            # copy inflates every event for no diagnostic gain.
+            # The exception already carries the stack trace.
             "attach_stacktrace": False,
             "before_send": before_send,
             "integrations": [

@@ -1,12 +1,6 @@
 /**
- * White-label template manifest (U-W1-T1): the single typed source for brand,
- * contact, navigation links and feature flags. `site.ts` re-derives its flat
- * `site` export from this object so every existing import keeps compiling
- * untouched.
- *
- * Every brand/contact string is overridable through NEXT_PUBLIC_* env vars
- * (.env.local) — no other file hardcodes tenant values. NEXT_PUBLIC_* values
- * are baked in at build time: after editing, rebuild (next build).
+ * Single typed source for brand, contact, nav and flags. Values are baked in
+ * at build time, so env edits require a rebuild.
  */
 function env(name: string): string {
   const value = process.env[name];
@@ -37,13 +31,12 @@ export interface TemplateManifest {
   contact: {
     /** Customer support inbox (also the SMTP sender address). */
     supportEmail: string;
-    /** Display phone number (e.g. "+91 98765 43210"). Empty = hidden in UI. */
+    /** Empty hides the channel in the UI. */
     supportPhone: string;
-    /** WhatsApp number in international digits, no "+" (e.g. "919876543210"). Empty = hidden. */
+    /** International digits, no "+"; empty hides. */
     whatsappNumber: string;
-    /** Pre-filled message for the WhatsApp deep link. */
     whatsappMessage: string;
-    /** Full profile URL (e.g. "https://instagram.com/maisonaurel"). Empty = hidden. */
+    /** Empty hides the channel in the UI. */
     instagramUrl: string;
   };
   /** Primary header navigation. */
@@ -77,9 +70,7 @@ export const templateConfig = {
     instagramUrl: env("NEXT_PUBLIC_INSTAGRAM_URL"),
   },
 
-  // Rendered directly: Header reads `nav`, Footer reads `footer.shop/help/legal`
-  // and MenuOverlay spreads `footer.shop`. This manifest is the single source
-  // those components use - no component keeps its own copy of these links.
+  // The only copy of these links: Header/Footer/MenuOverlay all read here.
   nav: [
     { href: "/products", label: "Shop" },
     { href: "/products?ordering=-created_at", label: "New arrivals" },
@@ -103,11 +94,8 @@ export const templateConfig = {
     ],
   },
 
-  // White-label switches. Consumed today: `guestCheckout` gates the guest
-  // cart/checkout path (CartView, CheckoutView) and `restockNotifications`
-  // gates the PDP's RestockForm replacement row (`!inStock &&`). Declared
-  // but not yet wired to a consumer: `orderTracking`, `returnsRequests`.
-  // Reviews stay off until a tenant curates moderation.
+  // guestCheckout and restockNotifications are wired; orderTracking and
+  // returnsRequests are declared only. Reviews stay off until moderated.
   featureFlags: {
     guestCheckout: true,
     restockNotifications: true,

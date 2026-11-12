@@ -6,11 +6,7 @@ declare global {
   }
 }
 
-/**
- * Loads Razorpay Checkout only when the payment step needs it (perf plan:
- * never globally). Resolves false on load failure — the UI treats that as a
- * retryable error, never a payment state.
- */
+/** Load on demand, never globally; false means the UI shows a retryable error. */
 export function loadRazorpay(): Promise<boolean> {
   return new Promise((resolve) => {
     if (typeof window === "undefined") return resolve(false);

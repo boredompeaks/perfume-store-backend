@@ -1,7 +1,3 @@
-"""Products unit tests - docs/test-gaps.md items 15-22, plus the manual
-stock-adjustment feature (``adjust_stock`` / ``StockMovement``) and its
-admin surface."""
-
 import base64
 import math
 import os
@@ -68,7 +64,6 @@ class ProductListFilterTests(ApiTestCase):
             price="200.00",
             description="Smoky oud with saffron.",
         )
-        # description matches "rose" even though the name does not
         self.p_jasmine = self.make_product(
             name="Jasmine Mist",
             category="Floral",
@@ -77,7 +72,6 @@ class ProductListFilterTests(ApiTestCase):
         )
 
     def _list_all(self, params=None):
-        """Walk every page and return the combined results list."""
         results, page = [], 1
         while True:
             res = self.client.get("/api/products/", {**(params or {}), "page": page})
@@ -87,13 +81,12 @@ class ProductListFilterTests(ApiTestCase):
                 return results
             page += 1
 
-    # 15. search across name/description/category ---------------------------------------
     def test_search_across_name_description_and_category(self):
         cases = {
-            "Rose Water": {self.p_rose.id},  # name match
-            "jasmine blend": {self.p_jasmine.id},  # description match
-            "oriental": {self.p_oud.id},  # category match
-            "ROSE": {self.p_rose.id, self.p_jasmine.id},  # icase across fields
+            "Rose Water": {self.p_rose.id},
+            "jasmine blend": {self.p_jasmine.id},
+            "oriental": {self.p_oud.id},
+            "ROSE": {self.p_rose.id, self.p_jasmine.id},
         }
         for term, expected in cases.items():
             with self.subTest(term=term):
@@ -107,7 +100,6 @@ class ProductListFilterTests(ApiTestCase):
         self.assertEqual(res.data["count"], 0)
         self.assertEqual(res.data["results"], [])
 
-    # 16. category filter (iexact) + min/max price incl. invalid decimal -> 400 -----------
     def test_category_filter_is_case_insensitive(self):
         res = self.client.get("/api/products/", {"category": "FLORAL"})
         self.assertEqual(res.status_code, 200, res.data)
@@ -122,7 +114,7 @@ class ProductListFilterTests(ApiTestCase):
             {"category": "floral", "min_price": "150", "max_price": "250"},
         )
         self.assertEqual(res.status_code, 200, res.data)
-        self.assertEqual(res.data["count"], 0)  # florals cost 100 and 300
+        self.assertEqual(res.data["count"], 0)
 
         res = self.client.get("/api/products/", {"min_price": "150"})
         self.assertEqual(res.data["count"], 2)
@@ -134,8 +126,7 @@ class ProductListFilterTests(ApiTestCase):
         self.assertEqual({row["id"] for row in res.data["results"]}, {self.p_oud.id})
 
     def test_zero_price_bounds_are_applied_not_ignored(self):
-        """0 is a real bound: Decimal("0") is falsy, so a truthiness test
-        silently dropped it and a zero ceiling returned every product."""
+        """0 is a real bound: Decimal("0") is falsy, so a truthiness test would silently drop it and a zero ceiling would return every product."""
         res = self.client.get("/api/products/", {"min_price": "0"})
         self.assertEqual(res.status_code, 200, res.data)
         self.assertEqual(res.data["count"], 3)
@@ -158,9 +149,6 @@ class ProductListFilterTests(ApiTestCase):
                     res.data["error"], "Price filters must be valid numbers"
                 )
 
-    # 17. ordering whitelist (invalid value ignored, not 500) ------------------------------
-    # Page 2 is requested explicitly below, so the size-2 override keeps the
-    # walk genuinely multi-page instead of clamping back onto page 1.
     @override_settings(PRODUCTS_PAGE_SIZE=2)
     def test_ordering_by_price_and_name(self):
         res = self.client.get("/api/products/", {"ordering": "-price", "page": 1})
@@ -183,8 +171,6 @@ class ProductListFilterTests(ApiTestCase):
         )
 
     def test_invalid_ordering_values_ignored_not_500(self):
-        """Whitelist only: unknown, related-field and injection-ish values are
-        ignored, never raise (no 500, no field leak)."""
         for ordering in (
             "user",
             "password",
@@ -198,9 +184,6 @@ class ProductListFilterTests(ApiTestCase):
                 self.assertEqual(res.status_code, 200, res.data)
                 self.assertEqual(res.data["count"], 3)
 
-    # 18. pagination envelope shape ---------------------------------------------------------
-    # The size-2 override pins the multi-page envelope behaviour explicitly;
-    # the production default is the env-driven PRODUCTS_PAGE_SIZE (F-23).
     @override_settings(PRODUCTS_PAGE_SIZE=2)
     def test_pagination_envelope_shape(self):
         res = self.client.get("/api/products/")
@@ -228,10 +211,6 @@ class ProductListFilterTests(ApiTestCase):
         self.assertEqual(len(res.data["results"]), 1)
 
     def test_page_size_is_env_driven(self):
-        """F-23: the page size comes from the env-driven
-        ``settings.PRODUCTS_PAGE_SIZE`` (documented in .env.example), not a
-        hardcoded literal — the envelope math always follows the active size
-        and a deployment tunes it without a code change."""
         res = self.client.get("/api/products/")
         self.assertEqual(res.data["count"], 3)
         expected_pages = math.ceil(3 / settings.PRODUCTS_PAGE_SIZE)
@@ -253,13 +232,6 @@ class ProductListFilterTests(ApiTestCase):
         self.assertEqual(res.data["current_page"], 1)
 
     def test_f12_default_listing_order_is_deterministic(self):
-        """F-12/V-20 regression pin: without an explicit ``ordering`` the
-        listing still has a deterministic default order (newest first,
-        ``-created_at``, with the unique ``-id`` as the total tiebreaker),
-        so pages are stable across identical requests. The pin's mechanism
-        is the view-level default order_by (the model keeps no Meta.ordering
-        by design); identical timestamps force the id tiebreaker to decide
-        the sequence."""
         from django.utils import timezone
 
         fixed = timezone.make_aware(timezone.datetime(2026, 1, 1, 12, 0, 0))
@@ -275,7 +247,6 @@ class ProductListFilterTests(ApiTestCase):
 
 @tag("products")
 class SlugGenerationTests(ApiTestCase):
-    # 19. slug auto-generation + collision suffix --------------------------------------------
     def test_slug_autogeneration_and_collision_suffix(self):
         first = self.make_product(name="Rose Water")
         self.assertEqual(first.slug, "rose-water")
@@ -292,21 +263,10 @@ class SlugGenerationTests(ApiTestCase):
     def test_symbol_only_name_falls_back_to_product_slug(self):
         product = self.make_product(name="!!! ???")
         self.assertEqual(product.slug, "product")
-        # even the fallback collides safely
         self.assertEqual(self.make_product(name="###").slug, "product-2")
 
     def test_long_name_collision_truncated_to_slug_max_length(self):
-        """The collision branch gives the base up to the suffix's characters.
-
-        Expected values are hand-written literals, never recomputed from the
-        bound: a pin derived from the constant it guards agrees with a wrong
-        constant from both sides. 98 + len("-2") == the declared 100.
-
-        The name here is 100 characters, the model's own declared bound, so the
-        row stores on both engines. The over-long input that this pin used to
-        use (150) is not a valid row at all -- see
-        ``test_over_long_name_collision_against_a_stored_row``.
-        """
+        """Expected values are hand-written literals, never recomputed from the bound: 98 + len("-2") == the declared 100."""
         first = self.make_product(name="x" * 100)
         self.assertEqual(first.slug, "x" * 100)
         second = self.make_product(name="x" * 100)
@@ -314,15 +274,6 @@ class SlugGenerationTests(ApiTestCase):
         self.assertEqual(len(second.slug), 100)
 
     def test_over_long_name_collision_against_a_stored_row(self):
-        """Same collision branch, with the base coming from an over-long name.
-
-        This is the case the 150-character fixture used to describe. The
-        generated value is pinned in memory rather than through ``save()``
-        because PostgreSQL cannot store a 150-character ``name`` (its own
-        declared bound is the same 100) -- the earlier version of this pin
-        therefore only ever ran on SQLite, the engine that enforces no
-        declared length, and errored on the engine production runs.
-        """
         self.make_product(name="x" * 100)
         candidate = products(name="x" * 150)
         candidates = candidate._slug_candidates()
@@ -330,69 +281,25 @@ class SlugGenerationTests(ApiTestCase):
         self.assertEqual(next(candidates), "x" * 98 + "-2")
 
     def test_long_name_without_collision_truncated_to_slug_max_length(self):
-        """PG-2b: the FIRST candidate is clamped to the declared bound.
-
-        This was the shipped ``@unittest.expectedFailure`` (V-15 neighbour),
-        whose own instruction was to "flip when slug generation truncates
-        unconditionally": the unclamped first candidate kept all 150
-        slugified characters. Un-xfailed because it now truncates, and left
-        as a pin rather than deleted, because the overshoot was a real property
-        of the generator even while the row it came from was not a row the
-        database would accept.
-        """
         candidate = products(name="x" * 150)
         generated = next(candidate._slug_candidates())
         self.assertEqual(generated, "x" * 100)
         self.assertEqual(len(generated), 100)
 
-    # U+00BD VULGAR FRACTION ONE HALF. ``slugify`` normalises it to a digit, a
-    # FRACTION SLASH and a digit, then drops the non-ASCII slash -- so ONE
-    # character of name becomes TWO characters of slug. This is the whole
-    # mechanism that makes an over-long generated value reachable from a row
-    # the database will actually accept: the name stays inside its own declared
-    # width while the value derived from it leaves the slug column's. Written as
-    # an escape so the width of a source line is not the width of the name.
+    # U+00BD (vulgar fraction one half) slugifies to two characters, the mechanism that makes an
+    # over-long generated value reachable from a row the database will accept.
     WIDENING_CHAR = "\u00bd"
 
     def test_storable_name_slugifying_wider_than_the_slug_column_is_clamped(self):
-        """PG-2b cycle 2: the clamp reached through a row that STORES.
-
-        Every other truncation pin in this class drives an over-long name, and
-        an over-long name is not a row either database accepts - ``name`` is
-        declared at the same 100 as ``slug``. Those pins therefore only ever
-        ran on SQLite, which enforces no declared length, so PostgreSQL never
-        saw the clamp exercised through a real save at all. This one uses 60
-        widening characters: 60 is inside the declared 100, so the row saves on
-        both engines, while ``slugify`` turns it into 120 characters of slug and
-        the generated value no longer fits the column it is about to be
-        written to.
-
-        The expected value is a hand-written literal, never
-        ``slugify(name)[:100]``: a pin derived from the constant it guards
-        agrees with a wrong constant from both sides. Sixty widening characters
-        are ``"12"`` sixty times over, and the first 100 characters of that run
-        are ``"12"`` fifty times over.
-
-        Completeness: widening the ``slug`` column changes what is stored here
-        and fails this assertion, so this is a drift guard and not a snapshot
-        of the current bound.
-        """
         product = self.make_product(name=self.WIDENING_CHAR * 60)
         self.assertEqual(product.slug, "12" * 50)
         self.assertEqual(len(product.slug), 100)
-        # Re-read through the database rather than trusting the in-memory
-        # attribute: the defect this guards is a value the COLUMN rejects, so
-        # the pin has to be about what the column accepted.
+        # Re-read through the database: the risk this guards is a value the COLUMN rejects, so the
+        # pin has to be about what the column accepted.
         stored = products.objects.get(pk=product.pk).slug
         self.assertEqual(stored, "12" * 50)
 
     def test_storable_widening_name_collision_lands_inside_the_slug_column(self):
-        """Same input through the collision branch, still a storable row.
-
-        The first row takes the whole 100 characters, so the second one has to
-        give the base up to the "-2" marker's two characters. Hand-written
-        again: ``"12"`` forty-nine times then the marker.
-        """
         self.make_product(name=self.WIDENING_CHAR * 60)
         second = self.make_product(name=self.WIDENING_CHAR * 60)
         self.assertEqual(second.slug, "12" * 49 + "-2")
@@ -404,33 +311,19 @@ class SlugGenerationTests(ApiTestCase):
         self.assertEqual(next(candidate._slug_candidates()), "z" * 100)
 
     def test_slug_max_length_declaration_is_pinned(self):
-        """The bound the generator reads is the declared one, at a literal.
-
-        This is the completeness check for the truncation pins above: they
-        assert behaviour at 100 characters, so widening the column has to fail
-        HERE, naming the declaration, rather than silently leaving them
-        asserting against a bound that no longer exists.
-        """
         self.assertEqual(products._meta.get_field("slug").max_length, 100)
 
     def test_slug_at_the_bound_is_left_whole(self):
-        """Clamping must not eat characters that already fit."""
         self.assertEqual(self.make_product(name="y" * 99).slug, "y" * 99)
         self.assertEqual(self.make_product(name="y" * 100).slug, "y" * 100)
 
     def test_two_names_sharing_a_prefix_get_distinct_slugs(self):
-        """Threat case for blind truncation: both names slugify to the SAME 100
-        characters -- they differ only in case, which slugify folds -- so the
-        discriminator can only come from the collision branch, and cutting the
-        finished candidate instead of the base would collapse the pair onto one
-        slug and hand the uniqueness constraint a 500."""
+        """Both names slugify to the SAME 100 characters, so the discriminator can only come from the collision branch; truncating the finished candidate would collapse the pair onto one slug."""
         first = self.make_product(name="o" * 100)
         second = self.make_product(name="O" * 100)
         self.assertEqual(first.slug, "o" * 100)
         self.assertEqual(second.slug, "o" * 98 + "-2")
         self.assertNotEqual(first.slug, second.slug)
-        # The over-long form of the same hazard, in memory for the reason given
-        # on test_over_long_name_collision_against_a_stored_row.
         third = products(name="o" * 120 + "cc")
         candidates = third._slug_candidates()
         next(candidates)
@@ -438,10 +331,6 @@ class SlugGenerationTests(ApiTestCase):
         self.assertEqual(next(candidates), "o" * 98 + "-3")
 
     def test_collision_suffix_keeps_every_candidate_inside_the_bound(self):
-        """A multi-digit suffix has to make the base shorter, or a late
-        collision would push the value back over the declared length. Twelve
-        rows on one base walk the counter to a two-digit marker, which the
-        single-digit cases cannot reach."""
         base = "w" * 100
         first = self.make_product(name=base)
         self.assertEqual(first.slug, "w" * 100)
@@ -457,22 +346,14 @@ class SlugGenerationTests(ApiTestCase):
         self.assertEqual(products.objects.filter(slug__in=slugs).count(), 12)
 
     def test_empty_and_punctuation_names_use_the_fallback(self):
-        """slugify returns nothing for these, so the FALLBACK is what has to
-        stay inside the bound -- and it does without truncating anything,
-        which is why the length clamp is not what saves these rows."""
         self.assertEqual(self.make_product(name="").slug, "product")
         self.assertEqual(self.make_product(name="###").slug, "product-2")
-        # An over-long name of pure punctuation slugifies to nothing at all, so
-        # the fallback is still what lands in the column.
         candidates = products(name="!" * 150)._slug_candidates()
         next(candidates)
         next(candidates)
         self.assertEqual(next(candidates), "product-3")
 
     def test_non_slug_integrity_error_propagates(self):
-        """The retry loop must not swallow a real defect: an IntegrityError
-        that is not the slug unique constraint propagates unchanged rather
-        than burning through the candidate walk."""
         candidate = products(
             name="Rose Water",
             description="d",
@@ -494,7 +375,6 @@ class SlugGenerationTests(ApiTestCase):
         product.save()
         product.refresh_from_db()
         self.assertEqual(product.slug, "custom-slug")
-        # renaming must not silently rewrite the slug (stable URLs)
         product.name = "Renamed Product"
         product.save()
         product.refresh_from_db()
@@ -503,18 +383,7 @@ class SlugGenerationTests(ApiTestCase):
 
 @tag("products")
 class SlugGenerationRaceTests(TransactionTestCase):
-    """Two threads, two connections, one new name: the slug generation
-    must not let an IntegrityError escape, and both rows must survive with
-    distinct slugs.
-
-    ``TransactionTestCase`` and not ``TestCase``: the point is two SEPARATE
-    database connections holding real row locks, and a test-case transaction
-    would put both workers in the same one, where the race cannot happen.
-    ``close_old_connections`` per worker is what makes them genuinely
-    separate. Driven on PostgreSQL -- the engine that enforces the unique
-    constraint under real concurrency -- rather than only on SQLite, which
-    serialises writes and so cannot exhibit the window this pin exists for.
-    """
+    """TransactionTestCase, not TestCase: the point is two SEPARATE database connections holding real row locks, and a TestCase transaction would put both workers in the same one."""
 
     def test_two_threads_one_name_both_rows_survive(self):
         import threading
@@ -537,7 +406,7 @@ class SlugGenerationRaceTests(TransactionTestCase):
                     stock=1,
                     category="Floral",
                 )
-            except Exception as exc:  # reported, never swallowed
+            except Exception as exc:
                 errors.append(exc)
             finally:
                 close_old_connections()
@@ -549,28 +418,19 @@ class SlugGenerationRaceTests(TransactionTestCase):
             thread.join(timeout=30)
 
         if connection.vendor == "postgresql":
-            # The guarantee this pin exists for: no IntegrityError escapes
-            # the generation path, and both rows survive with distinct slugs.
             self.assertEqual(errors, [])
             self.assertEqual(products.objects.count(), 2)
             slugs = set(products.objects.values_list("slug", flat=True))
             self.assertEqual(len(slugs), 2)
         else:
-            # SQLite serialises writes: a genuinely concurrent insert is
-            # refused with OperationalError rather than blocking, which is
-            # the engine doing the mutual exclusion itself. That refusal is
-            # the documented consequence of the engine's own write
-            # serialisation -- but an IntegrityError escaping the generation
-            # path is never acceptable on any engine, so it is asserted
-            # absent here too.
+            # SQLite serialises writes: a genuinely concurrent insert is refused with OperationalError, the
+            # engine doing mutual exclusion itself; an IntegrityError escaping the slug path is never acceptable.
             for exc in errors:
                 self.assertIsInstance(exc, OperationalError)
 
 
 @tag("products")
 class ProductWritePermissionTests(ApiTestCase):
-    """20. create/update/delete require staff - 403 for anon + normal user."""
-
     def setUp(self):
         self.staff = self.make_staff()
         self.user = self.make_user("customer")
@@ -678,7 +538,6 @@ class ProductWritePermissionTests(ApiTestCase):
 
 @tag("products")
 class ProductDetailTests(ApiTestCase):
-    # 21. detail 404 for unknown slug -------------------------------------------------------
     def test_unknown_slug_returns_404(self):
         res = self.client.get("/api/products/does-not-exist/")
         self.assertEqual(res.status_code, 404, res.data)
@@ -692,11 +551,7 @@ class ProductDetailTests(ApiTestCase):
         self.assertEqual(res.data["price"], "499.99")
         self.assertEqual(res.data["slug"], "rose-water")
 
-    # 22. serializer exposes the full model field set (intentional canary) -------------------
     def test_serializer_field_set_is_pinned(self):
-        """Docs/test-gaps #22: this pins the CURRENT serializer shape. It will
-        break on purpose when `fields = '__all__'` is replaced by an explicit
-        whitelist (V-19), forcing a conscious review of the public surface."""
         product = self.make_product()
         res = self.client.get(f"/api/products/{product.slug}/")
         self.assertEqual(
@@ -714,11 +569,6 @@ class ProductDetailTests(ApiTestCase):
                 "created_at",
             },
         )
-
-
-# =====================================================================================
-# Manual stock adjustment feature (adjust_stock / StockMovement ledger)
-# =====================================================================================
 
 
 @tag("products")
@@ -751,8 +601,8 @@ class AdjustStockTests(ApiTestCase):
         with self.assertRaises(ValueError):
             self.product.adjust_stock(self.admin, -11, StockMovement.Reason.DAMAGE)
         self.product.refresh_from_db()
-        self.assertEqual(self.product.stock, 10)  # unchanged
-        self.assertEqual(StockMovement.objects.count(), 0)  # nothing logged
+        self.assertEqual(self.product.stock, 10)
+        self.assertEqual(StockMovement.objects.count(), 0)
 
     def test_negative_delta_allowed_within_stock(self):
         self.product.adjust_stock(self.admin, -4, StockMovement.Reason.CORRECTION)
@@ -760,15 +610,11 @@ class AdjustStockTests(ApiTestCase):
         self.assertEqual(self.product.stock, 6)
 
     def test_adjust_stock_re_reads_the_locked_row(self):
-        """SPEC-6-02: adjust_stock runs under atomic + select_for_update, so
-        it must gate on the row's current value, not the instance's stale
-        snapshot — the observable consequence of serialising against the
-        payment flow's locked decrements."""
-        # a concurrent writer changed the row behind self's back
+        """adjust_stock runs under atomic + select_for_update, so it must gate on the row's current value, not the instance's stale snapshot."""
         products.objects.filter(pk=self.product.pk).update(stock=50)
         self.product.adjust_stock(self.admin, -5, StockMovement.Reason.CORRECTION)
         self.product.refresh_from_db()
-        self.assertEqual(self.product.stock, 45)  # 50 - 5, not 10 - 5
+        self.assertEqual(self.product.stock, 45)
         movement = StockMovement.objects.get()
         self.assertEqual(movement.stock_after, 45)
 
@@ -784,21 +630,15 @@ class AdjustStockTests(ApiTestCase):
         self.assertEqual(str(movement), "Test oudh: +3 (returned)")
 
     def test_stock_health_property_branches(self):
-        self.assertEqual(self.product.stock_health, "ok")  # 10
+        self.assertEqual(self.product.stock_health, "ok")
         self.product.adjust_stock(self.admin, -5, StockMovement.Reason.CORRECTION)
-        self.assertEqual(self.product.stock_health, "low")  # 5
+        self.assertEqual(self.product.stock_health, "low")
         self.product.adjust_stock(self.admin, -5, StockMovement.Reason.DAMAGE)
-        self.assertEqual(self.product.stock_health, "out")  # 0
+        self.assertEqual(self.product.stock_health, "out")
 
 
 @tag("products")
 class InventoryAdjustApiTests(ApiTestCase):
-    """SPEC-9-06 [R-9.4.7] (spec line 3280, `POST /admin/inventory/adjustments`
-    under the Inventory module): a thin REST endpoint that reuses the shipped
-    ``adjust_stock`` service and the ``HasInventoryAdjust`` permission. The
-    ledger assertions mirror AdjustStockTests — the view adds HTTP, nothing
-    else."""
-
     URL = "/api/products/inventory/adjustments/"
 
     def setUp(self):
@@ -836,15 +676,12 @@ class InventoryAdjustApiTests(ApiTestCase):
         payload.update(overrides)
         return payload
 
-    # permission matrix -------------------------------------------------------
     def test_anonymous_caller_is_denied_403(self):
         res = self._post(self._payload(), client=self.fresh_client())
         self.assertEqual(res.status_code, 403, res.data)
         self.assertEqual(StockMovement.objects.count(), 0)
 
     def test_catalogue_role_lacks_inventory_adjust_403(self):
-        """Pin the least-privilege split: catalogue may write products but
-        NOT adjust inventory (roles.py: inventory.adjust = inventory+admin)."""
         catmgr = self._user_with_role("catmgr", ROLE_CATALOGUE)
         self.client.force_authenticate(catmgr)
         res = self._post(self._payload())
@@ -854,14 +691,13 @@ class InventoryAdjustApiTests(ApiTestCase):
         )
         self.assertEqual(StockMovement.objects.count(), 0)
         self.product.refresh_from_db()
-        self.assertEqual(self.product.stock, 10)  # untouched
+        self.assertEqual(self.product.stock, 10)
 
     def test_inventory_role_is_allowed(self):
         self.client.force_authenticate(self.invmgr)
         res = self._post(self._payload())
         self.assertEqual(res.status_code, 201, res.data)
 
-    # happy path + ledger contract ---------------------------------------------
     def test_successful_adjustment_writes_the_service_ledger_row(self):
         self.client.force_authenticate(self.invmgr)
         res = self._post(self._payload())
@@ -893,8 +729,6 @@ class InventoryAdjustApiTests(ApiTestCase):
         self.assertEqual(movement.stock_after, 6)
 
     def test_below_zero_adjustment_rejected_without_ledger_row(self):
-        """The service's ValueError contract surfaces as a 400 and rolls the
-        whole mutation back: stock unchanged, no movement row."""
         self.client.force_authenticate(self.invmgr)
         res = self._post(self._payload(delta=-11, reason=StockMovement.Reason.DAMAGE))
         self.assertEqual(res.status_code, 400, res.data)
@@ -903,7 +737,6 @@ class InventoryAdjustApiTests(ApiTestCase):
         self.assertEqual(self.product.stock, 10)
         self.assertEqual(StockMovement.objects.count(), 0)
 
-    # request validation ---------------------------------------------------
     def test_unknown_product_is_404(self):
         self.client.force_authenticate(self.invmgr)
         res = self._post(self._payload(product_id=999999))
@@ -946,17 +779,12 @@ class InventoryAdjustApiTests(ApiTestCase):
         )
         self.assertEqual(res.status_code, 201, res.data)
 
-    # admin-family mounts (SPEC-9-T3, R-9.4.7) --------------------------------
     ADMIN_URLS = (
         "/api/v1/admin/inventory/adjustments/",
         "/api/admin/inventory/adjustments/",
     )
 
     def test_admin_family_paths_reach_the_one_adjustment_view(self):
-        """The canonical admin mounts and the deprecated store alias are one
-        handler: resolve() returns the same callable for every path, so the
-        mount move did not add a second view, and the admin family registers
-        it exactly once."""
         from config.urls import v1_admin_patterns
         from products.views import inventory_adjust
 
@@ -1008,10 +836,6 @@ class InventoryAdjustApiTests(ApiTestCase):
         self.assertEqual(StockMovement.objects.count(), 0)
 
     def test_admin_path_refuses_an_anonymous_caller(self):
-        """An anonymous caller is denied with the staff API's uniform 403
-        envelope, not a 401: ``HasInventoryAdjust`` raises PermissionDenied
-        for guests too (common/permissions.py). The admin mount must not
-        diverge from the path it replaces."""
         for url in self.ADMIN_URLS:
             with self.subTest(url=url):
                 res = self.fresh_client().post(url, self._payload(), format="json")
@@ -1029,8 +853,6 @@ class InventoryAdjustApiTests(ApiTestCase):
 
 @tag("products")
 class ProductAdminTests(ApiTestCase):
-    """The customised product admin renders and its actions work."""
-
     def setUp(self):
         User.objects.create_superuser(
             "padmin", "padmin@example.com", "S3cure-Passphrase!"
@@ -1069,25 +891,19 @@ class ProductAdminTests(ApiTestCase):
         res = self.client.get("/admin/products/products/")
         self.assertEqual(res.status_code, 200)
         self.assertContains(res, self.with_image.name)
-        self.assertContains(res, "out of stock")  # stock 0 -> red flag branch
-        self.assertContains(res, "low (3)")  # stock 3 -> amber branch
-        self.assertContains(res, "rose_")  # thumbnail from the ImageField
+        self.assertContains(res, "out of stock")
+        self.assertContains(res, "low (3)")
+        self.assertContains(res, "rose_")
 
     def test_changelist_renders_inline_stock_next_to_price(self):
-        """SPEC-20-11 [R-20.35]: `stock` is inline-editable beside `price`.
-        The affordance is cheap; the ledger write behind it is the contract
-        (see the inline-edit pins in tests/test_admin_inline_stock.py)."""
         self.assertIn("stock", ProductAdmin.list_editable)
         res = self.client.get("/admin/products/products/")
         self.assertEqual(res.status_code, 200)
-        self.assertContains(res, 'name="form-0-price"')  # price still editable
-        self.assertContains(res, 'name="form-0-stock"')  # ... and stock with it
-        self.assertContains(res, 'class="field-stock"')  # column still labelled
+        self.assertContains(res, 'name="form-0-price"')
+        self.assertContains(res, 'name="form-0-stock"')
+        self.assertContains(res, 'class="field-stock"')
 
     def test_changelist_bulk_save_of_price_leaves_stock_ledger_free(self):
-        """A price-only inline save never touches inventory: the stock cell is
-        posted back unchanged (that is what the real grid submits), so the
-        delta is 0 — no mutation, no movement row."""
         res = self.client.get("/admin/products/products/")
         management = dict(
             re.findall(r'name="(form-[A-Z_]+)" value="([^"]*)"', res.content.decode())
@@ -1101,23 +917,19 @@ class ProductAdminTests(ApiTestCase):
                 "form-INITIAL_FORMS": "1",
                 "form-0-id": str(self.plain.id),
                 "form-0-price": "77.00",
-                "form-0-stock": "3",  # untouched cell, echoed back unchanged
+                "form-0-stock": "3",
                 "_save": "Save",
             },
             follow=True,
         )
         self.assertEqual(res.status_code, 200)
         self.plain.refresh_from_db()
-        self.assertEqual(self.plain.price, Decimal("77.00"))  # sanctioned edit applied
-        self.assertEqual(self.plain.stock, 3)  # stock untouched
-        self.assertEqual(StockMovement.objects.count(), 0)  # no mutation, no movement
+        self.assertEqual(self.plain.price, Decimal("77.00"))
+        self.assertEqual(self.plain.stock, 3)
+        self.assertEqual(StockMovement.objects.count(), 0)
 
     def test_change_page_stock_is_display_only_add_page_keeps_input(self):
-        """SPEC-6-02 (audit cycle-2 probe): the change page's `stock` input
-        was a live ledger-free mutation path — a change-form POST silently
-        wrote stock. It is read-only once the row exists, while the add page
-        keeps the input because creation sets the opening balance, not an
-        edit."""
+        """The change page's stock input was a live ledger-free mutation path; it is read-only once the row exists, while the add page keeps the input for the opening balance."""
         res = self.client.get(f"/admin/products/products/{self.plain.id}/change/")
         self.assertEqual(res.status_code, 200)
         self.assertNotContains(res, 'name="stock"')
@@ -1126,10 +938,6 @@ class ProductAdminTests(ApiTestCase):
         self.assertContains(res, 'name="stock"')
 
     def test_change_form_save_ignores_tampered_stock(self):
-        """A hand-crafted change-form POST must not move stock: sanctioned
-        edits (price) apply, stock is untouched and no movement row lands —
-        empirically reproduced pre-fix (POST stock=999 -> 200, stock 3->999,
-        zero rows)."""
         res = self.client.post(
             f"/admin/products/products/{self.plain.id}/change/",
             {
@@ -1138,7 +946,7 @@ class ProductAdminTests(ApiTestCase):
                 "description": "d",
                 "price": "88.00",
                 "size": "30",
-                "stock": "999",  # the silent edit the old form allowed
+                "stock": "999",
                 "stock_movements-TOTAL_FORMS": "0",
                 "stock_movements-INITIAL_FORMS": "0",
             },
@@ -1146,16 +954,15 @@ class ProductAdminTests(ApiTestCase):
         )
         self.assertEqual(res.status_code, 200)
         self.plain.refresh_from_db()
-        self.assertEqual(self.plain.price, Decimal("88.00"))  # sanctioned edit applied
-        self.assertEqual(self.plain.stock, 3)  # stock untouched
-        self.assertEqual(StockMovement.objects.count(), 0)  # no mutation, no movement
+        self.assertEqual(self.plain.price, Decimal("88.00"))
+        self.assertEqual(self.plain.stock, 3)
+        self.assertEqual(StockMovement.objects.count(), 0)
 
     def test_change_page_renders_with_movement_inline_and_preview(self):
         self.with_image.adjust_stock(
             None, 7, StockMovement.Reason.RESTOCK, "initial fill"
         )
 
-        # with an image: preview renders the stored file
         res = self.client.get(f"/admin/products/products/{self.with_image.id}/change/")
         self.assertEqual(res.status_code, 200)
         self.assertContains(res, "Inventory history (all mutations)")
@@ -1164,19 +971,16 @@ class ProductAdminTests(ApiTestCase):
             res, "Imaged Rose: +7 (restock)"
         )  # movement __str__ in the inline
 
-        # without an image: the empty-preview branch
         res = self.client.get(f"/admin/products/products/{self.plain.id}/change/")
         self.assertEqual(res.status_code, 200)
         self.assertContains(res, "No image uploaded.")
 
     def test_adjust_stock_action_full_flow(self):
-        # step 1: choosing the action renders the intermediate form
         res = self._run_action("adjust_stock", self.plain)
         self.assertEqual(res.status_code, 200)
         self.assertContains(res, "Adjusting stock for the following 1 product(s)")
         self.assertContains(res, "Plain Oud")
 
-        # step 2: applying the form writes the movement
         res = self._run_action(
             "adjust_stock",
             self.plain,
@@ -1203,7 +1007,7 @@ class ProductAdminTests(ApiTestCase):
         )
         self.assertEqual(res.status_code, 200)
         self.plain.refresh_from_db()
-        self.assertEqual(self.plain.stock, 3)  # untouched
+        self.assertEqual(self.plain.stock, 3)
         self.assertEqual(StockMovement.objects.count(), 0)
 
     def test_adjust_stock_action_rejects_invalid_form(self):
@@ -1213,7 +1017,7 @@ class ProductAdminTests(ApiTestCase):
             {"apply": "1", "delta": "not-a-number", "reason": "restock"},
         )
         self.assertEqual(res.status_code, 200)
-        self.assertContains(res, "Change in stock")  # form re-rendered with errors
+        self.assertContains(res, "Change in stock")
         self.plain.refresh_from_db()
         self.assertEqual(self.plain.stock, 3)
 
@@ -1228,14 +1032,7 @@ class ProductAdminTests(ApiTestCase):
 
 @tag("products")
 class ProductFreeShippingFlagTests(ApiTestCase):
-    """SPEC-C-03: the per-product free-shipping flag.
-
-    The flag is a merchant-editable delivery rule. The model default keeps
-    every existing row charged, the admin exposes it through the same
-    ``products.write`` change gate as every other catalogue field, and the
-    public store payload deliberately does NOT carry it: no storefront badge
-    consumes it, and the checkout charge is its only reader.
-    """
+    """The flag is a merchant-editable delivery rule; the public store payload deliberately does not carry it, because no storefront badge consumes it and the total already reflects the waiver."""
 
     def setUp(self):
         self.product = self.make_product(name="Free Ship Oud")
@@ -1297,8 +1094,6 @@ class ProductFreeShippingFlagTests(ApiTestCase):
         self.assertIs(self.product.free_shipping, True)
 
     def test_role_without_products_write_cannot_edit_the_flag(self):
-        # ROLE_SUPPORT holds products.read but not products.write, so the
-        # change gate renders the whole form read-only and refuses the POST.
         client = self._staff_client("flag-viewer", ROLE_SUPPORT)
 
         res = client.get(f"/admin/products/products/{self.product.id}/change/")
@@ -1314,10 +1109,6 @@ class ProductFreeShippingFlagTests(ApiTestCase):
         self.assertIs(self.product.free_shipping, False)
 
 
-# =====================================================================================
-# SPEC-1-01: staff writes via permission_classes + explicit serializer fields
-# =====================================================================================
-
 EXPECTED_PRODUCT_FIELDS = [
     "id",
     "name",
@@ -1331,24 +1122,13 @@ EXPECTED_PRODUCT_FIELDS = [
     "created_at",
 ]
 
-# MERCHANT-DELIST: model columns deliberately NOT exposed on the public
-# product payload. ``is_active`` is delist state — a bare flag in the
-# payload is exactly the existence/state leak the detail 404 exists to
-# avoid — and the surfaces that need it (the Django admin's delist/relist
-# actions) do not read it through this serializer. A new entry here is a
-# decision that must be justified in place, exactly like the whitelist
-# itself.
-#
-# SPEC-C-03: ``free_shipping`` stays off the payload because no storefront
-# badge consumes it — its only reader is the checkout pricing path, which
-# reads the model directly — and the total already reflects the waiver.
+# is_active and free_shipping are deliberately NOT exposed on the public payload: is_active is
+# delist state (a bare flag would leak existence), and no storefront badge consumes free_shipping.
 SERIALIZER_EXCLUDED_FIELDS = {"is_active", "free_shipping"}
 
 
 @tag("products")
 class IsAdminUserOrReadOnlyUnitTests(ApiTestCase):
-    """Unit contract for common.permissions.IsAdminUserOrReadOnly."""
-
     def setUp(self):
         self.permission = IsAdminUserOrReadOnly()
         self.staff = self.make_staff()
@@ -1384,9 +1164,6 @@ class IsAdminUserOrReadOnlyUnitTests(ApiTestCase):
 
 @tag("products")
 class ProductPermissionClassesApiTests(ApiTestCase):
-    """SPEC-1-01 wiring: reads stay public, writes stay staff-only, and the
-    403 contract is unchanged now that the gate lives in permission_classes."""
-
     def setUp(self):
         self.staff = self.make_staff()
         self.product = self.make_product(name="Rose Water")
@@ -1397,15 +1174,13 @@ class ProductPermissionClassesApiTests(ApiTestCase):
         self.assertEqual(
             client.get(f"/api/products/{self.product.slug}/").status_code, 200
         )
-        # OPTIONS is a SAFE_METHOD too; HEAD is not routed by the FBV
-        # (405 before and after this refactor), so it is not asserted here.
+        # OPTIONS is a SAFE_METHOD too; HEAD is not routed by the FBV (405 before and after), so it is
+        # not asserted here.
         self.assertEqual(
             client.options(f"/api/products/{self.product.slug}/").status_code, 200
         )
 
     def test_anonymous_write_on_unknown_slug_is_403_not_404(self):
-        """Permission checks run before the view body: anonymous writes get a
-        uniform 403 even for slugs that do not exist (no existence leak)."""
         res = self.fresh_client().put(
             "/api/products/no-such-slug/", {"price": "1.00"}, format="json"
         )
@@ -1413,10 +1188,6 @@ class ProductPermissionClassesApiTests(ApiTestCase):
         self.assertEqual(res.data["error"], "Administrator access is required.")
 
     def test_staff_write_still_succeeds_end_to_end(self):
-        """SPEC-1-01 wiring: a staff PATCH succeeds end-to-end. The payload
-        uses a sanctioned field: since SPEC-6-02 `stock` is read-only on
-        updates (a REST stock edit would bypass the StockMovement ledger —
-        see ProductStockEditLedgerGuardTests for that contract)."""
         client = self.fresh_client()
         self.api_login("staff", client=client)
         res = client.patch(
@@ -1431,18 +1202,9 @@ class ProductPermissionClassesApiTests(ApiTestCase):
 
 @tag("products")
 class ProductCapabilityGateRoleTests(ApiTestCase):
-    """SPEC-6-03c: view-level per-role allow/deny for the capability swap.
-
-    Reads stay public and the 403 body stays the legacy one; write authority
-    now flows from ``products.write`` (catalogue + admin roles), so a staff
-    account without a granting role is denied — a deliberate tightening
-    under the no-guard-downgrade rule, never a loosening.
-    """
-
     def setUp(self):
         self.product = self.make_product(name="Gate Rose")
         groups = sync_role_groups()
-        # One is_staff user per role, holding exactly that role's group.
         self.role_users = {}
         for role in STAFF_ROLES:
             user = User.objects.create_user(
@@ -1453,8 +1215,6 @@ class ProductCapabilityGateRoleTests(ApiTestCase):
             )
             user.groups.add(groups[role])
             self.role_users[role] = user
-        # The legacy gate granted every is_staff account write access; the
-        # capability gate must deny a role-less staff account (tightening).
         self.roleless_staff = User.objects.create_user(
             username="gate-roleless",
             email="gate-roleless@example.com",
@@ -1498,9 +1258,6 @@ class ProductCapabilityGateRoleTests(ApiTestCase):
         self.assertEqual(res.data["error"], "Administrator access is required.")
 
     def test_roleless_staff_write_is_denied(self):
-        """The no-downgrade rule permits only tightenings: the blanket
-        is_staff write grant is replaced by the roles map, so a staff
-        account with no role loses product write access."""
         client = self._writer_client(self.roleless_staff)
         res = client.post(
             "/api/products/", self._write_payload("Blocked"), format="json"
@@ -1553,33 +1310,22 @@ class ProductCapabilityGateRoleTests(ApiTestCase):
 
 @tag("products")
 class ProductSerializerFieldsTests(ApiTestCase):
-    """SPEC-1-01: '__all__' replaced by an explicit, drift-guarded whitelist."""
-
     def test_fields_are_declared_explicitly(self):
         fields = ProductSerializer.Meta.fields
         self.assertIsInstance(fields, (list, tuple))
         self.assertEqual(list(fields), EXPECTED_PRODUCT_FIELDS)
 
     def test_whitelist_covers_every_field_or_declares_its_exclusion(self):
-        """The explicit list must equal what '__all__' exposed, minus the
-        columns a written decision excludes — a new model column must force
-        a conscious decision here (into the whitelist or into the exclusion
-        set with a reason), never auto-leak and never silently vanish."""
+        """The explicit list must equal what __all__ exposed minus the columns a written decision excludes; a new model column must force a conscious decision, never auto-leak."""
         concrete = {field.name for field in products._meta.concrete_fields}
         self.assertEqual(
             set(ProductSerializer.Meta.fields),
             concrete - SERIALIZER_EXCLUDED_FIELDS,
         )
-        # Every exclusion is a real column: a name here that is not on the
-        # model is a stale entry silently widening the gap.
         self.assertLessEqual(SERIALIZER_EXCLUDED_FIELDS, concrete)
 
     def test_stock_writable_on_create_read_only_on_update(self):
-        """SPEC-6-02 (audit cycle-1 BUG-1): a REST stock write on an existing
-        row is a ledger-free inventory mutation, so updates expose `stock`
-        read-only while creation keeps it writable (opening balance, not an
-        edit). The field stays in the payload either way — pinned response
-        shape lives in test_serializer_field_set_is_pinned."""
+        """A REST stock write on an existing row is a ledger-free inventory mutation, so updates expose stock read-only while creation keeps it writable as the opening balance."""
         self.assertFalse(ProductSerializer().fields["stock"].read_only)
         product = self.make_product()
         self.assertTrue(ProductSerializer(product).fields["stock"].read_only)
@@ -1592,10 +1338,7 @@ class ProductSerializerFieldsTests(ApiTestCase):
 
 @tag("products")
 class ProductStockEditLedgerGuardTests(ApiTestCase):
-    """SPEC-6-02 (audit cycle-1 BUG-1): staff PATCH/PUT {"stock": N} used to
-    return 200, move stock and write ZERO StockMovement rows — a ledger-free
-    inventory mutation path. Updates now ignore `stock`, forcing every
-    existing-row change through the sanctioned adjust_stock ledger path."""
+    """Updates ignore stock so every existing-row change goes through adjust_stock: a REST stock write would be a ledger-free inventory mutation."""
 
     def setUp(self):
         self.staff = self.make_staff()
@@ -1608,8 +1351,8 @@ class ProductStockEditLedgerGuardTests(ApiTestCase):
         )
         self.assertEqual(res.status_code, 200, res.data)
         self.product.refresh_from_db()
-        self.assertEqual(self.product.stock, 10)  # edit ignored
-        self.assertEqual(StockMovement.objects.count(), 0)  # no mutation, no row
+        self.assertEqual(self.product.stock, 10)
+        self.assertEqual(StockMovement.objects.count(), 0)
 
     def test_put_with_stock_is_ignored_and_writes_no_movement(self):
         res = self.client.put(
@@ -1626,12 +1369,10 @@ class ProductStockEditLedgerGuardTests(ApiTestCase):
         )
         self.assertEqual(res.status_code, 200, res.data)
         self.product.refresh_from_db()
-        self.assertEqual(self.product.stock, 10)  # edit ignored
-        self.assertEqual(StockMovement.objects.count(), 0)  # no mutation, no row
+        self.assertEqual(self.product.stock, 10)
+        self.assertEqual(StockMovement.objects.count(), 0)
 
     def test_update_response_still_reports_stock(self):
-        """`stock` keeps its place in the public payload; only its
-        writability changed."""
         res = self.client.patch(
             f"/api/products/{self.product.slug}/", {"stock": 999}, format="json"
         )
@@ -1639,8 +1380,7 @@ class ProductStockEditLedgerGuardTests(ApiTestCase):
         self.assertEqual(res.data["stock"], 10)
 
     def test_create_still_sets_opening_stock_without_movement(self):
-        """Creation is exempt (auditor scope note): the requested stock is
-        the opening balance, not an edit — so no movement row is expected."""
+        """Creation is exempt: the requested stock is the opening balance, not an edit, so no movement row is expected."""
         res = self.client.post(
             "/api/products/",
             {
@@ -1660,8 +1400,6 @@ class ProductStockEditLedgerGuardTests(ApiTestCase):
         self.assertEqual(StockMovement.objects.count(), 0)
 
     def test_adjust_stock_remains_the_sanctioned_edit_path(self):
-        """Anti-regression contrast: the same staff member who cannot PATCH
-        stock can still move inventory — and only via the ledgered path."""
         res = self.client.patch(
             f"/api/products/{self.product.slug}/", {"stock": 999}, format="json"
         )
@@ -1670,7 +1408,7 @@ class ProductStockEditLedgerGuardTests(ApiTestCase):
             self.staff, 5, StockMovement.Reason.RESTOCK, "sanctioned path"
         )
         self.product.refresh_from_db()
-        self.assertEqual(self.product.stock, 15)  # 10 (PATCH ignored) + 5
+        self.assertEqual(self.product.stock, 15)
         movement = StockMovement.objects.get()
         self.assertEqual(movement.delta, 5)
         self.assertEqual(movement.stock_after, 15)
@@ -1679,20 +1417,7 @@ class ProductStockEditLedgerGuardTests(ApiTestCase):
 
 @tag("products")
 class ProductCatalogIndexSchemaTests(ApiTestCase):
-    """SPEC-8-05: spec 8.3 "Indexes" starting set for the catalogue tables.
-
-    2551 ("Product status and category relationships"): category is the
-    public listing/filter key and gets the explicit index. The status half
-    is N/A for this schema — the products table has no lifecycle-status
-    column (stock health is derived by ``stock_health``, not stored state),
-    so there is nothing to index there. Slug (2549) stays satisfied by its
-    UNIQUE constraint (2479) — a unique constraint already implies a
-    backing index; SKU (2553) is equally constraint-covered and already
-    pinned at the DB level by ProductVariantSkuUniquenessTests in
-    test_variant.py. The pins here keep both halves conscious: the
-    category index must exist physically, and slug must not grow a
-    duplicate index on top of its constraint.
-    """
+    """The status half is N/A: the products table has no lifecycle-status column, and later indexes must come from measured query patterns, never silent accretion."""
 
     def _table_constraints(self, model):
         with connection.cursor() as cursor:
@@ -1701,9 +1426,6 @@ class ProductCatalogIndexSchemaTests(ApiTestCase):
             )
 
     def test_meta_declares_the_category_index(self):
-        """The model-level starting set. Later catalogue indexes must come
-        from measured query patterns (2569), i.e. as a conscious edit to
-        this set, never by silent accretion."""
         self.assertEqual(
             {tuple(index.fields) for index in products._meta.indexes},
             {("category",)},
@@ -1718,15 +1440,7 @@ class ProductCatalogIndexSchemaTests(ApiTestCase):
         self.assertTrue(covering, "no index on products.category")
 
     def test_slug_stays_satisfied_by_its_unique_constraint(self):
-        """2549: unique=True on slug (2479) already implies the lookup
-        index the spec asks to start with — the pin rejects any duplicate
-        index stacked on top of the constraint.
-
-        The one non-unique covering index a correct schema may carry is the
-        engine's own ``varchar_pattern_ops`` LIKE index, which exists for
-        ``icontains`` and must not be unique; ``redundant_covering_indexes``
-        excludes it by the name Django itself would have generated.
-        """
+        """unique=True on slug already implies the lookup index the spec asks for; the one non-unique covering index a correct schema may carry is the engine's varchar_pattern_ops LIKE index."""
         covering = covering_indexes(products, "slug")
         self.assertTrue(covering, "no constraint on slug at all")
         self.assertTrue(
@@ -1742,18 +1456,7 @@ class ProductCatalogIndexSchemaTests(ApiTestCase):
 
 @tag("products")
 class StockReservationModelTests(ApiTestCase):
-    """SPEC-12-01 (spec section 12.1): the reservation data model.
-
-    Schema core only — the lifecycle writers arrive later: SPEC-12-02
-    creates reservations inside create_order's atomic block and converts
-    them inside verify_payment's locked block; SPEC-12-03 expires them via
-    the reconciler. Section 12.1's inventory split maps onto the schema
-    as: on-hand inventory stays ``products.stock`` (the only authority),
-    reserved inventory is the sum of a product's active reservations'
-    quantity, available-to-sell is the derived difference (never stored —
-    the reserved/safety-field accounting depth is SPEC-6-13's), expiry is
-    ``expires_at``, and owner/reference are the ``owner``/``order`` FKs.
-    """
+    """Schema core only: the lifecycle writers arrive later; on-hand inventory stays products.stock, while reservations track the checkout-time claims."""
 
     def setUp(self):
         self.owner = self.make_user(username="reserver")
@@ -1783,11 +1486,7 @@ class StockReservationModelTests(ApiTestCase):
         return StockReservation.objects.create(**fields)
 
     def test_field_set_is_pinned(self):
-        """Section 12.1 prescribes exactly this core: the product the units
-        come off, the order reference and owner, the reserved quantity, the
-        status lifecycle, expiry, and distinct created/updated timestamps.
-        A new column must force a conscious decision here, never
-        auto-appear."""
+        """Section 12.1 prescribes this core; a new column must force a conscious decision here, never auto-appear."""
         names = {field.name for field in StockReservation._meta.concrete_fields}
         self.assertEqual(
             names,
@@ -1805,13 +1504,6 @@ class StockReservationModelTests(ApiTestCase):
         )
 
     def test_status_lifecycle_carries_the_spec_vocabulary(self):
-        """§12.1 "Recommended checkout behaviour" names the transitions: a
-        reservation is minted active at checkout (step 3), converted into
-        a committed sale on payment confirmation (step 5), released by a
-        failed/cancelled checkout (step 6), and expired by the scheduled
-        reconciliation (step 7). The writers may only set these named
-        states — never free-form strings — and a minted row starts
-        active."""
         self.assertEqual(
             {value for value, _ in StockReservation.Status.choices},
             {"active", "converted", "released", "expired"},
@@ -1822,11 +1514,6 @@ class StockReservationModelTests(ApiTestCase):
         self.assertEqual(self.make_reservation().status, StockReservation.Status.ACTIVE)
 
     def test_fk_targets_follow_the_cross_app_string_pattern(self):
-        """product resolves in-app; order and owner use the file's existing
-        cross-app string-FK pattern (see StockMovement.created_by) so the
-        products app never imports orders at model load. Deletion policy
-        is cascade throughout: the reservation is a checkout artifact, so
-        it is meaningless once its product or order is gone."""
         product_field = StockReservation._meta.get_field("product")
         order_field = StockReservation._meta.get_field("order")
         owner_field = StockReservation._meta.get_field("owner")
@@ -1845,19 +1532,12 @@ class StockReservationModelTests(ApiTestCase):
         self.assertEqual(StockReservation.objects.count(), 0)
 
     def test_order_product_pair_is_unique_at_the_db_level(self):
-        """Checkout mints at most one reservation per order line: a
-        duplicate (order, product) row would double-count reserved stock
-        in the available-to-sell math, and a retried checkout must
-        re-target the existing hold, not mint a second one. Pinned at the
-        DB level the same way ProductVariant.sku and Order.order_number
-        are (§12.1 implies the constraint: "reserved inventory" is a
-        per-checkout hold with an owner/reference)."""
+        """A duplicate (order, product) row would double-count reserved stock; a retried checkout must re-target the existing hold, so DB uniqueness is the authority."""
         order = self.make_order()
         self.make_reservation(order=order)
         self.assertEqual(StockReservation.objects.count(), 1)
-        # The duplicate create runs inside a nested atomic (savepoint): the
-        # IntegrityError rolls back to the savepoint, leaving the TestCase
-        # transaction usable for the introspection proof below.
+        # The duplicate create runs inside a nested atomic savepoint, so the IntegrityError rolls back
+        # to it and leaves the TestCase transaction usable.
         with self.assertRaises(IntegrityError):
             with transaction.atomic():
                 self.make_reservation(order=order)
@@ -1877,11 +1557,6 @@ class StockReservationModelTests(ApiTestCase):
         )
 
     def test_different_orders_hold_independent_reservations_on_one_product(self):
-        """Uniqueness is per (order, product), not per product: two
-        customers' concurrent checkouts each hold units of the same
-        product as independent rows, and the reserved inventory is their
-        summed quantity. The sufficiency gate is the atomic reservation
-        create in SPEC-12-02, not this constraint."""
         first = self.make_reservation(quantity=1)
         second = self.make_reservation(quantity=3)
         self.assertEqual(first.product, second.product)
@@ -1891,12 +1566,6 @@ class StockReservationModelTests(ApiTestCase):
         self.assertEqual(reserved, 4)
 
     def test_expiry_sweep_query_reads_only_stale_active_rows(self):
-        """The reconciler's sweep (SPEC-12-03) reads status=active AND
-        expires_at<=now; it must be exact on both axes. A still-fresh
-        hold, and rows already converted/released/expired with a past
-        expiry, are all out of scope — only the stale active hold is
-        matched. This is the query shape the (status, expires_at) index
-        serves."""
         stale = self.make_reservation(expires_at=timezone.now() - timedelta(seconds=1))
         self.make_reservation(expires_at=timezone.now() + timedelta(hours=1))
         for status in (
@@ -1919,9 +1588,6 @@ class StockReservationModelTests(ApiTestCase):
         self.assertEqual(sweep, [stale])
 
     def test_quantity_shares_the_stock_column_type(self):
-        """Reserved units are counted in the same column type as on-hand
-        stock (products.stock, StockMovement.stock_after): one integer
-        domain for unit counts across the inventory schema."""
         field = StockReservation._meta.get_field("quantity")
         self.assertIs(type(field), type(products._meta.get_field("stock")))
         reservation = self.make_reservation(quantity=999_999)
@@ -1929,11 +1595,6 @@ class StockReservationModelTests(ApiTestCase):
         self.assertEqual(reservation.quantity, 999_999)
 
     def test_meta_pins_the_unique_constraint_and_expiry_index(self):
-        """The model-level starting set for §12.1: the (order, product)
-        uniqueness constraint plus the composite (status, expires_at)
-        index the expiry-based queries read through. Later inventory
-        indexes must come from measured query patterns, i.e. as a
-        conscious edit to this set, never by silent accretion."""
         self.assertIn(
             "uniq_order_product_reservation",
             {constraint.name for constraint in StockReservation._meta.constraints},
@@ -1944,10 +1605,7 @@ class StockReservationModelTests(ApiTestCase):
         )
 
     def test_reservation_ttl_is_read_at_call_time(self):
-        """expiry_from_now() is the single place a minting writer derives
-        expires_at from: it must honour the env-driven RESERVATION_TTL at
-        call time — the ops/services.py pattern — so an override applies
-        to the very next call instead of being frozen at first import."""
+        """expiry_from_now() is the single place a minting writer derives expires_at from: it must honour RESERVATION_TTL at call time so an override applies to the very next call."""
         with override_settings(RESERVATION_TTL=60):
             before = timezone.now()
             expires = StockReservation.expiry_from_now()
@@ -1960,10 +1618,7 @@ class StockReservationModelTests(ApiTestCase):
             self.assertGreater(later, expires)
 
     def test_reservation_ttl_env_parse_is_fail_safe(self):
-        """settings.py resolves RESERVATION_TTL through _env_int: the
-        documented default (900s — long enough to finish a payment session
-        within the hold) stands when the key is absent, and a malformed
-        value cannot crash startup."""
+        """RESERVATION_TTL resolves through _env_int: the documented 900s default stands when the key is absent, and a malformed value cannot crash startup."""
         with patch.dict(os.environ, {}, clear=True):
             self.assertEqual(_env_int("RESERVATION_TTL", 900), 900)
         with patch.dict(os.environ, {"RESERVATION_TTL": "not-a-number"}):
@@ -1978,14 +1633,7 @@ class StockReservationModelTests(ApiTestCase):
 
 @tag("products")
 class ImageUploadSizeCapTests(ApiTestCase):
-    """SPEC-17-08 [R-17.21]: file upload abuse -> size validation.
-
-    The cap lives on the model field as ``validate_image_size``, so DRF's
-    ModelSerializer copies it onto the API image field and the admin's
-    ModelForm enforces the same validator - one enforcement point covering
-    every entry surface. These tests pin the oversized rejection, the
-    boundary pass, the env override, and the no-image passthrough.
-    """
+    """The cap lives on the model field as validate_image_size, so DRF's ModelSerializer and the admin's ModelForm share one enforcement point."""
 
     def setUp(self):
         self.staff = self.make_staff()
@@ -2021,8 +1669,8 @@ class ImageUploadSizeCapTests(ApiTestCase):
             "size": 30,
             "stock": 1,
             "category": "Floral",
-            # Cap minus the TINY_PNG header already in the buffer: the file
-            # body lands exactly at the limit, and `>` (not `>=`) admits it.
+            # Cap minus the TINY_PNG header already in the buffer: the body lands exactly at the limit, and
+            # `>` (not `>=`) admits it.
             "image": self._png(settings.MAX_UPLOAD_MB * 1024 * 1024 - len(TINY_PNG)),
         }
         res = self.client.post("/api/products/", payload, format="multipart")
@@ -2042,8 +1690,6 @@ class ImageUploadSizeCapTests(ApiTestCase):
         self.assertEqual(res.status_code, 201, res.data)
 
     def test_validator_passes_through_empty_values(self):
-        # The guard branch: no image (or a bare wrapper) must fall through
-        # the validator untouched - the empty-value half of the contract.
         from products.models import validate_image_size
 
         validate_image_size(None)

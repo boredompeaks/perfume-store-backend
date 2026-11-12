@@ -1,20 +1,3 @@
-"""SPEC-20-6 [R-20.11]: saved filters/views on the two busiest changelists.
-
-Spec 20.1 lists "Saved filters/views where useful" among the data-table
-capabilities; Django ships no equivalent, so orders and products get a
-per-user saved filter. These tests pin the four properties that make it
-safe rather than a shortcut around the admin's own gates:
-
-- a saved spec applies on the changelist and narrows the listing,
-- it belongs to ONE user: a foreign pk neither applies nor confirms its
-  existence, and cannot be deleted,
-- it cannot surface a row the user could not otherwise list — the gate is
-  the ModelAdmin's own ``has_view_permission``, so a role without
-  ``orders.read`` is refused by the changelist itself,
-- only parameters the changelist itself accepts are ever stored, so a
-  replayed spec can never turn into a 400.
-"""
-
 import re
 from decimal import Decimal
 from html import unescape
@@ -73,8 +56,6 @@ def content_type_of(model):
 
 @tag("e2e")
 class SavedFilterBarTests(ApiTestCase):
-    """The bar is on both high-traffic changelists, and only for viewers."""
-
     def setUp(self):
         self.support = make_role_user(ROLE_SUPPORT, "bar-support")
         self.client.force_login(self.support)
@@ -86,9 +67,6 @@ class SavedFilterBarTests(ApiTestCase):
         self.assertContains(products, "/admin/saved-filters/products/products/save/")
 
     def test_the_delivered_grid_is_untouched_by_the_bar(self):
-        """The bar is additive chrome below the grid, never a replacement:
-        the inline-editable stock cell is still rendered for a role holding
-        ``inventory.adjust`` (SPEC-20-11)."""
         product = self.make_product(name="Bar Rose", stock=4)
         self.client.force_login(make_role_user(ROLE_ADMIN, "bar-chief"))
         res = self.client.get(PRODUCT_CHANGELIST)
@@ -97,8 +75,6 @@ class SavedFilterBarTests(ApiTestCase):
         self.assertEqual(product.stock, 4)
 
     def test_a_role_without_the_capability_never_reaches_the_bar(self):
-        """No capability -> the changelist's own 403, and the saved-filter
-        table is not touched on the way there."""
         self.client.force_login(make_role_user(ROLE_MARKETING, "bar-marketing"))
         res = self.client.get(ORDER_CHANGELIST)
         self.assertEqual(res.status_code, 403)
@@ -108,8 +84,6 @@ class SavedFilterBarTests(ApiTestCase):
 
 @tag("e2e")
 class SavedFilterSaveTests(ApiTestCase):
-    """What gets stored: the current selection, validated by the changelist."""
-
     def setUp(self):
         self.support = make_role_user(ROLE_SUPPORT, "save-support")
         self.client.force_login(self.support)
@@ -129,16 +103,11 @@ class SavedFilterSaveTests(ApiTestCase):
         self.assertEqual(SavedFilter.objects.get().params, {"q": "Rose"})
 
     def test_ordering_is_deliberately_not_part_of_a_saved_spec(self):
-        """``o`` is a list of ``list_display`` column INDEXES, so a stored
-        copy re-sorts a different column the moment one is inserted."""
         self.assertIn("o", NON_SPEC_PARAMS)
         save_view(self.client, ORDER_SAVE, "Sorted", "o=-3.1&status__exact=pending")
         self.assertEqual(SavedFilter.objects.get().params, {"status__exact": "pending"})
 
     def test_a_parameter_the_changelist_rejects_is_dropped_not_stored(self):
-        """A spec is replayed from the database, so it may only hold
-        parameters the changelist itself accepts — an unknown lookup would
-        be a 400 on every later visit."""
         save_view(
             self.client,
             ORDER_SAVE,
@@ -177,8 +146,6 @@ class SavedFilterSaveTests(ApiTestCase):
         )
 
     def test_a_concurrent_save_of_the_same_name_is_reported_not_crashed(self):
-        """The unique constraint is the authority on the name, not a prior
-        SELECT: the losing insert is told so instead of 500ing."""
         saved = SavedFilter.objects.create(
             user=self.support,
             content_type=content_type_of(Order),
@@ -216,16 +183,12 @@ class SavedFilterSaveTests(ApiTestCase):
         self.assertEqual(SavedFilter.objects.count(), 0)
 
     def test_a_role_without_the_capability_cannot_save_a_filter(self):
-        """The gate is the ModelAdmin's own view permission: marketing holds
-        no order capability, so there is no orders saved view to own."""
         self.client.force_login(make_role_user(ROLE_MARKETING, "save-marketing"))
         res = save_view(self.client, ORDER_SAVE, "Sneaky", "status__exact=pending")
         self.assertEqual(res.status_code, 404)
         self.assertEqual(SavedFilter.objects.count(), 0)
 
     def test_an_unregistered_or_unknown_model_is_a_404(self):
-        """AuditEvent is deliberately unregistered in the admin, and a model
-        name that does not exist at all is refused the same way."""
         for url in (
             "/admin/saved-filters/common/auditevent/save/",
             "/admin/saved-filters/common/no_such_model/save/",
@@ -238,8 +201,6 @@ class SavedFilterSaveTests(ApiTestCase):
 
 @tag("e2e")
 class SavedFilterApplyTests(ApiTestCase):
-    """Applying a saved filter — and only ever your own."""
-
     def setUp(self):
         self.support = make_role_user(ROLE_SUPPORT, "apply-support")
         self.client.force_login(self.support)
@@ -267,8 +228,6 @@ class SavedFilterApplyTests(ApiTestCase):
         self.assertNotIn("Listing the saved view", body)
 
     def test_another_users_saved_filter_is_not_applied(self):
-        """A foreign pk is the same answer as one that does not exist: the
-        apply link can neither apply nor confirm another user's view."""
         self.client.force_login(make_role_user(ROLE_ADMIN, "apply-other"))
         body = self._listing(f"{ORDER_CHANGELIST}?{APPLY_PARAM}={self.saved.pk}")
         self.assertIn("Open One", body)
@@ -283,8 +242,6 @@ class SavedFilterApplyTests(ApiTestCase):
                 self.assertIn("Closed One", body)
 
     def test_a_saved_filter_cannot_reach_rows_the_user_cannot_list(self):
-        """The capability gate is the changelist's own, so applying someone
-        else's filter is still a 403 for a role without the capability."""
         self.client.force_login(make_role_user(ROLE_MARKETING, "apply-marketing"))
         res = self.client.get(f"{ORDER_CHANGELIST}?{APPLY_PARAM}={self.saved.pk}")
         self.assertEqual(res.status_code, 403)
@@ -300,8 +257,6 @@ class SavedFilterApplyTests(ApiTestCase):
         self.assertNotIn("Oud One", body)
 
     def test_a_saved_filter_does_not_leak_another_models_selection(self):
-        """A filter is scoped to its own model: the products apply marker on
-        the orders changelist is ignored, never cross-applied."""
         save_view(self.client, PRODUCT_SAVE, "Floral only", "category__exact=Floral")
         products_saved = SavedFilter.objects.get(name="Floral only")
         body = self._listing(f"{ORDER_CHANGELIST}?{APPLY_PARAM}={products_saved.pk}")
@@ -311,8 +266,6 @@ class SavedFilterApplyTests(ApiTestCase):
 
 @tag("e2e")
 class SavedFilterDeleteTests(ApiTestCase):
-    """Deletion is the owner's alone, and needs no capability to be tidy."""
-
     def setUp(self):
         self.support = make_role_user(ROLE_SUPPORT, "delete-support")
         self.client.force_login(self.support)
@@ -342,8 +295,6 @@ class SavedFilterDeleteTests(ApiTestCase):
         self.assertEqual(SavedFilter.objects.count(), 1)
 
     def test_a_user_who_lost_the_capability_can_still_clear_their_view(self):
-        """The row is the caller's own preference, not domain data; the
-        redirect to the changelist is then refused by its own gate."""
         self.support.groups.clear()
         res = self.client.post(
             f"/admin/saved-filters/delete/{self.saved.pk}/", follow=True
@@ -352,8 +303,6 @@ class SavedFilterDeleteTests(ApiTestCase):
         self.assertEqual(res.status_code, 403)
 
     def test_a_view_of_a_model_without_a_changelist_falls_back_to_the_index(self):
-        """AuditEvent is deliberately unregistered in the admin; the row
-        outlives its changelist and clearing it must not raise."""
         orphan = SavedFilter.objects.create(
             user=self.support,
             content_type=content_type_of(AuditEvent),
@@ -366,8 +315,6 @@ class SavedFilterDeleteTests(ApiTestCase):
 
 
 class SavedFilterSpecTests(ApiTestCase):
-    """The stored-spec guards, on rows the UI would not produce."""
-
     def setUp(self):
         self.support = make_role_user(ROLE_SUPPORT, "spec-support")
         self.client.force_login(self.support)
@@ -387,8 +334,6 @@ class SavedFilterSpecTests(ApiTestCase):
         return f"{ORDER_CHANGELIST}?{APPLY_PARAM}={saved.pk}"
 
     def test_a_non_string_stored_value_is_skipped_not_crashed_on(self):
-        """``params`` is a JSON column, so a hand-edited row can hold a type
-        the QueryDict would refuse; the entry is dropped, the rest applies."""
         saved = self._hand_written(
             {"status__exact": "pending", "created_at__year": 2026}
         )
@@ -399,7 +344,6 @@ class SavedFilterSpecTests(ApiTestCase):
         self.assertNotIn("Dropped One", body)
 
     def test_an_explicit_url_parameter_wins_over_the_saved_spec(self):
-        """A saved view is a starting point an operator can adjust from."""
         saved = self._hand_written({"status__exact": "pending"})
         res = self.client.get(f"{self._apply_url(saved)}&status__exact=shipped")
         self.assertEqual(res.status_code, 200)
@@ -408,9 +352,6 @@ class SavedFilterSpecTests(ApiTestCase):
         self.assertNotIn("Kept One", body)
 
     def test_the_save_form_carries_the_selection_on_screen(self):
-        """The bar's hidden field is filled from the live query string, minus
-        the changelist plumbing, so re-saving captures what is displayed —
-        and never a page number."""
         res = self.client.get(f"{ORDER_CHANGELIST}?status__exact=pending&p=2")
         self.assertEqual(res.status_code, 200)
         spec = re.search(r'name="filter_spec" value="([^"]*)"', res.content.decode())

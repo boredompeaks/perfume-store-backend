@@ -10,14 +10,8 @@ import {
 type Errors = Partial<Record<keyof ShippingDetails, string>>;
 
 /**
- * D1 screen (U-W12-T8): OPEN-HAIRLINE fields — no box, label above in the
- * small tracked eyebrow step, bottom rule only. The rule keeps
- * `--color-field-border` (#857C72, 3.90:1 on paper): the screen draws its
- * underline in a decorative outline shade (#d0c4be), which is
- * barred from being a control boundary (§2.1.5 E2 — this underline IS the
- * field's 3:1 affordance). Preflight zeroes the other three sides, so `border-b`
- * alone is the whole box model here; the shared boxed field class every other
- * form uses stays untouched.
+ * Open-hairline fields: the bottom rule is the field's only boundary, so it
+ * must use `--color-field-border`, not the decorative hairline.
  */
 const hairlineInputClass =
   "border-b border-field-border bg-transparent px-0 py-2 text-body placeholder:text-ink-secondary focus:outline-none";
@@ -56,18 +50,9 @@ export default function AddressForm({
   serverError: string | null;
   submitLabel: string;
   onSubmit: (details: ShippingDetails) => void;
-  /**
-   * Spec 5.4 CHANGE-12: the delivery estimate fires on blur of pincode AND
-   * state, so the destination fields report their own blur instead of the
-   * parent polling form state it does not own. Everything else about this
-   * form (fields, validation, the PII disclosure) is untouched.
-   */
+  /** Fires on pincode/state blur so the parent need not poll form state. */
   onDestinationBlur?: (details: ShippingDetails) => void;
-  /**
-   * Spec 5.4: the delivery estimate renders "below the fields" — a slot
-   * inserted directly after the field grid. The PII disclosure and the submit
-   * button below keep their own order and styling.
-   */
+  /** Slot for the delivery estimate, directly below the field grid. */
   afterFields?: ReactNode;
 }) {
   const [details, setDetails] = useState<ShippingDetails>(
@@ -82,8 +67,8 @@ export default function AddressForm({
     },
   );
   const [errors, setErrors] = useState<Errors>({});
-  // Whether a prefill actually happened this mount — the disclosure is tied
-  // to it, per the PII-handling requirement (visible note + forget control).
+  // The disclosure is tied to an actual prefill this mount (visible note plus
+  // a forget control), not merely to stored PII.
   const [prefilledAtMount] = useState<boolean>(() => initial !== null);
   const [forgotten, setForgotten] = useState(false);
 

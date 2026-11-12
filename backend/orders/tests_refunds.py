@@ -1,20 +1,3 @@
-"""SPEC-1-05 (spec section 1, lines 29-151, [1.14]): refunds.
-
-A paid order must be refundable in full or in part, the money must go back
-through the payment gateway, and the attempt must be atomic and auditable.
-Razorpay is mocked at the seam (``razorpay.Client``, which both
-``orders.refunds`` and ``orders.views`` resolve to the one module attribute
-the shared ``razorpay_mock`` helper patches), so no test here touches the
-network or the real keys from ``.env`` (V-01 containment).
-
-What is pinned is behaviour, not prose: the balance gate can never be passed
-twice (a second attempt for the same money is refused whether or not it
-carries an ``Idempotency-Key``), a gateway failure leaves nothing behind at
-all, the money reaching the gateway is quantized the way the codebase
-quantizes money everywhere else, and authority is ``refunds.create`` — a
-support agent who may read and fulfil orders still cannot move money.
-"""
-
 import itertools
 from decimal import Decimal
 from unittest import mock
@@ -34,17 +17,8 @@ from orders.refunds import RefundGatewayError, refund_payment
 
 @tag("orders")
 class RefundGatewaySeamTests(SimpleTestCase):
-    """The seam itself: env-driven credentials, minor units, typed failures.
-
-    No DB and no request: everything the gateway can do to a refund is
-    decided in this one function, so it is tested on its own rather than
-    only through the endpoint that calls it.
-    """
-
     @staticmethod
     def _patched_client(**response):
-        """Patch the razorpay Client the seam builds and configure one
-        refund response for it."""
         patcher = mock.patch("orders.refunds.razorpay.Client")
         client_cls = patcher.start()
         client = client_cls.return_value
@@ -55,45 +29,23 @@ class RefundGatewaySeamTests(SimpleTestCase):
         patcher, client_cls, _ = self._patched_client()
         self.addCleanup(patcher.stop)
 
-        # Distinct from the ambient test keys, so the assertion can prove the
-        # seam read the settings rather than a literal of its own - and
-        # composed from the suite's documented dummy credentials rather than
-        # a new key-shaped literal, which the secret scan must never see.
+        # Distinct from the ambient test keys, composed from the suite's documented dummy
+        # credentials so the secret scan never sees a new key-shaped literal.
         with override_settings(
             RAZORPAY_KEY_ID=f"seam-{TEST_RAZORPAY_KEY_ID}",
             RAZORPAY_KEY_SECRET=f"seam-{TEST_RAZORPAY_KEY_SECRET}",
         ):
             refund_id = refund_payment(payment_id="pay_1", amount=Decimal("10.00"))
 
-        # No credential is written in the code: the client is built from the
-        # settings, which read RAZORPAY_KEY_ID / RAZORPAY_KEY_SECRET from env.
-        # The keyword form is the POINT of this assertion, not a detail: the
-        # SDK reads ``__init__(self, session=None, auth=None, **options)``, so
-        # the same two values passed positionally bind the key id to
-        # ``session`` and every refund dies with an AttributeError that this
-        # seam reports to the operator as "the gateway declined".
+        # The SDK reads __init__(self, session=None, auth=None, **options): the keyword form is
+        # the point, because passing the pair positionally binds the key id to session.
         client_cls.assert_called_once_with(
             auth=(f"seam-{TEST_RAZORPAY_KEY_ID}", f"seam-{TEST_RAZORPAY_KEY_SECRET}")
         )
         self.assertEqual(refund_id, "rfnd_ENV1")
 
     def test_the_real_sdk_client_receives_the_credentials_as_its_auth(self):
-        """The construction path with ``razorpay.Client`` itself NOT mocked.
-
-        Every other test in this class replaces the client class wholesale, so
-        ``Client.__init__`` never runs and no assertion here can see WHICH
-        parameter the credentials landed in - which is precisely the defect
-        that shipped: the pair was passed positionally, bound the key id to
-        ``session``, and turned every real refund into an AttributeError this
-        seam reported to the operator as "the gateway declined". Mocking the
-        class cannot catch that, because a mock accepts any call shape.
-
-        So this patches the SDK's own default session instead and lets the real
-        ``__init__`` run, then observes the credentials where they actually
-        matter - on the ``requests`` call. Expected values are hand-written
-        literals passed in through ``override_settings``, never re-derived from
-        whatever ``settings`` happens to hold.
-        """
+        """The construction path with razorpay.Client NOT mocked: the credentials must arrive as the keyword auth argument, since the SDK's first positional slot is session."""
         response = mock.Mock(status_code=200)
         response.json.return_value = {"id": "rfnd_REALSESSION"}
 
@@ -109,15 +61,11 @@ class RefundGatewaySeamTests(SimpleTestCase):
 
             post = session_cls.return_value.post
 
-        # The refund the provider acknowledged came back through the REAL
-        # client: proof that the whole chain ran, not just the seam's own call.
         self.assertEqual(refund_id, "rfnd_REALSESSION")
-        # The credentials reached requests as the HTTP auth pair...
         self.assertEqual(
             post.call_args.kwargs["auth"],
             (f"seam-{TEST_RAZORPAY_KEY_ID}", f"seam-{TEST_RAZORPAY_KEY_SECRET}"),
         )
-        # ...and the env-driven timeout reached the socket alongside them.
         self.assertEqual(post.call_args.kwargs["timeout"], 7)
 
     def test_the_money_reaches_the_gateway_in_the_currencies_minor_units(self):
@@ -134,9 +82,8 @@ class RefundGatewaySeamTests(SimpleTestCase):
         patcher, _, client = self._patched_client()
         self.addCleanup(patcher.stop)
 
-        # 0.015 rounds HALF_EVEN to 0.02 (the rounding common.money applies
-        # everywhere in this codebase), so the provider is asked for 2 units
-        # and never for a half-paise it would reject.
+        # 0.015 rounds HALF_EVEN to 0.02, the rounding common.money applies everywhere, so the
+        # provider is asked for 2 units rather than a half-paise it would reject.
         refund_payment(payment_id="pay_1", amount=Decimal("0.015"))
 
         client.refund.create.assert_called_once_with(
@@ -150,7 +97,6 @@ class RefundGatewaySeamTests(SimpleTestCase):
         with self.assertRaises(RefundGatewayError):
             refund_payment(payment_id="", amount=Decimal("10.00"))
 
-        # Refused before any call: there is nothing at the gateway to refund.
         client.refund.create.assert_not_called()
 
     def test_a_provider_error_becomes_a_typed_error_naming_it(self):
@@ -163,8 +109,6 @@ class RefundGatewaySeamTests(SimpleTestCase):
         with self.assertRaises(RefundGatewayError) as caught:
             refund_payment(payment_id="pay_gone", amount=Decimal("10.00"))
 
-        # The provider's own words ride the exception for the caller's log
-        # line; the caller decides what may reach an API response.
         self.assertIn("BadRequestError", str(caught.exception))
 
     def test_a_response_without_a_refund_id_is_a_typed_error(self):
@@ -177,8 +121,6 @@ class RefundGatewaySeamTests(SimpleTestCase):
 
 @tag("orders")
 class RefundTestBase(ApiTestCase):
-    """Fixtures: a captured order and the finance operator who may refund it."""
-
     REFUND_PATH = "/api/admin/orders/{order_id}/refund/"
 
     def setUp(self):
@@ -217,8 +159,6 @@ class RefundTestBase(ApiTestCase):
         )
 
     def with_items(self, order, product=None, quantity=1):
-        """Give an ORM-created order the checkout lines the shipped edge
-        requires (SPEC-10-03 makes items a shipped precondition)."""
         product = product or self.make_product(name="Rose Aurum", price="900.00")
         OrderItem.objects.create(
             order=order,
@@ -231,13 +171,7 @@ class RefundTestBase(ApiTestCase):
         return order
 
     def gateway(self, prefix="rfnd_TEST"):
-        """The mocked Razorpay client, whose refunds succeed.
-
-        Each call answers with its own gateway refund id (``rfnd_TEST1``,
-        ``rfnd_TEST2``, ...) the way the provider does, so a test that issues
-        several refunds exercises the real unique-column behaviour instead of
-        colliding on one reused id.
-        """
+        """Each call answers with its own gateway refund id the way the provider does, so issuing several refunds exercises the real unique-column behaviour."""
         client = self.razorpay_mock()
         counter = itertools.count(1)
         client.refund.create.side_effect = lambda *_args, **_kwargs: {
@@ -265,8 +199,6 @@ class FullRefundTests(RefundTestBase):
 
         self.assertEqual(res.status_code, 201, res.data)
         order.refresh_from_db()
-        # The payment dimension moves to the choice orders.state already
-        # declares; nothing new was invented for refunds.
         self.assertEqual(order.payment_status, "refunded")
         self.assertEqual(order.status, "confirmed")
         self.assertEqual(Decimal(res.data["refunded_total"]), Decimal("900.00"))
@@ -295,8 +227,6 @@ class FullRefundTests(RefundTestBase):
         )
         self.assertEqual(entry.user_id, self.finance.pk)
         self.assertEqual(entry.action_flag, ADDITION)
-        # The trail has to answer "who refunded how much, on which order"
-        # without joining the row the message names.
         self.assertIn(f"order #{order.id}", entry.change_message)
         self.assertIn("900.00", entry.change_message)
 
@@ -308,8 +238,6 @@ class FullRefundTests(RefundTestBase):
         res = self.refund(order)
 
         self.assertEqual(res.status_code, 409, res.data)
-        # The second attempt is refused for the true reason - the money is
-        # already all back with the customer - and it moves nothing.
         self.assertEqual(res.data["error"], "Order has no refundable balance left")
         self.assertEqual(Refund.objects.count(), 1)
         client.refund.create.assert_called_once()
@@ -365,7 +293,6 @@ class PartialRefundTests(RefundTestBase):
         self.assertEqual(res.status_code, 201, res.data)
         refund = Refund.objects.order_by("id").last()
         self.assertEqual(refund.amount, Decimal("200.00"))
-        # Exhausting the remaining balance is a full refund of the rest.
         self.assertEqual(refund.kind, Refund.Kind.FULL)
         order.refresh_from_db()
         self.assertEqual(order.payment_status, "refunded")
@@ -391,8 +318,6 @@ class PartialRefundTests(RefundTestBase):
         res = self.refund(order, amount="0.015")
 
         self.assertEqual(res.status_code, 201, res.data)
-        # HALF_EVEN, the rounding the database adapter would apply anyway:
-        # 0.015 -> 0.02, and 2 minor units reach the provider.
         self.assertEqual(Refund.objects.get().amount, Decimal("0.02"))
         client.refund.create.assert_called_once_with(
             {"payment_id": "pay_CAPTURED1", "amount": 2}, timeout=10
@@ -411,7 +336,6 @@ class OverRefundTests(RefundTestBase):
         res = self.refund(order, amount="900.01")
 
         self.assertEqual(res.status_code, 409, res.data)
-        # Nothing moved: no row, no payment-dimension change, no gateway call.
         self.assertEqual(Refund.objects.count(), 0)
         client.refund.create.assert_not_called()
         order.refresh_from_db()
@@ -435,9 +359,8 @@ class OverRefundTests(RefundTestBase):
         order = self.captured_order()
         client = self.gateway()
 
-        # NaN/Infinity parse as Decimals but are not money (and comparing one
-        # raises), and a value too large for 2-dp money cannot be quantized:
-        # both are 400s, never a 500 out of the arithmetic.
+        # NaN/Infinity parse as Decimals but are not money, and a value too large for 2-dp money
+        # cannot be quantized: both are 400s, never a 500 out of the arithmetic.
         for amount in ("ten", "12,50", True, "", "NaN", "1e30"):
             with self.subTest(amount=amount):
                 res = self.refund(order, amount=amount)
@@ -494,8 +417,8 @@ class RefundEligibilityTests(RefundTestBase):
         client.refund.create.assert_not_called()
 
     def test_a_captured_order_with_no_gateway_payment_is_refused(self):
-        # A cash-on-delivery order has no provider payment to reverse: the
-        # seam has nothing to call, so the writer refuses before it writes.
+        # A cash-on-delivery order has no provider payment to reverse: the seam refuses before
+        # it writes anything.
         order = self.captured_order(payment_id=None)
         client = self.gateway()
 
@@ -528,9 +451,6 @@ class GatewayFailureTests(RefundTestBase):
         res = self.refund(order, amount="300.00")
 
         self.assertEqual(res.status_code, 502, res.data)
-        # No partial state anywhere: the in-flight refund row went with the
-        # transaction, the payment dimension did not move, no timestamp was
-        # stamped and nothing was written to the privileged-action trail.
         self.assertEqual(Refund.objects.count(), 0)
         order.refresh_from_db()
         self.assertEqual(order.payment_status, "captured")
@@ -588,7 +508,6 @@ class RefundReplayTests(RefundTestBase):
         self.assertEqual(first.status_code, 201, first.data)
         self.assertEqual(second.status_code, 200, second.data)
         self.assertEqual(second.data["refund"]["id"], first.data["refund"]["id"])
-        # The money moved exactly once: one gateway call, one refund row.
         self.assertEqual(Refund.objects.count(), 1)
         client.refund.create.assert_called_once()
         order.refresh_from_db()
@@ -611,9 +530,8 @@ class RefundReplayTests(RefundTestBase):
         client.refund.create.assert_not_called()
 
     def test_the_same_key_on_another_order_is_an_independent_refund(self):
-        # Replay identity is scoped per order: a finance operator working
-        # through a queue under one key must not have the second order's
-        # refund collapse onto the first.
+        # Replay identity is scoped per order: one operator key must not collapse the second
+        # order's refund onto the first.
         first = self.captured_order(payment_id="pay_CAPTURED1")
         second = self.captured_order(payment_id="pay_CAPTURED2")
         self.gateway()
@@ -636,14 +554,6 @@ class RefundReplayTests(RefundTestBase):
 
 @tag("orders")
 class RefundRaceTests(RefundTestBase):
-    """The balance gate under contention.
-
-    The writer holds the Order row lock (and this order's refund rows) for
-    the whole attempt, so resolving two attempts in sequence is exactly the
-    interleaving those locks permit - the same determinism the oversell and
-    coupon races use for verify_payment.
-    """
-
     def test_two_full_refunds_cannot_both_succeed(self):
         order = self.captured_order()
         client = self.gateway()
@@ -653,7 +563,6 @@ class RefundRaceTests(RefundTestBase):
 
         self.assertEqual(first.status_code, 201, first.data)
         self.assertEqual(second.status_code, 409, second.data)
-        # The order is refunded once, not twice.
         self.assertEqual(Refund.objects.count(), 1)
         self.assertEqual(Refund.refunded_total(order), Decimal("900.00"))
         client.refund.create.assert_called_once()
@@ -679,9 +588,6 @@ class RefundRaceTests(RefundTestBase):
 @tag("orders")
 class RefundPermissionTests(RefundTestBase):
     def test_a_support_agent_cannot_refund(self):
-        # Support reads and fulfils orders; refunds are finance's call
-        # (spec 1.1's warning that a catalogue manager must not issue refunds
-        # is the same split, one role over).
         support = self.user_with_role("supp", ROLE_SUPPORT)
         order = self.captured_order()
         client = self.gateway()
@@ -720,8 +626,6 @@ class RefundPermissionTests(RefundTestBase):
         client.refund.create.assert_not_called()
 
     def test_the_finance_role_is_the_authorized_writer(self):
-        # The positive control for the three refusals above: the same call,
-        # the same order, the same body - only the role differs.
         order = self.captured_order()
         self.gateway()
 
@@ -733,8 +637,6 @@ class RefundPermissionTests(RefundTestBase):
 
 @tag("orders")
 class RefundAdminSurfaceTests(RefundTestBase):
-    """The admin surface is a read-only window onto issued refunds."""
-
     def test_finance_sees_the_refund_changelist(self):
         self.client.force_login(self.finance)
 
@@ -750,9 +652,8 @@ class RefundAdminSurfaceTests(RefundTestBase):
         self.assertEqual(self.client.get("/admin/orders/refund/").status_code, 403)
 
     def test_the_admin_surface_refuses_to_write_a_refund(self):
-        # Refunds are issued by the API seam, which is the only writer that
-        # calls the gateway; a hand-written admin row would be money movement
-        # with no payment behind it.
+        # Refunds are issued by the API seam, the only writer that calls the gateway; a hand-written
+        # admin row would be money movement with no payment behind it.
         self.client.force_login(self.finance)
 
         self.assertEqual(self.client.get("/admin/orders/refund/add/").status_code, 403)
@@ -765,7 +666,7 @@ class RefundAdminSurfaceTests(RefundTestBase):
         self.client.force_login(self.finance)
 
         page = self.client.get(f"/admin/orders/refund/{refund.id}/change/")
-        self.assertEqual(page.status_code, 200)  # renders read-only
+        self.assertEqual(page.status_code, 200)
 
         denied = self.client.post(
             f"/admin/orders/refund/{refund.id}/change/",
@@ -788,21 +689,11 @@ class RefundAdminSurfaceTests(RefundTestBase):
 
 @tag("orders")
 class PartiallyRefundedShipmentTests(RefundTestBase):
-    """[R-1.14] A partially-refunded order is still shippable.
-
-    Regression pin for the interaction the first cut missed: the shipped
-    precondition accepted ``captured`` only, so the moment a refund moved the
-    payment dimension to ``partially_refunded`` the order could never ship
-    again - and because cancel is illegal from ``confirmed`` there was no
-    operator route out, so paid-for inventory was stranded permanently.
-    ``partially_refunded`` is captured money minus a recorded refund, and the
-    Refund row is what reconciliation reads, so the remainder ships.
-    """
+    """A partially-refunded order stays shippable: the shipped precondition admits captured and partially_refunded payment, so a refund cannot strand a paid order."""
 
     FULFIL_PATH = "/api/admin/orders/{order_id}/fulfill/"
 
     def partially_refunded_order(self):
-        """A confirmed, itemised order with one partial refund against it."""
         order = self.captured_order()
         self.with_items(order)
         self.gateway()
@@ -817,7 +708,6 @@ class PartiallyRefundedShipmentTests(RefundTestBase):
         return client
 
     def _run_admin_action(self, action, orders):
-        """A bulk action through the real admin UI (the house pattern)."""
         User.objects.create_superuser(
             "refundboss", "refundboss@example.com", "S3cure-Passphrase!"
         )
@@ -846,8 +736,6 @@ class PartiallyRefundedShipmentTests(RefundTestBase):
         order.refresh_from_db()
         self.assertEqual(order.status, "shipped")
         self.assertEqual(order.fulfilment_status, "fulfilled")
-        # Shipping reconciles against the refund row rather than erasing it:
-        # the money returned and the money shipped are both still on record.
         self.assertEqual(Refund.refunded_total(order), Decimal("100.00"))
         self.assertEqual(order.refundable_remaining, Decimal("800.00"))
 
@@ -880,16 +768,6 @@ class PartiallyRefundedShipmentTests(RefundTestBase):
 
 @tag("orders")
 class RefundAdminActionTests(RefundTestBase):
-    """SPEC-D-03: refunds are issuable from the order admin.
-
-    The owner's finding was "refund not showing": the refund record page was
-    read-only and empty with no way to issue one, so the only writer was the
-    DRF POST. These pins hold the admin entry point to the SAME authority and
-    the SAME issuance core: an operator with ``refunds.create`` can issue a
-    full or partial refund from an order, support cannot, and every refusal
-    leaves the order untouched.
-    """
-
     CHANGELIST = "/admin/orders/order/"
     REFUND_PAGE = "/admin/orders/order/{order_id}/issue-refund/"
 
@@ -953,7 +831,6 @@ class RefundAdminActionTests(RefundTestBase):
         res = self.admin_post(order, {"reason": "Damaged in transit"})
 
         self.assertEqual(res.status_code, 200)
-        # The success message names the refund id and the money.
         self.assertContains(res, "Refund #")
         self.assertContains(res, "900.00")
         refund = Refund.objects.get()
@@ -983,7 +860,6 @@ class RefundAdminActionTests(RefundTestBase):
         self.assertEqual(entry.action_flag, ADDITION)
         self.assertIn(f"order #{order.id}", entry.change_message)
         self.assertIn("300.00", entry.change_message)
-        # The audit trail names the surface the money moved through.
         self.assertIn("via admin", entry.change_message)
 
     def test_a_partial_refund_leaves_the_rest_refundable(self):
@@ -1108,9 +984,6 @@ class RefundAdminActionTests(RefundTestBase):
         self.assertEqual(res.status_code, 404)
 
     def test_the_existing_keyed_retry_still_calls_the_gateway_once(self):
-        # The replay contract moved into the shared core with the refactor;
-        # this is the same call the API suite makes, kept here so the admin
-        # extraction cannot quietly drop it.
         order = self.captured_order()
         client = self.gateway(prefix="rfnd_RETRY")
         headers = {"HTTP_IDEMPOTENCY_KEY": "admin-refactor-key"}

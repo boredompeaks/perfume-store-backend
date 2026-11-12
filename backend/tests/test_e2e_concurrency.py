@@ -1,11 +1,3 @@
-"""E2E concurrency/pagination tests - docs/test-gaps.md e2e items 5, 6, 9.
-
-The verify endpoint serializes concurrent payments via
-``transaction.atomic`` + ``select_for_update`` on Order/Products/Coupon, so
-the race is exercised by resolving the two verifications against the same
-rows in sequence - exactly the interleaving the row locks permit.
-"""
-
 from django.conf import settings
 from django.test import tag
 from django.utils import timezone
@@ -18,7 +10,6 @@ from products.models import products as Product
 
 @tag("e2e")
 class OversellRaceTests(ApiTestCase):
-    # e2e 5. two checkouts, one item left -> exactly one verify succeeds
     def test_oversell_allows_exactly_one_successful_verify(self):
         product = self.make_product(price="100.00", stock=1)
         clients = {}
@@ -28,12 +19,7 @@ class OversellRaceTests(ApiTestCase):
             self.api_login(name, client=clients[name])
             self.seed_session_cart([(product, 1)], client=clients[name])
 
-        # [R-21.2.6] deliberate contract: the checkout dedup guard (SPEC-21-1)
-        # collapses only SAME-user identical resubmissions onto one order; two
-        # DIFFERENT users keep two orders (both 201) and stock stays untouched
-        # until verify -- the oversell decision deliberately remains at
-        # verify_payment, where exactly one row-locked verify wins. The
-        # same-user collapse is pinned in orders/tests.py CheckoutDedupTests.
+        # The checkout dedup guard collapses only same-user identical resubmissions; the oversell decision deliberately stays at verify_payment, where one row-locked verify wins.
         order_ids = {}
         for name, client in clients.items():
             res = client.post(
@@ -43,7 +29,6 @@ class OversellRaceTests(ApiTestCase):
             order_ids[name] = res.data["id"]
         self.assertEqual(Order.objects.count(), 2)
 
-        # both payments get a razorpay order (mocked; ids are unique per order)
         client_mock = self.razorpay_mock()
         client_mock.order.create.side_effect = [
             {"id": "order_RACE1"},
@@ -55,7 +40,6 @@ class OversellRaceTests(ApiTestCase):
             )
             self.assertEqual(res.status_code, 200, res.data)
 
-        # first verify wins: stock 1 -> 0
         first = clients["alice"].post(
             "/api/orders/payment/verify/",
             {
@@ -68,7 +52,6 @@ class OversellRaceTests(ApiTestCase):
         )
         self.assertEqual(first.status_code, 200, first.data)
 
-        # second verify hits the same locked rows: stock already gone -> 409
         second = clients["bob"].post(
             "/api/orders/payment/verify/",
             {
@@ -85,7 +68,6 @@ class OversellRaceTests(ApiTestCase):
             "An item is no longer available in the requested quantity",
         )
 
-        # exactly one confirmed, stock sold out once, loser stays pending
         statuses = {
             row["id"]: row["status"] for row in Order.objects.values("id", "status")
         }
@@ -94,11 +76,7 @@ class OversellRaceTests(ApiTestCase):
         product.refresh_from_db()
         self.assertEqual(product.stock, 0)
 
-        # [SPEC-12-02] the same race through the reservation lens: both
-        # checkouts minted a hold on the last unit (soft overbooking,
-        # by-design); the winner's hold converted into the committed sale
-        # and the 409 backstop released the loser's, so no phantom active
-        # hold survives the race.
+        # The same race through the reservation lens: both checkouts hold the last unit (soft overbooking by design); the loser's hold is released by the 409 backstop.
         alice_hold = Order.objects.get(id=order_ids["alice"]).stock_reservations.get()
         bob_hold = Order.objects.get(id=order_ids["bob"]).stock_reservations.get()
         self.assertEqual(alice_hold.status, StockReservation.Status.CONVERTED)
@@ -115,7 +93,6 @@ class OversellRaceTests(ApiTestCase):
 
 @tag("e2e")
 class CouponRaceTests(ApiTestCase):
-    # e2e 6. two concurrent verifications on usage_limit=1 -> exactly one increments
     def test_single_use_coupon_incremented_exactly_once(self):
         coupon = self.make_coupon(code="ONCE", discount_value="50", usage_limit=1)
         product = self.make_product(price="200.00", stock=5)
@@ -126,7 +103,6 @@ class CouponRaceTests(ApiTestCase):
             self.api_login(name, client=clients[name])
             self.seed_session_cart([(product, 1)], client=clients[name])
 
-        # both checkouts pass: used_count(0) < usage_limit(1) at checkout time
         order_ids = {}
         for name, client in clients.items():
             res = client.post(
@@ -174,7 +150,6 @@ class CouponRaceTests(ApiTestCase):
         self.assertEqual(second.status_code, 409, second.data)
         self.assertEqual(second.data["error"], "The coupon is no longer valid")
 
-        # exactly one increment, exactly one confirmed order
         coupon.refresh_from_db()
         self.assertEqual(coupon.used_count, 1)
         statuses = {
@@ -183,23 +158,17 @@ class CouponRaceTests(ApiTestCase):
         self.assertEqual(statuses[order_ids["alice"]], "confirmed")
         self.assertEqual(statuses[order_ids["bob"]], "pending")
         product.refresh_from_db()
-        self.assertEqual(product.stock, 4)  # only the winner's line was fulfilled
+        self.assertEqual(product.stock, 4)
 
 
 @tag("e2e")
 class PaginationStabilityTests(ApiTestCase):
-    # e2e 9. pagination is stable across pages even with equal created_at (F-12 context)
     def test_pages_partition_the_catalog_stably_across_repeated_requests(self):
-        # Enough rows to force MORE THAN ONE page: a catalogue that fits in a
-        # single page is returned whole by every engine and cannot demonstrate
-        # that the partition is stable, so the count is derived from the
-        # configured page size rather than typed - a literal here would quietly
-        # stop crossing the boundary the moment the page size changed.
+        # Enough rows to cross a page boundary; derived from the configured page size so a page-size change cannot quietly stop crossing it.
         page_size = settings.PRODUCTS_PAGE_SIZE
         names = [f"Perfume {i}" for i in range(1, 2 * page_size + 1)]
         for name in names:
             self.make_product(name=name)
-        # identical timestamps: ordering must not depend on timestamp jitter
         Product.objects.update(
             created_at=timezone.make_aware(timezone.datetime(2026, 1, 1, 12, 0, 0))
         )
@@ -221,16 +190,12 @@ class PaginationStabilityTests(ApiTestCase):
         # is asserting that one page is returned intact.
         self.assertGreater(pages_walked, 1, "the catalogue fit on a single page")
 
-        # every product appears exactly once across pages (no skips/repeats),
-        # measured against the rows this test created rather than against a
-        # literal id range: a sequence is not transactional, so on PostgreSQL
-        # these rows do not get pks 1..N in a fresh test database.
+        # Measured against the rows this test created, not a literal id range: a sequence is not transactional, so PostgreSQL does not start at pk 1.
         self.assertEqual(
             sorted(all_ids),
             sorted(Product.objects.values_list("id", flat=True)),
         )
 
-        # a repeat walk yields the identical partition (stable across requests)
         repeat = []
         page = 1
         while True:

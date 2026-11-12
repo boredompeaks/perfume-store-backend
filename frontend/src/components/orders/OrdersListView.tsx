@@ -10,22 +10,8 @@ import { formatINR } from "@/lib/money";
 import OrderStatusBadge, { formatOrderDate } from "./OrderStatusBadge";
 
 /**
- * §5.5 — order history. A list of transactions is a ledger: the only motion
- * on this page is the row hover (`--motion-hover-dur`, §3's orders-row row);
- * there is no entrance animation and no accent moment, by design (P2 —
- * none-by-design, and §5.5 line 1441 says so verbatim).
- *
- * Screen parity (U-W12-T9, media/designs/maison_ther_vos_commandes): the
- * folio register — serif order number, hairline status rectangle inline,
- * muted date, right-aligned tabular total with the mobile "TOTAL" eyebrow,
- * item summary beneath on truncate, per-row hairline that darkens to ink on
- * hover. The screen's status VOCABULARY (DISPATCHED / ARCHIVED) is mockup
- * fiction; the backend's own status words ride in OrderStatusBadge (P5).
- *
- * Pagination reads the backend's own contract: `?page=` / `?page_size=` with
- * the house page-number envelope (backend/orders/views/order.py:48-79,
- * `page_size` capped by `ORDER_HISTORY_MAX_PAGE_SIZE`). The pager only
- * appears when the envelope says there is more than one page.
+ * A ledger, so the only motion is row hover. Pagination reads the backend's
+ * `?page=`/`?page_size=` envelope and shows the pager only for >1 page.
  */
 export default function OrdersListView() {
   const { status: authStatus } = useAuth();

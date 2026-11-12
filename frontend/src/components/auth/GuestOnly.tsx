@@ -4,10 +4,7 @@ import { useRouter } from "next/navigation";
 import { useEffect } from "react";
 import { useAuth } from "@/lib/auth";
 
-/**
- * Gates guest-only routes (/login, /register): a signed-in user is bounced
- * to their orders instead of seeing the forms again.
- */
+/** A signed-in user is bounced to their orders instead of seeing the forms. */
 export default function GuestOnly({
   next,
   children,

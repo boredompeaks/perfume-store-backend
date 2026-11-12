@@ -1,16 +1,3 @@
-"""SPEC-D-08: the customer tracking endpoint is throttled and uncacheable.
-
-The endpoint already had a credential (guest token or account) and a uniform
-404. This file adds the two properties a cache/abuse review needs and pins that
-neither the credential nor the uniform miss moved:
-
-* a dedicated ``tracking`` throttle (60/min default) returns 429 after the
-  limit, and the 429 still carries the privacy headers;
-* every response - hit, uniform miss, and 429 - is ``Cache-Control: no-store``
-  and ``Vary: X-Guest-Order-Token``;
-* the estimate endpoint, which has no scope, is unaffected.
-"""
-
 from decimal import Decimal
 from unittest import mock
 
@@ -87,8 +74,8 @@ class TrackingHardeningTests(ShipmentTestCase):
 
         for response in responses:
             self.assertEqual(response.status_code, 200, response.data)
-        # The tracking view still owns the budget: a fourth tracking read is
-        # refused even though the estimate calls above spent nothing.
+        # The tracking view still owns the budget: a fourth tracking read is refused even though the
+        # estimate calls above spent nothing.
         with mock.patch.object(TrackingRateThrottle, "THROTTLE_RATES", self._rates()):
             first = self.track(self.guest_order.order_number, token="guest-token-value")
             second = self.track(
@@ -109,5 +96,4 @@ class TrackingHardeningTests(ShipmentTestCase):
                 order__order_number=self.order.order_number
             ).exists()
         )
-        # Signing in is not a second way to read a guest order.
         self.assertEqual(guest.status_code, 404)

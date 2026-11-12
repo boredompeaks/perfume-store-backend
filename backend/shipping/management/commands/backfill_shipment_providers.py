@@ -1,10 +1,8 @@
 """``manage.py backfill_shipment_providers [--dry-run|--apply]``.
 
-Links legacy parcels (carrier text, no provider FK) to ``ShippingProvider``
-rows. The matching rule lives in ``shipping.backfill`` so the dry-run and the
-apply run cannot disagree; this command only chooses whether to write and
-reports the outcome. It is safe to run repeatedly: matched rows lose their NULL
-provider, so the next pass has nothing to do.
+The matching rule lives in ``shipping.backfill`` so the dry run and the
+apply run cannot disagree; matched rows lose their NULL provider, so reruns
+are safe.
 """
 
 from django.core.management.base import BaseCommand

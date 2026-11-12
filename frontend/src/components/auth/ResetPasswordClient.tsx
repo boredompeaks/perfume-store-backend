@@ -7,22 +7,15 @@ import { resetPassword } from "@/lib/accounts-api";
 import { inputClass } from "@/lib/ui";
 
 type State =
-  /** uid + token present — the form. */
   | { kind: "form" }
-  /** Query carried no uid/token: the link was truncated before it reached us. */
+  /** No uid/token in the query: the link was truncated. */
   | { kind: "incomplete" }
-  /** Server answered — message renders verbatim (invalid/expired link). */
   | { kind: "rejected"; message: string }
-  /** Server accepted — message renders verbatim. */
   | { kind: "done"; message: string };
 
 /**
- * §5.10 `/reset-password`. The token arrives in the query; the server is the
- * only judge of whether it is valid. Failures (invalid/expired token) render
- * the server's message verbatim — this UI never rewrites it and never adds
- * copy that branches on account existence. `validate_password` errors arrive
- * as `{password: [msgs]}` and render per message under the password field
- * (AddressForm is the reference implementation for field-error wiring).
+ * The server is the only judge of token validity; its message is rendered
+ * verbatim, and no copy branches on account existence.
  */
 export default function ResetPasswordClient({
   uid,
@@ -56,15 +49,13 @@ export default function ResetPasswordClient({
       setState({ kind: "done", message: res.message });
     } catch (err) {
       if (err instanceof ApiError && err.fieldErrors?.password) {
-        // Server-side password policy failures — one <p> per message.
+        // Server-side password policy: one <p> per message.
         setFieldErrors(err.fieldErrors.password);
       } else if (err instanceof ApiError) {
-        // Invalid/expired link (and any other server refusal): the server's
-        // own words, verbatim.
+        // The server's own words, verbatim.
         setState({ kind: "rejected", message: err.message });
       } else {
-        // Network failure — the link may be perfectly good. Say nothing
-        // about the link; ask for a retry.
+        // Network failure says nothing about the link's validity.
         setFormError("We couldn't reach the server. Check your connection and try again.");
       }
     } finally {
@@ -76,8 +67,6 @@ export default function ResetPasswordClient({
 
   if (state.kind === "incomplete") {
     body = (
-      // Screen nouveau_mot_de_passe state panel: white plate on paper, message
-      // line, full-width ink CTA inside the panel.
       <div className="border border-hairline bg-surface p-8">
         <h2 className="font-display text-2xl tracking-tight">
           This reset link is incomplete.

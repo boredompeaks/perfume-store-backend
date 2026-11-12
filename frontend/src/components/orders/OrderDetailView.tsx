@@ -16,22 +16,8 @@ import ShipmentTracking from "./ShipmentTracking";
 import PaymentLauncher from "../checkout/PaymentLauncher";
 
 /**
- * §5.5 — single order, fed by `GET /api/orders/{id}/` (CHANGE-13), not by
- * the list. The backend answers every miss (unknown id, someone else's
- * order) with the same uniform 404, and the UI does not try to tell those
- * cases apart (§5.5 line 1481-1484); a signed-out caller never reaches it —
- * that state renders the sign-in wall.
- *
- * Screen parity (U-W12-T9, maison_ther_order_detail_nested_tracking): the
- * folio header (bronze registry eyebrow over the serif order title, status
- * chip + timestamp right), the consignment-style progress panel (section
- * rule + counter, serif step labels, hairline square markers on the track),
- * the NESTED shipment tracking panel (waybill rectangle, estimated delivery,
- * checkpoint rail) fed by the existing `GET /api/shipping/track/{number}/`,
- * and the manifest column (items, money rows, serif total on an ink rule).
- * The screen's narrative headline/subtitle and fictional states (DISPATCHED
- * step names, "Active", lot numbers) are mockup drift: the backend's own
- * vocabulary and timestamps are the only data rendered (P5 / §0b.1).
+ * Every miss is the backend's uniform 404, so the UI cannot and does not
+ * distinguish unknown from foreign ids. A signed-out caller gets the wall.
  */
 export default function OrderDetailView({
   orderId,
@@ -42,12 +28,8 @@ export default function OrderDetailView({
 }) {
   const { status: authStatus } = useAuth();
   const { data: order, isPending, isError, error, refetch } = useQuery({
-    // Keyed UNDER the "orders" prefix so PaymentLauncher's shared
-    // `invalidateQueries({ queryKey: ["orders"] })` (PaymentLauncher.tsx:118)
-    // refreshes this read after a successful verify — without it the
-    // `?payment=success` banner would read a stale "pending" status. The
-    // literal "detail" segment keeps it from ever colliding with the list's
-    // numeric `["orders", page]` key.
+    // Keyed under ["orders"] so PaymentLauncher's prefix invalidation
+    // refreshes it after verify; "detail" keeps it clear of ["orders", page].
     queryKey: ["orders", "detail", orderId],
     queryFn: () => fetchOrder(orderId),
     retry: false,
@@ -84,10 +66,8 @@ export default function OrderDetailView({
   }
 
   if (isError || !order) {
-    // The uniform 404 (§5.5: the backend deliberately does not distinguish
-    // "not yours" / "does not exist"). No id in the copy: `order_number` is
-    // the customer-facing reference and it is exactly what a 404 does not
-    // hand us, so the panel names nothing it cannot know.
+    // Uniform 404: no id in the copy, since the response cannot tell us
+    // whether the order exists, belongs to someone else, or never will.
     if (error instanceof ApiError && error.status === 404) {
       return (
         <div className="border border-hairline p-10 text-center">
@@ -104,8 +84,7 @@ export default function OrderDetailView({
       );
     }
 
-    // API-down / network failure: designed panel, not bare prose, and — like
-    // money states — never animated.
+    // Network failure gets a designed panel, like every other state.
     return (
       <div className="border border-hairline p-10 text-center">
         <p className="text-ink-secondary">Couldn&apos;t load this order.</p>
@@ -195,7 +174,7 @@ export default function OrderDetailView({
                       {item.product_name} × {item.quantity}
                     </span>
                     {/* sku / variant_name are the frozen checkout snapshot
-                        (models.py:440-456): rendered from this row, never a
+                        (models.py:325-333): rendered from this row, never a
                         live product read — the item cannot change after the
                         order. Empty today (no variant input yet), so both stay
                         out of the way until the backend fills them. */}
@@ -308,12 +287,8 @@ export default function OrderDetailView({
 }
 
 /**
- * §5.5 item 8 says "resume payment when `payment_status` is unpaid" — the
- * backend's vocabulary has no `unpaid`, and its own precondition is the
- * source of truth: `payment/` refuses anything whose `status` is not
- * `pending` (backend/orders/views/payment.py:92-94) and treats a `failed`
- * payment as retryable (orders/state.py:178). So an order is resumable when
- * the machine says it can be paid AND the money has not landed.
+ * The backend refuses anything whose status is not `pending` and treats a
+ * `failed` payment as retryable, so "payable" means payable and not captured.
  */
 function payable(order: OrderRecord): boolean {
   return (
@@ -325,25 +300,9 @@ function payable(order: OrderRecord): boolean {
 }
 
 /**
- * §5.5 item 4 — the lifecycle timeline. The six timestamps are exactly what
- * `OrderSerializer` ships (backend/orders/serializers.py:131-136); the two
- * machine dimensions ride as current-state rows (serializers.py:97-98).
- * `OrderStatusEvent` rows are NOT in the projection, so nothing reads them.
- *
- * Unreached steps print their label and no date — that is the state, and it
- * is the customer's actual question ("what is still to come", §5.5).
- *
- * Screen parity (U-W12-T9): section rule with a counter right (the screen's
- * "Step 03 of 04" is replaced by the REAL milestone count over the six
- * timestamps — P5, no step machine is invented), serif step labels, square
- * hairline markers on the vertical track (already the house treatment).
- *
- * Accent moment (§5.5 line 1478, P2): the markers settle in on
- * `animation-timeline: view()` via the existing `.settle` class — reading
- * position mapped onto journey position, declared inside
- * `prefers-reduced-motion: no-preference` + `@supports` (globals.css:525-544),
- * so reduced motion and unsupported browsers render every marker already
- * filled, and the same status is printed as text at the top of the page.
+ * The six timestamps are exactly what the serializer ships; unreached steps
+ * print their label with no date. Markers settle on the view timeline via
+ * `.settle`, which is disabled for reduced motion and unsupported browsers.
  */
 function OrderJourney({ order }: { order: OrderRecord }) {
   const steps: {

@@ -3,14 +3,8 @@ import type { PyramidTier } from "@/lib/products-api";
 export type { PyramidTier };
 
 /**
- * Olfactory pyramid (design screen `ther_s_culaire…refined_hero_flow`,
- * "Olfactory Architecture"; DESIGN.md §Olfactory Pyramids: tiers divided by
- * hairlines with wide-tracked 11px uppercase indicators). The section is
- * data-gated: with no tiers from the server it renders nothing at all,
- * because §5.2 item 5 and P5 forbid inventing Top/Heart/Base structure from
- * the one free-text prose field (§12-G10; gap logged in
- * BACKEND_REQUESTS.md). Static by design — the pyramid is reading content,
- * and the page's one accent moment is the story drift below it.
+ * Data-gated: no tiers means no section at all. Never invent Top/Heart/Base
+ * from the free-text prose field.
  */
 export default function OlfactoryPyramid({ tiers }: { tiers: PyramidTier[] }) {
   if (tiers.length === 0) return null;
@@ -26,8 +20,7 @@ export default function OlfactoryPyramid({ tiers }: { tiers: PyramidTier[] }) {
       >
         Top, heart and base
       </h2>
-      {/* gap-px over the hairline colour draws the tier rules themselves —
-          no shadows, no radius, one surface (DESIGN.md partition system). */}
+      {/* gap-px over the hairline colour draws the tier rules themselves. */}
       <div className="mt-8 grid gap-px bg-hairline md:grid-cols-3">
         {tiers.map((tier) => (
           <div key={tier.key} className="bg-surface p-6 md:p-8">

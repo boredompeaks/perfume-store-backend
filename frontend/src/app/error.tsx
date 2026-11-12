@@ -10,9 +10,8 @@ export default function ErrorPage({
   error: Error & { digest?: string };
   reset: () => void;
 }) {
-  // Report once per boundary render. The effect is what keeps telemetry off
-  // the render path: a blocked or slow DSN can never delay the fallback UI,
-  // and `captureException` itself swallows every failure.
+  // In an effect so telemetry stays off the render path: a blocked DSN must
+  // never delay the fallback UI.
   useEffect(() => {
     captureException(error);
   }, [error]);

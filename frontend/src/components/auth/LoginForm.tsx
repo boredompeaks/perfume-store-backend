@@ -14,11 +14,8 @@ export default function LoginForm({
 }: {
   next?: string;
   /**
-   * Which sign-in door this is. SPEC-20-10: the storefront ("customer") door
-   * renders NO authentication-code field at all — customers never
-   * authenticate with one, and offering it there was unknowable noise for
-   * the overwhelming majority of sign-ins. The "staff" door renders it,
-   * plainly, because that is where [R-17.9] demands it.
+   * The storefront door has no authentication-code field (customers never
+   * use one); only the staff door renders the TOTP field.
    */
   variant?: "customer" | "staff";
 }) {
@@ -36,24 +33,20 @@ export default function LoginForm({
     setPending(true);
     setError(null);
     try {
-      // The surface picks both the endpoint and whether a code may ride
-      // along (lib/mfa.ts): the customer body can never grow a totp key.
+      // The surface picks endpoint and body shape (lib/mfa.ts); the customer
+      // body can never grow a totp key.
       await login(variant, username.trim(), password, totp.trim() || undefined);
-      // D-04b: the backend merged the guest basket into the account cart at
-      // sign-in, so the held cart query is stale — refetch it before the
-      // destination renders the header badge from it.
+      // Sign-in merges the guest basket server-side, so the cached cart is
+      // stale before the destination header renders its badge.
       await queryClient.invalidateQueries({ queryKey: ["cart"] });
-      // Go where the user was headed. Awaiting keeps "Signing in…" visible
-      // until the destination is rendering (the backend's PBKDF2 check costs
-      // ~0.7s — honest feedback beats a dead-looking button).
+      // Await keeps "Signing in…" visible until the destination renders;
+      // the backend's PBKDF2 check costs ~0.7s.
       await router.push(next ?? "/");
     } catch (err) {
       setError(
         err instanceof ApiError
-          ? // The staff door reports MFA problems under `totp`; the customer
-            // door has no such field, so its answers (a uniform 401, or the
-            // "this is a staff account" refusal) arrive as the envelope's
-            // own text.
+          ? // Staff reports MFA problems under `totp`; the customer door has
+            // no such field and surfaces the envelope's own text.
             variant === "staff"
             ? (err.fieldErrors?.totp?.[0] ?? err.message)
             : err.message

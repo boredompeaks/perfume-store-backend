@@ -2,6 +2,10 @@
 
 Source of truth for the spec-compliance run. Updated at every status transition with evidence (commit SHA, test command + result, or report verdict).
 
+Line references (`path:line`) inside dated entries are historical anchors from
+the tree at that time. The 2026-11-12 repo-wide comment prune shifted source
+lines; locate a current line by the named symbol, not by the old number.
+
 ## Standing operating rules (orchestrator — read before every dispatch)
 
 These are rules for the ORCHESTRATOR, not for the agents. They live here

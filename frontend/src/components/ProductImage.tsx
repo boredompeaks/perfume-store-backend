@@ -5,7 +5,6 @@ import { useState } from "react";
 import { mediaUrl } from "@/lib/config";
 
 type Props = {
-  /** Raw API path ("/media/…") or null. */
   src: string | null | undefined;
   alt: string;
   sizes?: string;
@@ -14,9 +13,8 @@ type Props = {
 };
 
 /**
- * Handles the two real-world degradation paths seen in live data:
- * a null image path, and /media/ URLs that 404 (media is unserved in prod, F-16).
- * Falls back to a quiet typographic monogram rather than a broken image.
+ * Falls back to a monogram for a null path or a /media/ URL that 404s
+ * (media is unserved in prod), never a broken image.
  */
 export default function ProductImage({
   src,

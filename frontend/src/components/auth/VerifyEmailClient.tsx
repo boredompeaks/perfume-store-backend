@@ -7,20 +7,15 @@ import { verifyEmail } from "@/lib/accounts-api";
 
 type State =
   | { kind: "working" }
-  /** Query carried no uid/token: the link was truncated before it reached us. */
+  /** Missing uid/token: the link was truncated. */
   | { kind: "incomplete" }
-  /** Server accepted — message renders verbatim. */
   | { kind: "verified"; message: string }
-  /** Server refused (uniform 400) — message renders verbatim, + resend link. */
   | { kind: "rejected"; message: string }
-  /** Network failure — says nothing about the link's validity. */
   | { kind: "unreachable" };
 
 /**
- * §5.10 `/verify-email`. Posts uid + token on mount. The server's answer —
- * success or the uniform invalid/expired 400 — renders verbatim; this UI
- * never rewrites it. A network failure is its own state: it must not claim
- * the link is invalid when we never reached the server.
+ * The server's answer (success or the uniform 400) renders verbatim. A network
+ * failure is its own state and must not claim the link is invalid.
  */
 export default function VerifyEmailClient({
   uid,
@@ -43,8 +38,7 @@ export default function VerifyEmailClient({
       .catch((err) => {
         if (cancelled) return;
         if (err instanceof ApiError) {
-          // Invalid/expired link (and any other server refusal): the
-          // server's own words, verbatim.
+          // The server's own words, verbatim.
           setState({ kind: "rejected", message: err.message });
         } else {
           setState({ kind: "unreachable" });
@@ -55,14 +49,8 @@ export default function VerifyEmailClient({
     };
   }, [uid, token]);
 
-  /**
-   * Screen v_rification_de_courriel (refined, PRIMARY): every state renders
-   * inside the register panel with a status line over a hairline. The status
-   * names only what this client knows (checked / not checked / confirmed /
-   * unconfirmed); the server's own words carry the reason, verbatim below it,
-   * so the chrome never characterises the failure (no expiry or invalidity
-   * claim beyond what the server said).
-   */
+  // The chrome names only what this client knows; the server's message
+  // carries the reason, so no expiry/invalidity claim is invented.
   let statusLabel: string;
   let statusTone: string;
   let body: ReactNode;

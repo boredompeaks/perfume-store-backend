@@ -1,21 +1,8 @@
 """Unit tests for ``scripts/load/run_races.py``'s invariant-check pipeline.
 
-Auditor BUG-1 (cycle 1): the T2-INV-6 expectation shipped in a ``value_from``
-form that ``checks_for_phase`` never resolved and ``evaluate_checks`` did not
-understand, so EVERY double-capture run reported INV-6 FAIL on a perfectly
-clean DB — in both live-psycopg and --verify-json mode — and the
-exactly-once-capture invariant (the core deliverable) was unverifiable.
-
-These tests pin both directions of the check with the auditor's exact rows,
-through BOTH consumption shapes the runner uses:
-
-  * the resolved ``row_eq/value`` form (what checks_for_phase emits and what
-    an --verify-json round-trip file carries), and
-  * the raw ``row_eq/value_from`` form plus a context dict (the belt the
-    evaluator keeps for a hand-written/stale checks file).
-
-Everything here is offline: no HTTP, no DB, no network — the module's HTTP
-plumbing is never invoked, only its pure functions.
+Pins BOTH consumption shapes of the T2-INV-6 expectation -- the resolved
+``row_eq/value`` form and the raw ``row_eq/value_from`` form plus a context
+dict -- so a clean double-capture cannot report FAIL. Offline: no HTTP, no DB.
 """
 
 import sys
@@ -26,8 +13,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "load"))
 
 import run_races as rr  # noqa: E402
 
-# The phase results dict phase_double_capture produces (run_races.py), with
-# the auditor's named ids: order 77 captured once under payment id payX.
+# phase_double_capture's results dict: order 77 captured once under payX.
 RESULTS = {
     "capture_order_id": 77,
     "capture_payment_id": "payX",
@@ -35,8 +21,8 @@ RESULTS = {
     "expected_captured": 1,
 }
 
-# The auditor's exact query rows: a clean capture (one transition) and a
-# genuine double-capture shape (two pending->confirmed transitions).
+# The auditor's rows: a clean capture (one transition) and a genuine
+# double-capture shape (two pending->confirmed transitions).
 CLEAN_ROWS = [
     {
         "payment_status": "captured",
@@ -101,14 +87,13 @@ class ValueFromResolutionTests(unittest.TestCase):
 
 class Inv6EvaluationTests(unittest.TestCase):
     def test_clean_capture_passes_in_resolved_form(self):
-        # verify-json / live shape: the check carries row_eq/value already.
+        # verify-json / live shape: the check already carries row_eq/value.
         verdicts = rr.evaluate_checks([_resolved_check()], {INV6_ID: CLEAN_ROWS})
         self.assertEqual(len(verdicts), 1)
         self.assertTrue(verdicts[0]["ok"], verdicts[0])
 
     def test_clean_capture_passes_in_raw_value_from_form_with_context(self):
-        # live-mode belt: a checks file that still names context keys must
-        # evaluate, not report "unsupported expect form".
+        # live-mode belt: a checks file that still names context keys must evaluate.
         raw = {
             "id": INV6_ID,
             "expect": {
@@ -141,9 +126,8 @@ class Inv6EvaluationTests(unittest.TestCase):
 
 class IntentCapAlignmentTests(unittest.TestCase):
     def test_intent_cap_default_is_twenty(self):
-        # Auditor BUG-4: the two files' LOAD_MAX_INTENTS fallbacks diverged
-        # (20 in k6_profiles.js, 25 here). The runner's default is pinned to
-        # 20 by hand-written literal, NOT derived from anything.
+        # The two files' LOAD_MAX_INTENTS fallbacks diverged (20 vs 25); the
+        # runner's default is pinned by hand-written literal, not derived.
         self.assertEqual(rr.INTENT_CAP, 20)
 
 

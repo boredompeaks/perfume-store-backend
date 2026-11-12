@@ -1,58 +1,29 @@
-# MUT-1: weekly automated mutation testing, scoped to two files.
+# Weekly automated mutation testing, scoped to two files.
 #
-# WHY THIS EXISTS. scripts/mutation_evidence.py already replays mutation claims
-# and is the reason seven unmeasured figures in SPEC-1 were caught. It is not
-# replaced here, and it cannot be: it REPLAYS mutations a human already wrote
-# into scripts/mutation_evidence/*.json, so it can only ever check a claim about
-# a mutation somebody remembered to record. Nothing in it chooses a mutant. The
-# question it structurally cannot answer is "which line in orders/state.py has
-# no test pinning it", because that question needs a runner that generates its
-# own mutants. This workflow is that runner; the two compose.
+# scripts/mutation_evidence.py REPLAYS recorded mutations, so it cannot answer
+# "which line in orders/state.py has no test pinning it". mutmut generates its
+# own mutants; the two compose.
 #
-# WHY mutmut AND NOT cosmic-ray. Both were installed and read on this tree
-# before either was chosen, and the deciding facts are mechanical:
-#   - mutmut 2.5.1's `paths_to_mutate` is a per-file ALLOW-list. Naming two
-#     files mutates two files.
-#   - cosmic-ray 8.7.0's config schema (read from its own new_config.py) has
-#     exactly one `module-path`, expanded by glob as <module>/**/*.py, plus a
-#     SUBTRACTIVE `excluded-modules`. So its unit of scope is a module, not a
-#     file: orders/state.py and common/permissions.py are in different packages,
-#     and there is no single module-path that yields exactly those two files
-#     short of enumerating every other file in both packages as an exclusion.
-#     On the unit this task turns on, cosmic-ray cannot be pointed at two files.
-#   - mutmut 3.8.0 (current) hard-requires pytest>=6.2.5 in its own metadata.
-#     This repo's floor is measured by `manage.py test`, so mutmut 3 would mean
-#     carrying a second test runner whose result is not the changelog's number.
-#     Hence the pin at 2.5.1, which takes any command as its runner.
-#   - cosmic-ray runs its configured command in FULL per mutant. So does mutmut
-#     2.5.1 (its `--use-coverage` narrows which LINES are mutated, never which
-#     tests run), so per-mutant cost is a property of the suite, not a property
-#     of the tool -- cosmic-ray has the same cost with worse scoping.
+# mutmut 2.5.1, not cosmic-ray: mutmut's `paths_to_mutate` is a per-file
+# allow-list, while cosmic-ray's unit is a module and cannot be pointed at
+# exactly these two files in different packages. mutmut 3 hard-requires
+# pytest>=6.2.5, but this repo's floor is `manage.py test`; 2.5.1 takes any
+# runner command.
 #
-# NEVER A GATE. Triggers are schedule + workflow_dispatch only. There is no
-# pull_request/push trigger anywhere in this file, so this workflow cannot
-# appear as a required check and cannot block a merge. `--CI` makes mutmut exit
-# 0 when mutants survive, which is the whole point of measuring a weekly score:
-# a surviving mutant is information, not a red build. A non-zero exit here means
-# the HARNESS broke (red baseline, unreadable cache), which is worth seeing.
+# NEVER A GATE: schedule + workflow_dispatch only, no PR/push trigger, and
+# `--CI` exits 0 when mutants survive - survival is information, not a red
+# build. A non-zero exit means the HARNESS broke.
 #
-# WRITES NOTHING INTO THE REPO TREE. mutmut rewrites its target file in place,
-# plus .mutmut-cache, mutations/ and html/ in its working directory. The run
-# happens against a COPY of backend/ under RUNNER_TEMP, and the final step
-# asserts `git status --porcelain` is still empty -- so the constraint is a
-# checked assertion rather than an intention. That also means a cancelled run
-# cannot leave a mutated source file behind.
+# Writes nothing into the repo: mutmut runs against a COPY of backend/ under
+# RUNNER_TEMP, and the final step asserts `git status --porcelain` is empty, so
+# even a cancelled run cannot leave a mutated source file behind.
 name: mutation-weekly
 
 on:
   schedule:
-    # Weekly at 04:41 UTC on Monday. Scheduled runs are best-effort and come from the
-    # repository's DEFAULT BRANCH, so this file goes live when
-    # feat/add-frontend is the default (master is legacy, never a target).
-    # The slot is arbitrary but fixed, and deliberately NOT doc-claims-nightly's
-    # 03:17, so two nightlies cannot contend for the same window.
-    # A changed-files check runs first: if neither target file changed since the
-    # last successful run, the mutation run is skipped.
+    # Weekly at 04:41 UTC Monday. Scheduled runs come from the DEFAULT BRANCH
+    # (feat/add-frontend; master is legacy). The fixed slot avoids
+    # doc-claims-nightly's 03:17, and an unchanged target file skips the run.
     - cron: "41 4 * * 1"
   # Manual runs, without editing the cron above (also the API entry point).
   workflow_dispatch:
@@ -67,57 +38,33 @@ concurrency:
 jobs:
   mutate:
     runs-on: ubuntu-latest
-    # Measured, not guessed: the sample run below killed 7 mutants in 634s with
-    # one full baseline run (~80s) plus ~79s per mutant. This job has 186
-    # covered mutants across the two files (108 in orders/state.py, 78 in
-    # common/permissions.py), so ~79s x 186 + 80s + the coverage baseline is
-    # about 250 minutes. The cap is above that on purpose: a job killed by its
-    # own timeout publishes NO summary at all (later steps do not run), so the
-    # ceiling is set to let an ordinary overrun still report itself as
-    # incomplete rather than vanishing.
+    # Measured ~79s per mutant over 186 covered mutants plus baseline (~250 min),
+    # so the cap sits above that: a job killed by its own timeout publishes NO
+    # summary (later steps do not run), and an overrun must still report.
     timeout-minutes: 330
     env:
-      # Same dummy Razorpay values backend-tests.yml uses: CI never reads a real
-      # .env, and this proves the runner never depends on live credentials.
+      # Same dummy Razorpay values as backend-tests.yml: no real .env is read.
       DJANGO_DEBUG: "true"
       RAZORPAY_KEY_ID: rzp_test_CI_DUMMY
       RAZORPAY_KEY_SECRET: ci-dummy-secret
-      # mutmut reads its subprocess output as UTF-8 and dies on a byte it
-      # cannot decode. Measured on a cp1252 console: a Django run emitting an
-      # em dash (0x97 in cp1252) aborts the whole run with
-      # UnicodeDecodeError. This repo has already been bitten by that exact
-      # byte class once (see the byte-safe grep in doc-claims-nightly.yml).
+      # mutmut decodes subprocess output as UTF-8 and dies on an undecodable
+      # byte: a Django run emitting a cp1252 em dash (0x97) raises
+      # UnicodeDecodeError and aborts the whole run.
       PYTHONIOENCODING: utf-8
-      # DATABASE_URL is unset on purpose: settings.py falls back to SQLite when
-      # it is absent, and a mutation score is only comparable run-to-run if the
-      # engine is pinned rather than inherited from the runner's environment.
-      # The mutation score therefore describes the SQLite engine; the Postgres
-      # pair is the suite's concern, not this job's.
+      # DATABASE_URL unset on purpose: settings.py falls back to SQLite, and a
+      # score is comparable run-to-run only if the engine is pinned. It describes
+      # the SQLite engine; Postgres is the suite's concern.
       #
-      # SANDBOX is NOT set here. The `runner` context is not available to a
-      # job-level `env:` -- GitHub's context-availability table allows only
-      # github/inputs/matrix/needs/secrets/strategy/vars there -- so naming it
-      # made this file fail semantic validation: GitHub refused to create the
-      # job, and PyYAML could not see it because the refusal is not a parse
-      # error. Each step that needs the path declares it in its OWN env, which
-      # is a scope where `runner` resolves, so the one step that builds the
-      # sandbox sets it itself.
-      #
-      # WHY actionlint AND NOT PyYAML IS THE GATE. This file parsed cleanly
-      # under PyYAML while GitHub refused to create the job, because the refusal
-      # is SEMANTIC (which context may be read where) and not syntactic. No test
-      # in this repo parses YAML -- deliberately, PyYAML is not a dependency --
-      # so actionlint is the only oracle for the class, and it is what a
-      # reviewer should run before pushing any workflow change here.
+      # SANDBOX is NOT set at job level: the `runner` context is illegal in a
+      # job `env:` (GitHub refuses the job semantically, which PyYAML cannot
+      # see), so the step that needs it declares it in its own env. That is why
+      # actionlint, not PyYAML, is the oracle for workflow changes here.
     steps:
-      # SPEC-22-11: full commit SHA, tag in a trailing comment. Never widen a
-      # pin back to a tag. These are the same three SHAs backend-tests.yml
-      # already pins, so there is exactly one set of action pins in this repo.
+      # Full commit SHA + tag; never widen a pin. Same SHAs as backend-tests.yml,
+      # so the repo has one set of action pins.
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          # Depth 1 is enough and is the default: mutmut needs no history (it
-          # is not a patch-based tool), so unlike backend-tests.yml's
-          # diff-scoped claim scan there is nothing here to fetch history for.
+          # Depth 1 is enough: mutmut is not patch-based and needs no history.
           fetch-depth: 1
 
       - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
@@ -130,10 +77,8 @@ jobs:
         working-directory: backend
         run: pip install -r requirements.txt
 
-      # Refuse to measure from a checkout that is not pristine. mutmut edits a
-      # tracked file in place, so starting from a dirty tree would mean
-      # mutating someone's uncommitted work -- which is the same hazard
-      # scripts/mutation_evidence.py refuses to run into.
+      # mutmut edits a tracked file in place, so a dirty tree would mean
+      # mutating someone's uncommitted work.
       - name: Assert the checkout is clean before mutating
         run: |
           set -euo pipefail
@@ -143,11 +88,9 @@ jobs:
             exit 1
           fi
 
-      # Skip the run when neither target file changed since the last successful
-      # execution. A weekly cron that re-measures an unchanged score is noise;
-      # the changed-files check makes the cadence honest. The check compares
-      # the blob SHAs of the two target files at the last successful run's
-      # head_sha against HEAD, using the GitHub API (no git history needed).
+      # Re-measuring an unchanged score is noise. Compares the two files' blob
+      # SHAs at the last successful run's head_sha against HEAD via the API, so
+      # no git history is needed.
       - name: Check if target files changed since last run
         id: changed
         env:
@@ -178,13 +121,10 @@ jobs:
             echo "No target files changed since last successful run; skipping."
           fi
 
-      # The copy is what keeps mutmut's in-place rewrites, .mutmut-cache,
-      # mutations/ and html/ out of the repository. Copied with the version
-      # control directory NOT carried over, so nothing in the sandbox can
-      # commit, push or otherwise reach the real tree.
-      #
-      # SANDBOX is declared HERE rather than at job level: `runner.temp` is a
-      # legal expression in a step's own `env:` and an illegal one in the job's.
+      # The copy keeps mutmut's in-place rewrites, .mutmut-cache and reports out
+      # of the repository. .git is NOT carried over, so nothing in the sandbox
+      # can reach the real tree. SANDBOX is declared here: `runner.temp` is
+      # legal in a step env, illegal at job level.
       - name: Copy backend/ into an out-of-tree sandbox
         if: steps.changed.outputs.changed == '1'
         env:
@@ -196,11 +136,9 @@ jobs:
           test -f "${SANDBOX}/manage.py"
           echo "sandbox=${SANDBOX}"
 
-      # mutmut's use_coverage reads .coverage from its working directory and
-      # keeps only mutants on lines a test actually executes. Measured: 246
-      # mutants without it, 186 with it. The 60 dropped sit on lines this
-      # runner never reaches, so they would be guaranteed survivors -- noise
-      # reported as test-suite weakness.
+      # use_coverage keeps only mutants on lines a test executes: 246 mutants
+      # without it, 186 with. The 60 dropped would be guaranteed survivors -
+      # noise reported as test-suite weakness.
       - name: Coverage baseline for the mutation scope
         if: steps.changed.outputs.changed == '1'
         working-directory: ${{ runner.temp }}/mutation-sandbox
@@ -210,22 +148,14 @@ jobs:
             orders common accounts products shipping --verbosity 0
           test -f .coverage
 
-      # `--runner` here OVERRIDES the config-file key rather than being
-      # required, and that is measured, not assumed: mutmut declares `--runner`
-      # with no default, so the value click passes is None (falsy) and the
-      # config merge substitutes the file's value. The non-empty pytest runner
-      # is only that merge's Python fallback. Executed both ways against mutmut
-      # 2.5.1: with no flag the config-file value reached the callback, with the
-      # flag the command line won. paths_to_mutate, use_coverage, simple_output
-      # and no_progress all default falsy too, so the same rule reads them from
-      # backend/pyproject.toml.
-      #
-      # The label list is the scope's cost, stated rather than hidden. This is
-      # 909 of the suite's 1836 tests and it is GREEN, which mutmut requires
-      # (it aborts the whole run if the unmutated baseline is not clean). The
-      # `tests` package that is left out holds the RBAC/admin tests that import
-      # common/permissions.py, so the score is a lower bound on what the suite
-      # would kill -- see the fidelity note in the summary below.
+      # `--runner` OVERRIDES the config key: mutmut gives the flag no default,
+      # so the config merge supplies backend/pyproject.toml's value when it is
+      # absent. paths_to_mutate/use_coverage/simple_output/no_progress follow the
+      # same falsy-default rule.
+      # The label list is the scope's cost: 909 of 1836 tests, run green (mutmut
+      # aborts if the baseline is not clean). The omitted `tests` package holds
+      # RBAC/admin tests importing common/permissions.py, so the score is a lower
+      # bound - see the summary's fidelity note.
       - name: Run mutmut (scope and flags from backend/pyproject.toml)
         id: mutate
         if: steps.changed.outputs.changed == '1'
@@ -237,19 +167,13 @@ jobs:
             --CI
           status=$?
           echo "mutmut_exit=${status}"
-          # Not `set -e` on purpose: --CI exits 0 for surviving mutants and
-          # non-zero only for a broken harness, and the summary step below must
-          # still run either way (it is `if: always()`), so the exit is
-          # reported and re-raised rather than swallowed.
+          # Not `set -e` on purpose: the exit is reported and re-raised so the
+          # `if: always()` summary step still runs.
           exit "${status}"
 
-      # mutmut's own HTML report is the machine's verdict; the step summary
-      # quotes it rather than recomputing it. The row regex does NOT anchor on
-      # </tr>: mutmut's writer emits no closing </tr> on ANY row - not the last
-      # one, not any other; the table is closed once, after the loop. Measured on
-      # real output rather than assumed: a </tr>-anchored pattern matches nothing
-      # at all, where the unanchored one used here matches every data row - the
-      # exact shape of "a green gate that read nothing".
+      # Quotes mutmut's own HTML report rather than recomputing it. The row
+      # regex must NOT anchor on </tr>: mutmut emits no closing </tr> on any row,
+      # so an anchored pattern matches nothing - "a green gate that read nothing".
       - name: Publish the mutation summary
         if: always()
         working-directory: ${{ runner.temp }}/mutation-sandbox
@@ -311,9 +235,7 @@ jobs:
             echo "::warning::only ${rowcount} file row(s) in the mutation report"
           fi
 
-      # The constraint made checkable rather than asserted in a comment: after a
-      # run that rewrites a tracked file in place, the checkout must be exactly
-      # as it was.
+      # After in-place rewrites, the checkout must be exactly as it was.
       - name: Assert the repo tree is untouched
         if: always()
         run: |

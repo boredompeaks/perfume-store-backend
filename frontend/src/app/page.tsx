@@ -8,32 +8,16 @@ import { getReturnWindow } from "@/lib/policies";
 import { pageMetadata } from "@/lib/pages";
 import { site } from "@/lib/site";
 
-// Rendered on demand with the underlying fetch cached for 60s
-// (next.revalidate in products-api). Not ISR: a build without backend
-// access would otherwise bake the empty "New arrivals" state into the
-// prerender until an unverified background revalidation.
+// On-demand rather than ISR: a backend-less build would otherwise prerender
+// the empty arrivals state. The fetch itself is cached for 60s.
 export const dynamic = "force-dynamic";
 
-// §8.1 `/` row: canonical is `/`, robots index, title the exact default
-// string (absolute so the root template cannot re-wrap it), description the
-// site's real one. Title/description already arrive from the root layout;
-// pageMetadata (registry-driven generation layer) adds the canonical and
-// pins both values so home cannot drift from the robots.txt/sitemap pair
-// built from the same registry entry.
+// Title/description are pinned from the page registry so home cannot drift
+// from the robots.txt/sitemap pair built from the same entry.
 export const metadata: Metadata = pageMetadata("/", { absoluteTitle: true });
 
-/**
- * §5.1 §2 — new arrivals: the newest four (the server's default page size),
- * fetched on the server and handed to the D1 screen's carousel as props
- * (`maison_ther_catalogue_accueil_carousel_edition`). The fetch therefore
- * keeps its 60s revalidate cache and no client request runs before the
- * section paints; the client island only holds the slide index.
- *
- * P5 honesty on both failure paths: an empty result set and an unreachable
- * backend each omit the section outright. A carousel cannot exist without
- * slides, and §5.1's discipline is that the home page still renders quietly
- * — never with an error dump or an invented placeholder product.
- */
+// Server-fetched props keep the 60s cache and no client request; the island
+// only holds the slide index. Empty or unreachable results omit the section.
 async function NewArrivals() {
   try {
     const page = await fetchProductsPage(
@@ -48,17 +32,12 @@ async function NewArrivals() {
       </section>
     );
   } catch {
-    // Backend unreachable — the home page must still render, quietly.
     return null;
   }
 }
 
-/**
- * §6: the fallback mirrors the real slide's plate — same hairline frame,
- * same 5/7 image-to-copy split, same padding — because a skeleton of a
- * different shape causes the CLS it exists to prevent. Four shimmer blocks,
- * well under §3's 12-instance page cap.
- */
+// Mirrors the real slide's plate: a differently shaped skeleton causes the CLS
+// it exists to prevent.
 function CarouselFallback() {
   return (
     <section
@@ -80,8 +59,7 @@ function CarouselFallback() {
 }
 
 export default async function HomePage() {
-  // A-12.D.2: the strip states the window only when the API publishes one;
-  // without it the item keeps its place in the strip as plain "Returns".
+  // The strip states the return window only when the API publishes one.
   const { days } = await getReturnWindow();
   const organizationJsonLd = {
     "@context": "https://schema.org",
@@ -100,18 +78,8 @@ export default async function HomePage() {
         }}
       />
 
-      {/* §5.1 §1 — hero: the brand statement and the entry to the catalogue.
-          Typographic on paper: there is no campaign photograph, so the KEEP
-          paper grain and ghost "A" are the only imagery. Nothing in here
-          animates — the hero is the first-screen content and the LCP
-          candidate (§10, §3: "Never on the hero") — and nothing in here is
-          `cv-auto` either: content-visibility on the LCP section would defer
-          the paint it exists to win (§10.3's below-fold rule names the
-          sections that follow it, not this one). The D1 screen shows an
-          atelier photograph behind this block; §5.1 bans the stock-photo
-          hero (one image per product, none of them a campaign asset) and
-          W6-T1 ruled this treatment compliant, so the photograph is not
-          adopted. */}
+      {/* LCP hero: no animation and no content-visibility, which would defer
+          the paint this section exists to win. No campaign photograph. */}
       <section className="noise relative overflow-hidden border-b border-hairline">
         <span
           aria-hidden="true"
@@ -120,10 +88,6 @@ export default async function HomePage() {
           A
         </span>
         <div className="mx-auto max-w-6xl px-4 sm:px-6">
-          {/* §5.1: the column is vertically centred in a hero of ~62% of the
-              viewport height — not the full-viewport 50% — carrying §2.3's
-              hero vertical padding (--space-16/24/32), so the block sits
-              above the optical centre and leaves air beneath it. */}
           <div className="flex min-h-[62svh] max-w-4xl flex-col justify-center py-16 md:py-24 lg:py-32">
             <p className="text-label uppercase text-bronze">
               Eau de parfum · Small batches
@@ -159,15 +123,8 @@ export default async function HomePage() {
         <NewArrivals />
       </Suspense>
 
-      {/* §5.1 §3 — the house position, composed against the D1 screen: the
-          screen's asymmetric 5/7 split (code.html:446-457) instead of the
-          even 2-column grid, applied from `md` so §5.1's "two columns at md"
-          still holds. Copy KEEP verbatim — it is the most honest text on the
-          site; the screen's own wording ("Philosophy of measure") is mockup
-          drift against that KEEP. `cv-auto` (§10.3, U-W15-T17): the band sits
-          a full screen below the hero, so its layout/paint is skipped until
-          it nears the viewport — the settle reveal still plays there, and
-          print/find-in-page are covered by the utility's own guarantees. */}
+      {/* cv-auto: this band sits a full screen below the hero, so skip its
+          layout/paint until it nears the viewport. */}
       <section className="settle cv-auto mx-auto max-w-6xl px-4 pt-16 sm:px-6 md:pt-24 lg:pt-32">
         <div className="grid gap-6 border-t border-hairline pt-8 md:grid-cols-12 md:gap-8">
           <div className="md:col-span-5">
@@ -193,14 +150,8 @@ export default async function HomePage() {
         </div>
       </section>
 
-      {/* §5.1 §4 — three verifiable facts about how the store behaves, not
-          trust badges. The return window renders only when the API publishes
-          one (A-12.D.2); the `·` glyphs are decorative. The screen's band
-          ("Complimentary shipping … Razorpay & Stripe … returnable within
-          seven days") claims two things this store does not do (Stripe, a
-          blanket seven-day window), so §5.1's verified wording stays.
-          `cv-auto` (§10.3): the strip is the page's last band, always below
-          the fold once the carousel is on screen. */}
+      {/* cv-auto: last band, always below the fold once the carousel is on
+          screen. The return window renders only when the API publishes one. */}
       <section className="settle cv-auto mx-auto max-w-6xl px-4 py-16 sm:px-6 md:py-24 lg:py-32">
         <p className="flex flex-wrap items-center gap-x-6 gap-y-2 text-label uppercase text-ink-secondary">
           <span>Ships across India</span>

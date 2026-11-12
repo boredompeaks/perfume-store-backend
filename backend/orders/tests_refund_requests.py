@@ -1,36 +1,3 @@
-"""SPEC-E-01/E-02: the customer's refund request and the staff decision.
-
-One sentence of requirement: an authenticated customer can file a refund
-request against one of their own captured orders, and filing one moves no
-money; staff with ``refunds.create`` can later approve it into a real refund
-through the one money writer, or reject it.
-
-The probes below are organized around the rules the tasks name, plus the traps
-this repo has already been bitten by:
-
-* the order lookup is ownership-scoped, so a stranger's order and a
-  nonexistent order answer ONE byte-identical 404 (``OwnershipTests``);
-* every payment status outside the captured-money pair is a 409, and
-  ``refunded`` is among them because there is nothing left to return
-  (``StatusGateTests``);
-* one pending request per order is enforced by a partial unique index, proved
-  by reaching the database directly rather than trusting the view's probe
-  (``DuplicateTests``);
-* every supplied item id must belong to the addressed order - a mixed list is
-  refused whole, never silently narrowed (``ItemsValidationTests``);
-* the 201 body is the explicit-field projection, and the response exposes no
-  staff decision id (``HappyPathTests``);
-* filing a request writes no ``Refund`` row and changes no ``payment_status``
-  (``MoneyIsUntouchedTests``);
-* ``requester`` is SET_NULL, so deleting an account never erases the trail
-  (``TrailTests``);
-* approval derives the amount from the request (line totals or the remaining
-  balance), calls ``orders.refunds.issue_refund`` and never writes a refund
-  itself; a gateway refusal leaves the request pending; rejection moves no
-  money; a decided request is a no-op; only ``refunds.create`` may decide
-  (``AdminDecisionTests``).
-"""
-
 from decimal import Decimal
 from unittest.mock import patch
 
@@ -58,8 +25,6 @@ TEST_PASSWORD = "S3cure-Passphrase!"
 
 
 class RefundRequestTestCase(ApiTestCase):
-    """Fixtures: two customers, one captured order each, and a helper to file."""
-
     def setUp(self):
         super().setUp()
         self.buyer = self.make_user("refund-buyer")
@@ -197,12 +162,8 @@ class StatusGateTests(RefundRequestTestCase):
                 self.assertEqual(response.data["status"], "pending")
 
     def test_every_payment_value_the_machine_admits_is_gated(self):
-        # A hand-written oracle on BOTH sides of the gate: the expected set is
-        # a literal, not a recomputation from the constant the view reads, so
-        # a wrong machine fires this by name. Because the loop is driven from
-        # the transition table itself, a newly admitted payment value can
-        # never slip through untested (the B07a lesson: coverage measures
-        # lines executed, not states reasoned about).
+        # The expected set is a hand-written literal, not a recomputation from the constant the
+        # view reads, so a wrong machine fires this by name.
         self.assertEqual(
             set(CAPTURED_MONEY_PAYMENT_STATUSES),
             {"captured", "partially_refunded"},
@@ -264,10 +225,8 @@ class DuplicateTests(RefundRequestTestCase):
                 )
 
     def test_a_racing_insert_that_slips_past_the_probe_is_still_a_409(self):
-        # The probe and the insert are separated by no lock the test can
-        # reach, so the race is simulated at the savepoint boundary: the
-        # unique index raising during save must be answered with the same 409
-        # as the probe, never a 500 or a poisoned transaction.
+        # The race is simulated at the savepoint boundary: the unique index raising during save
+        # must answer the same 409 as the probe, never a 500 or a poisoned transaction.
         self.login_as(self.buyer)
 
         with patch.object(
@@ -392,7 +351,6 @@ class HappyPathTests(RefundRequestTestCase):
         self.assertEqual(response.data["requester"], self.buyer.id)
         self.assertEqual(response.data["status"], "pending")
         self.assertIsNone(response.data["decided_at"])
-        # Staff identity is not part of the customer projection.
         self.assertNotIn("decided_by", response.data)
 
     def test_the_serializer_declares_its_fields(self):
@@ -413,9 +371,8 @@ class HappyPathTests(RefundRequestTestCase):
         )
 
     def test_the_serializer_is_usable_without_an_order_context(self):
-        # Output rendering (the 201 body) constructs the serializer with an
-        # instance and no context, so the item-ownership gate must be a
-        # write-path-only concern rather than an attribute that always exists.
+        # Output rendering constructs the serializer without context, so the item-ownership gate
+        # must be write-path-only rather than an attribute that always exists.
         serializer = RefundRequestSerializer(data={"reason": "x", "items": [1]})
         self.assertTrue(serializer.is_valid(), serializer.errors)
         self.assertEqual(serializer.validated_data["items"], [1])
@@ -447,8 +404,6 @@ class MoneyIsUntouchedTests(RefundRequestTestCase):
 
 class TrailTests(RefundRequestTestCase):
     def test_deleting_the_requester_keeps_the_request(self):
-        # The order belongs to the buyer, so the stranger can be deleted
-        # without the order (and its request) cascading away first.
         request = RefundRequest.objects.create(
             order=self.order,
             requester=self.stranger,
@@ -496,16 +451,7 @@ ADMIN_REQUESTS = "/admin/orders/refundrequest/"
 
 @tag("e2e")
 class AdminDecisionTests(RefundRequestTestCase):
-    """SPEC-E-02: the staff decision seam over a customer's refund request.
-
-    Approval is the ONLY place a request can become money, and it does so by
-    calling ``orders.refunds.issue_refund`` - never by writing a ``Refund`` row
-    itself and never by calling the gateway. These probes hold that boundary:
-    an item-scoped request refunds its own line totals, a whole-order ask is
-    the remaining balance, a gateway refusal leaves the request pending with
-    nothing written, a rejection moves no money, a decided request is a no-op,
-    and only ``refunds.create`` can decide.
-    """
+    """Approval is the only place a request becomes money: it calls orders.refunds.issue_refund, never writes a Refund row and never calls the gateway."""
 
     def setUp(self):
         super().setUp()
@@ -530,7 +476,6 @@ class AdminDecisionTests(RefundRequestTestCase):
         return client
 
     def captured(self, order):
-        """Give an ORM-built order the captured payment the writer requires."""
         order.razorpay_payment_id = "pay_E02"
         order.save(update_fields=["razorpay_payment_id"])
         return order
@@ -540,7 +485,7 @@ class AdminDecisionTests(RefundRequestTestCase):
         order = self._order(self.buyer, f"REF-2026-{self._number:06d}")
         order.total_amount = Decimal("600.50")
         order.save(update_fields=["total_amount"])
-        first = self._line(order)  # 250.00 x 2 = 500.00
+        first = self._line(order)
         second = OrderItem.objects.create(
             order=order,
             product=self.product,
@@ -577,7 +522,6 @@ class AdminDecisionTests(RefundRequestTestCase):
             data["confirmation_note"] = note
         return self.client.post(ADMIN_REQUESTS, data, follow=True)
 
-    # the surface itself ---------------------------------------------------
     def test_the_surface_is_refunds_create_gated_and_read_only(self):
         model_admin = admin.site._registry[RefundRequest]
         self.assertIsInstance(model_admin, RefundRequestAdmin)
@@ -708,7 +652,6 @@ class AdminDecisionTests(RefundRequestTestCase):
         self.assertEqual(self.request_record.reason, "The bottle arrived damaged.")
         self.assertEqual(Refund.objects.count(), 0)
 
-    # the amount the request asks for -------------------------------------
     def test_the_ask_is_line_totals_or_the_remaining_balance(self):
         order, first, second = self.order_with_two_lines()
 
@@ -719,7 +662,6 @@ class AdminDecisionTests(RefundRequestTestCase):
             Decimal("600.50"),
         )
 
-    # approval ------------------------------------------------------------
     def test_approval_refunds_the_requested_lines_and_marks_the_request(self):
         order, _first, second = self.order_with_two_lines()
         self.request_record.items = [second.id]
@@ -821,7 +763,7 @@ class AdminDecisionTests(RefundRequestTestCase):
     def test_an_item_request_above_the_remaining_balance_is_refused(self):
         order = self.captured(self.order)
         self.partial_refund(order)
-        self.request_record.items = [self.line.id]  # 500.00 > 400.00 left
+        self.request_record.items = [self.line.id]
         self.request_record.save(update_fields=["items"])
         client = self.gateway()
 
@@ -876,10 +818,8 @@ class AdminDecisionTests(RefundRequestTestCase):
         client.refund.create.assert_called_once()
 
     def test_the_idempotency_key_is_the_second_approval_authority(self):
-        # The status gate is the first line of defence; this pins the one
-        # behind it. Re-opening the request (a replay after an operator reset
-        # it by hand) must still collapse onto the refund the key already
-        # produced rather than moving the same money twice.
+        # Re-opening the request (a replay after an operator reset) must collapse onto the refund
+        # the key already produced instead of moving the same money twice.
         self.request_record.items = [self.line.id]
         self.request_record.save(update_fields=["items"])
         self.captured(self.order)
@@ -901,7 +841,6 @@ class AdminDecisionTests(RefundRequestTestCase):
         self.request_record.refresh_from_db()
         self.assertEqual(self.request_record.status, "approved")
 
-    # rejection -----------------------------------------------------------
     def test_rejection_moves_no_money_and_is_audited(self):
         client = self.gateway()
 

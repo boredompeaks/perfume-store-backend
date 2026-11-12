@@ -11,11 +11,8 @@ import type { CouponPreview } from "@/lib/types";
 import { inputClass } from "@/lib/ui";
 
 /**
- * Server truth only: the applied state IS the persisted cart coupon
- * (POST/DELETE /api/cart/coupon/), never a client-side mirror; every
- * displayed number comes verbatim from the apply-coupon preview response —
- * never from client math. A coupon already persisted on the cart renders as
- * applied on mount; checkout re-validates it for real server-side.
+ * The persisted cart coupon is the only applied state; every displayed number
+ * comes verbatim from the preview response, never client math.
  */
 export default function CouponForm({
   onCodeChange,
@@ -23,9 +20,8 @@ export default function CouponForm({
   onCodeChange?: (code: string | null) => void;
 }) {
   const queryClient = useQueryClient();
-  // The shared hook: same identity-keyed entry as CartView/Header and gated
-  // on the auth bootstrap, so the coupon block reads the settled account/guest
-  // cart instead of opening a second, unkeyed ["cart"] cache slot (D-04b).
+  // Shared identity-keyed cart entry, gated on the auth bootstrap; opening a
+  // second unkeyed ["cart"] slot would escape invalidation.
   const { data: cart } = useCart();
   const [code, setCode] = useState("");
   const [applied, setApplied] = useState<{
@@ -35,10 +31,9 @@ export default function CouponForm({
   const [error, setError] = useState<string | null>(null);
   const bootstrapped = useRef(false);
 
-  // Apply: preview first (the PREVIEW endpoint, §12.G5 — it computes the
-  // server numbers), then persist the code on the cart. "Applied" is only
-  // ever set after the persist succeeds, so a preview can never render as
-  // a coupon the cart doesn't hold.
+  // Preview computes the server numbers, then persist the code. "Applied" is
+  // only set after the persist succeeds, so it can never claim a coupon the
+  // cart doesn't hold.
   const apply = useMutation({
     mutationFn: async (value: string) => {
       const preview = await applyCoupon(value);
@@ -89,11 +84,9 @@ export default function CouponForm({
     },
   });
 
-  // A persisted coupon arriving from GET /api/cart/ renders as applied; one
-  // preview call fetches its display numbers (the explicit-submit-only rule
-  // applies to keystrokes, not this bootstrap). If the preview now fails —
-  // the coupon was invalidated after it was persisted — the code stays
-  // shown without numbers; checkout re-validates it.
+  // A persisted coupon renders as applied; one preview call fetches its
+  // numbers. If that fails the code stays without numbers; checkout
+  // re-validates it.
   useEffect(() => {
     if (bootstrapped.current || cart === undefined) return;
     bootstrapped.current = true;

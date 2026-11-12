@@ -18,13 +18,8 @@ import {
 type SearchParams = Record<string, string | string[] | undefined>;
 type Props = { searchParams: Promise<SearchParams> };
 
-/**
- * §5.2 grid — 2 / 2 / 3 / 4 columns at xs/sm/md/lg, with §4's gutters (16px
- * handheld, 24px tablet, 32px desktop). §4 is explicit that sm stays at two:
- * "3 columns at 640px gives 190px cards, too narrow for a bottle to read."
- * Declared once so the real grid and the `GridSkeleton` fallback cannot drift
- * apart (§6: the skeleton mirrors the real columns at every breakpoint).
- */
+// Declared once so the real grid and the GridSkeleton fallback cannot drift:
+// 2/2/3/4 columns, with sm deliberately staying at two.
 const GRID_CLASS =
   "grid grid-cols-2 gap-4 md:grid-cols-3 md:gap-6 lg:grid-cols-4 lg:gap-8";
 
@@ -51,11 +46,6 @@ export default async function ProductsPage({ searchParams }: Props) {
 
   return (
     <div className="mx-auto max-w-6xl px-4 py-10 sm:px-6">
-      {/* Screen header block (U-W11-T5): bronze eyebrow over the display
-          title, eyebrow-to-title gap per the screen (4px = --space-1). The
-          screen's right-hand "Série Permanente · Grasse MMXXIV" line is
-          design-system fiction (A-0b: refs are a SYSTEM, not content) and is
-          deliberately not shipped. */}
       <header>
         <p className="text-eyebrow uppercase text-bronze">Catalogue Raisonné</p>
         <h1 className="mt-1 font-display text-display">All fragrances</h1>
@@ -63,14 +53,8 @@ export default async function ProductsPage({ searchParams }: Props) {
 
       <FilterBar />
 
-      {/*
-        §5.2: the result count is the page's `aria-live="polite"` region;
-        §7.7: the region is a container that is already in the DOM and the
-        changing — cross-fading — line is its child, so the announcement and
-        the animation never sit on the same element. `min-h-6` reserves the
-        line's height (§2.3 cadence: 24px = --space-6) while the fetch is in
-        flight so the grid never moves when the count lands.
-      */}
+      {/* The aria-live region stays a stable container with the cross-fading
+          line as its child; min-h reserves the line so the grid never moves. */}
       <div className="mt-6 min-h-6" aria-live="polite">
         <Suspense fallback={null}>
           <CountFade>
@@ -91,15 +75,8 @@ export default async function ProductsPage({ searchParams }: Props) {
   );
 }
 
-/**
- * The count sentence, per the screen (U-W11-T5): "Showing **N creations** …",
- * with the bold middle step from the screen's emphasis. Two honest exits kept
- * from §5.2: no count is announced for a genuine empty set (the empty state
- * below speaks for it), and none for an unreachable backend — a number we
- * never received is exactly the figure P5 forbids on screen. The filtered
- * suffix ("matching your filters") is the §5.2 behaviour pin and stays; the
- * unfiltered tail is the screen's "in small batch circulation".
- */
+// No count for an empty set or an unreachable backend — only a number the
+// server actually returned.
 async function ResultCount({ filters }: { filters: ProductFilters }) {
   const page = await fetchProductsPage(filtersToParams(filters)).catch(
     () => null,
@@ -153,7 +130,6 @@ async function ProductGrid({ filters }: { filters: ProductFilters }) {
   );
 }
 
-/** §5.2: KEEP copy and the "Clear all filters" action — already correct. */
 function EmptyResults() {
   return (
     <div className="mt-16 py-16 text-center">
@@ -171,17 +147,8 @@ function EmptyResults() {
   );
 }
 
-/**
- * The listing's failure state (§6: every surface names its error state). It
- * renders instead of throwing, so an unreachable backend shows a designed,
- * actionable panel rather than the empty state's copy — which would tell the
- * customer to widen a price range when the truth is that the catalogue did
- * not load. Deliberately NOT the home page's `NewArrivals` shape: home is a
- * supporting section, so its catch returns `null` and the page stands
- * without it; `/products` IS the catalogue, and a silent page there is a
- * dead end. The retry is a plain link so it forces a real re-render with no
- * JS island.
- */
+// Distinct from the empty state, which would wrongly suggest widening filters.
+// A plain link retry forces a server re-render with no JS island.
 function LoadFailed({ filters }: { filters: ProductFilters }) {
   return (
     <div className="mt-16 py-16 text-center">

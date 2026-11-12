@@ -1,12 +1,9 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 /**
- * Silent-refresh contract tests: a 401 must trigger exactly ONE refresh
- * (single-flight, even for concurrent 401s), retry once with the new token,
- * and clear tokens on refresh failure — no loops, no silent failures.
- * Since SPEC-17-02 the refresh token rides an HttpOnly cookie: tests seed
- * only the in-memory access token + the non-secret session hint, never a
- * stored token.
+ * A 401 triggers exactly one single-flight refresh, one retry, and clears
+ * tokens on refresh failure. Only the in-memory access token and non-secret
+ * hint are seeded; the refresh token is an HttpOnly cookie.
  */
 const storage = new Map<string, string>();
 vi.stubGlobal("localStorage", {
@@ -54,8 +51,7 @@ describe("apiFetch silent refresh", () => {
           orderCalls++;
           lastAuth = (init?.headers as Record<string, string>)?.Authorization;
           if (orderCalls === 1) return jsonResponse({ detail: "gone" }, 401);
-          // SPEC-9-04: the history endpoint returns the house page-number
-          // envelope; fetchOrders unwraps `results` for list consumers.
+          // History uses the page-number envelope; fetchOrders unwraps results.
           return jsonResponse({
             count: 1,
             total_pages: 1,
@@ -76,7 +72,7 @@ describe("apiFetch silent refresh", () => {
 
     expect(orders).toEqual([{ id: 7 }]);
     expect(refreshCalls).toBe(1);
-    // R-17.12: the cookie is the credential — the body carries no token.
+    // The cookie is the credential; the body carries no token.
     expect(refreshCredentials).toBe("include");
     expect(JSON.parse(refreshBody ?? "{}")).toEqual({});
     expect(orderCalls).toBe(2);
@@ -104,9 +100,7 @@ describe("apiFetch silent refresh", () => {
 
     const results = await Promise.allSettled([fetchOrders(), fetchOrders()]);
 
-    // Both retries get the SAME shared access token → still 401 (the mock
-    // always 401s orders) → ApiError, but only ONE refresh happened.
-    // orderCalls = 2 requests × (initial + single retry) = 4.
+    // Both retries share the token and still 401: only ONE refresh happened.
     expect(results.every((r) => r.status === "rejected")).toBe(true);
     expect(refreshCalls).toBe(1);
     expect(orderCalls).toBe(4);
@@ -159,12 +153,7 @@ describe("apiFetch silent refresh", () => {
 });
 
 describe("CSRF header on mutations (SPEC-17-03, R-17.18)", () => {
-  /**
-   * The backend's SessionCartCSRFAuthentication gate requires the
-   * double-submit pair on every session-cookie mutation: the browser
-   * sends the csrftoken cookie itself, the SPA must send the matching
-   * X-CSRFToken header — read from the cookie, never invented.
-   */
+  // Double-submit: the SPA sends the cookie value as X-CSRFToken.
   function stubDocument(cookie: string) {
     vi.stubGlobal("document", { cookie });
   }

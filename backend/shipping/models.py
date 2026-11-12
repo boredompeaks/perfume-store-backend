@@ -1,25 +1,8 @@
 """Shipping methods, their rates, and the parcels that leave on them.
 
-SPEC-1-B05 [R-1.07] owns the first half; SPEC-1-B06 [R-1.08] adds the
-shipment half, in the same app because the spec treats them as one admin
-domain (6.9, "Shipping and fulfilment") and B05's changelog records the
-decision that B06 would land beside these two tables rather than open a
-second app.
-
-Shipping methods and their rates answer "what does delivery cost".
-Spec 6.9 names two entities and they answer two different questions, so
-they are two tables: a shipping METHOD is what a customer picks ("Standard",
-"Express") and a RATE is what that method costs for one geography ("Zones,
-rates, carriers, restrictions", line 4155). A method therefore carries many
-rates and the geography lives on the rate -- a national method is a method
-with one wildcard rate, not a method with no geography at all.
-
-Weight-based rates (spec 6.9 line 2003 names them beside flat rates) are
-deliberately NOT modelled here, and the reason is a fact about the catalogue
-rather than a scope decision: `products.products` carries `size` (the bottle
-volume) and no weight in grams anywhere, so a weight band would have nothing
-to match against. It belongs to the first task that gives a product a weight
-to weigh.
+A method is what a customer picks and a rate is what it costs for one
+geography; weight-based rates are deliberately absent because the catalogue
+has no weight column, only ``size``.
 """
 
 from urllib.parse import urlsplit
@@ -32,15 +15,8 @@ from django.db import models
 def _reject_oversized(model, field_name, value):
     """Raise when ``value`` is a string wider than the column it is written to.
 
-    The bound is read off the field itself rather than restated as a literal,
-    so the refusal and the schema cannot drift apart, and a field with no
-    width is never checked because there is nothing to exceed.
-
-    Only ``str`` is measured. Django routes the values of a ``bulk_update``
-    through the same ``QuerySet.update`` as a ``Case`` expression rather than
-    as the string that produced it, so a value here is not always a value at
-    all - and an expression's width is the database's business, not this
-    gate's. ``None`` and every non-string fall out of the same check.
+    The bound is read off the field so refusal and schema cannot drift; only
+    ``str`` is measured because ``bulk_update`` hands over expression objects.
     """
     max_length = getattr(model._meta.get_field(field_name), "max_length", None)
     if max_length is None or not isinstance(value, str):
@@ -54,16 +30,9 @@ def _reject_oversized(model, field_name, value):
 def _reject_oversized_values(instance):
     """Apply :func:`_reject_oversized` to every bounded column of ``instance``.
 
-    SQLite does not enforce a ``varchar(n)`` width while Postgres does, so an
-    over-length value saves cleanly in this test suite and raises ``DataError``
-    on the production database - a 500 on a write the suite reported as a
-    success.
-
-    Called from both models' ``save``, which is the write boundary the admin
-    form funnels into: the form validates its own fields, so a width that
-    reaches the database can only have come from a direct ORM write. The
-    queryset paths that bypass ``save`` are covered by the same helper in
-    ``ShipmentQuerySet``.
+    SQLite does not enforce ``varchar(n)`` while Postgres raises ``DataError``,
+    so this makes the schema a boundary both engines agree on; queryset paths
+    are covered in ``ShipmentQuerySet``.
     """
     for field in type(instance)._meta.concrete_fields:
         if not isinstance(field, models.CharField):
@@ -74,14 +43,9 @@ def _reject_oversized_values(instance):
 class ShipmentQuerySet(models.QuerySet):
     """A ``Shipment`` queryset that will not move a status behind the trail.
 
-    Spec 10.3 lists an "Audit record" as the last element of every transition's
-    contract, and ``ShipmentAdmin.save_model`` is the writer that honours it:
-    the status write and the ``ShipmentEvent`` that records it are one
-    transaction. The bulk paths - ``update()`` and ``bulk_update()`` - are the
-    writes that never reach that method, so both are refused here rather than
-    left as a way to move a parcel with no record of where it moved from. The
-    other columns stay updatable, because none of them is a transition the
-    trail claims to hold.
+    Status and its ``ShipmentEvent`` are written together in the admin; the
+    bulk paths that never reach it are refused here, while other columns stay
+    updatable.
     """
 
     def update(self, **kwargs):
@@ -90,10 +54,8 @@ class ShipmentQuerySet(models.QuerySet):
                 "Shipment.status is moved only through the admin, which records "
                 "the move as a ShipmentEvent; a bulk update cannot."
             )
-        # The width gate rides here too, not only on save(): a bulk update
-        # writes straight to the column, so without this a 400-character
-        # carrier would be a clean write on SQLite and a DataError on the
-        # production database - the same trap, one layer down.
+        # The width gate rides here too: a bulk update writes straight to the
+        # column, the same SQLite-vs-Postgres trap one layer down.
         for field_name, value in kwargs.items():
             _reject_oversized(Shipment, field_name, value)
         return super().update(**kwargs)
@@ -101,16 +63,10 @@ class ShipmentQuerySet(models.QuerySet):
     def bulk_update(self, objs, fields, batch_size=None):
         """Refuse a status move here too, and width-gate the rest.
 
-        ``bulk_update`` is already caught by the ``update`` guard above, because
-        Django compiles the values into a CASE expression and issues it through
-        ``queryset.filter(...).update(...)`` (Django 6.1). It is refused HERE
-        as well rather than left to that, for two reasons that are both about
-        the caller rather than about the guard: the internal route is a Django
-        implementation detail rather than a documented contract, and Django
-        wraps the whole operation in ``transaction.atomic(savepoint=False)``, so
-        a refusal raised from inside it poisons the caller's transaction - a
-        caller could not catch the error and carry on. Raising before the block
-        opens makes the refusal immediate and recoverable.
+        ``update`` already catches it through Django's internals, but those are
+        not a documented contract and Django wraps the call in a savepoint, so
+        a refusal from inside would poison the caller's transaction; raising
+        first is recoverable.
         """
         fields = list(fields)
         if "status" in fields:
@@ -118,8 +74,7 @@ class ShipmentQuerySet(models.QuerySet):
                 "Shipment.status is moved only through the admin, which records "
                 "the move as a ShipmentEvent; a bulk update cannot."
             )
-        # The same width gate as ``update``/``save``, because a bulk write does
-        # not call ``save`` either: the values ride in on the objects.
+        # The same width gate, because a bulk write does not call ``save``.
         for obj in objs:
             for field_name in fields:
                 _reject_oversized(Shipment, field_name, getattr(obj, field_name))
@@ -129,17 +84,9 @@ class ShipmentQuerySet(models.QuerySet):
 class ShipmentEventQuerySet(models.QuerySet):
     """The append-only guarantee on the paths a ``save()`` guard cannot see.
 
-    ``ShipmentEvent.save`` refuses a re-save and ``ShipmentEvent.delete``
-    refuses a delete, so the direct-object path is closed. A bulk
-    ``update()``/``delete()``/``bulk_create()``/``bulk_update()`` writes rows
-    without ever calling either, which is how a recorded step could be
-    rewritten, erased or forged from a shell - so all four are refused here
-    instead.
-
-    Django's own machinery is unaffected: the delete collector and the
-    ``SET_NULL`` field update both issue their own SQL and never route through
-    ``QuerySet.delete()``/``QuerySet.update()``, so a deleted shipment still
-    takes its trail with it (see the cascade policy on ``Shipment.order``).
+    Bulk ``update``/``delete``/``bulk_create``/``bulk_update`` never call the
+    model methods, so all four are refused; Django's own delete collector and
+    ``SET_NULL`` updates bypass these and still work.
     """
 
     def update(self, **kwargs):
@@ -161,12 +108,7 @@ class ShipmentEventQuerySet(models.QuerySet):
         )
 
     def bulk_update(self, objs, fields, batch_size=None):
-        """Refuse every bulk update, on ``ShipmentQuerySet``'s reasoning.
-
-        Every column of a recorded step is part of the record - the status, the
-        previous status, the parcel and the actor - so there is no field list
-        that would be safe here, unlike ``Shipment.status`` on a parcel.
-        """
+        """Refuse every bulk update: every column of a step is part of the record."""
         raise ValueError(
             "ShipmentEvent rows are append-only: updating existing events in "
             "bulk is forbidden."
@@ -176,13 +118,9 @@ class ShipmentEventQuerySet(models.QuerySet):
 class ShippingMethod(models.Model):
     """A delivery option a customer can pick, priced by its rates.
 
-    ``code`` is the client-facing IDENTIFIER (spec 9.1's "Select delivery
-    option"): checkout accepts this value and prices it server-side, never an
-    amount, so the slug is part of the money path's trust boundary. It is
-    staff-entered rather than generated, so there is no slug-generation race
-    to retry (conventions.md:17 is about generation); the unique index plus
-    the ModelForm's own uniqueness validation is what keeps two methods from
-    answering one code.
+    ``code`` is the client-facing identifier checkout prices server-side, so
+    it is part of the money path's trust boundary; it is staff-entered, and
+    the unique index is the concurrency authority.
     """
 
     code = models.SlugField(
@@ -201,8 +139,7 @@ class ShippingMethod(models.Model):
     )
 
     # Retiring a method must not reprice or unhide historical orders, so
-    # deactivation is the supported way to stop offering one. An order keeps
-    # the amount it was charged whatever happens to this row afterwards.
+    # deactivation is the supported way to stop offering one.
     is_active = models.BooleanField(default=True)
 
     created_at = models.DateTimeField(auto_now_add=True)
@@ -219,15 +156,9 @@ class ShippingMethod(models.Model):
 class ShippingRate(models.Model):
     """What one method costs for one geography.
 
-    A rate matches a destination when BOTH of its geography rules hold, and
-    an empty rule is a wildcard: an empty ``region`` matches every region and
-    an empty ``postal_code_prefix`` matches every postal code. That is what
-    makes a national rate expressible without a special case.
-
-    ``postal_code_prefix`` is the spec's "Serviceable postal codes/regions"
-    (line 2001) and the storefront's "pincode checker" (line 657) in one
-    column: matching is prefix-based, so "400" covers the 400xxx band
-    without enumerating it.
+    A rate matches when both geography rules hold, where an empty rule is a
+    wildcard; ``postal_code_prefix`` matches by prefix, so "400" covers the
+    400xxx band.
     """
 
     method = models.ForeignKey(
@@ -236,10 +167,8 @@ class ShippingRate(models.Model):
         related_name="rates",
     )
 
-    # conventions.md:15 - DecimalField(max_digits=10, decimal_places=2), the
-    # same shape as every other money column in this repo. Never a float:
-    # the amount is added to an order total, so a float here would be a
-    # rounding error in the customer's favour at the database's expense.
+    # Exact decimal money, as every money column here: a float would be a
+    # rounding error against the store.
     amount = models.DecimalField(
         max_digits=10,
         decimal_places=2,
@@ -264,11 +193,8 @@ class ShippingRate(models.Model):
     class Meta:
         ordering = ("amount", "pk")
         constraints = [
-            # One amount per method per geography. Without this, a store
-            # could hold two rates that both match one destination and the
-            # winner would be a coin toss the admin cannot see; with it, the
-            # admin form says so at the point of entry. Specificity and
-            # price still decide BETWEEN different geographies.
+            # One amount per method per geography: otherwise two matching rates
+            # make a coin-toss winner the admin cannot see.
             models.UniqueConstraint(
                 fields=["method", "region", "postal_code_prefix"],
                 name="shipping_rate_geography_uidx",
@@ -283,103 +209,48 @@ class ShippingRate(models.Model):
 
 
 class Shipment(models.Model):
-    """[R-1.08] SPEC-1-B06: one parcel leaving the store for one order.
+    """One parcel leaving the store for one order.
 
-    Spec 6.9 names "Shipment creation" (line 2009), "Tracking number" (line
-    2013) and "Carrier integration" (line 2007) as the shipping admin
-    surface, and spec 10.2 gives the shipment its OWN lifecycle dimension --
-    "Label created, dispatched, in transit, delivered, exception" (line
-    3465). Those five words are the values of ``status`` verbatim; nothing
-    here is an invented vocabulary, and in particular none of the deliberately
-    vague words spec line 3487 warns against ("success", "done").
-
-    One row per PARCEL, not per order: spec line 2021 asks for split
-    shipments "if needed", and no order-level status could express two
-    parcels leaving on different days, so ``order`` is one-to-many.
-
-    The parcel status drives the order's visible lifecycle through
-    ``shipping.lifecycle`` (SPEC-D-01 owner directive), and it does so by
-    READING ``orders.state`` rather than by widening it: only "dispatched",
-    "in_transit" and "delivered" map to an order move, and every one of them
-    is gated by ``transition_allowed`` and ``precondition_failures``, so a
-    move the order machine refuses (a pending or cancelled order) is skipped
-    instead of forced. The two vocabularies stay separate records of separate
-    facts - "label_created" and "exception" are not order states, and
-    cancellation and returns remain their own actions with their own writers.
+    One row per parcel, not per order; ``status`` is the shipment's own
+    lifecycle and drives the order's visible state through
+    ``shipping.lifecycle`` by reading ``orders.state`` rather than widening it.
     """
 
     class Status(models.TextChoices):
-        # Spec 10.2 line 3465, in the order the spec lists them.
         LABEL_CREATED = "label_created", "Label created"
         DISPATCHED = "dispatched", "Dispatched"
         IN_TRANSIT = "in_transit", "In transit"
         DELIVERED = "delivered", "Delivered"
-        # "Exception" is the spec's own catch-all and the state spec 6.9 line
-        # 2017 means by "Delivery failure handling".
         EXCEPTION = "exception", "Exception"
 
     order = models.ForeignKey(
-        # A string reference, not an import: orders.models already points at
-        # shipping.ShippingMethod, and importing it back would be a cycle.
+        # String ref avoids an import cycle: orders.models already points here.
         "orders.Order",
-        # CASCADE, deliberately, and this is the recorded answer to spec 8.3
-        # line 2485's "explicit deletion/archival policies": a shipment is a
-        # record OF one order's fulfilment, so it has no referent once that
-        # order is gone, and three of this codebase's own surfaces would break
-        # if it were protected - `Shipment.__str__` and the changelist's
-        # `order` column, `search_fields` on `order__order_number`, and the
-        # tracking endpoint's own owner filter, all of which join to the order.
-        #
-        # It is NOT the same decision as `ShipmentEvent.actor`'s SET_NULL, and
-        # the asymmetry is the point rather than an oversight. A staff account
-        # is an ATTRIBUTION on a row that must outlive it; the order is the
-        # row's subject, and this store hard-deletes orders as a matter of
-        # course (`Order.user` is itself CASCADE, and the backup/restore drill
-        # truncates the order table wholesale). PROTECT here would turn every
-        # such delete into a crash on a table the system is designed to empty.
-        #
-        # Stated cost, not hidden: deleting an order takes its parcels and
-        # their trail with it, so - unlike `common.models.AuditEvent`, whose
-        # `order` is SET_NULL for exactly this reason - an order's fulfilment
-        # history does not outlive the order. That is an accepted limit of a
-        # store with no order archival yet (spec 8.3's archival half is
-        # unbuilt), and the honest place to revisit it is `Order`, not here.
+        # CASCADE by design: a parcel is a record OF one order, and order
+        # hard-deletes are routine, so PROTECT would crash them.
         on_delete=models.CASCADE,
         related_name="shipments",
     )
 
-    # The carrier reference a customer quotes to the carrier. UNIQUE because
-    # one reference must never answer for two parcels: spec 8.3 line 2565
-    # prescribes an index on the "Shipment tracking reference", and the
-    # backing unique index is that index (same shape Order.order_number uses
-    # for the spec's "order number" index). It is staff-entered, not
-    # generated, so there is no generation race to retry.
+    # UNIQUE: one reference must never answer for two parcels, and the backing
+    # unique index serves the tracking lookup. Staff-entered, so no race.
     tracking_number = models.CharField(
         max_length=100,
         unique=True,
     )
 
-    # The name the customer sees on the tracking page. Blank rather than
-    # required: an unbranded courier still hands out a reference.
+    # Blank rather than required: an unbranded courier still hands out a reference.
     carrier = models.CharField(
         max_length=60,
         blank=True,
         default="",
     )
 
-    # [SPEC-B-02] The provider whose tracking page the customer follows.
-    # NULLABLE so a parcel can exist before an operator links it, and PROTECT
-    # rather than SET_NULL because the link is part of what an already-shipped
-    # customer was given: a careless delete must be REFUSED, not silently turn
-    # a live tracking page into a dead end. `is_active` on the provider is the
-    # supported retirement path - the same answer ``ShippingMethod`` gives
-    # above - so retiring one hides it from future picks without rewriting the
-    # history of a parcel already on its way. `carrier` stays for back-compat
-    # and as the human display name; this FK is what makes ``tracking_url``
-    # resolvable rather than a string the storefront has to build itself.
+    # NULLABLE until linked; PROTECT because a careless delete must not
+    # dead-end a shipped customer's tracking page — retire via ``is_active``.
     provider = models.ForeignKey(
-        # A string reference, not an import: ``ShippingProvider`` is declared
-        # later in this module, and Django resolves an app-local label lazily.
+        # App-local label declared later in this module; Django resolves it
+        # lazily.
         "ShippingProvider",
         on_delete=models.PROTECT,
         null=True,
@@ -393,19 +264,14 @@ class Shipment(models.Model):
         default=Status.LABEL_CREATED,
     )
 
-    # Spec line 997's "Estimated delivery" on the confirmation page. NULL
-    # until a carrier commits to a date, which is a fact about the carrier,
-    # not a sentinel date.
+    # NULL until a carrier commits to a date — a fact, not a sentinel date.
     estimated_delivery = models.DateTimeField(
         null=True,
         blank=True,
     )
 
-    # The staff-only half of the row: spec 6.9 line 2027 says the customer
-    # tracking page must show neither "internal carrier credentials" nor
-    # "warehouse notes", so both live here and this one field is NEVER on the
-    # tracking serializer. One free-text field rather than two is what makes
-    # that structural: there is no second place for an operator to type one.
+    # Staff-only: spec forbids showing warehouse notes or carrier credentials
+    # to customers, and one field keeps them off the tracking serializer.
     internal_note = models.TextField(
         blank=True,
         default="",
@@ -423,28 +289,16 @@ class Shipment(models.Model):
     objects = ShipmentQuerySet.as_manager()
 
     def __str__(self):
-        # No `order` traversal: this label is what the admin grid, the CSV
-        # export and LogEntry render per row, and an order can be a guest row
-        # whose own __str__ already has to be null-safe (SPEC-1-B04).
+        # No ``order`` traversal: this renders per row in admin/CSV/LogEntry,
+        # and a guest order's own __str__ is not guaranteed null-safe.
         return f"Shipment {self.tracking_number} ({self.status})"
 
     @property
     def tracking_url(self):
         """The customer's tracking page for this parcel, or ``None``.
 
-        Renders ``ShippingProvider.tracking_url_template`` with this parcel's
-        own ``tracking_number``. The absences a caller must not have to guard
-        are answered with ``None`` rather than a broken string: no provider
-        linked, a provider whose template is empty, a parcel with no reference,
-        and a template whose rendered URL is not absolute http(s). No network
-        call is made - rendering a URL is not fetching it, and this module has
-        no business reaching the carrier; the browser the customer already has
-        follows the link.
-
-        ``str.replace`` rather than ``str.format`` on purpose: the template is
-        operator-entered text, and a ``{`` the format mini-language would read
-        as a field is URL text here. Only the one documented placeholder is
-        substituted, so every other character survives exactly as typed.
+        Every unrenderable absence answers ``None``; ``str.replace`` rather
+        than ``format`` because operator-entered URL text may contain ``{``.
         """
         if not self.provider_id or not self.tracking_number:
             return None
@@ -452,12 +306,8 @@ class Shipment(models.Model):
         if not template:
             return None
         rendered = template.replace(TRACKING_NUMBER_PLACEHOLDER, self.tracking_number)
-        # Defense in depth, not a duplicate of the provider's validation: a
-        # template written straight through the ORM never runs ``clean()``, and
-        # this string is what the storefront puts in an ``href``. A scheme that
-        # is not http(s) is script execution (``javascript:``) or an arbitrary
-        # document (``data:``) in the customer's browser, so it is answered with
-        # the same absence as every other unrenderable link rather than passed on.
+        # Defense in depth: an ORM-written template skips ``clean()``, and a
+        # javascript:/data: scheme in an ``href`` must become the same absence.
         parsed = urlsplit(rendered)
         if parsed.scheme not in _TRACKING_URL_SCHEMES or not parsed.netloc:
             return None
@@ -466,52 +316,19 @@ class Shipment(models.Model):
     def save(self, *args, **kwargs):
         """Refuse a value wider than the column, then write.
 
-        The admin form validates its own fields, so a width violation can only
-        reach this line from a direct ORM write - and SQLite would accept it
-        where the production Postgres raises ``DataError`` (see
-        ``_reject_oversized_values``). Refusing here makes the store's own
-        schema the boundary both engines agree on, instead of a rule that
-        happens to hold on the development database.
+        The admin form validates itself, so a violation can only come from a
+        direct ORM write — refused here so both engines enforce the boundary.
         """
         _reject_oversized_values(self)
         return super().save(*args, **kwargs)
 
 
 class ShipmentEvent(models.Model):
-    """[R-1.08] SPEC-1-B06: one recorded status change on one shipment.
+    """One recorded status change on one shipment: the customer trail.
 
-    Spec 6.9 line 2015 names "Tracking events" as its own feature, and spec
-    10.3 lists an "Audit record" as the last element of every transition's
-    contract. This is that record, and every status change ``ShipmentAdmin``
-    makes is remembered here and nowhere else: the customer trail the tracking
-    endpoint serves is this table, so a shipment's history cannot be
-    reconstructed differently from the history an operator saw.
-
-    Append-only, on BOTH write paths, and the second one is the one a
-    ``save()``-only guard misses. ``save()`` below rejects any pk-set re-save
-    and ``delete()`` rejects any delete, which closes the direct-object path -
-    the same pair ``common.models.AuditEvent`` uses. ``ShipmentEventQuerySet``
-    above then closes the bulk path, which is how a recorded step could
-    otherwise be rewritten, erased or forged without either method running:
-    ``Model.objects.filter(...).update(...)`` writes rows through
-    ``QuerySet.update`` and never calls ``save()``, ``bulk_update`` compiles a
-    CASE expression and issues it as an UPDATE without calling ``save()``
-    either, and ``bulk_create`` inserts rows with no model method at all. So no
-    code path can rewrite, delete or forge a recorded step, through the object
-    or through the queryset.
-
-    What is NOT claimed: the admin registration is view-only, so history cannot
-    be written or removed through the admin either, and deleting the SHIPMENT
-    takes its trail with it (the CASCADE policy on ``Shipment.order`` says why).
-    ``from_status`` is NULL exactly on the creation event (a shipment that has
-    never left a previous state).
-
-    ``actor`` is SET_NULL for the same reason OrderStatusEvent.actor is:
-    deleting a staff account must never cascade into the trail.
-
-    There is deliberately NO free-text field here. Spec 6.9 line 2027 forbids
-    exposing warehouse notes to the customer, and the only way to keep that
-    promise structurally is for the trail itself to have nowhere to put one.
+    Append-only on both the object path (save/delete) and the bulk path
+    (``ShipmentEventQuerySet``), and deliberately has no free-text field so
+    warehouse notes cannot leak into the trail.
     """
 
     shipment = models.ForeignKey(
@@ -543,10 +360,8 @@ class ShipmentEvent(models.Model):
     created_at = models.DateTimeField(auto_now_add=True)
 
     class Meta:
-        # Oldest first: this ordering is what the customer trail reads
-        # forward through, so it is the model's own rather than an admin-only
-        # override. The id breaks ties between events written in one
-        # transaction with equal timestamps.
+        # Oldest first: the customer trail reads forward through it; id breaks
+        # ties for events written in one transaction.
         ordering = ("created_at", "id")
         verbose_name = "shipment event"
         verbose_name_plural = "shipment events"
@@ -554,11 +369,7 @@ class ShipmentEvent(models.Model):
     objects = ShipmentEventQuerySet.as_manager()
 
     def save(self, *args, **kwargs):
-        """Append only: a pk-set save would rewrite a recorded step.
-
-        The direct-object half of the append-only guarantee, mirroring
-        ``AuditEvent.save``. ``ShipmentEventQuerySet`` is the other half.
-        """
+        """Append only: a pk-set save would rewrite a recorded step."""
         _reject_oversized_values(self)
         if self.pk is not None:
             raise ValueError(
@@ -577,36 +388,25 @@ class ShipmentEvent(models.Model):
         return f"{self.shipment_id}: {self.from_status}->{self.to_status}"
 
 
-# The one placeholder a tracking template may carry. A module constant because
-# the validator, the renderer on ``Shipment`` and the admin help text all have
-# to agree on its spelling; a literal repeated in three places is a drift.
+# The one placeholder a tracking template may carry: validator, renderer and
+# help text must agree on its spelling.
 TRACKING_NUMBER_PLACEHOLDER = "{tracking_number}"
 
-# The schemes a rendered link may use. ``http`` is admitted only while DEBUG is
-# on (see the validator), so a production template cannot downgrade the link
-# the customer follows to cleartext.
+# http is admitted only while DEBUG is on, so a production template cannot
+# downgrade the customer's link to cleartext.
 _TRACKING_URL_SCHEMES = ("http", "https")
 
-# A URL-shaped literal, deliberately not a real parcel's reference: the
-# template is validated on the PROVIDER, where no parcel exists, so the sample
-# only has to prove that the rendered string parses as an absolute URL.
+# A URL-shaped sample, not a real reference: the template is validated on the
+# provider, where no parcel exists.
 _SAMPLE_TRACKING_NUMBER = "SAMPLE123"
 
 
 def _tracking_template_error(template):
     """Why ``template`` cannot be a tracking URL, or ``None`` when it can.
 
-    The template is operator-entered text that reaches the customer's browser
-    inside an ``href``, so this is a security boundary rather than a
-    convenience check: a ``javascript:`` template would run in the customer's
-    session, and a ``data:`` one would serve a document this store never
-    published. Blank is allowed - an unbranded courier still hands out a
-    reference - and renders no link at all.
-
-    "Exactly one placeholder" because zero leaves every parcel pointing at one
-    page (there would be nothing to track), and two makes the substitution
-    ambiguous. Both are operator mistakes the form should say out loud rather
-    than store.
+    This is a security boundary (the result lands in an ``href``); exactly one
+    placeholder is required because zero or two makes every parcel point at one
+    page or the substitution ambiguous.
     """
     if not template:
         return None
@@ -630,13 +430,9 @@ def _tracking_template_error(template):
 class ShippingProvider(models.Model):
     """A carrier / shipping provider admin can add, linkable to shipments.
 
-    ``code`` is the slug identifier (unique). ``tracking_url_template`` is a
-    URL template containing a ``{tracking_number}`` placeholder that renders
-    the carrier's tracking page for a given parcel.
-
-    ``clean`` is the only validation of that template, and it lives on the
-    model rather than in a form so every writer that calls ``full_clean``
-    (today the admin, which Django already runs) gets the same answer.
+    ``tracking_url_template`` renders the carrier's tracking page for a
+    parcel; ``clean`` is its only validation and lives on the model so every
+    ``full_clean`` writer gets the same answer.
     """
 
     name = models.CharField(
@@ -669,12 +465,8 @@ class ShippingProvider(models.Model):
     def clean(self):
         """Refuse a template that is not a safe, renderable http(s) URL.
 
-        Runs through the admin change form (Django's ``ModelForm`` calls
-        ``full_clean``), which is the only writer of this field, so an
-        operator learns about a bad scheme or a missing placeholder at entry
-        time instead of a customer meeting it later. The renderer on
-        ``Shipment`` keeps its own scheme guard for templates that arrive
-        through the ORM, where this method is never consulted.
+        Runs on the admin form path, so an operator learns at entry time; the
+        renderer keeps its own scheme guard for ORM-written templates.
         """
         super().clean()
         error = _tracking_template_error(self.tracking_url_template)
