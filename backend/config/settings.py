@@ -185,7 +185,6 @@ TEMPLATES = [
 WSGI_APPLICATION = "config.wsgi.application"
 
 
-
 def _query_options(query):
     """Return DATABASES OPTIONS from a DATABASE_URL query string, forwarding bare
     key=value pairs (a repeated key takes its last value, matching libpq).

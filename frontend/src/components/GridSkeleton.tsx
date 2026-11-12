@@ -1,6 +1,8 @@
 /**
  * Must mirror the real grid's columns or it causes the CLS it prevents.
  * Each card is 3 blocks, so the default count stays within the 12-block cap.
+ * Home's grid ships `gap-y-8` (32px); this default keeps `gap-y-12` until
+ * the two strings are reconciled.
  */
 export default function GridSkeleton({
   count = 4,

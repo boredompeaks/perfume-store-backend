@@ -233,6 +233,8 @@
   transform: translateY(-2px);
 }
 
+/* `text-money` is legal from src/: lib/ui.test.ts lists `money` in NOT_A_COLOUR,
+   so the guard reads a --text-* step, not a missing colour. */
 .money {
   font-size: var(--text-money);
   line-height: var(--text-money--line-height);
@@ -240,6 +242,7 @@
   font-weight: var(--text-money--font-weight);
 }
 
+/* Four such declarations: .settle, .count-settle, .qty-crossfade, .story-drift. */
 @media (prefers-reduced-motion: no-preference) {
   @keyframes count-settle {
     from {
