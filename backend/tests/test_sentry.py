@@ -1,20 +1,19 @@
-"""P1-2: error reporting with a hard, free-tier quota guard.
+"""P1-2/GH-81: error reporting with a noise denylist, not a local quota.
 
-The guard is the contract, not the SDK. These pins drive it directly, with a
-fake clock and an injected store, so the budgets and windows are provable
-without waiting minutes or needing a transport. Two tests use the REAL SDK but
-an injected ``Transport`` instance, which is the other half of the promise:
-a configured tracker sends nothing over a socket in this suite.
+The guard is a filter, not a ceiling. These pins drive it directly, so the
+denylist is provable without waiting minutes or needing a transport. Two tests
+use the REAL SDK but an injected ``Transport`` instance: a configured tracker
+sends nothing over a socket in this suite, and identical events are no longer
+collapsed by a local dedupe window - the reason this guard exists at all.
 
-The guard must also be boring under failure. A Redis outage, a malformed
-event, or a broken store degrades to a local warning and drops the event; it
-never raises inside ``before_send`` and never reports its own failure through
-the SDK, because that would be the recursion the cap exists to prevent.
+The guard must also be boring under failure. A malformed event degrades to a
+local warning and drops the event; it never raises inside ``before_send`` and
+never reports its own failure through the SDK, because that would be the
+recursion it exists to prevent.
 """
 
 import logging
 import os
-import time
 import types
 import uuid
 from unittest.mock import patch
@@ -24,7 +23,6 @@ from django.db import OperationalError
 from django.http import Http404
 from django.test import SimpleTestCase
 
-import common.sentry as sentry_module
 from common.sentry import build_before_send, init_sentry
 
 # RFC 2606 guarantees .invalid never resolves, so nothing can reach a real
@@ -43,17 +41,6 @@ class RecordingLog:
             self.warnings.append(message % args if args else message)
         except (TypeError, ValueError):
             self.warnings.append(message)
-
-
-class Clock:
-    def __init__(self, now=1_700_000_000.0):
-        self.now = now
-
-    def __call__(self):
-        return self.now
-
-    def advance(self, seconds):
-        self.now += seconds
 
 
 def exception_event(exc_type=ValueError, message="boom"):
@@ -100,64 +87,6 @@ def stub_sdk(record):
     }
 
 
-class FakeRedis:
-    """In-process stand-in for the two Redis primitives the store uses.
-
-    It keeps the counters and the NX/EX marks on a fake clock, so two guard
-    instances handed the SAME client share one budget exactly as two workers
-    sharing one Redis server do.
-    """
-
-    def __init__(self, clock):
-        self.clock = clock
-        self.counts = {}
-        self.marks = {}
-
-    def pipeline(self):
-        return FakePipeline(self)
-
-    def incr(self, key):
-        self.counts[key] = self.counts.get(key, 0) + 1
-        return self.counts[key]
-
-    def expire(self, key, ttl):
-        return True
-
-    def set(self, key, value, nx=False, ex=None):
-        if nx and self.marks.get(key, 0) > self.clock():
-            return None
-        self.marks[key] = self.clock() + (ex or 0)
-        return True
-
-
-class FakePipeline:
-    def __init__(self, client):
-        self.client = client
-        self.ops = []
-
-    def incr(self, key):
-        self.ops.append(("incr", key))
-        return self
-
-    def expire(self, key, ttl):
-        self.ops.append(("expire", key, ttl))
-        return self
-
-    def execute(self):
-        results = []
-        for op in self.ops:
-            if op[0] == "incr":
-                results.append(self.client.incr(op[1]))
-            else:
-                results.append(self.client.expire(op[1], op[2]))
-        return results
-
-
-class FailingRedis:
-    def pipeline(self):
-        raise ConnectionError("redis is down")
-
-
 class InitWithoutDsnTests(SimpleTestCase):
     def test_no_dsn_is_inert_and_never_reaches_the_sdk(self):
         calls = []
@@ -180,9 +109,6 @@ class InitWithDsnTests(SimpleTestCase):
                 environment="staging",
                 release="abc123",
                 sample_rate=0.5,
-                max_per_minute=3,
-                max_per_hour=40,
-                redis_url="",
                 log=log,
             )
         self.assertTrue(live)
@@ -197,29 +123,38 @@ class InitWithDsnTests(SimpleTestCase):
         self.assertEqual(options["max_breadcrumbs"], 20)
         self.assertIs(options["attach_stacktrace"], False)
         self.assertTrue(callable(options["before_send"]))
+        self.assertNotIn("transport", options)
         identifiers = [
             getattr(integration, "identifier", None)
             for integration in options["integrations"]
         ]
         self.assertEqual(identifiers, ["django", "logging"])
 
-    def test_env_supplies_the_label_release_and_caps_when_not_passed(self):
+    def test_env_supplies_the_dsn_label_release_and_environment(self):
         calls = []
         env = {
             "SENTRY_DSN": FAKE_DSN,
             "SENTRY_ENVIRONMENT": "",
             "RELEASE_SHA": "",
             "GIT_SHA": "deploy-sha-1",
-            "SENTRY_MAX_EVENTS_PER_MINUTE": "7",
-            "SENTRY_MAX_EVENTS_PER_HOUR": "70",
-            "REDIS_URL": "",
         }
         with patch.dict(os.environ, env):
             with patch.dict("sys.modules", stub_sdk(calls)):
                 self.assertTrue(init_sentry(log=RecordingLog()))
         options = calls[0]
+        self.assertEqual(options["dsn"], FAKE_DSN)
         self.assertEqual(options["environment"], "production")
         self.assertEqual(options["release"], "deploy-sha-1")
+
+    def test_an_explicit_release_wins_over_the_env(self):
+        calls = []
+        env = {"SENTRY_DSN": FAKE_DSN, "RELEASE_SHA": "env-release"}
+        with patch.dict(os.environ, env):
+            with patch.dict("sys.modules", stub_sdk(calls)):
+                self.assertTrue(
+                    init_sentry(release="explicit-release", log=RecordingLog())
+                )
+        self.assertEqual(calls[0]["release"], "explicit-release")
 
     def test_an_injected_before_send_is_passed_through_unchanged(self):
         calls = []
@@ -228,12 +163,24 @@ class InitWithDsnTests(SimpleTestCase):
             self.assertTrue(
                 init_sentry(
                     dsn=FAKE_DSN,
-                    redis_url="",
                     before_send=sentinel,
                     log=RecordingLog(),
                 )
             )
         self.assertIs(calls[0]["before_send"], sentinel)
+
+    def test_an_injected_transport_is_passed_through_unchanged(self):
+        calls = []
+        transport = object()
+        with patch.dict("sys.modules", stub_sdk(calls)):
+            self.assertTrue(
+                init_sentry(
+                    dsn=FAKE_DSN,
+                    transport=transport,
+                    log=RecordingLog(),
+                )
+            )
+        self.assertIs(calls[0]["transport"], transport)
 
     def test_a_missing_sdk_warns_and_stays_off(self):
         log = RecordingLog()
@@ -258,22 +205,10 @@ class InitWithDsnTests(SimpleTestCase):
         self.assertEqual(len(log.warnings), 1)
         self.assertIn("rejected by the sentry-sdk", log.warnings[0])
 
-    def test_the_guard_reads_positive_caps_and_ignores_bad_values(self):
-        self.assertEqual(
-            sentry_module._positive_int_env("P1_2_MISSING", 10),
-            10,
-        )
-        with patch.dict(os.environ, {"P1_2_CAP": "0"}):
-            self.assertEqual(sentry_module._positive_int_env("P1_2_CAP", 10), 10)
-        with patch.dict(os.environ, {"P1_2_CAP": "nonsense"}):
-            self.assertEqual(sentry_module._positive_int_env("P1_2_CAP", 10), 10)
-        with patch.dict(os.environ, {"P1_2_CAP": "4"}):
-            self.assertEqual(sentry_module._positive_int_env("P1_2_CAP", 10), 4)
-
 
 class DenylistTests(SimpleTestCase):
     def build(self):
-        return build_before_send(redis_url="", clock=Clock())
+        return build_before_send(log=RecordingLog())
 
     def test_denylisted_exception_classes_are_dropped(self):
         guard = self.build()
@@ -289,16 +224,46 @@ class DenylistTests(SimpleTestCase):
                     guard(exception_event(exc_type), exception_hint(exc_type))
                 )
 
+    def test_a_subclass_of_a_denylisted_error_is_dropped_by_class(self):
+        class CustomNotFound(Http404):
+            pass
+
+        guard = self.build()
+        self.assertIsNone(
+            guard(exception_event(CustomNotFound), exception_hint(CustomNotFound))
+        )
+
     def test_a_serialised_event_is_denied_by_type_name(self):
         # No hint, only the event's own exception value: the name branch is
         # what keeps a denylisted error from slipping through.
         guard = self.build()
         self.assertIsNone(guard({"exception": {"values": [{"type": "Http404"}]}}))
 
+    def test_a_serialised_event_without_a_type_is_not_denied(self):
+        guard = self.build()
+        event = {"exception": {"values": [{"type": "", "value": "plain"}]}}
+        self.assertIs(guard(event), event)
+
     def test_health_check_paths_are_dropped(self):
         guard = self.build()
         event = {
             "request": {"url": "https://shop.example.test/health/"},
+            "exception": {"values": [{"type": "ValueError", "value": "x"}]},
+        }
+        self.assertIsNone(guard(event, exception_hint(ValueError, "x")))
+
+    def test_a_health_check_transaction_is_dropped(self):
+        guard = self.build()
+        event = {
+            "transaction": "/healthz",
+            "exception": {"values": [{"type": "ValueError", "value": "x"}]},
+        }
+        self.assertIsNone(guard(event, exception_hint(ValueError, "x")))
+
+    def test_a_relative_health_path_is_dropped(self):
+        guard = self.build()
+        event = {
+            "request": {"path": "/ping"},
             "exception": {"values": [{"type": "ValueError", "value": "x"}]},
         }
         self.assertIsNone(guard(event, exception_hint(ValueError, "x")))
@@ -312,217 +277,30 @@ class DenylistTests(SimpleTestCase):
         self.assertIs(guard(event, exception_hint(ValueError, "x")), event)
 
 
-class DedupeTests(SimpleTestCase):
-    def test_an_identical_event_is_dropped_then_allowed_after_the_window(self):
-        clock = Clock()
-        log = RecordingLog()
-        guard = build_before_send(
-            max_per_minute=100, max_per_hour=100, redis_url="", clock=clock, log=log
-        )
-        first = exception_event(ValueError, "same")
-        second = exception_event(ValueError, "same")
-        self.assertIs(guard(first, exception_hint(ValueError, "same")), first)
-        self.assertIsNone(guard(second, exception_hint(ValueError, "same")))
-        clock.advance(61)
-        third = exception_event(ValueError, "same")
-        self.assertIs(guard(third, exception_hint(ValueError, "same")), third)
+class NoLocalCeilingTests(SimpleTestCase):
+    """The spike behaviour this ticket restores: nothing is dropped by count."""
 
-    def test_a_different_message_is_not_a_duplicate(self):
-        guard = build_before_send(
-            max_per_minute=100, max_per_hour=100, redis_url="", clock=Clock()
-        )
-        first = exception_event(ValueError, "one")
-        second = exception_event(ValueError, "two")
-        self.assertIs(guard(first, exception_hint(ValueError, "one")), first)
-        self.assertIs(guard(second, exception_hint(ValueError, "two")), second)
-
-
-class CapTests(SimpleTestCase):
-    def test_the_eleventh_event_in_a_minute_is_dropped(self):
-        clock = Clock()
-        log = RecordingLog()
-        guard = build_before_send(
-            max_per_minute=10, max_per_hour=1000, redis_url="", clock=clock, log=log
-        )
-        allowed = 0
-        for index in range(10):
-            message = f"minute-{index}"
-            event = exception_event(ValueError, message)
-            allowed += guard(event, exception_hint(ValueError, message)) is event
-        self.assertEqual(allowed, 10)
-        eleventh = exception_event(ValueError, "minute-11")
-        self.assertIsNone(guard(eleventh, exception_hint(ValueError, "minute-11")))
-        # A cap hit is one local warning per window, not one per dropped event.
-        self.assertIsNone(
-            guard(exception_event(ValueError, "minute-12"), exception_hint(ValueError))
-        )
-        self.assertEqual(len(log.warnings), 1)
-        self.assertIn("10/minute", log.warnings[0])
-
-    def test_the_hour_cap_is_independent_of_the_minute_cap(self):
-        clock = Clock()
-        log = RecordingLog()
-        guard = build_before_send(
-            max_per_minute=1000, max_per_hour=5, redis_url="", clock=clock, log=log
-        )
-        for index in range(5):
-            message = f"hour-{index}"
-            event = exception_event(ValueError, message)
-            self.assertIs(guard(event, exception_hint(ValueError, message)), event)
-        sixth = exception_event(ValueError, "hour-5")
-        self.assertIsNone(guard(sixth, exception_hint(ValueError, "hour-5")))
-        self.assertEqual(len(log.warnings), 1)
-        self.assertIn("5/hour", log.warnings[0])
-        # The next minute opens a fresh minute window, but the hour is still
-        # spent: the tighter of the two bounds is what admits traffic.
-        clock.advance(61)
-        seventh = exception_event(ValueError, "hour-6")
-        self.assertIsNone(guard(seventh, exception_hint(ValueError, "hour-6")))
-
-
-class RedisSharedCounterTests(SimpleTestCase):
-    def test_two_workers_spend_one_budget_through_a_shared_store(self):
-        clock = Clock()
-        client = FakeRedis(clock)
-        guard_a = build_before_send(
-            max_per_minute=3,
-            max_per_hour=100,
-            redis_client=client,
-            key_prefix="p1-2-shared",
-            clock=clock,
-            log=RecordingLog(),
-        )
-        guard_b = build_before_send(
-            max_per_minute=3,
-            max_per_hour=100,
-            redis_client=client,
-            key_prefix="p1-2-shared",
-            clock=clock,
-            log=RecordingLog(),
-        )
-        for index in range(3):
-            message = f"worker-a-{index}"
-            event = exception_event(ValueError, message)
-            self.assertIs(guard_a(event, exception_hint(ValueError, message)), event)
-        # Worker B has its own guard object but the same Redis counter, so its
-        # fourth distinct event is over the shared 3/minute budget.
-        fourth = exception_event(ValueError, "worker-b-3")
-        self.assertIsNone(guard_b(fourth, exception_hint(ValueError, "worker-b-3")))
-
-    def test_dedupe_is_shared_between_workers_too(self):
-        clock = Clock()
-        client = FakeRedis(clock)
-        prefix = "p1-2-shared-dedupe"
-        guard_a = build_before_send(
-            redis_client=client,
-            key_prefix=prefix,
-            clock=clock,
-            log=RecordingLog(),
-        )
-        guard_b = build_before_send(
-            redis_client=client,
-            key_prefix=prefix,
-            clock=clock,
-            log=RecordingLog(),
-        )
-        first = exception_event(ValueError, "shared-dup")
-        second = exception_event(ValueError, "shared-dup")
-        self.assertIs(guard_a(first, exception_hint(ValueError, "shared-dup")), first)
-        self.assertIsNone(guard_b(second, exception_hint(ValueError, "shared-dup")))
-
-    def test_a_dead_redis_degrades_to_the_process_counter_without_raising(self):
-        log = RecordingLog()
-        guard = build_before_send(
-            max_per_minute=100,
-            max_per_hour=100,
-            redis_client=FailingRedis(),
-            clock=Clock(),
-            log=log,
-        )
-        for index in range(2):
-            message = f"degraded-{index}"
-            event = exception_event(ValueError, message)
-            self.assertIs(guard(event, exception_hint(ValueError, message)), event)
-        self.assertEqual(len(log.warnings), 1)
-        self.assertIn("Redis unavailable", log.warnings[0])
-
-    def test_an_unusable_redis_url_falls_back_before_any_connection(self):
-        log = RecordingLog()
-        guard = build_before_send(redis_url="not-a-url", clock=Clock(), log=log)
-        event = exception_event(ValueError, "bad-url")
-        self.assertIs(guard(event, exception_hint(ValueError, "bad-url")), event)
-        self.assertEqual(len(log.warnings), 1)
-        self.assertIn("cannot create a Redis client", log.warnings[0])
-
-
-class RealRedisSharedCounterTests(SimpleTestCase):
-    """The fake above proves the contract; this proves the real server agrees."""
-
-    def setUp(self):
-        url = (os.environ.get("REDIS_URL") or "").strip()
-        if not url:
-            self.skipTest("REDIS_URL is not declared; shared-counter pin not armed")
-        import redis
-
-        try:
-            self.client = redis.Redis.from_url(
-                url, socket_connect_timeout=3, socket_timeout=3
-            )
-            self.client.ping()
-        except Exception as error:
-            self.skipTest(f"REDIS_URL declared but no Redis answered ({error})")
-        self.prefix = f"p1-2-test:{os.getpid()}:{uuid.uuid4().hex}:"
-        self.addCleanup(self._cleanup, url)
-
-    def _cleanup(self, url):
-        import redis
-
-        client = redis.Redis.from_url(url, socket_connect_timeout=3, socket_timeout=3)
-        for key in client.scan_iter(f"{self.prefix}*"):
-            client.delete(key)
-        client.close()
-
-    def test_zero_events_are_lost_and_the_cap_is_one_budget(self):
-        clock = Clock(time.time())
-        guard_a = build_before_send(
-            max_per_minute=2,
-            max_per_hour=100,
-            redis_url=os.environ["REDIS_URL"],
-            key_prefix=self.prefix,
-            clock=clock,
-            log=RecordingLog(),
-        )
-        guard_b = build_before_send(
-            max_per_minute=2,
-            max_per_hour=100,
-            redis_url=os.environ["REDIS_URL"],
-            key_prefix=self.prefix,
-            clock=clock,
-            log=RecordingLog(),
-        )
-        for index in range(2):
-            message = f"real-a-{uuid.uuid4().hex}"
-            event = exception_event(ValueError, message)
-            self.assertIs(guard_a(event, exception_hint(ValueError, message)), event)
-        third_message = f"real-b-{uuid.uuid4().hex}"
-        third = exception_event(ValueError, third_message)
-        self.assertIsNone(guard_b(third, exception_hint(ValueError, third_message)))
+    def test_repeated_identical_events_are_all_reported(self):
+        guard = build_before_send(log=RecordingLog())
+        for _ in range(60):
+            event = exception_event(ValueError, "same")
+            self.assertIs(guard(event, exception_hint(ValueError, "same")), event)
+        # 60 is above the removed 10/minute and 50/tab defaults on purpose.
+        self.assertIsNotNone(guard(exception_event(ValueError, "same")))
 
 
 class GuardRobustnessTests(SimpleTestCase):
     def test_a_malformed_event_is_dropped_not_raised(self):
         log = RecordingLog()
-        guard = build_before_send(redis_url="", clock=Clock(), log=log)
+        guard = build_before_send(log=log)
         self.assertIsNone(
             guard({"request": "not-a-mapping"}, exception_hint(ValueError, "x"))
         )
         self.assertEqual(len(log.warnings), 1)
-        self.assertIn("quota guard failed", log.warnings[0])
+        self.assertIn("denylist failed", log.warnings[0])
 
     def test_a_log_record_with_exc_info_is_handled(self):
-        guard = build_before_send(
-            max_per_minute=100, max_per_hour=100, redis_url="", clock=Clock()
-        )
+        guard = build_before_send(log=RecordingLog())
         record = logging.LogRecord(
             "django.request", logging.ERROR, __file__, 1, "server error", None, None
         )
@@ -530,9 +308,7 @@ class GuardRobustnessTests(SimpleTestCase):
         self.assertIsNone(guard({"message": "server error"}, {"log_record": record}))
 
     def test_a_log_record_without_exc_info_is_handled(self):
-        guard = build_before_send(
-            max_per_minute=100, max_per_hour=100, redis_url="", clock=Clock()
-        )
+        guard = build_before_send(log=RecordingLog())
         record = logging.LogRecord(
             "django.request", logging.ERROR, __file__, 1, "plain", None, None
         )
@@ -540,16 +316,27 @@ class GuardRobustnessTests(SimpleTestCase):
         self.assertIs(guard(event, {"log_record": record}), event)
 
     def test_a_bare_message_event_is_handled(self):
-        guard = build_before_send(
-            max_per_minute=100, max_per_hour=100, redis_url="", clock=Clock()
-        )
+        guard = build_before_send(log=RecordingLog())
         event = {"message": "bare"}
         self.assertIs(guard(event), event)
 
+    def test_an_event_with_no_identity_is_kept(self):
+        guard = build_before_send(log=RecordingLog())
+        event = {"level": "error"}
+        self.assertIs(guard(event), event)
+
+    def test_an_exc_info_without_a_class_is_not_denied(self):
+        guard = build_before_send(log=RecordingLog())
+        event = {"message": "non-class"}
+        self.assertIs(guard(event, {"exc_info": (42, "boom", None)}), event)
+
+    def test_a_non_string_transaction_is_ignored(self):
+        guard = build_before_send(log=RecordingLog())
+        event = {"transaction": 123, "message": "kept"}
+        self.assertIs(guard(event), event)
+
     def test_a_non_string_request_url_is_treated_as_no_path(self):
-        guard = build_before_send(
-            max_per_minute=100, max_per_hour=100, redis_url="", clock=Clock()
-        )
+        guard = build_before_send(log=RecordingLog())
         event = {
             "request": {"url": 123},
             "exception": {"values": [{"type": "ValueError", "value": "x"}]},
@@ -557,21 +344,28 @@ class GuardRobustnessTests(SimpleTestCase):
         self.assertIs(guard(event, exception_hint(ValueError, "x")), event)
 
 
-class StorePruningTests(SimpleTestCase):
-    def test_minute_buckets_are_bounded(self):
-        store = sentry_module._ProcessStore(Clock())
-        for bucket in range(65):
-            store.hit("minute", bucket, 120)
-        self.assertLessEqual(len(store._counts), 64)
+class SampleRateValidationTests(SimpleTestCase):
+    """A bad env value must not become "keep everything" or "drop everything"."""
 
-    def test_expired_marks_are_pruned(self):
-        clock = Clock()
-        store = sentry_module._ProcessStore(clock)
-        for index in range(1025):
-            store.mark(f"mark-{index}", 60)
-        clock.advance(61)
-        store.mark("fresh", 60)
-        self.assertEqual(len(store._marks), 1)
+    def init_with_rate(self, rate):
+        calls = []
+        log = RecordingLog()
+        with patch.dict("sys.modules", stub_sdk(calls)):
+            self.assertTrue(init_sentry(dsn=FAKE_DSN, sample_rate=rate, log=log))
+        return calls[0]["sample_rate"], log
+
+    def test_out_of_range_and_non_finite_rates_fall_back_to_one(self):
+        for rate in (-0.5, 1.5, float("nan"), float("inf"), "nonsense", None):
+            with self.subTest(rate=rate):
+                effective, log = self.init_with_rate(rate)
+                self.assertEqual(effective, 1.0)
+                self.assertEqual(len(log.warnings), 1)
+                self.assertIn("SENTRY_SAMPLE_RATE", log.warnings[0])
+
+    def test_zero_is_preserved_as_an_explicit_disable(self):
+        effective, log = self.init_with_rate(0.0)
+        self.assertEqual(effective, 0.0)
+        self.assertEqual(log.warnings, [])
 
 
 class RealSdkTransportTests(SimpleTestCase):
@@ -600,14 +394,11 @@ class RealSdkTransportTests(SimpleTestCase):
         finally:
             self.sentry_sdk.init(dsn="")
 
-    def test_events_reach_the_fake_transport_and_duplicates_do_not(self):
+    def test_events_reach_the_fake_transport_and_duplicates_are_kept(self):
         live = init_sentry(
             dsn=FAKE_DSN,
             environment="test",
             release="p1-2",
-            max_per_minute=100,
-            max_per_hour=100,
-            redis_url="",
             transport=self.transport,
             log=RecordingLog(),
         )
@@ -620,5 +411,19 @@ class RealSdkTransportTests(SimpleTestCase):
             except ValueError:
                 self.sentry_sdk.capture_exception()
             self.sentry_sdk.flush(timeout=5)
-        # One accepted event, one identical event dropped by the 60s window.
-        self.assertEqual(len(self.transport.envelopes), 1)
+        # Both identical events are reported: the removed dedupe window must
+        # not hide a repeated error from Sentry.
+        self.assertEqual(len(self.transport.envelopes), 2)
+
+    def test_a_denylisted_exception_does_not_reach_the_transport(self):
+        live = init_sentry(
+            dsn=FAKE_DSN,
+            environment="test",
+            release="p1-2",
+            transport=self.transport,
+            log=RecordingLog(),
+        )
+        self.assertTrue(live)
+        self.sentry_sdk.capture_exception(Http404("gone"))
+        self.sentry_sdk.flush(timeout=5)
+        self.assertEqual(self.transport.envelopes, [])

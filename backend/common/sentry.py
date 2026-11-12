@@ -1,43 +1,39 @@
-"""Error reporting with a hard, free-tier quota guard.
+"""Error reporting with a minimal denylist and Sentry-side spend controls.
 
-The Sentry SDK is a liability without a ceiling. Its free plan bills in
-events, and the failure mode that costs the most is not a normal bug: it is
-one noisy exception inside a hot loop, which can spend a month's quota in
-minutes while the app is otherwise healthy. This module therefore separates
-two decisions that the SDK usually fuses:
+The Sentry free plan bills in events, and one noisy exception inside a hot
+loop can spend a month's quota in minutes. The tempting local answer - a
+client-side cap that stops sending after N events - is the wrong one: it goes
+quiet exactly when errors spike, which is when telemetry matters most. Spend
+is controlled where it can be enforced without hiding an incident:
 
-* ``init_sentry`` is the ONLY place the SDK is initialised. It is inert with
-  no DSN, imports the SDK inside the DSN gate, and pins the reporting shape
-  (no PII, no traces, no stack traces, a small breadcrumb buffer).
-* ``build_before_send`` is the ceiling. It runs in-process before an event is
-  handed to a transport and enforces, in order: a denylist, a 60-second
-  duplicate window, and a per-minute AND per-hour cap. The caps live in a
-  shared Redis counter when one is configured, because a per-worker cap is
-  not a cap: N workers would each spend the full budget. Without Redis the
-  counter is per-process, which is the safe local/CI default.
+* the project's own rate limits (per DSN/client key) and inbound filters are
+  the ceiling, configured in Sentry rather than in this process;
+* ``SENTRY_SAMPLE_RATE`` keeps a fixed fraction of events, which bounds cost
+  without ever turning reporting off completely;
+* ``build_before_send`` is only a small denylist of known noise (exception
+  types and health-check paths), so noise does not spend quota in the first
+  place. It never drops an event because a local counter says so.
+
+``init_sentry`` is the ONLY place the SDK is initialised. It is inert with no
+DSN, imports the SDK inside the DSN gate, and pins the reporting shape (no
+PII, no traces, no stack traces, a small breadcrumb buffer).
 
 Nothing here imports the SDK, opens a socket, or reads Django settings at
 module import time. ``config.settings`` imports this module while it is still
 being executed, so a module-scope dependency on either would break the boot
 in exactly the deployment that is supposed to be observable.
 
-The guard never raises and never reports its own failure through the SDK
-(that would be the recursion it exists to prevent). A quota hit is a local
-warning, once per window; an internal guard failure drops the event and says
-so once.
+The denylist never raises and never reports its own failure through the SDK
+(that would be the recursion it exists to prevent). An internal failure drops
+the event and logs a warning rather than raising.
 """
 
-import hashlib
 import logging
+import math
 import os
-import time
 from urllib.parse import urlparse
 
 logger = logging.getLogger(__name__)
-
-DEFAULT_MAX_EVENTS_PER_MINUTE = 10
-DEFAULT_MAX_EVENTS_PER_HOUR = 200
-DEDUPE_WINDOW_SECONDS = 60
 
 # Paths whose errors are noise, not signal: orchestrator probes hit /health/
 # on a timer, and one unhealthy minute would otherwise be hundreds of events.
@@ -90,132 +86,13 @@ def _denied_exception_types():
     return _DENIED_EXCEPTIONS
 
 
-class _ProcessStore:
-    """Per-process fallback: enough for one worker, honest about its scope."""
-
-    def __init__(self, clock=time.time):
-        self._clock = clock
-        self._counts = {}
-        self._marks = {}
-
-    def hit(self, kind, bucket, ttl):
-        key = (kind, bucket)
-        self._counts[key] = self._counts.get(key, 0) + 1
-        if len(self._counts) > 64:
-            self._counts = {
-                stored: count
-                for stored, count in self._counts.items()
-                if stored[0] != kind or stored[1] > bucket - 1
-            }
-        return self._counts[key]
-
-    def mark(self, key, ttl):
-        now = self._clock()
-        seen = self._marks.get(key)
-        if seen is not None and now - seen < ttl:
-            return False
-        self._marks[key] = now
-        if len(self._marks) > 1024:
-            self._marks = {
-                stored: stamp
-                for stored, stamp in self._marks.items()
-                if now - stamp < ttl
-            }
-        return True
-
-
-class _RedisStore:
-    """Shared counters, so N workers spend one budget rather than N budgets.
-
-    Bucket keys are fixed windows (``minute:<bucket>``, ``hour:<bucket>``) and
-    carry their own expiry, so there is no cleanup job and a worker that dies
-    cannot strand a counter. Dedupe is ``SET NX EX`` for the same reason.
-    """
-
-    def __init__(self, client, clock=time.time, key_prefix="sentry:quota:"):
-        self._client = client
-        self._clock = clock
-        self._prefix = key_prefix if key_prefix.endswith(":") else f"{key_prefix}:"
-
-    def hit(self, kind, bucket, ttl):
-        key = f"{self._prefix}{kind}:{bucket}"
-        pipeline = self._client.pipeline()
-        pipeline.incr(key)
-        pipeline.expire(key, ttl)
-        return int(pipeline.execute()[0])
-
-    def mark(self, key, ttl):
-        return bool(self._client.set(f"{self._prefix}{key}", "1", nx=True, ex=ttl))
-
-
-class _FallbackStore:
-    """Use Redis while it answers, then spend the rest of the process locally.
-
-    A Redis outage must not stop error reporting (that would hide the very
-    outage) and must not raise inside ``before_send``. It also must not log on
-    every event: the first failure names the problem, and the process degrades
-    to the per-process counter until it restarts.
-    """
-
-    def __init__(self, primary, fallback, log):
-        self._primary = primary
-        self._fallback = fallback
-        self._log = log
-        self._degraded = False
-
-    def _delegate(self, method, *args):
-        if not self._degraded:
-            try:
-                return getattr(self._primary, method)(*args)
-            except Exception as error:
-                self._degraded = True
-                self._log.warning(
-                    "Sentry quota counter: Redis unavailable (%s: %s); "
-                    "using per-process counters for this process.",
-                    type(error).__name__,
-                    error,
-                )
-        return getattr(self._fallback, method)(*args)
-
-    def hit(self, kind, bucket, ttl):
-        return self._delegate("hit", kind, bucket, ttl)
-
-    def mark(self, key, ttl):
-        return self._delegate("mark", key, ttl)
-
-
-def _make_store(redis_url, redis_client, clock, log, key_prefix):
-    process = _ProcessStore(clock)
-    if redis_client is not None:
-        return _FallbackStore(
-            _RedisStore(redis_client, clock, key_prefix), process, log
-        )
-    if redis_url:
-        try:
-            import redis
-
-            client = redis.Redis.from_url(
-                redis_url, socket_connect_timeout=2, socket_timeout=2
-            )
-        except Exception as error:
-            log.warning(
-                "Sentry quota counter: cannot create a Redis client (%s: %s); "
-                "using per-process counters.",
-                type(error).__name__,
-                error,
-            )
-            return process
-        return _FallbackStore(_RedisStore(client, clock, key_prefix), process, log)
-    return process
-
-
 def _exception_identity(event, hint):
     """Return ``(class_or_None, type_name, message)`` for an event.
 
     The hint is the authoritative source when the SDK has a live exception.
     A serialised event and a log record are the two fallbacks; every branch
-    keeps a type NAME so the denylist and the dedupe key stay populated even
-    when only a string survives.
+    keeps a type NAME so the denylist stays populated even when only a string
+    survives.
     """
     hint = hint or {}
     exc_info = hint.get("exc_info")
@@ -269,72 +146,28 @@ def _is_denied_path(event):
     return False
 
 
-def _signature(type_name, message):
-    raw = f"{type_name}\0{message}".encode("utf-8", "replace")
-    return hashlib.sha256(raw).hexdigest()[:32]
+def build_before_send(*, log=None):
+    """Return a ``before_send`` hook that drops known noise and nothing else.
 
-
-def build_before_send(
-    *,
-    max_per_minute=DEFAULT_MAX_EVENTS_PER_MINUTE,
-    max_per_hour=DEFAULT_MAX_EVENTS_PER_HOUR,
-    dedupe_seconds=DEDUPE_WINDOW_SECONDS,
-    redis_url=None,
-    redis_client=None,
-    key_prefix="sentry:quota:",
-    clock=time.time,
-    log=None,
-):
-    """Return a ``before_send`` hook that is a ceiling, not a filter.
-
-    Order is deliberate: a denylisted event must not spend quota, and a
-    duplicate must not either. The minute cap is checked before the hour cap
-    so a burst is stopped at the tighter bound.
+    There is deliberately no counter here. A local cap cannot distinguish a
+    bug from an incident, and the events it drops are invisible to Sentry, so
+    an attack that produces errors would also silence its own report. The
+    project's rate limits and ``SENTRY_SAMPLE_RATE`` bound spend instead.
     """
     log = log or logger
-    store = _make_store(redis_url, redis_client, clock, log, key_prefix)
-    warned = set()
-
-    def warn_once(window, message, *args):
-        if window in warned:
-            return
-        warned.add(window)
-        log.warning(message, *args)
 
     def before_send(event, hint=None):
         try:
             event = event or {}
-            exc_type, type_name, message = _exception_identity(event, hint)
+            exc_type, type_name, _ = _exception_identity(event, hint)
             if _is_denied_exception(exc_type, type_name):
                 return None
             if _is_denied_path(event):
                 return None
-
-            now = clock()
-            minute_bucket = int(now // 60)
-            hour_bucket = int(now // 3600)
-            if not store.mark(
-                f"dedupe:{_signature(type_name, message)}", dedupe_seconds
-            ):
-                return None
-            if store.hit("minute", minute_bucket, 120) > max_per_minute:
-                warn_once(
-                    ("minute", minute_bucket),
-                    "Sentry quota: dropped events beyond %d/minute.",
-                    max_per_minute,
-                )
-                return None
-            if store.hit("hour", hour_bucket, 7200) > max_per_hour:
-                warn_once(
-                    ("hour", hour_bucket),
-                    "Sentry quota: dropped events beyond %d/hour.",
-                    max_per_hour,
-                )
-                return None
             return event
         except Exception as error:
             log.warning(
-                "Sentry quota guard failed (%s: %s); dropping the event.",
+                "Sentry denylist failed (%s: %s); dropping the event.",
                 type(error).__name__,
                 error,
             )
@@ -343,12 +176,27 @@ def build_before_send(
     return before_send
 
 
-def _positive_int_env(name, default):
+def _validated_sample_rate(sample_rate, log):
+    """Return a usable error sample rate, warning on one Sentry cannot use.
+
+    The SDK keeps every event for a rate above 1, ``NaN`` or infinity, and
+    drops every event for a negative rate. With the local cap gone, either
+    mistake would go unnoticed in the only remaining spend control, so both
+    fall back to the documented default. ``0.0`` stays valid as an explicit
+    "send no errors" setting.
+    """
     try:
-        value = int(os.getenv(name, str(default)))
-    except ValueError:
-        return default
-    return value if value > 0 else default
+        value = float(sample_rate)
+    except (TypeError, ValueError):
+        value = None
+    if value is None or not math.isfinite(value) or not 0.0 <= value <= 1.0:
+        log.warning(
+            "Ignoring invalid Sentry sample rate %r; using 1.0. "
+            "Check SENTRY_SAMPLE_RATE.",
+            sample_rate,
+        )
+        return 1.0
+    return value
 
 
 def init_sentry(
@@ -358,9 +206,6 @@ def init_sentry(
     release=None,
     sample_rate=1.0,
     traces_sample_rate=0.0,
-    max_per_minute=None,
-    max_per_hour=None,
-    redis_url=None,
     before_send=None,
     transport=None,
     log=None,
@@ -375,9 +220,14 @@ def init_sentry(
     while ``config.settings`` is executing, so a raise here is a dead
     deployment, not one broken worker.
 
-    A ``transport`` may be injected (tests use it to prove nothing is sent
-    over a socket); it is passed straight to the SDK and takes no other
-    behaviour with it.
+    ``sample_rate`` is the spend knob: it is Sentry's own client-side sampling,
+    so a fraction of events is kept instead of reporting going dark after an
+    arbitrary count. An invalid value falls back to 1.0 with a warning rather
+    than reaching the SDK, because the SDK treats a negative rate as "drop
+    every event" and a rate above 1 or NaN as "keep every event". A
+    ``transport`` may be injected (tests use it to prove nothing is sent over
+    a socket); it is passed straight to the SDK and takes no other behaviour
+    with it.
     """
     log = log or logger
     if dsn is None:
@@ -392,23 +242,9 @@ def init_sentry(
             or (os.getenv("GIT_SHA") or "").strip()
             or None
         )
-    if max_per_minute is None:
-        max_per_minute = _positive_int_env(
-            "SENTRY_MAX_EVENTS_PER_MINUTE", DEFAULT_MAX_EVENTS_PER_MINUTE
-        )
-    if max_per_hour is None:
-        max_per_hour = _positive_int_env(
-            "SENTRY_MAX_EVENTS_PER_HOUR", DEFAULT_MAX_EVENTS_PER_HOUR
-        )
-    if redis_url is None:
-        redis_url = (os.getenv("REDIS_URL") or "").strip() or None
     if before_send is None:
-        before_send = build_before_send(
-            max_per_minute=max_per_minute,
-            max_per_hour=max_per_hour,
-            redis_url=redis_url,
-            log=log,
-        )
+        before_send = build_before_send(log=log)
+    sample_rate = _validated_sample_rate(sample_rate, log)
 
     try:
         import sentry_sdk

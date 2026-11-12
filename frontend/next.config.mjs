@@ -22,9 +22,9 @@ const apiOrigins = configuredApiOrigin ? [configuredApiOrigin] : devOrigins;
 // SPA reports "Could not load the payment gateway" (script blocked by CSP).
 //
 // Sentry's browser SDK POSTs envelopes to the DSN's ingest origin, and
-// connect-src is an allowlist. Without the exact origin the send is blocked
-// on the wire AFTER beforeSend in src/lib/sentry.ts has already seen and
-// counted the event, so the hourly quota is spent and nothing reaches Sentry.
+// connect-src is an allowlist. Without the exact origin the browser blocks
+// the envelope AFTER beforeSend in src/lib/sentry.ts accepted the event, so
+// the report is lost silently with no server-side trace.
 // The origin is derived from the configured DSN rather than hardcoded so
 // staging and production can use different Sentry regions; an unset or
 // malformed DSN adds nothing (the SDK is not initialised then).

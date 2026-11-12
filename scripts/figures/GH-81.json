@@ -1,0 +1,33 @@
+{
+  "kind": "floor",
+  "task": "GH-81",
+  "tool": "scripts/changelog_figures.py",
+  "measured_at": "2026-11-12T15:48:43+00:00",
+  "pair_complete": false,
+  "engines": [
+    {
+      "engine": "sqlite",
+      "database_url": "sqlite:///db.sqlite3",
+      "commands": [
+        "/tmp/gh81-venv/bin/python -m coverage run manage.py test --verbosity 0",
+        "/tmp/gh81-venv/bin/python -m coverage report"
+      ],
+      "run": {
+        "verdict": "OK",
+        "tests": 2545,
+        "failures": null,
+        "errors": null,
+        "expected_failures": 2
+      },
+      "coverage": {
+        "statements": 14350,
+        "missed": 9,
+        "coverage_percent": "99.77",
+        "branches": 1840,
+        "partial_branches": 29
+      },
+      "test_exit": 0,
+      "coverage_exit": 0
+    }
+  ]
+}

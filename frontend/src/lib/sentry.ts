@@ -1,18 +1,21 @@
 /**
- * Browser error reporting with a hard FREE-TIER quota guard.
+ * Browser error reporting with a minimal noise denylist.
  *
  * A client error loop (a render that throws on every frame, a chunk that
  * fails to load on every navigation) can emit thousands of events in an
  * hour. Sentry's free tier is a monthly event budget, so an unguarded SDK
  * can spend the whole month in one afternoon and leave the real incidents
- * of the following weeks unsampled. Everything below exists to make that
- * impossible rather than unlikely:
+ * of the following weeks unsampled. A local per-tab cap was deliberately
+ * removed: it went quiet exactly when errors spiked, and the events it
+ * dropped were invisible to Sentry. Spend is bounded by Sentry's own
+ * controls instead:
  *
  * - Nothing is initialised unless a DSN is configured, so a local run or a
  *   preview build sends nothing.
- * - `beforeSend` is the single chokepoint. It drops known noise, collapses
- *   identical events inside a 60s window, and refuses everything past a
- *   per-tab hourly cap that survives in sessionStorage.
+ * - `NEXT_PUBLIC_SENTRY_SAMPLE_RATE` keeps a fixed fraction of events, and
+ *   the Sentry project's rate limit and inbound filters are the ceiling.
+ * - `beforeSend` is only a denylist for known noise. It never drops an event
+ *   because a local counter says so.
  * - `beforeSend` is wrapped in try/catch: telemetry must never be able to
  *   break the page it is measuring, so a malformed event is dropped, not
  *   thrown.
@@ -30,14 +33,8 @@
 import * as Sentry from "@sentry/browser";
 import type { BrowserOptions, ErrorEvent } from "@sentry/browser";
 
-/** Free-tier safety default: 50 events per tab per rolling hour. */
-export const DEFAULT_MAX_EVENTS_PER_HOUR = 50;
-/** Identical (type, message) pairs inside this window are sent once. */
-export const DEDUPE_WINDOW_MS = 60_000;
-/** The quota window; anchored to the first event of the window, not to the clock hour. */
-export const QUOTA_WINDOW_MS = 3_600_000;
-/** sessionStorage key holding `{ windowStart, count }` for this tab. */
-export const QUOTA_STORAGE_KEY = "aurel.sentry-quota";
+/** Sentry's default sample rate: every error event is kept. */
+export const DEFAULT_SAMPLE_RATE = 1.0;
 
 /**
  * The slice of a Sentry event the guard reads. Kept structural so tests can
@@ -50,20 +47,7 @@ export interface SentryEventLike {
   };
 }
 
-export interface GuardStorage {
-  getItem(key: string): string | null;
-  setItem(key: string, value: string): void;
-}
-
 export interface SentryGuardOptions {
-  /** Events allowed per window. Defaults to the env value, then 50. */
-  maxEventsPerHour?: number;
-  /** Clock seam; defaults to `Date.now`. */
-  now?: () => number;
-  /** Storage seam; defaults to `window.sessionStorage` when it exists. */
-  storage?: () => GuardStorage | null;
-  /** Warning sink; defaults to `console.warn`. */
-  warn?: (message: string) => void;
   /** Offline probe; defaults to `navigator.onLine === false`. */
   isOffline?: () => boolean;
 }
@@ -72,30 +56,19 @@ export interface SentryGuard<T extends SentryEventLike> {
   beforeSend(event: T): T | null;
 }
 
-interface QuotaRecord {
-  windowStart: number;
-  count: number;
-}
-
 /**
- * Parse the hourly cap. Anything that is not a positive integer falls back
- * to the default, so a typo in the env file cannot disable the guard by
- * producing `NaN` (every comparison with `NaN` is false).
+ * Parse the client-side sample rate. Anything that is not a number inside
+ * 0.0-1.0 falls back to the default, so a typo in the env file cannot turn
+ * sampling into "send nothing" (0) by accident.
  */
-export function parseMaxEvents(raw: string | undefined): number {
-  const parsed = Number.parseInt((raw ?? "").trim(), 10);
-  if (!Number.isFinite(parsed) || parsed < 1) return DEFAULT_MAX_EVENTS_PER_HOUR;
-  return parsed;
-}
-
-function defaultStorage(): GuardStorage | null {
-  try {
-    if (typeof window === "undefined") return null;
-    return window.sessionStorage ?? null;
-  } catch {
-    // Private mode / blocked storage: the guard falls back to module memory.
-    return null;
+export function parseSampleRate(raw: string | undefined): number {
+  const trimmed = (raw ?? "").trim();
+  if (trimmed === "") return DEFAULT_SAMPLE_RATE;
+  const parsed = Number(trimmed);
+  if (!Number.isFinite(parsed) || parsed < 0 || parsed > 1) {
+    return DEFAULT_SAMPLE_RATE;
   }
+  return parsed;
 }
 
 function defaultOffline(): boolean {
@@ -154,141 +127,18 @@ export function denylistReason(
 }
 
 /**
- * Dedupe identity: the exception type plus the message. An event carrying
- * neither has no identity, so it is never deduped (and never collapsed into
- * an unrelated blank-key event).
- */
-function identityKey(event: SentryEventLike): string | null {
-  const first = event.exception?.values?.[0];
-  const type = first?.type ?? "";
-  const message = event.message ?? first?.value ?? "";
-  if (type === "" && message === "") return null;
-  return `${type}\u0000${message}`;
-}
-
-function isQuotaRecord(value: unknown): value is QuotaRecord {
-  if (typeof value !== "object" || value === null) return false;
-  const record = value as Partial<QuotaRecord>;
-  return (
-    typeof record.windowStart === "number" &&
-    Number.isFinite(record.windowStart) &&
-    typeof record.count === "number" &&
-    Number.isFinite(record.count)
-  );
-}
-
-/**
- * Build a guard with its own counter, dedupe map and warning state. The
- * default instance below is the one the SDK uses; tests construct isolated
- * instances so one case cannot leak state into the next.
+ * Build a guard around the denylist. The default instance below is the one
+ * the SDK uses; tests construct isolated instances so one case cannot leak
+ * the offline seam into the next.
  */
 export function createSentryGuard<T extends SentryEventLike = SentryEventLike>(
   options: SentryGuardOptions = {},
 ): SentryGuard<T> {
-  const max = options.maxEventsPerHour ?? DEFAULT_MAX_EVENTS_PER_HOUR;
-  const now = options.now ?? (() => Date.now());
-  const storage = options.storage ?? defaultStorage;
-  const warn =
-    options.warn ??
-    ((message: string) => {
-      console.warn(message);
-    });
   const isOffline = options.isOffline ?? defaultOffline;
-
-  /** Module-side copy of the persisted counter, used when storage is absent. */
-  let counter: QuotaRecord | null = null;
-  /** windowStart whose cap warning has already been printed. */
-  let warnedWindow: number | null = null;
-  /** Last send time per identity, within `DEDUPE_WINDOW_MS`. */
-  const lastSent = new Map<string, number>();
-
-  function readStored(): QuotaRecord | null {
-    try {
-      const raw = storage()?.getItem(QUOTA_STORAGE_KEY);
-      if (!raw) return null;
-      const parsed: unknown = JSON.parse(raw);
-      if (!isQuotaRecord(parsed)) return null;
-      return {
-        windowStart: parsed.windowStart,
-        count: Math.max(0, Math.floor(parsed.count)),
-      };
-    } catch {
-      return null;
-    }
-  }
-
-  function persist(record: QuotaRecord): void {
-    counter = record;
-    try {
-      storage()?.setItem(QUOTA_STORAGE_KEY, JSON.stringify(record));
-    } catch {
-      // Write failure only costs cross-call persistence; module memory still
-      // enforces the cap for the life of this bundle.
-    }
-  }
-
-  /**
-   * The live record for `ts`. sessionStorage is the shared authority between
-   * the tab's calls; the module copy is merged in because a failed write
-   * must not let the counter go backwards. A record older than the window
-   * (or a clock that moved backwards) starts a fresh window.
-   */
-  function currentRecord(ts: number): QuotaRecord {
-    const candidates: QuotaRecord[] = [];
-    const stored = readStored();
-    if (stored) candidates.push(stored);
-    if (counter) candidates.push(counter);
-    const live = candidates.filter(
-      (record) =>
-        ts >= record.windowStart && ts - record.windowStart < QUOTA_WINDOW_MS,
-    );
-    if (live.length === 0) return { windowStart: ts, count: 0 };
-    const windowStart = Math.min(...live.map((record) => record.windowStart));
-    const count = Math.max(
-      ...live
-        .filter((record) => record.windowStart === windowStart)
-        .map((record) => record.count),
-    );
-    return { windowStart, count };
-  }
-
-  function prune(ts: number): void {
-    for (const [key, sentAt] of lastSent) {
-      if (ts - sentAt >= DEDUPE_WINDOW_MS || ts < sentAt) lastSent.delete(key);
-    }
-  }
 
   function beforeSend(event: T): T | null {
     try {
-      if (denylistReason(event, isOffline()) !== null) return null;
-      const ts = now();
-      const key = identityKey(event);
-      if (key !== null) {
-        const sentAt = lastSent.get(key);
-        if (
-          sentAt !== undefined &&
-          ts >= sentAt &&
-          ts - sentAt < DEDUPE_WINDOW_MS
-        ) {
-          return null;
-        }
-      }
-      const record = currentRecord(ts);
-      if (record.count >= max) {
-        // One warning per window, not one per dropped event: a loop would
-        // otherwise fill the console it is being reported through.
-        if (warnedWindow !== record.windowStart) {
-          warnedWindow = record.windowStart;
-          warn(
-            `[sentry] hourly event quota reached (${max}); dropping events until the window resets`,
-          );
-        }
-        return null;
-      }
-      persist({ windowStart: record.windowStart, count: record.count + 1 });
-      if (key !== null) lastSent.set(key, ts);
-      prune(ts);
-      return event;
+      return denylistReason(event, isOffline()) === null ? event : null;
     } catch {
       // A guard that throws is worse than a dropped event: fail closed.
       return null;
@@ -298,24 +148,23 @@ export function createSentryGuard<T extends SentryEventLike = SentryEventLike>(
   return { beforeSend };
 }
 
-/**
- * The instance `initSentry` hands to the SDK.
- *
- * The literal `process.env.*` member expression below is what Next.js can
- * statically inline into the browser bundle; a dynamic lookup through a
- * variable would compile to a runtime object access that is always undefined
- * in the client.
- */
-export const sentryGuard: SentryGuard<ErrorEvent> = createSentryGuard<ErrorEvent>({
-  maxEventsPerHour: parseMaxEvents(
-    process.env.NEXT_PUBLIC_SENTRY_MAX_EVENTS_PER_HOUR,
-  ),
-});
+/** The instance `initSentry` hands to the SDK. */
+export const sentryGuard: SentryGuard<ErrorEvent> = createSentryGuard<ErrorEvent>();
 
 /** DSN from the environment, or `undefined` when unset/blank. */
 export function sentryDsn(): string | undefined {
   const dsn = process.env.NEXT_PUBLIC_SENTRY_DSN?.trim();
   return dsn ? dsn : undefined;
+}
+
+/**
+ * Sample rate from the environment. The literal `process.env.*` member
+ * expression below is what Next.js can statically inline into the browser
+ * bundle; a dynamic lookup through a variable would compile to a runtime
+ * object access that is always undefined in the client.
+ */
+export function sentrySampleRate(): number {
+  return parseSampleRate(process.env.NEXT_PUBLIC_SENTRY_SAMPLE_RATE);
 }
 
 /** The DSN the SDK was last initialised with (null before any init). */
@@ -328,7 +177,9 @@ let initializedFor: string | null = null;
  *
  * `sendDefaultPii: false` and the zeroed trace/replay rates are deliberate:
  * this storefront handles customer data, and the free tier is event-budgeted,
- * so performance and session replay stay off.
+ * so performance and session replay stay off. Sampling is Sentry's own knob,
+ * so a deployment can lower its spend without a local counter that would
+ * silence errors during an incident.
  */
 export function initSentry(): boolean {
   const dsn = sentryDsn();
@@ -337,6 +188,7 @@ export function initSentry(): boolean {
   const options: BrowserOptions = {
     dsn,
     sendDefaultPii: false,
+    sampleRate: sentrySampleRate(),
     tracesSampleRate: 0,
     replaysSessionSampleRate: 0,
     replaysOnErrorSampleRate: 0,
