@@ -360,7 +360,23 @@ def validate_baseline(payload: object) -> dict[str, object]:
     if not isinstance(scopes, dict):
         raise MeasurementError("baseline is missing a 'scopes' object")
     for name in ("app_python", "test_python", "docs_markdown", "ledger_markdown"):
-        _scope_from_payload(scopes, name)
+        counts = _scope_from_payload(scopes, name)
+        # Python scopes classify every physical line exactly once. A hand edit
+        # that lowers logic or raises comment/docstring lines would pass the
+        # ratio check against a corrupt baseline, so reject the mismatch.
+        # Markdown scopes do not classify lines and are exempt.
+        if name in ("app_python", "test_python"):
+            classified = (
+                counts.logic_lines
+                + counts.comment_lines
+                + counts.docstring_lines
+                + counts.blank_lines
+            )
+            if counts.total_lines != classified:
+                raise MeasurementError(
+                    f"baseline {name}.total_lines ({counts.total_lines}) != "
+                    f"logic + comment + docstring + blank ({classified})"
+                )
     return payload
 
 
@@ -452,7 +468,9 @@ def measure(repo_root: Path = REPO_ROOT) -> Measurement:
             )
         else:
             try:
-                text = data.decode("utf-8")
+                # Python accepts a UTF-8 BOM; plain utf-8 leaves U+FEFF and
+                # ast.parse then rejects an otherwise valid source file.
+                text = data.decode("utf-8-sig")
             except UnicodeDecodeError as exc:
                 raise MeasurementError(
                     f"{relpath}: not valid UTF-8 ({exc})"
@@ -525,6 +543,58 @@ def load_index_baseline(
     return _parse_baseline(raw, f"baseline {relpath} in the git index")
 
 
+def head_file_or_none(repo_root: Path, relpath: str) -> bytes | None:
+    """Committed ``HEAD`` bytes for ``relpath``, or ``None`` when absent.
+
+    ``record_baseline`` falls back here when the index copy was staged for
+    deletion: the previous baseline is still committed, so a fresh baseline
+    must be compared against it rather than recorded as a first record.
+    """
+    listed = subprocess.run(
+        [
+            "git",
+            "-C",
+            str(repo_root),
+            "ls-tree",
+            "-z",
+            "--name-only",
+            "HEAD",
+            "--",
+            relpath,
+        ],
+        capture_output=True,
+        env=git_environment(),
+    )
+    if listed.returncode != 0 or not listed.stdout.strip(b"\0"):
+        return None
+    completed = subprocess.run(
+        ["git", "-C", str(repo_root), "cat-file", "blob", f"HEAD:{relpath}"],
+        capture_output=True,
+        env=git_environment(),
+    )
+    if completed.returncode != 0:
+        detail = completed.stderr.decode("utf-8", "replace").strip()
+        raise MeasurementError(
+            f"{relpath}: unreadable from HEAD ({detail or 'no detail'})"
+        )
+    return completed.stdout
+
+
+def load_head_baseline(
+    repo_root: Path = REPO_ROOT, path: Path = BASELINE_PATH
+) -> dict[str, object] | None:
+    """The baseline committed at ``HEAD``, or ``None`` when none is committed."""
+    relpath = _relative_to_repo(repo_root, path)
+    if relpath is None:
+        raise MeasurementError(
+            f"baseline {path} is outside {repo_root}; use an in-repository path"
+        )
+    raw = head_file_or_none(repo_root, relpath)
+    if raw is None:
+        return None
+    return _parse_baseline(raw, f"baseline {relpath} at HEAD")
+
+
 def record_baseline(
     measurement: Measurement,
     path: Path = BASELINE_PATH,
@@ -538,6 +608,11 @@ def record_baseline(
     afterwards: ``check`` reads the indexed copy."""
     if _relative_to_repo(repo_root, path) is not None:
         previous = load_index_baseline(repo_root, path)
+        if previous is None:
+            # A staged deletion removes the index copy, but a committed
+            # baseline still exists at HEAD: compare against that instead of
+            # treating the write as a first record and skipping the ratchet.
+            previous = load_head_baseline(repo_root, path)
     else:
         previous = load_baseline(path) if path.exists() else None
     regressions = (

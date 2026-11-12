@@ -341,6 +341,21 @@ class BaselineValidationTests(unittest.TestCase):
         with self.assertRaises(dm.MeasurementError):
             dm.validate_baseline(bad)
 
+    def test_python_line_classes_must_sum_to_total(self):
+        # Lowering logic without changing total_lines would raise the density
+        # ratio while passing every other check.
+        scopes = json.loads(json.dumps(self.good["scopes"]))
+        scopes["app_python"]["logic_lines"] += 1
+        bad = dict(self.good, scopes=scopes)
+        with self.assertRaises(dm.MeasurementError):
+            dm.validate_baseline(bad)
+
+    def test_markdown_scopes_are_exempt_from_the_line_sum(self):
+        # Markdown scopes carry only files/bytes; they must keep loading.
+        scopes = json.loads(json.dumps(self.good["scopes"]))
+        scopes["docs_markdown"]["total_lines"] += 1
+        dm.validate_baseline(dict(self.good, scopes=scopes))
+
 
 class BaselineFileTests(unittest.TestCase):
     def test_missing_file_is_an_error(self):
@@ -429,11 +444,31 @@ class IndexMeasurementTests(unittest.TestCase):
         self._stage(root, "backend/sample.py")
         return sample
 
+    def _commit(self, root: Path) -> None:
+        subprocess.run(
+            [
+                "git",
+                "-C",
+                str(root),
+                "-c",
+                "user.name=test",
+                "-c",
+                "user.email=test@example.com",
+                "commit",
+                "-q",
+                "-m",
+                "seed",
+            ],
+            check=True,
+            env=dm.git_environment(),
+        )
+
     def test_measure_reads_the_index_not_the_worktree(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             sample = self._stage_sample(root)
-            # The worktree disagrees with the index; the measurement is the staged content.
+            # The worktree disagrees with the index; the measurement is the
+            # staged content.
             sample.write_text("y = 2\n", encoding="utf-8")
             measured = dm.measure(root)
             self.assertEqual(measured.app_python.files, 1)
@@ -504,6 +539,50 @@ class IndexMeasurementTests(unittest.TestCase):
             self.assertTrue(written)
             self.assertEqual(regressions, [])
             self.assertTrue(baseline.exists())
+
+    def test_measure_parses_a_utf8_bom_source(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self._init_repo(root)
+            sample = root / "backend" / "bom.py"
+            sample.parent.mkdir()
+            sample.write_bytes(b"\xef\xbb\xbf# why\nx = 1\n")
+            self._stage(root, "backend/bom.py")
+            measured = dm.measure(root)
+            self.assertEqual(measured.app_python.files, 1)
+            self.assertEqual(measured.app_python.comment_lines, 1)
+            self.assertEqual(measured.app_python.logic_lines, 1)
+
+    def test_record_baseline_uses_head_when_index_is_staged_for_deletion(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self._init_repo(root)
+            baseline = root / "scripts" / "doc_metrics_baseline.json"
+            baseline.parent.mkdir()
+            baseline.write_text(
+                json.dumps(dm.measurement_payload(measurement()), sort_keys=True),
+                encoding="utf-8",
+            )
+            self._stage(root, "scripts/doc_metrics_baseline.json")
+            self._commit(root)
+            subprocess.run(
+                [
+                    "git",
+                    "-C",
+                    str(root),
+                    "rm",
+                    "--cached",
+                    "-q",
+                    "scripts/doc_metrics_baseline.json",
+                ],
+                check=True,
+                env=dm.git_environment(),
+            )
+            written, regressions = dm.record_baseline(
+                measurement(comment=9), baseline, repo_root=root
+            )
+            self.assertFalse(written)
+            self.assertTrue(regressions)
 
 
 if __name__ == "__main__":
