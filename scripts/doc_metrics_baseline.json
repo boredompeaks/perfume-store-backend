@@ -3,7 +3,7 @@
   "metrics": {
     "comment_docstring_per_logic": 0.292476,
     "comment_docstring_share": 0.226291,
-    "docs_to_app_python_bytes": 1.141123
+    "docs_to_app_python_bytes": 1.141443
   },
   "note": "Hand-maintained: scripts/doc_metrics.py baseline writes this file only when an operator runs it. A baseline that refreshed itself would record whatever the last run measured, which is the defect the check exists to catch. The integer counts are the source of truth; the metrics block is derived and printed for humans. Record a higher ratio only via --accept-increase, and state the reason in the changelog row.",
   "schema": 1,
@@ -19,16 +19,16 @@
     },
     "docs_markdown": {
       "blank_lines": 0,
-      "bytes": 820827,
+      "bytes": 821057,
       "comment_lines": 0,
       "docstring_lines": 0,
       "files": 53,
       "logic_lines": 0,
-      "total_lines": 6903
+      "total_lines": 6907
     },
     "ledger_markdown": {
       "blank_lines": 0,
-      "bytes": 1077383,
+      "bytes": 1077579,
       "comment_lines": 0,
       "docstring_lines": 0,
       "files": 1,
