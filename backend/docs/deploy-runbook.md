@@ -377,6 +377,51 @@ events. So there is no second reporting path to keep in sync. PII is off:
 request bodies, cookies, headers and identifiers stay in the process unless an
 operator deliberately enables them.
 
+#### During an error spike
+
+There is deliberately **no local event cap**. A client-side ceiling stops
+sending once N events have been reported, so an incident that produces errors
+also silences its own report - the opposite of what is wanted. The guard in
+`common/sentry.py` is a denylist only (404/403/DisallowedHost, health-check
+paths, BrokenPipeError, any DB OperationalError); every other event is
+handed to the SDK's transport, subject to the sample rate. The denylist
+matches `OperationalError` by exception type and does not inspect whether the
+error is transient, so a persistent database outage is dropped too: use the
+`/health/` probe and the uptime checks below, not Sentry, to monitor the
+database. The storefront behaves the same way (`frontend/src/lib/sentry.ts`
+keeps only browser-noise entries).
+
+Billing is bounded in the Sentry project, where a drop is visible as a
+rate-limited count rather than a private local counter:
+
+1. Set a **rate limit on the client key** (Project Settings -> Client Keys
+   (DSN) -> Rate Limits), e.g. a per-minute event ceiling. Sentry applies it as
+   a circuit breaker: once the limit is hit, the SDK discards later events
+   until the window expires and reports an aggregate drop count, but the
+   discarded error details are gone. A new incident inside that window can
+   therefore be missing from Sentry issue alerts, so keep independent
+   monitoring and the uptime checks below for incident detection.
+2. Keep the project's **inbound filters** enabled for noise that changes over
+   time (browser extensions, web crawlers, legacy browsers). The in-code
+   denylist only carries what the application can identify itself.
+3. Lower `SENTRY_SAMPLE_RATE` (backend) or `NEXT_PUBLIC_SENTRY_SAMPLE_RATE`
+   (storefront) to keep a fixed fraction of events. Sampling is probabilistic,
+   so it thins a spike rather than turning reporting off partway through one.
+   The storefront deploy workflow reads `NEXT_PUBLIC_SENTRY_SAMPLE_RATE` from
+   the repository variable of that name; unset or empty keeps the `1.0`
+   default, and an out-of-range value falls back to `1.0` (the browser parser
+   has no logging channel, so check the built value if the rate matters).
+
+The former `SENTRY_MAX_EVENTS_PER_MINUTE`, `SENTRY_MAX_EVENTS_PER_HOUR` and
+`NEXT_PUBLIC_SENTRY_MAX_EVENTS_PER_HOUR` keys are removed and have no effect;
+a deployment that still sets one loses only the local cap. Configure volume
+alerts against the Sentry project, not a local counter - but account for the
+sample rate when doing so. With either rate below `1.0` the project receives
+only that fraction of the errors the application generated, so a threshold
+copied from an unsampled deployment will fire late (or not at all) during a
+spike. Set and read volume alerts against the sampled rate, and lower the
+threshold, or raise the sample rate, when the full error count matters.
+
 The DSN carries a public ingest key: it is configuration, but still
 environment-only - repo-root `.env` / your platform's secret store, never the
 repository. It is the one string in this section a scanner may flag; it belongs

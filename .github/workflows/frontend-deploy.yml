@@ -50,6 +50,11 @@ jobs:
           # mislabel it. The SDK is inert when the value is empty, so a missing
           # variable degrades to "no error reporting" rather than a broken build.
           NEXT_PUBLIC_SENTRY_DSN: ${{ vars.NEXT_PUBLIC_SENTRY_DSN }}
+          # Sentry client-side sampling (GH-81), from the same kind of repo
+          # variable. Unset or empty keeps the documented default of 1.0;
+          # an out-of-range value falls back to 1.0 in the bundle, so a typo
+          # cannot silence reporting.
+          NEXT_PUBLIC_SENTRY_SAMPLE_RATE: ${{ vars.NEXT_PUBLIC_SENTRY_SAMPLE_RATE }}
         run: npx opennextjs-cloudflare build
 
       # Next 16.4 + OpenNext: loadManifest rejects preview-props.json (upstream

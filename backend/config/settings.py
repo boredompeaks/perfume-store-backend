@@ -1577,7 +1577,9 @@ def _env_float(name, default):
 # error can never be filed as a production one (SPEC-22-03 [R-22.3]).
 SENTRY_DSN = (os.getenv("SENTRY_DSN") or "").strip()
 SENTRY_ENVIRONMENT = (os.getenv("SENTRY_ENVIRONMENT") or "").strip() or DJANGO_ENV
-# 1.0 ships every error event; a deployment under volume pressure lowers it.
+# 1.0 ships every error event. Sentry's own sampling is the spend knob: a
+# deployment under volume pressure lowers this instead of dropping events
+# after an arbitrary local count, which would go quiet during a spike.
 SENTRY_SAMPLE_RATE = _env_float("SENTRY_SAMPLE_RATE", 1.0)
 # Tracing is OFF by default: this app instruments no transactions, and a
 # non-zero trace rate would be a bill nobody asked for.
@@ -1591,13 +1593,6 @@ SENTRY_RELEASE = (
     or (os.getenv("GIT_SHA") or "").strip()
     or None
 )
-# The hard ceiling on the free tier. A per-process limit is not a limit with
-# N workers, so the guard behind these values keeps ONE shared counter when
-# REDIS_URL is declared (the same declaration that moves the throttle cache
-# onto Redis). Both are positive ints; a zero or malformed value keeps the
-# documented default, because a typo must not silently disable the cap.
-SENTRY_MAX_EVENTS_PER_MINUTE = _env_positive_int("SENTRY_MAX_EVENTS_PER_MINUTE", 10)
-SENTRY_MAX_EVENTS_PER_HOUR = _env_positive_int("SENTRY_MAX_EVENTS_PER_HOUR", 200)
 
 
 def _init_error_tracking(
@@ -1607,17 +1602,15 @@ def _init_error_tracking(
     traces_sample_rate,
     *,
     release=None,
-    max_per_minute=None,
-    max_per_hour=None,
-    redis_url=None,
 ):
-    """Initialise the quota-guarded error tracker; inert without a DSN.
+    """Initialise the denylist-guarded error tracker; inert without a DSN.
 
     The implementation lives in ``common.sentry`` because it is a transport
     decision, not a settings value, and it is imported HERE rather than at
     module scope so an unconfigured process never loads the SDK. That module
-    owns the DSN gate, the denylist, the 60-second duplicate window and the
-    per-minute/per-hour ceiling; its docstring records why each exists.
+    owns the DSN gate and the noise denylist; its docstring records why the
+    hard local event cap was removed in favour of Sentry's own rate limits and
+    sampling.
 
     Kept as a settings-level wrapper because this module is the boot surface
     and because its logger name is what a deployment watches. The wrapper
@@ -1632,9 +1625,6 @@ def _init_error_tracking(
         release=release,
         sample_rate=sample_rate,
         traces_sample_rate=traces_sample_rate,
-        max_per_minute=max_per_minute,
-        max_per_hour=max_per_hour,
-        redis_url=redis_url,
         log=logging.getLogger(__name__),
     )
 
@@ -1645,12 +1635,6 @@ ERROR_TRACKING_ENABLED = _init_error_tracking(
     SENTRY_SAMPLE_RATE,
     SENTRY_TRACES_SAMPLE_RATE,
     release=SENTRY_RELEASE,
-    max_per_minute=SENTRY_MAX_EVENTS_PER_MINUTE,
-    max_per_hour=SENTRY_MAX_EVENTS_PER_HOUR,
-    # Read the env directly rather than settings.REDIS_URL, which carries a
-    # localhost default: a default is not a declaration, and an undeclared
-    # Redis must keep the per-process counter.
-    redis_url=(os.getenv("REDIS_URL") or "").strip() or None,
 )
 
 
