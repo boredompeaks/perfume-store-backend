@@ -368,9 +368,16 @@ class OutboxBackoffTests(OutboxDrainTestCase):
         anything, and ``2 ** 10**9`` is slow enough on its own to look like a
         wedged worker.
         """
+        # Literal defaults (base 30s, cap 3600s). Comparing the function to
+        # itself only proves it is deterministic: moving the exponent clamp or
+        # the cap changes BOTH sides and the equality still holds. These are
+        # the values an operator's next_attempt_at is built from.
+        self.assertEqual(notifications.retry_delay_seconds(1), 30)
+        self.assertEqual(notifications.retry_delay_seconds(2), 60)
+        self.assertEqual(notifications.retry_delay_seconds(10**9), 3600)
         self.assertEqual(
-            notifications.retry_delay_seconds(10**9),
             notifications.retry_delay_seconds(notifications._BACKOFF_EXPONENT_CAP + 1),
+            3600,
         )
 
     def test_a_row_past_its_expiry_is_never_sent(self):

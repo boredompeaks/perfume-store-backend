@@ -142,10 +142,22 @@ class SuperadminTierDeclarationTests(TestCase):
 
     def test_the_group_exists_on_a_bootstrapped_database(self):
         # The migrations ran to build this test database: the group is there
-        # without any application code running sync_role_groups().
-        self.assertTrue(Group.objects.filter(name=ROLE_SUPERADMIN).exists())
+        # without any application code running sync_role_groups(). Literal
+        # names, because the migration imports the same constants the test
+        # would otherwise derive from - a rename would match itself here while
+        # leaving every deployed database on the old spelling.
+        self.assertTrue(Group.objects.filter(name="superadmin").exists())
         self.assertEqual(
-            set(Group.objects.values_list("name", flat=True)), set(STAFF_ROLES)
+            set(Group.objects.values_list("name", flat=True)),
+            {
+                "support",
+                "catalogue",
+                "inventory",
+                "marketing",
+                "finance",
+                "admin",
+                "superadmin",
+            },
         )
 
     def test_sync_recreates_a_deleted_superadmin_group(self):
@@ -153,8 +165,8 @@ class SuperadminTierDeclarationTests(TestCase):
 
         groups = sync_role_groups()
 
-        self.assertTrue(Group.objects.filter(name=ROLE_SUPERADMIN).exists())
-        self.assertEqual(groups[ROLE_SUPERADMIN].name, ROLE_SUPERADMIN)
+        self.assertTrue(Group.objects.filter(name="superadmin").exists())
+        self.assertEqual(groups[ROLE_SUPERADMIN].name, "superadmin")
 
     def test_the_rebootstrap_migration_adds_the_group_to_a_populated_database(self):
         # Existing deployments already ran 0001, so adding a role to the map

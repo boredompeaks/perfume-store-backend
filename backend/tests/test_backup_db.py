@@ -1077,8 +1077,20 @@ class HelperTests(SimpleTestCase):
         early = utc_stamp(datetime(2026, 1, 2, 3, 4, 5))
         late = utc_stamp(datetime(2026, 11, 30, 23, 59, 59))
 
-        self.assertEqual(len(early), len(late))
+        # Two equal-length samples pin neither the width nor the spelling:
+        # dropping the "Z", swapping the separators or using a two-digit year
+        # keeps both samples the same length and correctly ordered. The
+        # literals are the retention/sort contract.
+        self.assertEqual(early, "20260102T030405Z")
+        self.assertEqual(late, "20261130T235959Z")
+        self.assertRegex(early, r"\A\d{8}T\d{6}Z\Z")
+        self.assertRegex(late, r"\A\d{8}T\d{6}Z\Z")
         self.assertLess(early, late)
+        # Year rollover is the boundary a fixed-width sort must also get right.
+        self.assertLess(
+            utc_stamp(datetime(2025, 12, 31, 23, 59, 59)),
+            utc_stamp(datetime(2026, 1, 1, 0, 0, 0)),
+        )
 
     def test_backup_names_carry_the_scheme_retention_matches(self):
         self.assertEqual(

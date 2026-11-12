@@ -16,7 +16,7 @@ contract is untouched by the group-based layer.
 from django.contrib.auth.models import AnonymousUser, Group, User
 from django.core.exceptions import PermissionDenied as DjangoPermissionDenied
 from django.http import HttpResponse
-from django.test import RequestFactory, TestCase
+from django.test import RequestFactory, SimpleTestCase, TestCase, tag
 from rest_framework.exceptions import PermissionDenied
 from rest_framework.permissions import BasePermission
 from rest_framework.request import Request
@@ -60,8 +60,21 @@ class StaffRoleGroupSyncTests(TestCase):
         sync_role_groups()
         sync_role_groups()
 
+        # Literal spelling, not set(STAFF_ROLES): the sync creates groups
+        # FROM that tuple, so a renamed constant agrees with itself here while
+        # every deployed database keeps the old group. The names are the
+        # contract; the tuple is the code that must match them.
         self.assertEqual(
-            set(Group.objects.values_list("name", flat=True)), set(STAFF_ROLES)
+            set(Group.objects.values_list("name", flat=True)),
+            {
+                "support",
+                "catalogue",
+                "inventory",
+                "marketing",
+                "finance",
+                "admin",
+                "superadmin",
+            },
         )
         for role in STAFF_ROLES:
             self.assertEqual(Group.objects.filter(name=role).count(), 1)
@@ -72,8 +85,41 @@ class StaffRoleGroupSyncTests(TestCase):
 
         groups = sync_role_groups()
 
-        self.assertTrue(Group.objects.filter(name=ROLE_CATALOGUE).exists())
-        self.assertEqual(groups[ROLE_CATALOGUE].name, ROLE_CATALOGUE)
+        self.assertTrue(Group.objects.filter(name="catalogue").exists())
+        self.assertEqual(groups[ROLE_CATALOGUE].name, "catalogue")
+
+
+@tag("rbac")
+class StaffRoleWireLiteralTests(SimpleTestCase):
+    """The group names are deployed data, not Python-only labels.
+
+    A rename of any ``ROLE_*`` constant is invisible to every test that builds
+    its expected value from that same constant: ``sync_role_groups`` creates
+    the new name and the assertion compares against the new name. Existing
+    installations keep the old group, so the rename silently orphans the role
+    membership that grants staff access. These literals are the spelling the
+    deployed database already holds.
+    """
+
+    def test_staff_role_names_are_the_deployed_literals(self):
+        self.assertEqual(
+            STAFF_ROLES,
+            (
+                "support",
+                "catalogue",
+                "inventory",
+                "marketing",
+                "finance",
+                "admin",
+                "superadmin",
+            ),
+        )
+
+    def test_each_role_constant_is_spelled_as_deployed(self):
+        self.assertEqual(ROLE_SUPPORT, "support")
+        self.assertEqual(ROLE_CATALOGUE, "catalogue")
+        self.assertEqual(ROLE_ADMIN, "admin")
+        self.assertEqual(ROLE_SUPERADMIN, "superadmin")
 
 
 class CapabilityPermissionMatrixTests(TestCase):

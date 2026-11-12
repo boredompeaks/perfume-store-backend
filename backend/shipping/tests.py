@@ -346,17 +346,29 @@ class ShippingEstimateTests(ApiTestCase):
         # A JSON number is a double in the browser: the price must arrive as a
         # string so no client-side float can round it.
         res = self.estimate()
-        for option in res.data["options"]:
+        # A loop over an empty/missing option list would prove nothing, and
+        # neither would ``str(Decimal(amount)) == amount``: that round-trip
+        # accepts "1E+2", "99" and "99.0000", so it pins "canonicalizes as a
+        # Decimal", not the two-decimal wire spelling this test claims.
+        self.assertEqual(res.status_code, 200, res.data)
+        options = res.data["options"]
+        self.assertEqual(len(options), 3)
+        self.assertEqual(
+            [option["amount"] for option in options],
+            ["0.00", "99.00", "249.00"],
+        )
+        for option in options:
             with self.subTest(method=option["method"]):
                 self.assertIsInstance(option["amount"], str)
-                self.assertEqual(
-                    option["amount"],
-                    str(Decimal(option["amount"])),
-                )
+                self.assertRegex(option["amount"], r"\A\d+\.\d{2}\Z")
 
     def test_the_estimate_never_carries_a_row_id(self):
         res = self.estimate()
-        for option in res.data["options"]:
+        options = res.data["options"]
+        # Without this, a broken estimate that returns no options passes the
+        # loop below vacuously - the test would report green on zero rows.
+        self.assertEqual(len(options), 3)
+        for option in options:
             with self.subTest(method=option["method"]):
                 self.assertEqual(
                     set(option),
