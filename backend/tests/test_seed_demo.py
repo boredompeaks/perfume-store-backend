@@ -173,27 +173,18 @@ class SeedDemoTests(TestCase):
             },
         )
 
+    # The printed credential is now the customer's own generated value.
+    #
+    # The test id is the SPEC-T0 pin, kept so the test set cannot silently
+    # lose it; AUD-20261115-local-001 changed its contract: no shared literal
+    # exists, the value is unique per account, and printing it is opt-in.
     def test_seeded_customer_logs_in_with_the_printed_demo_credential(self):
-        """The printed credential is now the customer's own generated value.
-
-        The test id is the SPEC-T0 pin, kept so the test set cannot silently
-        lose it; AUD-20261115-local-001 changed its contract: no shared literal
-        exists, the value is unique per account, and printing it is opt-in.
-        """
         self.assertIn("--print-credentials", _seed_demo_help())
         out = _run("--print-credentials")
-        credentials = self._printed_credentials(out)
-        self._assert_customer_logs_in(credentials)
-
-    def _printed_credentials(self, out):
-        # task: AUD-20261115-local-001
         self.assertNotIn("demo-account", out)
         credentials = dict(re.findall(r"^\s+(demo-\S+) / (\S+)$", out, re.MULTILINE))
         self.assertEqual(set(credentials), STAFF_USERNAMES | {CUSTOMER_USERNAME})
         self.assertEqual(len(set(credentials.values())), len(credentials))
-        return credentials
-
-    def _assert_customer_logs_in(self, credentials):
         self.assertIsNotNone(
             authenticate(
                 username=CUSTOMER_USERNAME,
