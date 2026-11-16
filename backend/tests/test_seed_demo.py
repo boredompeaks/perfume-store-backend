@@ -56,6 +56,29 @@ def _run(*argv):
     return out.getvalue()
 
 
+def _seed_demo_help():
+    parser = seed_demo.Command().create_parser("manage.py", "seed_demo")
+    return parser.format_help()
+
+
+def _create_paid_order(user, total_amount):
+    """The shared paid-order fixture fields; user and total vary per test."""
+    # task: AUD-20261115-local-001
+    return Order.objects.create(
+        user=user,
+        status="paid",
+        payment_status="paid",
+        fulfilment_status="unfulfilled",
+        total_amount=total_amount,
+        full_name="Real Buyer",
+        phone="1234567890",
+        address="10 Real Street",
+        city="Real City",
+        state="Real State",
+        pincode="111111",
+    )
+
+
 class SeedDemoTests(TestCase):
     """The seeded set: marked rows, exact counts, exact identities."""
 
@@ -157,13 +180,20 @@ class SeedDemoTests(TestCase):
         lose it; AUD-20261115-local-001 changed its contract: no shared literal
         exists, the value is unique per account, and printing it is opt-in.
         """
-        parser = seed_demo.Command().create_parser("manage.py", "seed_demo")
-        self.assertIn("--print-credentials", parser.format_help())
+        self.assertIn("--print-credentials", _seed_demo_help())
         out = _run("--print-credentials")
+        credentials = self._printed_credentials(out)
+        self._assert_customer_logs_in(credentials)
+
+    def _printed_credentials(self, out):
+        # task: AUD-20261115-local-001
         self.assertNotIn("demo-account", out)
         credentials = dict(re.findall(r"^\s+(demo-\S+) / (\S+)$", out, re.MULTILINE))
         self.assertEqual(set(credentials), STAFF_USERNAMES | {CUSTOMER_USERNAME})
         self.assertEqual(len(set(credentials.values())), len(credentials))
+        return credentials
+
+    def _assert_customer_logs_in(self, credentials):
         self.assertIsNotNone(
             authenticate(
                 username=CUSTOMER_USERNAME,
@@ -233,19 +263,7 @@ class SeedDemoCleanupTests(TestCase):
             valid_from=timezone.now() - timedelta(days=1),
             valid_until=timezone.now() + timedelta(days=30),
         )
-        foreign_order = Order.objects.create(
-            user=foreign_user,
-            status="paid",
-            payment_status="paid",
-            fulfilment_status="unfulfilled",
-            total_amount=Decimal("899.00"),
-            full_name="Real Buyer",
-            phone="1234567890",
-            address="10 Real Street",
-            city="Real City",
-            state="Real State",
-            pincode="111111",
-        )
+        foreign_order = _create_paid_order(foreign_user, Decimal("899.00"))
         foreign_movement = StockMovement.objects.create(
             product=foreign_product,
             delta=7,
@@ -397,19 +415,7 @@ class SeedDemoOrderBookBoundaryTests(TestCase):
 
     def test_refused_production_seed_cannot_reach_the_order_book(self):
         buyer = User.objects.create_user("real-buyer", "buyer@example.com", "fixture")
-        Order.objects.create(
-            user=buyer,
-            status="paid",
-            payment_status="paid",
-            fulfilment_status="unfulfilled",
-            total_amount=Decimal("499.00"),
-            full_name="Real Buyer",
-            phone="1234567890",
-            address="10 Real Street",
-            city="Real City",
-            state="Real State",
-            pincode="111111",
-        )
+        _create_paid_order(buyer, Decimal("499.00"))
         with _production_shaped_database():
             with self.assertRaisesMessage(CommandError, "[seed_demo] refused"):
                 _run()

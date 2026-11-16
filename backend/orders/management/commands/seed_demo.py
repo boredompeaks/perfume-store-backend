@@ -116,17 +116,8 @@ def clean():
     _demo_users().delete()
 
 
-def seed():
-    """Recreate the canonical demo set (clean-then-create, idempotent).
-
-    Returns the three products plus ``{username: credential}``; the credential
-    is the account's own generated value and is never shared or stored in the
-    source.
-    """
-    clean()
-    credentials = {}
-
-    # --- staff users, one per role -------------------------------------
+def _seed_staff_users(credentials):
+    """Create one demo staff identity per role, recording each credential."""
     for role in STAFF_ROLES:
         username = f"{DEMO_TAG}{role}"
         credential = _new_credential()
@@ -141,7 +132,9 @@ def seed():
         u.groups.add(group)
         u.save()
 
-    # --- products -------------------------------------------------------
+
+def _seed_products():
+    """Create the three catalog rows the demo programs expect."""
     p_plenty = products.objects.create(
         name=f"{DEMO_TAG}Plenty Perfume",
         slug=f"{DEMO_TAG}plenty-perfume",
@@ -169,8 +162,11 @@ def seed():
         stock=3,
         category="demo",
     )
+    return p_plenty, p_last, p_low
 
-    # --- coupon with usage_limit=1 --------------------------------------
+
+def _seed_coupon():
+    """Create the usage_limit=1 coupon the demo flows exercise."""
     now = timezone.now()
     Coupon.objects.create(
         code=f"{DEMO_TAG.upper()}ONCE",
@@ -184,7 +180,9 @@ def seed():
         used_count=0,
     )
 
-    # --- a few fake paid orders so the dashboard has numbers ------------
+
+def _seed_paid_orders(product, credentials):
+    """Create the demo customer plus paid orders so dashboards have numbers."""
     customer_username = f"{DEMO_TAG}customer"
     customer_credential = _new_credential()
     credentials[customer_username] = customer_credential
@@ -209,11 +207,51 @@ def seed():
         )
         OrderItem.objects.create(
             order=order,
-            product=p_plenty,
+            product=product,
             quantity=1,
             price=Decimal("499.00"),
         )
+
+
+def seed():
+    """Recreate the canonical demo set (clean-then-create, idempotent).
+
+    Returns the three products plus ``{username: credential}``; the credential
+    is the account's own generated value and is never shared or stored in the
+    source.
+    """
+    # task: AUD-20261115-local-001
+    clean()
+    credentials = {}
+    _seed_staff_users(credentials)
+    p_plenty, p_last, p_low = _seed_products()
+    _seed_coupon()
+    _seed_paid_orders(p_plenty, credentials)
     return p_plenty, p_last, p_low, credentials
+
+
+def _add_cleanup_argument(parser):
+    parser.add_argument(
+        "--cleanup",
+        action="store_true",
+        help=(
+            "Delete only the demo-marked rows (demo- usernames/names, "
+            "DEMO- coupon codes, and stock movements on demo products). "
+            "Idempotent; unmarked rows are never touched."
+        ),
+    )
+
+
+def _add_print_credentials_argument(parser):
+    parser.add_argument(
+        "--print-credentials",
+        action="store_true",
+        dest="print_credentials",
+        help=(
+            "Print each seeded account's own generated credential once. "
+            "Off by default: no usable value is printed unless asked for."
+        ),
+    )
 
 
 class Command(BaseCommand):
@@ -223,31 +261,23 @@ class Command(BaseCommand):
     )
 
     def add_arguments(self, parser):
-        parser.add_argument(
-            "--cleanup",
-            action="store_true",
-            help=(
-                "Delete only the demo-marked rows (demo- usernames/names, "
-                "DEMO- coupon codes, and stock movements on demo products). "
-                "Idempotent; unmarked rows are never touched."
-            ),
-        )
-        parser.add_argument(
-            "--print-credentials",
-            action="store_true",
-            dest="print_credentials",
-            help=(
-                "Print each seeded account's own generated credential once. "
-                "Off by default: no usable value is printed unless asked for."
-            ),
-        )
+        # task: AUD-20261115-local-001
+        _add_cleanup_argument(parser)
+        _add_print_credentials_argument(parser)
 
     def handle(self, *args, **options):
+        # task: AUD-20261115-local-001
         _guard_isolated_environment()
         if options["cleanup"]:
-            clean()
-            self.stdout.write("[seed_demo] cleaned all demo-tagged rows")
+            self._handle_cleanup()
             return
+        self._seed_and_report(options["print_credentials"])
+
+    def _handle_cleanup(self):
+        clean()
+        self.stdout.write("[seed_demo] cleaned all demo-tagged rows")
+
+    def _seed_and_report(self, print_credentials):
         p_plenty, p_last, p_low, credentials = seed()
         self.stdout.write("[seed_demo] seeded demo data")
         self.stdout.write(
@@ -256,7 +286,7 @@ class Command(BaseCommand):
         self.stdout.write(f"  products: {p_plenty.name}, {p_last.name}, {p_low.name}")
         self.stdout.write(f"  coupon: {DEMO_TAG.upper()}ONCE (usage_limit=1)")
         self.stdout.write(f"  customer: {DEMO_TAG}customer")
-        if options["print_credentials"]:
+        if print_credentials:
             self.stdout.write("  credentials (generated once; a re-run replaces them):")
             for username, credential in credentials.items():
                 self.stdout.write(f"    {username} / {credential}")
