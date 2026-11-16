@@ -33,6 +33,10 @@ import config.settings as config_settings
 
 BACKEND_DIR = Path(__file__).resolve().parent.parent
 
+# PRISTINE-13d2a: the fixed at-rest Fernet key a non-debug boot must carry
+# (urlsafe base64 of 32 "A" bytes), spread into the boot shapes below.
+_TOTP_ENV = {"TOTP_ENCRYPTION_KEY": "QUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUE="}
+
 # A complete non-debug boot - the production shape. config.settings refuses to
 # import an incomplete one (SPEC-22-03 [R-22.3]): the secret key, a declared
 # DJANGO_ENV, a usable DATABASE_URL and explicit hosts/origins are all
@@ -43,12 +47,10 @@ _NON_DEBUG_ENV = {
     "DJANGO_ENV": "production",
     "DATABASE_URL": "postgres://u:p@db.example.com:5432/perfume_store",
     "DJANGO_ALLOWED_HOSTS": "example.test",
-    "CSRF_TRUSTED_ORIGINS": "https://example.test",
     # PRISTINE-13d2a: a non-debug boot must also carry the Fernet key that
     # encrypts secrets at rest; the settings module refuses to import without
-    # it. A fixed test key (urlsafe base64 of 32 zero-value bytes), never a
-    # deployment's key.
-    "TOTP_ENCRYPTION_KEY": "QUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUE=",
+    # it. A fixed test key, never a deployment's key.
+    "CSRF_TRUSTED_ORIGINS": "https://example.test", **_TOTP_ENV,
 }
 
 # The same environment declared as staging: only the name differs.
@@ -858,9 +860,8 @@ class NonDebugFailClosedTests(SimpleTestCase):
         "DJANGO_ENV": "production",
         "DATABASE_URL": "postgres://u:p@h:5432/db",
         "DJANGO_ALLOWED_HOSTS": "example.test",
-        "CSRF_TRUSTED_ORIGINS": "https://example.test",
         # PRISTINE-13d2a: the at-rest key is part of a complete non-debug boot.
-        "TOTP_ENCRYPTION_KEY": "QUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUE=",
+        "CSRF_TRUSTED_ORIGINS": "https://example.test", **_TOTP_ENV,
     }
 
     def test_missing_database_url_refuses_to_boot(self):

@@ -97,6 +97,11 @@ NON_DEBUG_REQUIRED_KEYS = (
     "TOTP_ENCRYPTION_KEY",
 )
 
+# PRISTINE-13d2a: the fixed at-rest Fernet key every non-debug boot must carry
+# (urlsafe base64 of 32 "A" bytes), never a deployment's key. Spread into the
+# env dicts below so each boot shape keeps the key without growing a helper.
+TOTP_ENV = {"TOTP_ENCRYPTION_KEY": "QUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUE="}
+
 # Run inside the container's own interpreter and settings, so this is the
 # gunicorn load path (the image CMD hands it exactly this module) followed by
 # the probe the compose healthcheck performs against /health/.
@@ -797,8 +802,7 @@ class TlsHardeningDeployContractTests(SimpleTestCase):
                 "DATABASE_URL": "postgres://u:p@db.example.com:5432/perfume_store",
                 "DJANGO_ALLOWED_HOSTS": "shop.example.test",
                 "CSRF_TRUSTED_ORIGINS": "https://shop.example.test",
-                "TOTP_ENCRYPTION_KEY": "QUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUE=",
-                **defaults,
+                **defaults, **TOTP_ENV,
             },
             snippet=snippet,
         )
@@ -879,11 +883,10 @@ class TlsHardeningDeployContractTests(SimpleTestCase):
                 "DJANGO_ENV": "production",
                 "DJANGO_ALLOWED_HOSTS": "shop.example.test",
                 "CSRF_TRUSTED_ORIGINS": "https://shop.example.test",
-                "TOTP_ENCRYPTION_KEY": ("QUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUE="),
                 "DATABASE_URL": "sqlite:///"
                 + (Path(workdir) / "hardened.sqlite3").as_posix(),
                 "DJANGO_MEDIA_ROOT": workdir,
-                "DJANGO_STATIC_ROOT": workdir,
+                "DJANGO_STATIC_ROOT": workdir, **TOTP_ENV,
             }
             for key in self.HARDENING_KEYS:
                 env[key] = self.compose_default(key)
@@ -923,15 +926,8 @@ class ComposeRuntimeEnvContractTests(SimpleTestCase):
         self.environment = compose_backend_environment()
 
     def test_backend_service_declares_the_non_debug_guard_keys(self):
-        # DJANGO_SECRET_KEY is deliberately absent (it flows in through
-        # env_file, and an earlier test pins that it is never set here): these
-        # are the keys whose absence made the container refuse to start.
-        for key in (
-            "DJANGO_ENV",
-            "CSRF_TRUSTED_ORIGINS",
-            "DATABASE_URL",
-            "TOTP_ENCRYPTION_KEY",
-        ):
+        # DJANGO_SECRET_KEY flows in via env_file; these keys made the boot refuse.
+        for key in ("DJANGO_ENV", "CSRF_TRUSTED_ORIGINS", "DATABASE_URL", "TOTP_ENCRYPTION_KEY"):
             with self.subTest(key=key):
                 self.assertIn(key, self.environment)
 
@@ -972,11 +968,10 @@ class ComposeRuntimeEnvContractTests(SimpleTestCase):
                 "DJANGO_ENV": "production",
                 "DJANGO_ALLOWED_HOSTS": "shop.example.test",
                 "CSRF_TRUSTED_ORIGINS": "https://shop.example.test",
-                "TOTP_ENCRYPTION_KEY": ("QUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUE="),
                 "DATABASE_URL": "sqlite:///"
                 + (Path(workdir) / "runtime.sqlite3").as_posix(),
                 "DJANGO_MEDIA_ROOT": workdir,
-                "DJANGO_STATIC_ROOT": workdir,
+                "DJANGO_STATIC_ROOT": workdir, **TOTP_ENV,
             }
             migrated = manage("migrate", "--noinput", env=env)
             self.assertEqual(migrated.returncode, 0, migrated.stdout + migrated.stderr)

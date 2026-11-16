@@ -12,6 +12,8 @@ with a scrubbed environment, the same pattern ``tests.test_settings_security``
 uses for the DEBUG and DATABASE_URL guards.
 """
 
+import base64
+import hashlib
 import os
 import subprocess
 import sys
@@ -98,8 +100,17 @@ class KeyResolutionTests(SimpleTestCase):
 
     def test_development_key_is_deterministic_and_secret_specific(self):
         first = config_settings._derive_development_totp_key("secret-a")
+        # Independent oracle: the documented derivation (SHA-256 over the
+        # label and the secret, urlsafe base64) computed here from the secret
+        # with stdlib primitives, never by calling the function under test.
+        oracle = base64.urlsafe_b64encode(
+            hashlib.sha256(
+                b"perfume-store/totp-encryption-key/v1:" + b"secret-a"
+            ).digest()
+        ).decode("ascii")
+        self.assertEqual(first, oracle)
         self.assertEqual(
-            first, config_settings._derive_development_totp_key("secret-a")
+            config_settings._derive_development_totp_key("secret-a"), oracle
         )
         self.assertNotEqual(
             first, config_settings._derive_development_totp_key("secret-b")
@@ -162,7 +173,9 @@ class KeyResolutionTests(SimpleTestCase):
                 config_settings._totp_encryption_key("", "", debug=True, test_run=True)
 
     def test_the_booted_setting_is_a_valid_fernet_key(self):
-        Fernet(settings.TOTP_ENCRYPTION_KEY)
+        fernet = Fernet(settings.TOTP_ENCRYPTION_KEY)
+        token = fernet.encrypt(b"booted-key-round-trip")
+        self.assertEqual(fernet.decrypt(token), b"booted-key-round-trip")
 
 
 class SettingsBootTests(SimpleTestCase):
