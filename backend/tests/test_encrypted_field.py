@@ -40,6 +40,21 @@ OTHER_KEY = "QkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkI="
 
 PLAINTEXT = "JBSWY3DPEHPK3PXP"
 
+# PRISTINE-13d2a: the derivation the development key uses, restated from its
+# documented definition so a test oracle never calls the function under test.
+_TOTP_DERIVATION_LABEL = b"perfume-store/totp-encryption-key/v1:"
+
+
+def _independent_development_key(secret: bytes) -> str:
+    digest = hashlib.sha256(_TOTP_DERIVATION_LABEL + secret).digest()
+    return base64.urlsafe_b64encode(digest).decode("ascii")
+
+
+def _fernet_round_trip(key: str, payload: bytes) -> bytes:
+    fernet = Fernet(key)
+    return fernet.decrypt(fernet.encrypt(payload))
+
+
 # A complete non-debug boot: the shape config.settings refuses to import when
 # any part is missing (SPEC-22-03). TOTP_ENCRYPTION_KEY is deliberately absent
 # from the base so each test adds it explicitly.
@@ -99,24 +114,13 @@ class KeyResolutionTests(SimpleTestCase):
     """The boot-time resolver, measured in-process (every branch is a value)."""
 
     def test_development_key_is_deterministic_and_secret_specific(self):
-        first = config_settings._derive_development_totp_key("secret-a")
-        # Independent oracle: the documented derivation (SHA-256 over the
-        # label and the secret, urlsafe base64) computed here from the secret
-        # with stdlib primitives, never by calling the function under test.
-        oracle = base64.urlsafe_b64encode(
-            hashlib.sha256(
-                b"perfume-store/totp-encryption-key/v1:" + b"secret-a"
-            ).digest()
-        ).decode("ascii")
+        derive = config_settings._derive_development_totp_key
+        first = derive("secret-a")
+        oracle = _independent_development_key(b"secret-a")
         self.assertEqual(first, oracle)
-        self.assertEqual(
-            config_settings._derive_development_totp_key("secret-a"), oracle
-        )
-        self.assertNotEqual(
-            first, config_settings._derive_development_totp_key("secret-b")
-        )
-        # It is a REAL Fernet key (32 bytes behind the base64), not merely a
-        # deterministic string that happens to compare equal.
+        self.assertEqual(derive("secret-a"), oracle)
+        self.assertNotEqual(first, derive("secret-b"))
+        # Fernet() would raise unless this is a real 32-byte key.
         Fernet(first)
 
     def test_an_explicit_key_is_returned_unchanged(self):
@@ -173,9 +177,7 @@ class KeyResolutionTests(SimpleTestCase):
                 config_settings._totp_encryption_key("", "", debug=True, test_run=True)
 
     def test_the_booted_setting_is_a_valid_fernet_key(self):
-        fernet = Fernet(settings.TOTP_ENCRYPTION_KEY)
-        token = fernet.encrypt(b"booted-key-round-trip")
-        self.assertEqual(fernet.decrypt(token), b"booted-key-round-trip")
+        self.assertEqual(_fernet_round_trip(settings.TOTP_ENCRYPTION_KEY, b"x"), b"x")
 
 
 class SettingsBootTests(SimpleTestCase):
