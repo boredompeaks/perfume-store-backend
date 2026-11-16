@@ -25,26 +25,70 @@ marked set, then creates a fresh one — a second run converges on the same
 rows rather than refusing or deduping in place). ``--cleanup`` deletes
 ONLY through the marker querysets below — there is no blanket-delete
 mode — and is idempotent: re-running it finds nothing marked and exits 0.
+
+Environment guard: the set includes staff accounts that hold real
+capabilities, so the command refuses to write anything unless the declared
+deployment environment is local/ci AND the resolved database is recognisably
+isolated (DEBUG, sqlite, or a localhost host — the same predicate ``seed_e2e``
+enforces). ``--cleanup`` obeys the same guard.
+
+Credentials: every account gets its own generated high-entropy password,
+never a value shared across accounts. Nothing usable is printed by default;
+``--print-credentials`` prints each account's individual value once (a seed
+re-run recreates the users, so it replaces them).
 """
 
+import secrets
 from datetime import timedelta
 from decimal import Decimal
 
+from django.conf import settings
 from django.contrib.auth.models import Group, User
-from django.core.management.base import BaseCommand
+from django.core.management.base import BaseCommand, CommandError
 from django.utils import timezone
 
 from common.roles import STAFF_ROLES
+from orders.management.commands.seed_e2e import _database_is_a_test_db
 from orders.models import Coupon, Order, OrderItem
 from products.models import StockMovement, products
 
 DEMO_TAG = "demo-"
-# Deliberately fake AND deliberately low-entropy: a password-shaped literal
-# (mixed case + digits + symbol) here trips GitGuardian's Generic Password
-# detector even in a seed fixture (incident 38269594), while the seeded
-# demo accounts only need a stable, plainly-fake credential the command
-# prints for humans to sign in with.
-DEMO_PASSWORD = "demo-account"
+# The only declared deployment environments that are demo-safe. local covers a
+# developer/demo boot; ci is the ephemeral test deployment. Anything else is
+# refused before the database check, so a production/staging boot cannot seed
+# even if its DATABASE_URL happens to look local.
+_DEMO_SAFE_ENVIRONMENTS = frozenset({"local", "ci"})
+
+
+def _guard_isolated_environment():
+    """Refuse demo seeding outside a test/demo-shaped environment.
+
+    The seeded staff accounts carry live capabilities, so the environment is
+    the primary control: a production-shaped boot/database never gets the rows
+    at all. Two independent readings are required: the declared deployment
+    environment must be demo-safe, and the resolved database must pass
+    seed_e2e's own test-DB predicate (one definition of "isolated" in this
+    app, not a second one that can drift).
+    """
+    # task: AUD-20261115-local-001
+    if settings.DJANGO_ENV not in _DEMO_SAFE_ENVIRONMENTS:
+        raise CommandError(
+            "[seed_demo] refused: this command writes demo staff and customer "
+            f"accounts and DJANGO_ENV={settings.DJANGO_ENV!r} is not a "
+            "test/demo environment (allowed: local, ci)."
+        )
+    if not _database_is_a_test_db():
+        raise CommandError(
+            "[seed_demo] refused: this command writes demo staff and customer "
+            "accounts and will not run against a production-shaped database. "
+            "Point DATABASE_URL at a local test database (DEBUG=true, the "
+            "sqlite engine, or a host of localhost/127.0.0.1)."
+        )
+
+
+def _new_credential():
+    """One unique password for one seeded account, never a shared literal."""
+    return secrets.token_urlsafe(18)
 
 
 def _demo_users():
@@ -73,14 +117,23 @@ def clean():
 
 
 def seed():
-    """Recreate the canonical demo set (clean-then-create, idempotent)."""
+    """Recreate the canonical demo set (clean-then-create, idempotent).
+
+    Returns the three products plus ``{username: credential}``; the credential
+    is the account's own generated value and is never shared or stored in the
+    source.
+    """
     clean()
+    credentials = {}
 
     # --- staff users, one per role -------------------------------------
     for role in STAFF_ROLES:
+        username = f"{DEMO_TAG}{role}"
+        credential = _new_credential()
+        credentials[username] = credential
         u = User.objects.create_user(
-            username=f"{DEMO_TAG}{role}",
-            password=DEMO_PASSWORD,
+            username=username,
+            password=credential,
             email=f"{DEMO_TAG}{role}@example.com",
             is_staff=True,
         )
@@ -132,9 +185,12 @@ def seed():
     )
 
     # --- a few fake paid orders so the dashboard has numbers ------------
+    customer_username = f"{DEMO_TAG}customer"
+    customer_credential = _new_credential()
+    credentials[customer_username] = customer_credential
     customer = User.objects.create_user(
-        username=f"{DEMO_TAG}customer",
-        password=DEMO_PASSWORD,
+        username=customer_username,
+        password=customer_credential,
         email=f"{DEMO_TAG}customer@example.com",
     )
     for _ in range(3):
@@ -157,7 +213,7 @@ def seed():
             quantity=1,
             price=Decimal("499.00"),
         )
-    return p_plenty, p_last, p_low
+    return p_plenty, p_last, p_low, credentials
 
 
 class Command(BaseCommand):
@@ -176,17 +232,36 @@ class Command(BaseCommand):
                 "Idempotent; unmarked rows are never touched."
             ),
         )
+        parser.add_argument(
+            "--print-credentials",
+            action="store_true",
+            dest="print_credentials",
+            help=(
+                "Print each seeded account's own generated credential once. "
+                "Off by default: no usable value is printed unless asked for."
+            ),
+        )
 
     def handle(self, *args, **options):
+        _guard_isolated_environment()
         if options["cleanup"]:
             clean()
             self.stdout.write("[seed_demo] cleaned all demo-tagged rows")
             return
-        p_plenty, p_last, p_low = seed()
+        p_plenty, p_last, p_low, credentials = seed()
         self.stdout.write("[seed_demo] seeded demo data")
         self.stdout.write(
             f"  staff users: {', '.join(DEMO_TAG + r for r in STAFF_ROLES)}"
         )
         self.stdout.write(f"  products: {p_plenty.name}, {p_last.name}, {p_low.name}")
         self.stdout.write(f"  coupon: {DEMO_TAG.upper()}ONCE (usage_limit=1)")
-        self.stdout.write(f"  customer: {DEMO_TAG}customer / {DEMO_PASSWORD}")
+        self.stdout.write(f"  customer: {DEMO_TAG}customer")
+        if options["print_credentials"]:
+            self.stdout.write("  credentials (generated once; a re-run replaces them):")
+            for username, credential in credentials.items():
+                self.stdout.write(f"    {username} / {credential}")
+        else:
+            self.stdout.write(
+                "  credentials: generated per account, not printed "
+                "(use --print-credentials to show them once)"
+            )
