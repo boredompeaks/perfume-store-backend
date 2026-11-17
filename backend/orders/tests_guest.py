@@ -1013,6 +1013,7 @@ class GuestOrderNullUserPathTests(GuestOrderRowTestBase):
             f"/api/admin/orders/{order.id}/refund/",
             {"reason": "guest changed their mind"},
             format="json",
+            HTTP_IDEMPOTENCY_KEY="guest-refund-seam",
         )
 
         self.assertEqual(res.status_code, 201, res.data)

@@ -227,6 +227,80 @@ class IdempotencyReplayTests(IdempotencyTestBase):
 
 
 @tag("orders")
+class IdempotencyDedupCollapseTests(IdempotencyTestBase):
+    """A keyed submit that collapses through the SPEC-21-1 keyless guard must
+    carry the key onto the collapsed order: the first 2xx for a key owns its
+    order across payload drift, so that key can never mint a second one."""
+
+    def test_keyed_collapse_through_keyless_dedup_adopts_the_key(self):
+        keyless = self.checkout()
+        self.assertEqual(keyless.status_code, 201, keyless.data)
+
+        # the same purchase retried with a key is still the keyless order
+        keyed = self.keyed_checkout(key="checkout-retry-001")
+        self.assertEqual(keyed.status_code, 200, keyed.data)
+        self.assertEqual(keyed.data["id"], keyless.data["id"])
+
+        # the drift defeats the SPEC-21-1 fingerprint; only the key binding
+        # can keep the retry on the original order instead of minting another
+        drifted = self.keyed_checkout(key="checkout-retry-001", city="Pune")
+        self.assertEqual(drifted.status_code, 200, drifted.data)
+        self.assertEqual(drifted.data["id"], keyless.data["id"])
+        self.assertEqual(drifted.data["order_number"], keyless.data["order_number"])
+        self.assertEqual(Order.objects.count(), 1)
+        self.assertEqual(
+            Order.objects.get(id=keyless.data["id"]).idempotency_key,
+            "checkout-retry-001",
+        )
+
+    def test_a_second_key_never_takes_over_the_first_keys_order(self):
+        first = self.keyed_checkout(key="checkout-retry-001")
+        self.assertEqual(first.status_code, 201, first.data)
+
+        # same payload, different key: a different submission, so it must
+        # neither resolve to K1's order nor overwrite K1's binding
+        second = self.keyed_checkout(key="checkout-retry-002")
+        self.assertEqual(second.status_code, 201, second.data)
+        self.assertNotEqual(second.data["id"], first.data["id"])
+        self.assertEqual(Order.objects.count(), 2)
+        self.assertEqual(
+            Order.objects.get(id=first.data["id"]).idempotency_key,
+            "checkout-retry-001",
+        )
+        self.assertEqual(
+            Order.objects.get(id=second.data["id"]).idempotency_key,
+            "checkout-retry-002",
+        )
+
+        # each key keeps resolving to its own order
+        replay_first = self.keyed_checkout(key="checkout-retry-001", city="Pune")
+        replay_second = self.keyed_checkout(key="checkout-retry-002", city="Pune")
+        self.assertEqual(replay_first.status_code, 200, replay_first.data)
+        self.assertEqual(replay_first.data["id"], first.data["id"])
+        self.assertEqual(replay_second.status_code, 200, replay_second.data)
+        self.assertEqual(replay_second.data["id"], second.data["id"])
+        self.assertEqual(Order.objects.count(), 2)
+
+    def test_an_existing_key_wins_over_a_matching_keyless_candidate(self):
+        """K1 already owns an order. A later K1 submission whose payload
+        matches a keyless pending order is still K1's order, not that one:
+        the candidate must be left unkeyed for its own caller."""
+        first = self.keyed_checkout(key="checkout-retry-001")
+        self.assertEqual(first.status_code, 201, first.data)
+
+        keyless = self.checkout(city="Pune")
+        self.assertEqual(keyless.status_code, 201, keyless.data)
+
+        replay = self.keyed_checkout(key="checkout-retry-001", city="Pune")
+
+        self.assertEqual(replay.status_code, 200, replay.data)
+        self.assertEqual(replay.data["id"], first.data["id"])
+        self.assertNotEqual(replay.data["id"], keyless.data["id"])
+        self.assertIsNone(Order.objects.get(id=keyless.data["id"]).idempotency_key)
+        self.assertEqual(Order.objects.count(), 2)
+
+
+@tag("orders")
 class IdempotencyRaceAuthorityTests(IdempotencyTestBase):
     """Deterministic race pins: the (user, idempotency_key) unique
     constraint is the concurrency authority (conventions.md:17), and

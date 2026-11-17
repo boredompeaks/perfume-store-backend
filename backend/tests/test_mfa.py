@@ -5,15 +5,17 @@ Pins the whole feature end to end:
 - common/totp.py against the public RFC 6238 SHA-1 test vectors and every
   branch of the verification/replay logic (stdlib-only helper — R-17.9
   names no mechanism, so no package was added);
-- the enrollment API (setup/confirm/status/disable) for privileged roles,
-  both trust paths (JWT steady-state and the credential bootstrap that
-  keeps blocked-at-login enforcement reachable);
+- the enrollment API (setup/confirm/status/disable) for the MFA-required
+  population PRISTINE-13b enforces at every door, both trust paths (JWT
+  steady-state and the credential bootstrap that keeps blocked-at-login
+  enforcement reachable);
 - SPEC-20-13 enrollment REACH: the admin login page offers the enrollment
   surface (and says so loudly when MFA is what blocked the attempt), and the
   bootstrap flow the enrollment page drives mints a usable device without a
   JWT;
-- enforcement at BOTH surfaces: the staff API login (totp required for
-  privileged users, replay-guarded) and the Django admin login form;
+- enforcement at BOTH surfaces: the staff API login (totp required for the
+  ``requires_mfa`` population -- PRISTINE-13b -- replay-guarded) and the
+  Django admin login form;
 - SPEC-20-10 door split: the storefront login declares no totp field at all
   and refuses privileged accounts, while the staff door keeps demanding and
   spending the factor;
@@ -40,11 +42,12 @@ from xml.etree import ElementTree
 
 import segno
 from django.conf import settings
-from django.contrib.auth.models import Group, User
+from django.contrib.auth.models import AnonymousUser, Group, User
 from django.core import signing
 from django.core.cache import cache
 from django.test import RequestFactory, SimpleTestCase, override_settings
 from django.utils import timezone
+from rest_framework.exceptions import PermissionDenied
 from rest_framework.settings import api_settings
 from rest_framework.throttling import ScopedRateThrottle
 
@@ -54,8 +57,19 @@ from accounts.models import TOTPDevice
 from accounts.serializers import StorefrontTokenObtainPairSerializer
 from common import qr, totp
 from common.models import AuditEvent
-from common.permissions import is_privileged
-from common.roles import ROLE_ADMIN, ROLE_SUPPORT
+from common.permissions import IsPrivilegedRole, is_privileged, requires_mfa
+from common.roles import (
+    CAPABILITY_ROLES,
+    MFA_REQUIRED_CAPABILITIES,
+    ROLE_ADMIN,
+    ROLE_CATALOGUE,
+    ROLE_FINANCE,
+    ROLE_INVENTORY,
+    ROLE_MARKETING,
+    ROLE_SUPERADMIN,
+    ROLE_SUPPORT,
+    STAFF_ROLES,
+)
 from common.testing import TEST_TOTP_SECRET, ApiTestCase
 
 PASSWORD = "S3cure-Passphrase!"
@@ -91,6 +105,25 @@ def enroll_via_model(user, secret=TEST_TOTP_SECRET):
     """Fixture shortcut: a confirmed, enabled device."""
     return TOTPDevice.objects.create(
         user=user, secret=secret, enabled=True, confirmed_at=timezone.now()
+    )
+
+
+def make_role_staff(username, role):
+    """A staff account holding exactly ``role`` -- and no MFA device."""
+    user = User.objects.create_user(
+        username=username,
+        email=f"{username}@example.com",
+        password=PASSWORD,
+        is_staff=True,
+    )
+    user.groups.add(Group.objects.get_or_create(name=role)[0])
+    return user
+
+
+def trust_marker(user, device):
+    """The signed (user, device) cookie ``mfa_trust.bind_trust_cookie`` sends."""
+    return signing.dumps(
+        {"user": user.pk, "device": device.pk}, salt=mfa_trust.TRUST_SALT
     )
 
 
@@ -215,6 +248,292 @@ class PrivilegedPredicateTests(ApiTestCase):
 
     def test_anonymous_not_privileged(self):
         self.assertFalse(is_privileged(None))
+
+    def test_the_legacy_permission_class_answers_the_same_predicate(self):
+        # PRISTINE-13c rewired the MFA endpoints to ``requires_mfa``, so no
+        # view consumes ``IsPrivilegedRole`` today -- but the class stays
+        # exported (common/permissions.py is outside this task's scope).
+        # Pin its answer so the retained surface cannot drift silently from
+        # the predicate it is named for.
+        request = RequestFactory().get("/")
+        request.user = make_privileged("legacy-boss")
+        self.assertTrue(IsPrivilegedRole().has_permission(request, None))
+        request.user = make_role_staff("legacy-finance", ROLE_FINANCE)
+        with self.assertRaises(PermissionDenied):
+            IsPrivilegedRole().has_permission(request, None)
+
+
+class MfaRequiredPopulationTests(ApiTestCase):
+    """PRISTINE-13a (#52): the MFA population, read from the catalogue.
+
+    ``is_privileged`` asked whether a user manages staff access, so the roles
+    that move money, read customer data and change stock kept a
+    password-only door. ``requires_mfa`` answers from the capability map
+    instead. These pins fix the per-role answer, then move a capability in
+    and out of the live set to prove the answer is membership-driven rather
+    than a second hardcoded role list.
+    """
+
+    def role_user(self, role, username):
+        user = User.objects.create_user(
+            username=username,
+            email=f"{username}@example.com",
+            password=PASSWORD,
+            is_staff=True,
+        )
+        user.groups.add(Group.objects.get_or_create(name=role)[0])
+        return user
+
+    def role_users(self):
+        return {role: self.role_user(role, f"mfa-{role}") for role in STAFF_ROLES}
+
+    def classification(self, users):
+        return {role: requires_mfa(users[role]) for role in STAFF_ROLES}
+
+    def test_the_declared_set_is_the_money_pii_and_stock_capabilities(self):
+        self.assertEqual(
+            MFA_REQUIRED_CAPABILITIES,
+            frozenset(
+                {
+                    "refunds.create",
+                    "shipping.manage",
+                    "reports.read",
+                    "customers.read",
+                    "orders.read",
+                    "inventory.adjust",
+                }
+            ),
+        )
+
+    def test_every_declared_capability_is_a_catalogue_identifier(self):
+        # A typo here would silently exempt a role instead of failing loudly.
+        self.assertEqual(MFA_REQUIRED_CAPABILITIES - set(CAPABILITY_ROLES), set())
+
+    def test_each_role_classifies_from_the_capabilities_it_holds(self):
+        users = self.role_users()
+        # The expected column is derived capability-by-capability:
+        #   support    orders.read + customers.read
+        #   catalogue  products.* and inventory.read only
+        #   inventory  inventory.adjust
+        #   marketing  reports.read (the role reads the money reports)
+        #   finance    refunds.create + shipping.manage + reports/customers
+        #   admin      every capability in the set
+        #   superadmin staff.manage -- the pre-existing privileged rule
+        expected = {
+            ROLE_SUPPORT: True,
+            ROLE_CATALOGUE: False,
+            ROLE_INVENTORY: True,
+            ROLE_MARKETING: True,
+            ROLE_FINANCE: True,
+            ROLE_ADMIN: True,
+            ROLE_SUPERADMIN: True,
+        }
+        self.assertEqual(set(expected), set(STAFF_ROLES))
+        self.assertEqual(self.classification(users), expected)
+
+    def test_a_superuser_with_no_role_group_still_requires_mfa(self):
+        root = make_privileged("root", is_superuser=True)
+        self.assertEqual(root.groups.count(), 0)
+        self.assertTrue(requires_mfa(root))
+
+    def test_an_unauthenticated_caller_does_not_require_mfa(self):
+        self.assertFalse(requires_mfa(None))
+        self.assertFalse(requires_mfa(AnonymousUser()))
+
+    def test_a_customer_does_not_require_mfa(self):
+        self.assertFalse(requires_mfa(self.make_user("buyer")))
+
+    def test_the_widening_never_narrows_the_existing_privileged_rule(self):
+        # The population must be a superset of is_privileged's, or replacing
+        # that check at the doors would exempt accounts it used to challenge.
+        users = self.role_users()
+        for role in STAFF_ROLES:
+            with self.subTest(role=role):
+                if is_privileged(users[role]):
+                    self.assertTrue(requires_mfa(users[role]))
+        # ...and it reaches the three operational roles the old rule missed.
+        for role in (ROLE_SUPPORT, ROLE_FINANCE, ROLE_INVENTORY):
+            with self.subTest(role=role):
+                self.assertFalse(is_privileged(users[role]))
+                self.assertTrue(requires_mfa(users[role]))
+
+    def test_removing_a_capability_flips_only_the_role_that_holds_it(self):
+        users = self.role_users()
+        before = self.classification(users)
+        narrowed = frozenset(MFA_REQUIRED_CAPABILITIES - {"inventory.adjust"})
+        with mock.patch("common.permissions.MFA_REQUIRED_CAPABILITIES", narrowed):
+            after = self.classification(users)
+        flipped = {role for role in STAFF_ROLES if before[role] != after[role]}
+        self.assertEqual(flipped, {ROLE_INVENTORY})
+        self.assertFalse(after[ROLE_INVENTORY])
+
+    def test_adding_a_capability_flips_the_role_that_holds_it(self):
+        # Promotion into the set is the mechanism a later step-up task uses:
+        # a capability no tested role otherwise needs is added, and only its
+        # holder changes class.
+        users = self.role_users()
+        before = self.classification(users)
+        widened = frozenset(MFA_REQUIRED_CAPABILITIES | {"products.publish"})
+        with mock.patch("common.permissions.MFA_REQUIRED_CAPABILITIES", widened):
+            after = self.classification(users)
+        flipped = {role for role in STAFF_ROLES if before[role] != after[role]}
+        self.assertEqual(flipped, {ROLE_CATALOGUE})
+        self.assertTrue(after[ROLE_CATALOGUE])
+
+    def test_granting_a_money_capability_flips_the_role_that_holds_it(self):
+        # The other direction of the same rule: membership follows the
+        # catalogue, so a map change that gives the single-factor catalogue
+        # role a money capability puts it in the population with no edit here.
+        users = self.role_users()
+        self.assertFalse(requires_mfa(users[ROLE_CATALOGUE]))
+        widened = dict(CAPABILITY_ROLES)
+        widened["refunds.create"] = CAPABILITY_ROLES["refunds.create"] | {
+            ROLE_CATALOGUE
+        }
+        with mock.patch("common.permissions.CAPABILITY_ROLES", widened):
+            self.assertTrue(requires_mfa(users[ROLE_CATALOGUE]))
+        self.assertFalse(requires_mfa(users[ROLE_CATALOGUE]))
+
+
+@override_settings(ADMIN_LOGIN_THROTTLE_RATE="1000/min")
+class MfaEnforcementPopulationTests(ApiTestCase):
+    """PRISTINE-13b (#52): the doors enforce the population 13a defined.
+
+    ``requires_mfa`` answers which accounts face the second factor; all three
+    doors must ask THAT question. They asked ``is_privileged`` (superuser /
+    ``staff.manage``) until now, so the finance, support, inventory and
+    marketing roles 13a classified kept a password-only route: the population
+    was widened in the catalogue and nothing at the doors read it.
+
+    The matrix below is the population, not a second role list -- catalogue
+    holds none of the money/PII/stock capabilities and is the single-factor
+    control. The admin/superadmin arm is pinned unchanged because a widening
+    must never narrow, and the storefront door is pinned with the staff door
+    because a customer door that asked a narrower question would be a
+    password-only route around the factor.
+
+    The class-level throttle override keeps every refusal the EXACT MFA
+    refusal these assertions name, never the admin form's generic budget
+    message (AdminLoginThrottleTests owns that proof).
+    """
+
+    STAFF_DOOR = "/api/accounts/login/"
+    CUSTOMER_DOOR = "/api/accounts/storefront/login/"
+    # The roles the 13a widening added, one per capability family: support
+    # (customer PII + orders), inventory (stock), marketing (money reports),
+    # finance (refunds + shipping rates). In STAFF_ROLES order.
+    REQUIRED_ROLES = (ROLE_SUPPORT, ROLE_INVENTORY, ROLE_MARKETING, ROLE_FINANCE)
+
+    def code(self, device=None):
+        secret = device.secret if device is not None else TEST_TOTP_SECRET
+        return totp.hotp(secret, totp.now() // totp.STEP)
+
+    def staff_login(self, username, client=None, **extra):
+        return (client or self.client).post(
+            self.STAFF_DOOR, login_payload(username, **extra), format="json"
+        )
+
+    def admin_login(self, username, client=None, **extra):
+        payload = {"username": username, "password": PASSWORD}
+        payload.update(extra)
+        return (client or self.client).post("/admin/login/", payload, follow=True)
+
+    def is_logged_in(self, client=None):
+        return "_auth_user_id" in (client or self.client).session
+
+    def assert_mfa_refused_by_both_doors(self, username):
+        res = self.staff_login(username)
+        self.assertEqual(res.status_code, 400, res.data)
+        self.assertIn("Multi-factor", res.data["details"]["totp"][0])
+        self.assertNotIn("access", res.data)
+        res = self.admin_login(username)
+        self.assertFalse(self.is_logged_in())
+        self.assertContains(res, "Multi-factor authentication is mandatory")
+
+    def test_unenrolled_roles_from_the_widening_are_blocked_at_both_doors(self):
+        for role in self.REQUIRED_ROLES:
+            with self.subTest(role=role):
+                username = f"unenrolled-{role}"
+                make_role_staff(username, role)
+                self.assert_mfa_refused_by_both_doors(username)
+
+    def test_unenrolled_catalogue_is_not_blocked_at_any_door(self):
+        # The control: no money/PII/stock capability, so no second factor.
+        # The widening must not have become a blanket staff gate.
+        make_role_staff("catalogue-editor", ROLE_CATALOGUE)
+        res = self.staff_login("catalogue-editor")
+        self.assertEqual(res.status_code, 200, res.data)
+        self.assertIn("access", res.data)
+        res = self.client.post(
+            self.CUSTOMER_DOOR, login_payload("catalogue-editor"), format="json"
+        )
+        self.assertEqual(res.status_code, 200, res.data)
+        self.admin_login("catalogue-editor")
+        self.assertTrue(self.is_logged_in())
+
+    def test_the_storefront_door_refuses_the_widened_population_too(self):
+        # The customer door has no factor to demand, so it must refuse
+        # exactly the accounts the staff door would challenge; a narrower
+        # predicate here would leave finance/support/inventory a
+        # password-only route through the shop door.
+        for role in self.REQUIRED_ROLES:
+            with self.subTest(role=role):
+                username = f"storefront-{role}"
+                make_role_staff(username, role)
+                res = self.client.post(
+                    self.CUSTOMER_DOOR, login_payload(username), format="json"
+                )
+                self.assertEqual(res.status_code, 403, res.data)
+                self.assertNotIn("access", res.data)
+
+    def test_enrolled_roles_from_the_widening_complete_login_with_a_code(self):
+        for role in self.REQUIRED_ROLES:
+            with self.subTest(role=role):
+                username = f"enrolled-{role}"
+                device = enroll_via_model(make_role_staff(username, role))
+                res = self.staff_login(username, totp=self.code(device))
+                self.assertEqual(res.status_code, 200, res.data)
+                self.assertIn("access", res.data)
+
+    def test_enrolled_roles_from_the_widening_complete_the_admin_login(self):
+        for role in self.REQUIRED_ROLES:
+            with self.subTest(role=role):
+                username = f"admin-enrolled-{role}"
+                device = enroll_via_model(make_role_staff(username, role))
+                client = self.fresh_client()
+                self.admin_login(username, client=client, totp=self.code(device))
+                self.assertTrue(self.is_logged_in(client))
+
+    def test_a_trusted_device_skips_the_code_for_a_newly_required_role(self):
+        # The skip decision is population-agnostic: once a device is trusted
+        # (13c makes the opt-in reachable for these roles), the marker that
+        # spares an admin a fresh code spares a finance login too. No code is
+        # posted at either door, so the skip is the only thing admitting it.
+        user = make_role_staff("trusted-finance", ROLE_FINANCE)
+        device = enroll_via_model(user)
+        device.trusted_until = mfa_trust.trust_deadline()
+        device.save(update_fields=["trusted_until"])
+        marker = trust_marker(user, device)
+        self.client.cookies[settings.MFA_TRUST_COOKIE_NAME] = marker
+        res = self.staff_login("trusted-finance")
+        self.assertEqual(res.status_code, 200, res.data)
+        self.assertIn("access", res.data)
+        self.admin_login("trusted-finance")
+        self.assertTrue(self.is_logged_in())
+
+    def test_admin_and_superadmin_are_still_challenged(self):
+        # Regression pin on the population that was already covered: the
+        # union in requires_mfa may only have widened them, never exempted.
+        for username, superuser in (("regress-admin", False), ("regress-root", True)):
+            with self.subTest(username=username):
+                user = make_privileged(username, is_superuser=superuser)
+                self.assert_mfa_refused_by_both_doors(username)
+                device = enroll_via_model(user)
+                res = self.staff_login(username, totp=self.code(device))
+                self.assertEqual(res.status_code, 200, res.data)
+                client = self.fresh_client()
+                self.admin_login(username, client=client, totp=code_after(device))
+                self.assertTrue(self.is_logged_in(client))
 
 
 class MFAEnrollmentTests(ApiTestCase):
@@ -461,6 +780,181 @@ class MFAEnrollmentTests(ApiTestCase):
             "/api/accounts/mfa/disable/", {"code": "000000"}, format="json"
         )
         self.assertEqual(res.status_code, 400)
+
+
+@override_settings(ADMIN_LOGIN_THROTTLE_RATE="1000/min")
+class MFAEnrollmentPopulationTests(ApiTestCase):
+    """PRISTINE-13c (#52): enrollment reaches 13b's enforcement population.
+
+    PRISTINE-13b made every login door ask ``requires_mfa``; the enrollment
+    surfaces still asked ``is_privileged``, so a finance/support/inventory/
+    marketing account blocked at login had no route to the factor blocking
+    it. Setup/confirm (the password-proven bootstrap while no device is
+    active) and status/disable/trust (JWT-authenticated) now ask the SAME
+    predicate as the doors: no wider (catalogue and customers stay
+    single-factor) and no narrower (admin/superuser keep their reach).
+    """
+
+    REQUIRED_ROLES = (ROLE_SUPPORT, ROLE_INVENTORY, ROLE_MARKETING, ROLE_FINANCE)
+    SETUP = "/api/accounts/mfa/setup/"
+    CONFIRM = "/api/accounts/mfa/confirm/"
+    STATUS = "/api/accounts/mfa/status/"
+    DISABLE = "/api/accounts/mfa/disable/"
+    TRUST = "/api/accounts/mfa/trust/"
+
+    def raise_auth_budget(self):
+        # These loops make more anonymous requests than the production
+        # 'auth' budget admits, and the throttle is not what they pin.
+        rates = dict(api_settings.DEFAULT_THROTTLE_RATES)
+        rates["auth"] = "1000/min"
+        return mock.patch.object(ScopedRateThrottle, "THROTTLE_RATES", rates)
+
+    def bootstrap(self, path, username, **extra):
+        payload = {"username": username, "password": PASSWORD}
+        payload.update(extra)
+        return self.client.post(path, payload, format="json")
+
+    def test_the_newly_required_roles_can_enroll_and_log_in(self):
+        with self.raise_auth_budget():
+            for role in self.REQUIRED_ROLES:
+                with self.subTest(role=role):
+                    user = make_role_staff(f"enroll-{role}", role)
+                    res = self.bootstrap(self.SETUP, user.username)
+                    self.assertEqual(res.status_code, 200, res.data)
+                    secret = res.data["secret"]
+                    self.assertIn(secret, res.data["otpauth_uri"])
+                    res = self.bootstrap(
+                        self.CONFIRM,
+                        user.username,
+                        code=totp.hotp(secret, totp.now() // totp.STEP),
+                    )
+                    self.assertEqual(res.status_code, 200, res.data)
+                    device = TOTPDevice.objects.get(user=user)
+                    # The point of the ordering: the enrollment the door
+                    # demands is now reachable, and its output admits login.
+                    res = self.client.post(
+                        "/api/accounts/login/",
+                        login_payload(user.username, totp=code_after(device)),
+                        format="json",
+                    )
+                    self.assertEqual(res.status_code, 200, res.data)
+                    self.assertIn("access", res.data)
+
+    def test_the_newly_required_roles_reach_status_trust_and_disable(self):
+        with self.raise_auth_budget():
+            for role in self.REQUIRED_ROLES:
+                with self.subTest(role=role, surface="status/trust"):
+                    user = make_role_staff(f"manage-{role}", role)
+                    device = enroll_via_model(user)
+                    client = self.fresh_client()
+                    res, token = self.api_login(user.username, client=client)
+                    self.assertIsNotNone(token, res.data)
+                    res = client.get(self.STATUS)
+                    self.assertEqual(res.status_code, 200, res.data)
+                    self.assertEqual(res.data, {"enabled": True})
+                    res = client.post(
+                        self.TRUST, {"code": code_after(device)}, format="json"
+                    )
+                    self.assertEqual(res.status_code, 200, res.data)
+                    self.assertTrue(res.data["trusted"])
+                with self.subTest(role=role, surface="disable"):
+                    user = make_role_staff(f"disable-{role}", role)
+                    device = enroll_via_model(user)
+                    client = self.fresh_client()
+                    res, token = self.api_login(user.username, client=client)
+                    self.assertIsNotNone(token, res.data)
+                    res = client.post(
+                        self.DISABLE, {"code": code_after(device)}, format="json"
+                    )
+                    self.assertEqual(res.status_code, 200, res.data)
+                    self.assertFalse(res.data["enabled"])
+
+    def test_catalogue_and_customers_cannot_reach_the_enrollment_surfaces(self):
+        # The control population: neither holds a money/PII/stock
+        # capability, so 13b never challenges them at login; enrollment
+        # must not become the wider gate.
+        customer = self.make_user("buyer-13c")
+        catalogue = make_role_staff("catalogue-13c", ROLE_CATALOGUE)
+        with self.raise_auth_budget():
+            for user in (customer, catalogue):
+                with self.subTest(username=user.username):
+                    res, token = self.api_login(user.username)
+                    self.assertIsNotNone(token, res.data)
+                    for method, path, body in (
+                        ("get", self.STATUS, None),
+                        ("post", self.TRUST, {}),
+                        ("post", self.DISABLE, {}),
+                        ("post", self.SETUP, {}),
+                        ("post", self.CONFIRM, {}),
+                    ):
+                        res = (
+                            getattr(self.client, method)(path)
+                            if body is None
+                            else getattr(self.client, method)(path, body, format="json")
+                        )
+                        self.assertEqual(res.status_code, 403, path)
+                    # The credential bootstrap answers the same gate.
+                    self.auth(None)
+                    self.assertEqual(
+                        self.bootstrap(self.SETUP, user.username).status_code, 403
+                    )
+                    self.assertEqual(
+                        self.bootstrap(
+                            self.CONFIRM, user.username, code="000000"
+                        ).status_code,
+                        403,
+                    )
+
+    def test_admin_and_superuser_keep_their_existing_reach(self):
+        # The widening may never narrow: the population 13a carried over
+        # from is_privileged still enrolls and still logs in.
+        with self.raise_auth_budget():
+            for username, superuser in (
+                ("reach-admin", False),
+                ("reach-root", True),
+            ):
+                with self.subTest(username=username):
+                    user = make_privileged(username, is_superuser=superuser)
+                    res = self.bootstrap(self.SETUP, username)
+                    self.assertEqual(res.status_code, 200, res.data)
+                    secret = res.data["secret"]
+                    res = self.bootstrap(
+                        self.CONFIRM,
+                        username,
+                        code=totp.hotp(secret, totp.now() // totp.STEP),
+                    )
+                    self.assertEqual(res.status_code, 200, res.data)
+                    device = TOTPDevice.objects.get(user=user)
+                    res = self.client.post(
+                        "/api/accounts/login/",
+                        login_payload(username, totp=code_after(device)),
+                        format="json",
+                    )
+                    self.assertEqual(res.status_code, 200, res.data)
+
+    def test_a_finance_user_can_enroll_then_log_in_with_totp(self):
+        """The ordering dependency 13b declared, end to end: password-proven
+        setup/confirm, then the TOTP login the staff door demands."""
+        user = make_role_staff("finance-pin", ROLE_FINANCE)
+        with self.raise_auth_budget():
+            res = self.bootstrap(self.SETUP, user.username)
+            self.assertEqual(res.status_code, 200, res.data)
+            secret = res.data["secret"]
+            res = self.bootstrap(
+                self.CONFIRM,
+                user.username,
+                code=totp.hotp(secret, totp.now() // totp.STEP),
+            )
+            self.assertEqual(res.status_code, 200, res.data)
+            device = TOTPDevice.objects.get(user=user)
+            self.assertTrue(device.enabled)
+            res = self.client.post(
+                "/api/accounts/login/",
+                login_payload(user.username, totp=code_after(device)),
+                format="json",
+            )
+            self.assertEqual(res.status_code, 200, res.data)
+            self.assertIn("access", res.data)
 
 
 # Q-S4: the classes below post many refused admin logins back to back; the
@@ -796,11 +1290,14 @@ class MFALoginEnforcementTests(ApiTestCase):
             ["password", "username"],
         )
 
-    def test_non_admin_staff_login_unaffected(self):
-        support = self.make_user("helper")
-        support.is_staff = True
-        support.save()
-        support.groups.add(Group.objects.get_or_create(name=ROLE_SUPPORT)[0])
+    def test_single_factor_staff_login_unaffected(self):
+        # PRISTINE-13b: the support role moved INTO the MFA population, so
+        # the single-factor control is the catalogue role -- the one staff
+        # role holding no money/PII/stock capability.
+        editor = self.make_user("helper")
+        editor.is_staff = True
+        editor.save()
+        editor.groups.add(Group.objects.get_or_create(name=ROLE_CATALOGUE)[0])
         res = self.client.post(
             "/api/accounts/login/", login_payload("helper"), format="json"
         )
@@ -1211,14 +1708,16 @@ class StorefrontLoginSplitTests(ApiTestCase):
         self.assertEqual(res.status_code, 403)
         self.assertNotIn("access", res.data)
 
-    def test_customer_door_serves_non_privileged_staff_unchanged(self):
-        # R-17.9 binds privileged roles only, and the customer door refuses
-        # exactly those: a support-role staffer (staff, no staff.manage) is
-        # an ordinary caller here, as it always was on the shared door.
+    def test_customer_door_serves_single_factor_staff_unchanged(self):
+        # PRISTINE-13b: the customer door refuses exactly the accounts the
+        # staff door challenges (requires_mfa). A catalogue-role staffer
+        # holds no money/PII/stock capability, so it is an ordinary caller
+        # here -- a support staffer is no longer one (pinned in
+        # MfaEnforcementPopulationTests).
         helper = self.make_user("helper")
         helper.is_staff = True
         helper.save()
-        helper.groups.add(Group.objects.get_or_create(name=ROLE_SUPPORT)[0])
+        helper.groups.add(Group.objects.get_or_create(name=ROLE_CATALOGUE)[0])
         res = self.client.post(
             self.CUSTOMER_DOOR, login_payload("helper"), format="json"
         )
@@ -1779,8 +2278,8 @@ class MfaEnrollmentThrottleTests(ApiTestCase):
 
     The URLConf wiring guard in accounts/tests.py pins that every accounts
     route DECLARES a scope; these pins prove the budget bites on the two
-    bootstrap enrollment paths themselves (they carry permission_classes=[]
-    and gate inside the view, so the throttle is their outer bound), sitting
+    bootstrap enrollment paths themselves (they declare AllowAny and gate
+    inside the view, so the throttle is their outer bound), sitting
     beside the permission pins this module already holds: anonymous ->
     uniform 401, non-privileged session -> 403, privileged JWT or the
     credential bootstrap while no device is active -> served.
