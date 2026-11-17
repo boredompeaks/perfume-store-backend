@@ -629,24 +629,45 @@ def create_order(request):
             duplicate = _find_duplicate_pending_order(owner, cart_items, coupon, body)
 
             if duplicate is not None:
-                # Benign double-submit retry, so INFO: a WARNING here would spam
-                # the log on every impatient re-click (same judgement as
-                # verify_payment's already-processed skip).
-                logger.info(
-                    "Checkout dedup: order %s replayed for %s "
-                    "(identical pending submission)",
-                    duplicate.id,
-                    duplicate.customer_name,
-                )
+                if idempotency_key is None:
+                    # Benign double-submit retry, so INFO: a WARNING here would
+                    # spam the log on every impatient re-click (same judgement
+                    # as verify_payment's already-processed skip).
+                    logger.info(
+                        "Checkout dedup: order %s replayed for %s "
+                        "(identical pending submission)",
+                        duplicate.id,
+                        duplicate.customer_name,
+                    )
 
-                # Scoped by `owner` above AND by `_same_purchase`, so this
-                # can only ever hand back a submission that agrees with the
-                # caller's own identity, on the complete shipping payload,
-                # on the delivery option, on the cart contents and on the
-                # coupon, inside the dedup window -- five independent
-                # agreements, which is what "the same purchase attempt"
-                # means for a double-click or a client retry.
-                return _checkout_response(duplicate, status.HTTP_200_OK)
+                    # Scoped by `owner` above AND by `_same_purchase`, so this
+                    # can only ever hand back a submission that agrees with the
+                    # caller's own identity, on the complete shipping payload,
+                    # on the delivery option, on the cart contents and on the
+                    # coupon, inside the dedup window -- five independent
+                    # agreements, which is what "the same purchase attempt"
+                    # means for a double-click or a client retry.
+                    return _checkout_response(duplicate, status.HTTP_200_OK)
+
+                # [R-9.3.14] A keyed retry may adopt only a still-keyless
+                # candidate. A candidate another key already owns is a
+                # different submission, so it falls through to the keyed probe
+                # (and creation) instead of resolving this key to that order.
+                if duplicate.idempotency_key is None:
+                    User.objects.select_for_update().get(pk=user.pk)
+                    duplicate.refresh_from_db(fields=["idempotency_key"])
+
+                    # task: IDEM-20261117-local-001
+                    # The user-row lock excludes every other keyed writer, so
+                    # a key that already owns an order is read here, never
+                    # re-bound: the keyed probe below answers with that order.
+                    if duplicate.idempotency_key is None and not (
+                        Order.objects.filter(
+                            user=user, idempotency_key=idempotency_key
+                        ).exists()
+                    ):
+                        duplicate.idempotency_key = idempotency_key
+                        duplicate.save(update_fields=["idempotency_key"])
 
             # [R-9.3.14]/[R-9.3.19] SPEC-9-01: key-based replay collapse. The
             # user row is locked first so two cross-session submissions carrying
