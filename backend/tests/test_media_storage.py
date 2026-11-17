@@ -44,6 +44,8 @@ _NON_DEBUG_ENV = {
     "DATABASE_URL": "postgres://u:p@db.example.com:5432/perfume_store",
     "DJANGO_ALLOWED_HOSTS": "example.test",
     "CSRF_TRUSTED_ORIGINS": "https://example.test",
+    # PRISTINE-13d2a: required by every non-debug boot (at-rest encryption).
+    "TOTP_ENCRYPTION_KEY": "QUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUE=",
 }
 
 # Every S3 env var the builder reads, declared EMPTY: config.settings

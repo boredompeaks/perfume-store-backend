@@ -6,7 +6,7 @@ from rest_framework.exceptions import PermissionDenied
 from rest_framework_simplejwt.serializers import TokenObtainPairSerializer
 
 from common import totp
-from common.permissions import is_privileged
+from common.permissions import requires_mfa
 
 from . import mfa_trust
 from .models import (
@@ -86,17 +86,18 @@ class RegisterSerializer(serializers.ModelSerializer):
 
 
 class MFATokenObtainPairSerializer(TokenObtainPairSerializer):
-    """Login serializer with mandatory TOTP for privileged roles (SPEC-17-05).
+    """Login serializer with mandatory TOTP for the MFA population (SPEC-17-05).
 
     BACKEND_REQUESTS.md defines no MFA contract, so the simpler
-    single-request shape is used and declared: privileged users
-    (:func:`common.permissions.is_privileged` — superusers and
-    ``staff.manage`` holders) must include a valid ``totp`` code in the
-    login body; everyone else is untouched. Failures raise after
-    ``super().validate()`` has accepted the password, so LoginView's
-    existing rejection path audits them as AUTH_LOGIN_FAILED and no tokens
-    are ever minted without the second factor. Rollout: a privileged user
-    with no confirmed device is blocked at login (mandatory means
+    single-request shape is used and declared: the population
+    :func:`common.permissions.requires_mfa` names (PRISTINE-13b: superusers,
+    ``staff.manage`` holders, and every role holding a capability that moves
+    money, reaches customer PII or changes stock) must include a valid
+    ``totp`` code in the login body; everyone else is untouched. Failures
+    raise after ``super().validate()`` has accepted the password, so
+    LoginView's existing rejection path audits them as AUTH_LOGIN_FAILED and
+    no tokens are ever minted without the second factor. Rollout: a required
+    user with no confirmed device is blocked at login (mandatory means
     mandatory) with the enrollment path named in the message.
 
     SPEC-20-8: the ONLY change to the rule above is the guard around it —
@@ -113,7 +114,7 @@ class MFATokenObtainPairSerializer(TokenObtainPairSerializer):
 
     def validate(self, attrs):
         data = super().validate(attrs)
-        if is_privileged(self.user):
+        if requires_mfa(self.user):
             device = TOTPDevice.active_for(self.user)
             if device is None:
                 raise serializers.ValidationError({"totp": [MFA_ENROLLMENT_REQUIRED]})
@@ -175,23 +176,27 @@ class AddressSerializer(serializers.ModelSerializer):
 class StorefrontTokenObtainPairSerializer(TokenObtainPairSerializer):
     """Customer storefront login — no ``totp`` field at all (SPEC-20-10).
 
-    The storefront has no TOTP: R-17.9 binds privileged roles only, so a
-    customer was being shown, and could post, an authentication-code field
-    that no server check ever read. This door declares the parent's explicit
-    ``username``/``password`` and nothing more, which makes ``totp`` a
-    non-field in both directions: the storefront form cannot render it, and
-    a body that includes it is ignored rather than half-honoured.
+    The storefront has no TOTP: R-17.9 binds the accounts that need the
+    second factor, so a customer was being shown, and could post, an
+    authentication-code field that no server check ever read. This door
+    declares the parent's explicit ``username``/``password`` and nothing
+    more, which makes ``totp`` a non-field in both directions: the storefront
+    form cannot render it, and a body that includes it is ignored rather than
+    half-honoured.
 
-    A privileged account is REFUSED here instead of being authenticated.
-    This serializer has no factor to demand, so letting one through would
-    turn the customer door into a way around the very rule that made it
-    necessary — the caller is pointed at the door that does enforce R-17.9.
-    The answer reveals nothing the caller has not already proven with a
-    correct password.
+    An account :func:`common.permissions.requires_mfa` covers is REFUSED
+    here instead of being authenticated. This serializer has no factor to
+    demand, so letting one through would turn the customer door into a way
+    around the very rule that made it necessary — the caller is pointed at
+    the door that does enforce R-17.9. PRISTINE-13b: the refusal asks the
+    same predicate the enforcing doors ask, so finance, support, inventory
+    and marketing cannot slip through the shop door either. The answer
+    reveals nothing the caller has not already proven with a correct
+    password.
     """
 
     def validate(self, attrs):
         data = super().validate(attrs)
-        if is_privileged(self.user):
+        if requires_mfa(self.user):
             raise PermissionDenied(MFA_STAFF_LOGIN_REQUIRED)
         return data

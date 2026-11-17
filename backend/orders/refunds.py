@@ -544,11 +544,15 @@ def issue_refund(
         # Outside every transaction and outside the order lock. The gateway
         # key is derived from the reservation row, so a retry of the SAME row
         # presents the same key even if the response to the first call was
-        # lost, and the provider can collapse it rather than pay twice.
+        # lost, and the provider can collapse it rather than pay twice. The
+        # `-order-<id>` tail keeps the key inside Razorpay's documented
+        # alphabet floor (>=10 chars of [A-Za-z0-9_-]) for low row numbers -
+        # the integration reconcile adopted the lane/a derivation format for
+        # exactly that reason (its alphabet pin failed on `refund-<pk>`).
         gateway_refund_id = refund_payment(
             payment_id=order.razorpay_payment_id,
             amount=amount,
-            idempotency_key=f"refund-{refund.pk}",
+            idempotency_key=f"refund-{refund.pk}-order-{refund.order_id}",
         )
     except RefundGatewayRefused as exc:
         # Definitive provider refusal: no money moved, so release the
@@ -595,10 +599,12 @@ def issue_refund(
                     refund.pk,
                 )
         # The provider's own text goes to the log; the caller gets the fact
-        # and nothing about the provider's internals.
+        # and nothing about the provider's internals. The attempt's PENDING
+        # row is deliberately left alone: it is what reconciliation reads.
         logger.warning(
             "Refund gateway refusal for order %s (amount %s): %s",
             order_id,
+            refund.pk,
             amount,
             exc,
         )
