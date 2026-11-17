@@ -546,6 +546,10 @@ class RefundSeamIntegrationTests(ReturnTestCase):
             self.REFUND_PATH.format(order_id=order.id),
             {"amount": amount, "reason": "Damaged on arrival"},
             format="json",
+            # The refund seam requires the operator action id; this test is
+            # about the return gate, so one deterministic key per order is
+            # enough to drive the real writer.
+            HTTP_IDEMPOTENCY_KEY=f"returns-refund-{order.id}",
         )
 
     def test_a_partly_refunded_order_is_still_returnable(self):
@@ -2026,27 +2030,39 @@ class ReturnEligibilityWindowTests(ReturnTestCase):
                     self.assertTrue(found, "a clock read in the body must trip it")
 
     def test_a_request_filed_years_ago_is_still_readable_and_still_its_own(self):
-        # Age must not change what the customer can SEE, only what they may ASK for: the request is
-        # filed while in date and aged afterwards.
+        # Age must not change what the customer can SEE, only what they may
+        # ASK for. The window retired the other half of this probe - a
+        # ten-year-old order can no longer be filed against - so the request
+        # is filed while it is in date and aged afterwards, which keeps the
+        # claim it was written to make and stops it quietly re-testing the
+        # window instead.
+        #
+        # The clock is frozen because _placed stamps the order at this class's
+        # fixed NOW while ask() goes through the window gate, which reads the
+        # clock: left unfrozen, the probe turns red on a calendar date (NOW +
+        # the window) instead of on a code change. Without the freeze the
+        # filing also quietly re-tests the 30-day window against wall-clock
+        # time and starts refusing the order once the suite runs more than
+        # 30 days after NOW (observed 2026-11-11 on the feat line, GH-65;
+        # pre-existing, unrelated to it).
         self.login_as(self.buyer)
-        fresh = self._placed("RET-2026-002200", "delivered", timedelta(days=1))
-        # _placed stamps the order against the class's fixed NOW, so the filing must read the SAME
-        # clock or this probe re-tests the 30-day window against wall-clock time.
+
         with self.clock_frozen_at():
+            fresh = self._placed("RET-2026-002200", "delivered", timedelta(days=1))
             created = self.ask(fresh.order_number)
-        self.assertEqual(created.status_code, 201, created.data)
-        pk = created.data["id"]
-        ReturnRequest.objects.filter(pk=pk).update(
-            created_at=timezone.now() - timedelta(days=3650)
-        )
+            self.assertEqual(created.status_code, 201, created.data)
+            pk = created.data["id"]
+            ReturnRequest.objects.filter(pk=pk).update(
+                created_at=timezone.now() - timedelta(days=3650)
+            )
 
-        listed = self.client.get(LIST_URL)
-        opened = self.client.get(detail_url(pk))
+            listed = self.client.get(LIST_URL)
+            opened = self.client.get(detail_url(pk))
 
-        self.assertEqual(listed.status_code, 200, listed.data)
-        self.assertIn(pk, [row["id"] for row in listed.data["results"]])
-        self.assertEqual(opened.status_code, 200, opened.data)
-        self.assertEqual(opened.data["id"], pk)
+            self.assertEqual(listed.status_code, 200, listed.data)
+            self.assertIn(pk, [row["id"] for row in listed.data["results"]])
+            self.assertEqual(opened.status_code, 200, opened.data)
+            self.assertEqual(opened.data["id"], pk)
 
     def test_no_return_window_setting_is_declared(self):
         self.assertFalse(

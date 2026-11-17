@@ -60,20 +60,45 @@ def _refund_payload(refund):
 @api_view(["POST"])
 @permission_classes([HasRefundsCreate])
 def admin_order_refund(request, order_id):
-    """POST /api/admin/orders/:id/refund — refund a captured payment in full or
-    in part. Authority is ``refunds.create`` (finance/admin), not order read or
-    fulfil; the Order row and its refund rows are locked for the whole attempt,
-    so concurrent refunds cannot both pass the balance gate."""
+    """[R-1.14] POST /api/admin/orders/:id/refund — refund a captured payment.
+
+    Spec 1.14 makes a paid order refundable in full or in part, and the
+    finance operator the one who reconciles payments and refunds ([1.31]), so
+    authority is the ``refunds.create`` capability (finance/admin). That is
+    the split spec 1.1 spells out: a catalogue manager must not be able to
+    issue refunds, and neither can a support agent who may read and fulfil
+    orders.
+
+    Two-phase and serialized: the reservation transaction locks the Order row
+    (this order's refund rows beside it, since they are the other half of the
+    balance being spent), recomputes the balance, and commits the PENDING row
+    before the gateway is called; the gateway call then runs outside every
+    transaction and outside the lock. Settlement writes PROCESSED and the
+    payment-dimension move in a short atomic block of its own, a definitive
+    gateway refusal leaves the attempt as a committed FAILED row with its
+    reservation released, and an ambiguous gateway outcome leaves it PENDING
+    with its reservation held (never silently released).
+
+    ``Idempotency-Key`` is REQUIRED: a missing/blank header is a 400 before
+    any core call, because every refund attempt must name the operator action
+    it belongs to. A keyed retry then collapses onto the refund it already
+    produced (no second gateway call).
+
+    The payment dimension moves to the choices orders.state already declares
+    (``partially_refunded`` / ``refunded``) — this writer is their first
+    writer, and no new choice was added for them.
+    """
     body = _object_body(request.data)
 
-    idempotency_key = (
-        request.headers.get(IDEMPOTENCY_KEY_HEADER) or ""
-    ).strip() or None
+    idempotency_key = (request.headers.get(IDEMPOTENCY_KEY_HEADER) or "").strip()
 
-    if (
-        idempotency_key is not None
-        and len(idempotency_key) > IDEMPOTENCY_KEY_MAX_LENGTH
-    ):
+    if not idempotency_key:
+        return Response(
+            {"error": "Idempotency-Key header is required"},
+            status=status.HTTP_400_BAD_REQUEST,
+        )
+
+    if len(idempotency_key) > IDEMPOTENCY_KEY_MAX_LENGTH:
         return Response(
             {"error": "Idempotency-Key is too long"}, status=status.HTTP_400_BAD_REQUEST
         )

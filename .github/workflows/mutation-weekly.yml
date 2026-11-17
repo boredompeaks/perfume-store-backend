@@ -60,8 +60,34 @@ jobs:
       # see), so the step that needs it declares it in its own env. That is why
       # actionlint, not PyYAML, is the oracle for workflow changes here.
     steps:
-      # Full commit SHA + tag; never widen a pin. Same SHAs as backend-tests.yml,
-      # so the repo has one set of action pins.
+      # The sandbox directory must EXIST before any step that names it as its
+      # `working-directory`, because GitHub resolves that path when it launches
+      # the step's shell: a missing directory fails with
+      # "An error occurred trying to start process '/usr/bin/bash' with working
+      # directory '...': No such file or directory" and the script never runs.
+      # No in-script guard can repair that, so the creation cannot be guarded by
+      # a condition either -- it is the FIRST step and it is `always()`.
+      #
+      # It is deliberately NOT gated on `changed == '1'`. The step that copies
+      # backend/ into the sandbox is correctly skipped when no target file
+      # changed, but the `if: always()` summary step still declares this path as
+      # its working directory, and skipping the only creator of that path is
+      # exactly what killed run 41448110345 (2026-11-02): the job died at
+      # "start process" with no report and no score. `always()` also means a
+      # failed checkout or a failed changed-files check cannot leave the path
+      # missing on the way to the summary.
+      - name: Create the mutation sandbox directory
+        if: always()
+        env:
+          SANDBOX: ${{ runner.temp }}/mutation-sandbox
+        run: |
+          set -euo pipefail
+          mkdir -p "${SANDBOX}"
+          echo "sandbox ready: ${SANDBOX} ($(ls -A "${SANDBOX}" | wc -l) entries)"
+
+      # SPEC-22-11: full commit SHA, tag in a trailing comment. Never widen a
+      # pin back to a tag. These are the same three SHAs backend-tests.yml
+      # already pins, so there is exactly one set of action pins in this repo.
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           # Depth 1 is enough: mutmut is not patch-based and needs no history.
@@ -121,10 +147,18 @@ jobs:
             echo "No target files changed since last successful run; skipping."
           fi
 
-      # The copy keeps mutmut's in-place rewrites, .mutmut-cache and reports out
-      # of the repository. .git is NOT carried over, so nothing in the sandbox
-      # can reach the real tree. SANDBOX is declared here: `runner.temp` is
-      # legal in a step env, illegal at job level.
+      # The copy is what keeps mutmut's in-place rewrites, .mutmut-cache,
+      # mutations/ and html/ out of the repository. Copied with the version
+      # control directory NOT carried over, so nothing in the sandbox can
+      # commit, push or otherwise reach the real tree.
+      #
+      # The `mkdir -p` here is idempotent and does NOT make the first step
+      # redundant: this step is skipped whenever nothing changed, and the
+      # `if: always()` summary that then runs still needs the directory to
+      # exist as its working directory.
+      #
+      # SANDBOX is declared HERE rather than at job level: `runner.temp` is a
+      # legal expression in a step's own `env:` and an illegal one in the job's.
       - name: Copy backend/ into an out-of-tree sandbox
         if: steps.changed.outputs.changed == '1'
         env:

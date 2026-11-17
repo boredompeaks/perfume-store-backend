@@ -73,13 +73,31 @@ services:
       # refuses - so compose names the missing key up front.
       DJANGO_ENV: "${DJANGO_ENV:-production}"
       CSRF_TRUSTED_ORIGINS: "${CSRF_TRUSTED_ORIGINS:?set CSRF_TRUSTED_ORIGINS in the repo-root .env}"
-      # TLS hardening ON with production defaults; a plain-HTTP local run
-      # overrides SECURE_SSL_REDIRECT=false / SECURE_HSTS_SECONDS=0 in .env.
-      # SECURE_PROXY_SSL_HEADER_NAME is the WSGI environ name
-      # (HTTP_X_FORWARDED_PROTO), not the bare header name: the latter silently
-      # never matches and every proxied request looks plain HTTP, looping the
-      # redirect. Set it only behind a proxy that sets the header on every
-      # request.
+      # PRISTINE-13d2a: the Fernet key that encrypts secrets at rest. REQUIRED
+      # rather than defaulted, like CSRF_TRUSTED_ORIGINS above: a container
+      # that booted without it could not store a TOTP secret at all, so compose
+      # names the missing value up front instead of letting the app die at the
+      # settings import. The value lives in the repo-root .env, never here.
+      TOTP_ENCRYPTION_KEY: "${TOTP_ENCRYPTION_KEY:?set TOTP_ENCRYPTION_KEY in the repo-root .env}"
+      # SPEC-22-08 [R-22.6]: the SPEC-17-07 transport hardening, turned ON
+      # here so a deployment actually gets it. Those settings are env-gated
+      # with development-safe defaults (SECURE_SSL_REDIRECT=False,
+      # SECURE_HSTS_SECONDS=0, no trusted proxy header), and until now nothing
+      # in the deploy path set any of them - so "HTTPS is enabled" was true of
+      # no real deployment (V-06). The defaults below are the production
+      # posture and each one is a pass-through, so a deployment that serves
+      # plain HTTP (local `docker compose up` over http://localhost) sets
+      # SECURE_SSL_REDIRECT=false / SECURE_HSTS_SECONDS=0 in the repo-root
+      # .env; a TLS-fronted deployment leaves them and gets HTTPS-only.
+      #
+      # SECURE_PROXY_SSL_HEADER_NAME is the WSGI environ NAME (Django reads
+      # request.META[header], and gunicorn maps the wire header
+      # X-Forwarded-Proto to HTTP_X_FORWARDED_PROTO) - not the bare header
+      # name. Setting "X-Forwarded-Proto" here would silently never match, so
+      # every proxied request would look plain HTTP and be redirected to HTTPS
+      # forever. Only set it when a proxy in front of this container actually
+      # sets that header on every request (nginx: `proxy_set_header
+      # X-Forwarded-Proto $scheme;`).
       SECURE_SSL_REDIRECT: "${SECURE_SSL_REDIRECT:-true}"
       SECURE_HSTS_SECONDS: "${SECURE_HSTS_SECONDS:-31536000}"
       # Not defaulted on: includeSubDomains breaks plain-HTTP subdomains and
@@ -167,6 +185,8 @@ services:
       # Celery imports the same settings, so it needs the same boot-guard keys.
       DJANGO_ENV: "${DJANGO_ENV:-production}"
       CSRF_TRUSTED_ORIGINS: "${CSRF_TRUSTED_ORIGINS:?set CSRF_TRUSTED_ORIGINS in the repo-root .env}"
+      # PRISTINE-13d2a: the at-rest key, required for the same reason.
+      TOTP_ENCRYPTION_KEY: "${TOTP_ENCRYPTION_KEY:?set TOTP_ENCRYPTION_KEY in the repo-root .env}"
     command: celery -A config worker -l info
     # The image's HEALTHCHECK probes gunicorn's /health/, but a Celery
     # container serves nothing there, so inheriting it marks a healthy worker
@@ -198,10 +218,15 @@ services:
       REDIS_URL: "${REDIS_URL:-redis://redis:6379/0}"
       DJANGO_ENV: "${DJANGO_ENV:-production}"
       CSRF_TRUSTED_ORIGINS: "${CSRF_TRUSTED_ORIGINS:?set CSRF_TRUSTED_ORIGINS in the repo-root .env}"
-    # -s /tmp/...: beat's default schedule file lands in /app, which the image
-    # leaves root-owned while the process runs as appuser; /tmp is writable.
-    # Container-local state is enough - the schedule is code, and a duplicate
-    # sweep is the same idempotent management command.
+      TOTP_ENCRYPTION_KEY: "${TOTP_ENCRYPTION_KEY:?set TOTP_ENCRYPTION_KEY in the repo-root .env}"
+    # -s / --schedule: beat's default schedule file lands in the working
+    # directory (/app), which the image leaves root-owned while the process
+    # runs as the non-root appuser - so the file goes to /tmp, which is
+    # writable. Container-local state is enough: the schedule is code (the
+    # env cadences), and after a recreate at most one due sweep fires early -
+    # safe because each sweep is the same idempotent management command a
+    # manual run executes, and a queue drained twice per tick was already
+    # declared safe when the drain was written (backend/.env.example).
     command: celery -A config beat -l info -s /tmp/celerybeat-schedule
     # Same inherited-HEALTHCHECK problem as the worker; same fix.
     healthcheck:

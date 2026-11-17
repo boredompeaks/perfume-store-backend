@@ -1,5 +1,19 @@
-"""Admin site that enforces mandatory TOTP for privileged staff and exposes the
-enrollment URL to the login template.
+"""Admin site wiring for SPEC-17-05 [R-17.9]: staff MFA at the admin door.
+
+``MFAAdminConfig`` replaces ``django.contrib.admin`` in INSTALLED_APPS and
+swaps the (lazily built) default site for ``MFAAdminSite``, whose login
+form demands a valid TOTP code from the MFA population
+(:func:`common.permissions.requires_mfa`). Registration, URLs and the
+``admin:`` namespace are untouched — every ``@admin.register`` and
+``admin.site._registry`` pin in the suite keeps working because this
+subclass IS the default site now.
+
+SPEC-20-13 adds the enrollment REACH the same page was missing: mandatory
+MFA refuses an unenrolled privileged login, so the login template has to
+be able to send that account somewhere to enroll. The two hooks below only
+put the configured enrollment URL (and whether MFA is the reason the last
+attempt failed) into the template context — the enforcement half of this
+feature is untouched.
 """
 
 from django.conf import settings

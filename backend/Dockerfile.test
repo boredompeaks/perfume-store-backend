@@ -1,0 +1,12 @@
+# Test-only image; it is never used by production compose or deployment.
+FROM python:3.14-slim
+
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1
+
+WORKDIR /workspace/backend
+COPY requirements.txt requirements.lock ./
+RUN pip install --no-cache-dir -r requirements.lock
+COPY . ./
+
+CMD ["sleep", "infinity"]

@@ -18,6 +18,12 @@ BACKEND_DIR = Path(__file__).resolve().parent.parent
 
 FAKE_DSN = "https://not-a-real-key@o0.ingest.us.example.invalid/0"
 
+# PRISTINE-13d2a: the fixed at-rest Fernet key a non-debug boot must carry
+# (urlsafe base64 of 32 "A" bytes), spread into the env shapes below.
+TOTP_ENV = {"TOTP_ENCRYPTION_KEY": "QUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUE="}
+
+# The stub the "with a DSN" path is given instead of the real SDK. `init` is
+# recorded, never called through to a transport.
 STUB_INIT_CALLS = []
 
 PROD_BOOT_ENV = {
@@ -26,6 +32,8 @@ PROD_BOOT_ENV = {
     "DJANGO_ALLOWED_HOSTS": "shop.example.test",
     "CSRF_TRUSTED_ORIGINS": "https://shop.example.test",
     "DATABASE_URL": "postgres://u:p@db.example.com:5432/perfume_store",
+    # PRISTINE-13d2a: the at-rest encryption key every non-debug boot needs.
+    **TOTP_ENV,
 }
 
 BLOCK_NETWORK_PREAMBLE = """
@@ -139,6 +147,7 @@ class ErrorTrackingInertWithoutADsnTests(SimpleTestCase):
                     "DJANGO_ENV": "production",
                     "DJANGO_ALLOWED_HOSTS": "shop.example.test",
                     "CSRF_TRUSTED_ORIGINS": "https://shop.example.test",
+                    **TOTP_ENV,
                     "DATABASE_URL": (
                         "postgres://u:p@db.example.com:5432/perfume_store"
                     ),
@@ -187,6 +196,7 @@ class ErrorTrackingInertWithoutADsnTests(SimpleTestCase):
                 "DATABASE_URL": "postgres://u:p@db.example.com:5432/perfume_store",
                 "DJANGO_ALLOWED_HOSTS": "example.test",
                 "CSRF_TRUSTED_ORIGINS": "https://example.test",
+                **TOTP_ENV,
                 "SENTRY_DSN": FAKE_DSN,
                 "SENTRY_ENVIRONMENT": "",
                 "SENTRY_SAMPLE_RATE": "0.25",

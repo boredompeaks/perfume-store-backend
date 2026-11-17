@@ -14,7 +14,7 @@ from common import totp
 from common.admin import CONFIRM_FIELD, CONFIRMATION_YES, RoleAwareModelAdmin
 from common.audit import log_mutation
 from common.models import AuditEvent
-from common.permissions import is_privileged, user_may_assign_role
+from common.permissions import requires_mfa, user_may_assign_role
 from common.roles import ROLE_GRANT_CAPABILITY, STAFF_ROLES
 from orders.models import Order
 
@@ -90,13 +90,31 @@ class AdminLoginThrottle(SimpleRateThrottle):
 
 
 class MFAAdminAuthenticationForm(AdminAuthenticationForm):
-    """Admin login plus mandatory TOTP for privileged roles.
+    """Admin login + mandatory TOTP for the MFA population (SPEC-17-05).
 
-    Privileged users must present a valid code (an unenrolled account is refused
-    with the enrollment path named), and a browser trusted through
-    ``accounts.mfa_trust`` skips the challenge via the same decision the staff API
-    makes. MFA errors appear only after the password validates, so nothing leaks
-    to a caller who failed the first factor.
+    The second enforcement surface for R-17.9: the accounts
+    :func:`common.permissions.requires_mfa` names (PRISTINE-13b: superusers,
+    ``staff.manage`` holders, and every role holding a money/PII/stock
+    capability) must present a valid TOTP code in the login form, and an
+    unenrolled required account is refused with the enrollment path named —
+    same predicate and same semantics as the staff API login. ``user_cache``
+    is set only after the password validates, so MFA errors appear only for
+    correct credentials (nothing is leaked to a caller who failed the first
+    factor). Accounts outside that population log in exactly as before — the
+    field is optional and unused for them.
+
+    SPEC-20-8b: a device this browser was trusted on skips the fresh code
+    here too, through :func:`accounts.mfa_trust.is_trusted_device` — the
+    SAME decision the staff API serializer makes, so the directive "don't
+    challenge me every login" holds on the primary staff door and there is
+    exactly one implementation of the rule to keep honest. ``AdminSite.login``
+    hands the request to ``LoginView``, which passes it to the form, so
+    ``self.request.COOKIES`` is where the signed marker lives. Everything
+    below the skip is the unchanged pre-SPEC-20-8 challenge.
+
+    Q-S4 [F8]: the whole exchange is wrapped in
+    :class:`AdminLoginThrottle` — the API 'auth' scope never covered this
+    plain-Django door, and the form is where that gap is closed.
     """
 
     totp = forms.CharField(
@@ -131,7 +149,7 @@ class MFAAdminAuthenticationForm(AdminAuthenticationForm):
     def _clean_with_mfa(self):
         cleaned_data = super().clean()
         user = getattr(self, "user_cache", None)
-        if user is None or not is_privileged(user):
+        if user is None or not requires_mfa(user):
             return cleaned_data
         device = TOTPDevice.active_for(user)
         if device is None:

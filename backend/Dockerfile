@@ -36,18 +36,42 @@ COPY . ./
 # Assets are gathered at build time and served by whitenoise from the app
 # process, so the image needs no separate web server or object store.
 #
-# The env below is BUILD-TIME ONLY: these are non-debug boot guards, so
-# collectstatic cannot run without them, and none is a real credential or
-# database (DJANGO_ENV=ci, a placeholder secret, sqlite under /tmp that nothing
-# reads, and localhost hosts/origins for a layer that serves no request). The
-# runtime env is injected by compose/platform. backend/tests/
-# test_deployment_contract.py pins this env by booting the app from it.
+# The env below is BUILD-TIME ONLY, and it exists because this layer is a
+# non-debug boot like any other: the SPEC-22-03 [R-22.3] guards refuse to
+# import a DJANGO_DEBUG=false app that cannot declare an environment, a usable
+# DATABASE_URL, explicit hosts/origins and a secret key - so without these keys
+# `docker build` itself exits 1 and no image can be produced. None of it is a
+# real credential or a real database:
+#   DJANGO_ENV=ci             a build layer is not a deployment; the runtime
+#                             environment is injected by compose (or the
+#                             platform's env), never inherited from here
+#   DJANGO_SECRET_KEY         a fixed non-secret placeholder, and NOT the key
+#                             the container runs with - that comes from the
+#                             environment as DJANGO_SECRET_KEY at runtime
+#   DATABASE_URL              a throwaway sqlite path under /tmp that nothing
+#                             creates or reads: collectstatic opens no
+#                             connection, but the guard cannot know that, and
+#                             an explicit sqlite:// URL is honoured in any
+#                             environment
+#   DJANGO_ALLOWED_HOSTS /    the localhost values the guard would otherwise
+#   CSRF_TRUSTED_ORIGINS      refuse outright; no request is ever served
+#                             while the image is being built
+#   TOTP_ENCRYPTION_KEY       a build-only placeholder (urlsafe base64 of 32
+#                             zero-value bytes) that decrypts nothing, and NOT
+#                             a deployment's key: the at-rest guard refuses a
+#                             non-debug boot without one (PRISTINE-13d2a), and
+#                             this layer is one. The runtime container gets the
+#                             real key from compose/the platform.
+# backend/tests/test_deployment_contract.py pins this layer by parsing it out
+# of this file and booting the app with exactly this env, and by refusing
+# again when any one key is dropped.
 RUN DJANGO_DEBUG=false \
     DJANGO_ENV=ci \
     DJANGO_SECRET_KEY=collectstatic-build-only-not-a-real-secret \
     DJANGO_ALLOWED_HOSTS=localhost \
     CSRF_TRUSTED_ORIGINS=http://localhost:3000 \
     DATABASE_URL=sqlite:////tmp/build.sqlite3 \
+    TOTP_ENCRYPTION_KEY=QUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUE= \
     DJANGO_STATIC_ROOT=/app/staticfiles \
     python manage.py collectstatic --noinput
 

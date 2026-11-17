@@ -221,54 +221,43 @@ def _mint_order_reservations(order, lines, user):
             reservation.save(update_fields=["quantity", "expires_at", "status"])
 
 
-@api_view(["POST"])
-# AllowAny is deliberate: the refusal is ours to write, not DRF's generic 401.
-# An authenticated caller is still scoped to their own orders below.
-@permission_classes([AllowAny])
-# Public mutating endpoint sharing the cart budget: checkout is the terminal
-# mutation of that same session-cart funnel.
-@throttle_scope("cart")
-def create_order(request):
+def _resolve_checkout_cart(request):
+    """The caller's cart and lines, or the refusal response that ends the view.
 
-    # FIRST line of the body: every anonymous submission gets the one uniform
-    # refusal, before any input is read.
-    if not request.user.is_authenticated:
-        return _guest_checkout_refused()
-
-    # Same key means the SAME submission; the atomic block dedupes on (user, key).
-    # Blank means no key, since an empty value carries no submission identity.
-    idempotency_key = (
-        request.headers.get(IDEMPOTENCY_KEY_HEADER) or ""
-    ).strip() or None
-
-    if (
-        idempotency_key is not None
-        and len(idempotency_key) > IDEMPOTENCY_KEY_MAX_LENGTH
-    ):
-        return Response(
-            {"error": "Idempotency-Key is too long"}, status=status.HTTP_400_BAD_REQUEST
-        )
-
-    # Who this submission belongs to, settled once and reused by every writer
-    # below. A body-supplied guest_email is ignored (one owner per row).
-    user = request.user
-    guest_email = ""
-    owner = {"user": user}
-
-    # Same ownership rule as the cart endpoints; create=False keeps the
-    # documented "Cart not found" 404 instead of minting an empty cart.
+    D-04a/D-07: the SAME ownership rule the cart endpoints use. A customer
+    who signed in checks out their ACCOUNT cart; a legacy guest order read
+    stays scoped to the caller's session cart. create=False keeps the
+    documented "Cart not found" 404 instead of minting an empty cart.
+    """
     cart = resolve_cart(request, create=False)
 
     if cart is None:
-        return Response({"error": "Cart not found"}, status=status.HTTP_404_NOT_FOUND)
+        return (
+            None,
+            None,
+            Response({"error": "Cart not found"}, status=status.HTTP_404_NOT_FOUND),
+        )
 
     cart_items = cart.items.select_related("product").all()
 
     if not cart_items.exists():
-        return Response({"error": "Cart is empty"}, status=status.HTTP_400_BAD_REQUEST)
+        return (
+            cart,
+            cart_items,
+            Response({"error": "Cart is empty"}, status=status.HTTP_400_BAD_REQUEST),
+        )
 
-    body = _object_body(request.data)
+    return cart, cart_items, None
 
+
+def _validate_checkout_payload(body):
+    """The shipping payload's required fields and column widths, or a 400.
+
+    The two loops stay separate on purpose: every missing field is answered
+    before any width is checked, which is the order this endpoint has always
+    answered in, so merging them would make an over-long present field win
+    over a missing one.
+    """
     required_fields = [
         "full_name",
         "phone",
@@ -284,20 +273,40 @@ def create_order(request):
                 {"error": f"{field} is required"}, status=status.HTTP_400_BAD_REQUEST
             )
 
-    # SQLite does not enforce these varchar widths, so an over-length value is a
-    # 201 in tests and a DataError on production Postgres.
+    # [R-1.13] The same varchar-width trap the guest email had, on the rest
+    # of the shipping payload: SQLite does not enforce `full_name`'s 150 or
+    # `phone`'s 15, so an over-length value is a 201 in the suite and a
+    # DataError on the production Postgres. Refused here, before the atomic
+    # block opens and therefore before any row exists.
     for field in _SHIPPING_FIELDS:
         length_rejection = _field_length_rejection(field, body[field])
 
         if length_rejection is not None:
             return length_rejection
 
-    # A cart line that outlasted its stock must not become a payable order;
-    # this gate is advisory, verify_payment re-checks under a row lock.
+    return None
+
+
+def _scan_cart_lines(cart_items):
+    """Collect delisted products, short lines and the merchandise subtotal.
+
+    SPEC-6-01 [6.2.22]: a cart line that outlasted its stock (stock can
+    drop after the item was added) must not become an order the customer
+    can pay for. This gate is advisory and read-only -- stock can still
+    change between create and pay, so verify_payment re-checks under a
+    row lock before decrementing; that remains the authoritative backstop.
+
+    MERCHANT-DELIST: a line whose product was taken off sale after it was
+    added is not buyable at ANY quantity, so it is collected for its own
+    refusal rather than the stock gate -- fixing the quantity can never fix
+    it. The whole checkout is refused (never a silent skip of the line,
+    which would charge the customer for a cart they did not submit), and the
+    line itself is deliberately left in the cart: removal is the customer's
+    call -- they see the line and the refusal names it -- and a relist makes
+    the line buyable again without the customer having to rebuild the cart.
+    """
     unavailable = []
 
-    # A delisted line is not buyable at ANY quantity, so it gets its own
-    # refusal; the line stays in the cart because removal is the customer's call.
     delisted = []
 
     subtotal_amount = Decimal("0.00")
@@ -320,9 +329,20 @@ def create_order(request):
 
         subtotal_amount += product.price * cart_item.quantity
 
+    return delisted, unavailable, subtotal_amount
+
+
+def _cart_line_rejection(delisted, unavailable):
+    """The 400 for delisted products or short lines, or None to continue.
+
+    The delist refusal takes precedence over the stock one: a line that is
+    not for sale is unfixable by quantity, so telling the customer to
+    "reduce the quantity" first would be wrong advice.
+    """
     if delisted:
-        # Delist takes precedence over the stock refusal (quantity cannot fix
-        # it); ordering by pk keeps the refusal body deterministic.
+        # Sorted by pk: the cart queryset carries no ORDER BY, and a
+        # deterministic body (same names, same order, every retry) is what
+        # lets a client reliably match refusal entries to cart lines.
         delisted.sort(key=lambda product: product.id)
         names = ", ".join(f'"{product.name}"' for product in delisted)
         if len(delisted) == 1:
@@ -359,71 +379,577 @@ def create_order(request):
             status=status.HTTP_400_BAD_REQUEST,
         )
 
-    coupon = None
-    discount_amount = Decimal("0.00")
+    return None
 
+
+def _checkout_coupon_code(body, cart):
+    """The code this submission names, else the one persisted on the cart.
+
+    [R-9.3.5/R-9.3.6] The coupon applied to the cart persists as cart
+    state: when the checkout payload posts no explicit code, the
+    persisted one becomes the coupon source. The pre-existing validation
+    below still re-runs every rule at checkout time (state may have
+    changed since apply), so an invalidated coupon is rejected here
+    rather than silently riding the FK into the order; a deleted coupon
+    is already gone (SET_NULL) and simply applies nothing.
+    """
     coupon_code = body.get("coupon_code")
 
-    # With no explicit code, the coupon persisted on the cart is the source;
-    # every rule still re-runs here because state may have changed since apply.
     if not coupon_code and cart.coupon_id:
         coupon_code = cart.coupon.code
 
-    if coupon_code:
-        try:
-            coupon = Coupon.objects.get(code__iexact=coupon_code)
+    return coupon_code
 
-        except Coupon.DoesNotExist:
-            return Response(
+
+def _load_checkout_coupon(coupon_code, subtotal_amount):
+    """Resolve and validate a named coupon: coupon, discount, or a 400.
+
+    Returns ``(coupon, discount_amount, rejection)``. A coupon that fails a
+    rule stops the checkout here, before the atomic creation block; the
+    caller answers with ``rejection`` unchanged.
+    """
+    try:
+        coupon = Coupon.objects.get(code__iexact=coupon_code)
+
+    except Coupon.DoesNotExist:
+        return (
+            None,
+            Decimal("0.00"),
+            Response(
                 {"error": "Invalid coupon code"}, status=status.HTTP_400_BAD_REQUEST
-            )
+            ),
+        )
 
-        if not coupon.active:
-            return Response(
-                {"error": "This coupon is inactive"}, status=status.HTTP_400_BAD_REQUEST
-            )
+    if not coupon.active:
+        return (
+            None,
+            Decimal("0.00"),
+            Response(
+                {"error": "This coupon is inactive"},
+                status=status.HTTP_400_BAD_REQUEST,
+            ),
+        )
 
-        now = timezone.now()
+    now = timezone.now()
 
-        if now < coupon.valid_from:
-            return Response(
+    if now < coupon.valid_from:
+        return (
+            None,
+            Decimal("0.00"),
+            Response(
                 {"error": "This coupon is not active yet"},
                 status=status.HTTP_400_BAD_REQUEST,
-            )
+            ),
+        )
 
-        if now > coupon.valid_until:
-            return Response(
-                {"error": "This coupon has expired"}, status=status.HTTP_400_BAD_REQUEST
-            )
+    if now > coupon.valid_until:
+        return (
+            None,
+            Decimal("0.00"),
+            Response(
+                {"error": "This coupon has expired"},
+                status=status.HTTP_400_BAD_REQUEST,
+            ),
+        )
 
-        if coupon.usage_limit is not None and coupon.used_count >= coupon.usage_limit:
-            return Response(
+    if coupon.usage_limit is not None and coupon.used_count >= coupon.usage_limit:
+        return (
+            None,
+            Decimal("0.00"),
+            Response(
                 {"error": "This coupon has reached its usage limit"},
                 status=status.HTTP_400_BAD_REQUEST,
-            )
+            ),
+        )
 
-        if subtotal_amount < coupon.minimum_order_amount:
-            return Response(
+    if subtotal_amount < coupon.minimum_order_amount:
+        return (
+            None,
+            Decimal("0.00"),
+            Response(
                 {
                     "error": "Minimum order amount is required",
-                    # The envelope would re-serialize a bare Decimal as a float,
-                    # so money stays a 2-dp string on the wire.
+                    # The envelope moves this key into details and re-serializes
+                    # with DRF's encoder, which would turn a bare Decimal into
+                    # the float 5000.0; the wire contract for money is the same
+                    # 2-dp string here as everywhere else in the payload.
                     "minimum_order_amount": money_string(coupon.minimum_order_amount),
                 },
                 status=status.HTTP_400_BAD_REQUEST,
-            )
+            ),
+        )
 
-        # One helper for the coupon-type math, so this order row and the public
-        # preview cannot disagree (a free-shipping coupon returns 0.00 here).
-        discount_amount = coupon_merchandise_discount(coupon, subtotal_amount)
+    # The coupon-type math lives in one helper so this order row and the
+    # public preview can never disagree about what a coupon is worth
+    # (F-11). A free-shipping coupon returns 0.00 merchandise discount
+    # here; its waiver is applied to the delivery quote below instead.
+    discount_amount = coupon_merchandise_discount(coupon, subtotal_amount)
+
+    return coupon, discount_amount, None
+
+
+def _resolve_checkout_coupon(body, cart, subtotal_amount):
+    """The coupon and merchandise discount for this submission, or a 400."""
+    coupon_code = _checkout_coupon_code(body, cart)
+
+    if not coupon_code:
+        return None, Decimal("0.00"), None
+
+    return _load_checkout_coupon(coupon_code, subtotal_amount)
+
+
+def _collapse_onto_duplicate(duplicate, idempotency_key, user):
+    """The 200 collapse for a duplicate, and the key adoption it may need.
+
+    Returns None when the submission must continue to the keyed probe and
+    creation.
+    """
+    if idempotency_key is None:
+        # Benign double-submit retry, so INFO: a WARNING here would
+        # spam the log on every impatient re-click (same judgement
+        # as verify_payment's already-processed skip).
+        logger.info(
+            "Checkout dedup: order %s replayed for %s (identical pending submission)",
+            duplicate.id,
+            duplicate.customer_name,
+        )
+
+        # Scoped by `owner` above AND by `_same_purchase`, so this
+        # can only ever hand back a submission that agrees with the
+        # caller's own identity, on the complete shipping payload,
+        # on the delivery option, on the cart contents and on the
+        # coupon, inside the dedup window -- five independent
+        # agreements, which is what "the same purchase attempt"
+        # means for a double-click or a client retry.
+        return _checkout_response(duplicate, status.HTTP_200_OK)
+
+    # [R-9.3.14] A keyed retry may adopt only a still-keyless
+    # candidate. A candidate another key already owns is a
+    # different submission, so it falls through to the keyed probe
+    # (and creation) instead of resolving this key to that order.
+    if duplicate.idempotency_key is None:
+        User.objects.select_for_update().get(pk=user.pk)
+        duplicate.refresh_from_db(fields=["idempotency_key"])
+
+        # task: IDEM-20261117-local-001
+        # The user-row lock excludes every other keyed writer, so
+        # a key that already owns an order is read here, never
+        # re-bound: the keyed probe that follows answers with that order.
+        if duplicate.idempotency_key is None and not (
+            Order.objects.filter(user=user, idempotency_key=idempotency_key).exists()
+        ):
+            duplicate.idempotency_key = idempotency_key
+            duplicate.save(update_fields=["idempotency_key"])
+
+    return None
+
+
+def _replay_by_key(user, owner, idempotency_key):
+    """The keyed-replay collapse: the 200 when this key already owns an order.
+
+    [R-9.3.14]/[R-9.3.19] SPEC-9-01: key-based replay collapse. The user
+    row is locked first so two cross-session submissions carrying the same
+    key serialize here -- the loser's probe runs only after the winner
+    committed, which makes the probe-then-bind race-free (the
+    (user, idempotency_key) unique constraint stays the last-resort
+    authority). This composes behind the SPEC-21-1 guard that runs before
+    it, which stays the first line of defence for keyless same-session
+    double-clicks: a keyed replay collapses onto the original order
+    regardless of payload drift, the dedup window, or a settled first
+    attempt, and never mints a second order_number.
+    """
+    if idempotency_key is None:
+        return None
+
+    User.objects.select_for_update().get(pk=user.pk)
+
+    replay = (
+        Order.objects.filter(**owner, idempotency_key=idempotency_key)
+        .prefetch_related("items")
+        .first()
+    )
+
+    if replay is not None:
+        # An authenticated caller proved who they are at login,
+        # so (user, key) is a strong pair and SPEC-9-01's
+        # "collapse regardless of payload drift" stands for
+        # them. (The keyed GUEST branch that additionally
+        # demanded whole-purchase agreement died with the
+        # TIER1-GUEST-DEADEND refusal.)
+        #
+        # Benign keyed retry, so INFO: same judgement as the dedup
+        # guard's collapse log above.
+        logger.info(
+            "Checkout idempotency: order %s replayed for %s (Idempotency-Key)",
+            replay.id,
+            replay.customer_name,
+        )
+
+        return _checkout_response(replay, status.HTTP_200_OK)
+
+    return None
+
+
+def _price_delivery(user, body, cart_items, coupon, merchandise_total):
+    """Price the delivery inside the caller's atomic block.
+
+    Returns ``(shipping_quote, shipping_amount, shipping_method_id,
+    shipping_method_code, total_amount)``.
+
+    [R-1.07] SPEC-1-B05: price the delivery, HERE - after both collapse
+    guards and inside the same atomic block as the order row, so a
+    rolled-back checkout takes the shipping cost with it and a collapse can
+    never reprice an order that already exists.
+
+    The inputs are the destination the customer typed and the delivery
+    OPTION they picked (a method code). Nothing the client sent is read as
+    an amount - `shipping_amount`, `shipping_cost`, `shipping` and
+    `total_amount` have no reader anywhere in this path, so a forged
+    `shipping_amount: 0` cannot reach the total. `lock=True` row-locks the
+    matched rate, so a staff edit committing mid-checkout cannot tear the
+    amount the order is charged.
+    """
+    shipping_quote = quote_shipping(
+        region=body.get("state"),
+        postal_code=body.get("pincode"),
+        merchandise_total=merchandise_total,
+        method_code=_requested_shipping_code(body),
+        lock=True,
+    )
+
+    # A quote of None means the store has configured no shipping at
+    # all - a real zero charge recorded as one, never a rate of zero
+    # standing in for "we could not price this".
+    shipping_amount = (
+        shipping_quote.amount if shipping_quote is not None else Decimal("0.00")
+    )
+    # A free delivery charge comes from either waiver, and both land
+    # on the ONE order-level amount: a merchant-set product flag
+    # (SPEC-C-04) or a free-shipping coupon. Convergence here is what
+    # keeps the pair from double-counting: there is a single charge
+    # to zero, so applying both is byte-identical to applying one.
+    #
+    # ANY qualifying merchandise line is enough (the spec's first
+    # option): the cart has one delivery cost, and a line advertised
+    # as shipping free is the reason to waive it. Flip the predicate
+    # to ``all(...)`` to require every line to qualify; nothing else
+    # in this block changes.
+    #
+    # The quote above still ran, so an unserviceable destination is
+    # still refused -- these waivers waive the charge, not the
+    # service -- and only the AMOUNT is zeroed. The quoted method is
+    # retained exactly as before, which is what tells this zero apart
+    # from the no-shipping-configured zero where the method is null.
+    free_delivery = any(item.product.free_shipping for item in cart_items) or (
+        coupon is not None and coupon.discount_type == Coupon.FREE_SHIPPING
+    )
+    if free_delivery:
+        shipping_amount = Decimal("0.00")
+    shipping_method_id = (
+        shipping_quote.method_id if shipping_quote is not None else None
+    )
+    # [R-8.13] The delivery-option label is snapshotted beside the FK
+    # (spec 8.3: an order retains what was actually purchased), so the
+    # order still names the option it was charged for after the method
+    # row is deleted. Empty exactly when the FK is null for the other
+    # reason - the store had no shipping configured - which is what
+    # keeps those two cases tellable apart.
+    shipping_method_code = (
+        shipping_quote.method_code if shipping_quote is not None else ""
+    )
+    if shipping_quote is None:
+        # The silent zero, made audible (SPEC-1-B05): this order is
+        # being accepted with no delivery charge because the store has
+        # no active shipping method, and nothing else in the request
+        # or the response says so. WARNING rather than INFO because
+        # the cost is silent revenue, and one line per order placed is
+        # a rate an operator can act on - a merchant who sees it can
+        # run `manage.py seed_shipping_methods`. The 201 is unchanged:
+        # refusing the order is a different decision than this task
+        # makes, and a store that has not configured shipping yet is
+        # not broken. `shipping_amount` stays the honest 0.00.
+        logger.warning(
+            "Checkout priced with NO shipping charge for %s: the store "
+            "has no active shipping method configured (seed one with "
+            "`manage.py seed_shipping_methods` to start charging)",
+            user,
+        )
+    total_amount = quantize_money(merchandise_total + shipping_amount)
+
+    return (
+        shipping_quote,
+        shipping_amount,
+        shipping_method_id,
+        shipping_method_code,
+        total_amount,
+    )
+
+
+def _create_order_row(user, guest_email, body, coupon, discount_amount, shipping):
+    """Mint the order row, retrying lost order-number races in savepoints.
+
+    [R-8.4] The order number is minted inside the caller's atomic block, so
+    a rolled-back checkout never burns a number. Each attempt runs in a
+    savepoint: a lost race (another connection committed the same candidate
+    first) rolls back only the failed insert and the next turn regenerates
+    from committed state. Same-session replays never reach this loop -- the
+    dedup guard above returns first.
+    """
+    (
+        _quote,
+        shipping_amount,
+        shipping_method_id,
+        shipping_method_code,
+        total_amount,
+    ) = shipping
+    for attempt in range(ORDER_NUMBER_ATTEMPTS):
+        candidate = _generate_order_number()
+        try:
+            with transaction.atomic():
+                order = Order.objects.create(
+                    user=user,
+                    # The two-owner constraint: an account row carries
+                    # the empty guest_email (never NULL) and no
+                    # guest_token (TIER1-GUEST-DEADEND: no token is
+                    # ever minted while the refusal stands).
+                    guest_email=guest_email,
+                    full_name=body.get("full_name"),
+                    phone=body.get("phone"),
+                    address=body.get("address"),
+                    city=body.get("city"),
+                    state=body.get("state"),
+                    pincode=body.get("pincode"),
+                    coupon=coupon,
+                    discount_amount=discount_amount,
+                    shipping_method_id=shipping_method_id,
+                    shipping_method_code=shipping_method_code,
+                    shipping_amount=shipping_amount,
+                    total_amount=total_amount,
+                    order_number=candidate,
+                )
+        except IntegrityError:
+            # Lost the number race: the unique constraint rejected the
+            # candidate, so the savepoint above rolled the failed
+            # insert back and this transaction stays usable for the
+            # retry. The bound is a safety net, not the expected path:
+            # one retry converges because the collision window is a
+            # single insert.
+            if attempt == ORDER_NUMBER_ATTEMPTS - 1:
+                raise
+            continue
+        break
+    return order
+
+
+def _record_order_status_event(user, order):
+    """Open the order's transition trail: none -> pending, in the caller's tx.
+
+    [R-10.12]/[R-10.17] SPEC-10-02: creation is the lifecycle's first
+    transition (no source state -> pending), so the audit trail opens
+    here — inside the same outer atomic block as the order row, the
+    minted number, the snapshots and the key binding. A rolled-back
+    checkout leaves no order and no event; the actor is the customer
+    who placed the order (OrderStatusEvent.actor stays nullable for
+    the guest rows that predate the TIER1-GUEST-DEADEND refusal,
+    like StockMovement.created_by).
+    """
+    OrderStatusEvent.objects.create(
+        order=order,
+        from_status=None,
+        to_status=order.status,
+        actor=user,
+        trigger=TRIGGER_ORDER_CREATE,
+    )
+
+
+def _bind_order_key(order, idempotency_key):
+    """Bind the submission key inside the atomic block that minted the order.
+
+    [R-9.3.14] SPEC-9-01: bind the submission key to the freshly
+    minted order inside this same transaction, so a later replay's
+    probe above finds it and collapses. The write is an UPDATE of the
+    row this transaction just created, after the probe proved no
+    committed order holds (user, key) and with the user-row lock
+    excluding a concurrent keyed writer -- so the unique constraint
+    cannot reject here.
+    """
+    if idempotency_key is not None:
+        order.idempotency_key = idempotency_key
+        order.save(update_fields=["idempotency_key"])
+
+
+def _snapshot_order_items(order, cart_items):
+    """Freeze each cart line onto the order as an OrderItem row.
+
+    Inventory, coupon usage, and cart cleanup occur only after the payment
+    provider confirms this specific order, so creation snapshots what was
+    bought without touching any of them.
+    """
+    for cart_item in cart_items:
+        product = cart_item.product
+        quantity = cart_item.quantity
+
+        price = product.price
+
+        item_subtotal = price * quantity
+
+        OrderItem.objects.create(
+            order=order,
+            product=product,
+            product_name=product.name,
+            # [R-8.13] Freeze the catalogue identity the customer bought:
+            # no variant-selection input exists yet (CartItem is
+            # product-only, picking rides SPEC-3-21/SPEC-6-08) and the
+            # product carries no product-level SKU, so sku snapshots
+            # empty and variant_name mirrors the product name. Set once
+            # here; no later save path mutates them.
+            sku="",
+            variant_name=product.name,
+            price=price,
+            quantity=quantity,
+            subtotal=item_subtotal,
+        )
+
+
+def _record_order_trail(user, order, cart_items, coupon, shipping):
+    """The ORDER_CREATED business-event row, the atomic block's last writer.
+
+    [R-7.20] Business-event trail: the order's creation is recorded in
+    the same transaction as the order rows, so a rolled-back checkout
+    leaves no phantom trail row and a committed order is never
+    trail-less.
+    """
+    shipping_quote = shipping[0]
+    shipping_amount = shipping[1]
+
+    AuditEvent.record(
+        AuditEvent.EventType.ORDER_CREATED,
+        actor=user,
+        order=order,
+        detail={
+            "order_id": order.id,
+            "total_amount": str(order.total_amount),
+            "coupon": coupon.code if coupon else None,
+            "item_count": len(cart_items),
+            # [R-1.07] What the order was charged to deliver it, in the
+            # same trail row: the delivery charge is money like any other
+            # and a reconciliation asks "what did this order cost" of
+            # the trail, not only of the order row.
+            "shipping_method": shipping_quote.method_code
+            if shipping_quote is not None
+            else None,
+            "shipping_amount": str(shipping_amount),
+        },
+    )
+
+
+@api_view(["POST"])
+# AllowAny is deliberate: the refusal is ours to write, not DRF's generic 401.
+# An authenticated caller is still scoped to their own orders below.
+@permission_classes([AllowAny])
+# Public mutating endpoint sharing the cart budget: checkout is the terminal
+# mutation of that same session-cart funnel.
+@throttle_scope("cart")
+def create_order(request):
+
+    # FIRST line of the body: every anonymous submission gets the one uniform
+    # refusal, before any input is read.
+    if not request.user.is_authenticated:
+        return _guest_checkout_refused()
+
+    # Same key means the SAME submission; the atomic block dedupes on (user, key).
+    # Blank means no key, since an empty value carries no submission identity.
+    idempotency_key = (
+        request.headers.get(IDEMPOTENCY_KEY_HEADER) or ""
+    ).strip() or None
+
+    if (
+        idempotency_key is not None
+        and len(idempotency_key) > IDEMPOTENCY_KEY_MAX_LENGTH
+    ):
+        return Response(
+            {"error": "Idempotency-Key is too long"}, status=status.HTTP_400_BAD_REQUEST
+        )
+
+    return _place_order(request, idempotency_key)
+
+
+def _place_order(request, idempotency_key):
+    """Read and validate the submission, then hand it to the atomic writer."""
+
+    # [R-1.13] Who this submission belongs to, settled once and reused by
+    # every writer below (dedup probe, key binding, the row, the status
+    # event and the stock holds), so no two of them can disagree about it.
+    # Only an account caller is past the gate, so the owner is just the
+    # user; a body-supplied guest_email is ignored outright rather than
+    # stored (the Meta constraint allows exactly one owner per row, and an
+    # account row carries the empty guest_email, never NULL).
+    user = request.user
+    guest_email = ""
+    owner = {"user": user}
+
+    cart, cart_items, rejection = _resolve_checkout_cart(request)
+    if rejection is not None:
+        return rejection
+
+    body = _object_body(request.data)
+
+    rejection = _validate_checkout_payload(body)
+    if rejection is not None:
+        return rejection
+
+    delisted, unavailable, subtotal_amount = _scan_cart_lines(cart_items)
+
+    rejection = _cart_line_rejection(delisted, unavailable)
+    if rejection is not None:
+        return rejection
+
+    coupon, discount_amount, rejection = _resolve_checkout_coupon(
+        body, cart, subtotal_amount
+    )
+    if rejection is not None:
+        return rejection
 
     # Still the MERCHANDISE total; shipping is added below so a replay never
     # reprices an order that already exists.
 
     merchandise_total = subtotal_amount - discount_amount
 
-    # A shipping refusal must propagate out of the atomic block, not return
-    # from inside it: a partial order with no shipping cost would be free.
+    return _create_order_atomically(
+        user,
+        guest_email,
+        owner,
+        cart,
+        cart_items,
+        body,
+        coupon,
+        discount_amount,
+        merchandise_total,
+        idempotency_key,
+    )
+
+
+def _create_order_atomically(
+    user,
+    guest_email,
+    owner,
+    cart,
+    cart_items,
+    body,
+    coupon,
+    discount_amount,
+    merchandise_total,
+    idempotency_key,
+):
+    """Create the order and its rows, or return the collapse/refusal response.
+
+    The whole block is wrapped in the try so a shipping refusal PROPAGATES
+    out of it and rolls it back whole, rather than being answered from
+    inside it: a return from inside an atomic block commits whatever the
+    block had already written, and "shipping could not be priced" must
+    never leave a partial order behind (an order with no shipping cost is
+    a free shipment).
+    """
     try:
         with transaction.atomic():
             # Serialize same-session submissions on the cart row, so the loser
@@ -433,181 +959,37 @@ def create_order(request):
             duplicate = _find_duplicate_pending_order(owner, cart_items, coupon, body)
 
             if duplicate is not None:
-                # Benign double-submit retry, so INFO.
-                logger.info(
-                    "Checkout dedup: order %s replayed for %s "
-                    "(identical pending submission)",
-                    duplicate.id,
-                    duplicate.customer_name,
-                )
+                rejection = _collapse_onto_duplicate(duplicate, idempotency_key, user)
+                if rejection is not None:
+                    return rejection
 
-                # Scoped by owner and ``_same_purchase``: identity, shipping,
-                # delivery option, cart and coupon all agree inside the window.
-                return _checkout_response(duplicate, status.HTTP_200_OK)
+            rejection = _replay_by_key(user, owner, idempotency_key)
+            if rejection is not None:
+                return rejection
 
-            # Key replay: lock the user row so concurrent keyed writers
-            # serialize; the (user, idempotency_key) constraint stays final.
-            if idempotency_key is not None:
-                User.objects.select_for_update().get(pk=user.pk)
-
-                replay = (
-                    Order.objects.filter(**owner, idempotency_key=idempotency_key)
-                    .prefetch_related("items")
-                    .first()
-                )
-
-                if replay is not None:
-                    # An authenticated (user, key) pair is strong enough to
-                    # collapse regardless of payload drift.
-                    logger.info(
-                        "Checkout idempotency: order %s replayed for %s "
-                        "(Idempotency-Key)",
-                        replay.id,
-                        replay.customer_name,
-                    )
-
-                    return _checkout_response(replay, status.HTTP_200_OK)
-
-            # Price delivery after the collapse guards, inside the atomic block;
-            # clients name an option only, and lock=True keeps a staff edit out.
-            shipping_quote = quote_shipping(
-                region=body.get("state"),
-                postal_code=body.get("pincode"),
-                merchandise_total=merchandise_total,
-                method_code=_requested_shipping_code(body),
-                lock=True,
+            shipping = _price_delivery(
+                user, body, cart_items, coupon, merchandise_total
             )
 
-            # A None quote means no shipping configured at all, recorded as an
-            # honest 0.00 rather than a zero rate.
-            shipping_amount = (
-                shipping_quote.amount if shipping_quote is not None else Decimal("0.00")
+            order = _create_order_row(
+                user, guest_email, body, coupon, discount_amount, shipping
             )
-            # Either waiver zeroes the one order-level charge (both equals one);
-            # the quote still ran, so an unserviceable destination is refused.
-            free_delivery = any(item.product.free_shipping for item in cart_items) or (
-                coupon is not None and coupon.discount_type == Coupon.FREE_SHIPPING
-            )
-            if free_delivery:
-                shipping_amount = Decimal("0.00")
-            shipping_method_id = (
-                shipping_quote.method_id if shipping_quote is not None else None
-            )
-            # Snapshot the option label beside the FK so the order still names
-            # it after the method row is deleted; empty only when unconfigured.
-            shipping_method_code = (
-                shipping_quote.method_code if shipping_quote is not None else ""
-            )
-            if shipping_quote is None:
-                # Store has no active shipping method. WARNING because it is
-                # silent revenue; the 201 stands and the amount stays 0.00.
-                logger.warning(
-                    "Checkout priced with NO shipping charge for %s: the store "
-                    "has no active shipping method configured (seed one with "
-                    "`manage.py seed_shipping_methods` to start charging)",
-                    user,
-                )
-            total_amount = quantize_money(merchandise_total + shipping_amount)
-
-            # Minted inside the same atomic block so a rollback never burns a
-            # number; each attempt is a savepoint so a lost race retries cleanly.
-            for attempt in range(ORDER_NUMBER_ATTEMPTS):
-                candidate = _generate_order_number()
-                try:
-                    with transaction.atomic():
-                        order = Order.objects.create(
-                            user=user,
-                            # Account rows carry the empty guest_email (never
-                            # NULL) and no guest_token.
-                            guest_email=guest_email,
-                            full_name=body.get("full_name"),
-                            phone=body.get("phone"),
-                            address=body.get("address"),
-                            city=body.get("city"),
-                            state=body.get("state"),
-                            pincode=body.get("pincode"),
-                            coupon=coupon,
-                            discount_amount=discount_amount,
-                            shipping_method_id=shipping_method_id,
-                            shipping_method_code=shipping_method_code,
-                            shipping_amount=shipping_amount,
-                            total_amount=total_amount,
-                            order_number=candidate,
-                        )
-                except IntegrityError:
-                    # Lost the number race: the savepoint rolled the insert back,
-                    # so the retry starts from committed state.
-                    if attempt == ORDER_NUMBER_ATTEMPTS - 1:
-                        raise
-                    continue
-                break
 
             # Bind the cart to the order in the same transaction so the capture
             # path (even a later webhook with no session) can find and empty it.
             cart.order = order
             cart.save(update_fields=["order"])
 
-            # Creation is the lifecycle's first transition; the audit trail opens
-            # here in the same transaction, so a rollback leaves no event behind.
-            OrderStatusEvent.objects.create(
-                order=order,
-                from_status=None,
-                to_status=order.status,
-                actor=user,
-                trigger=TRIGGER_ORDER_CREATE,
-            )
+            _record_order_status_event(user, order)
 
-            # Bind the key inside this transaction: the probe above proved no
-            # committed order holds it and the user-row lock excludes a rival.
-            if idempotency_key is not None:
-                order.idempotency_key = idempotency_key
-                order.save(update_fields=["idempotency_key"])
+            _bind_order_key(order, idempotency_key)
 
-            # Inventory, coupon usage and cart cleanup happen only after the
-            # payment provider confirms this order.
-
-            for cart_item in cart_items:
-                product = cart_item.product
-                quantity = cart_item.quantity
-
-                price = product.price
-
-                item_subtotal = price * quantity
-
-                OrderItem.objects.create(
-                    order=order,
-                    product=product,
-                    product_name=product.name,
-                    # Freeze catalogue identity: no variant selection exists yet
-                    # and the product carries no SKU, so sku stays empty.
-                    sku="",
-                    variant_name=product.name,
-                    price=price,
-                    quantity=quantity,
-                    subtotal=item_subtotal,
-                )
+            _snapshot_order_items(order, cart_items)
 
             # Mint the checkout's holds in this same block (helper above).
             _mint_order_reservations(order, cart_items, user)
 
-            # Creation trail lands in the same transaction, so a committed order
-            # is never trail-less and a rollback leaves no row.
-            AuditEvent.record(
-                AuditEvent.EventType.ORDER_CREATED,
-                actor=user,
-                order=order,
-                detail={
-                    "order_id": order.id,
-                    "total_amount": str(order.total_amount),
-                    "coupon": coupon.code if coupon else None,
-                    "item_count": len(cart_items),
-                    # The delivery charge is money too, so the trail records it.
-                    "shipping_method": shipping_quote.method_code
-                    if shipping_quote is not None
-                    else None,
-                    "shipping_amount": str(shipping_amount),
-                },
-            )
+            _record_order_trail(user, order, cart_items, coupon, shipping)
 
     except ShippingUnavailable as exc:
         # The transaction rolled back whole: 400 with the reason, never a 500 and
@@ -703,6 +1085,8 @@ def coupon_merchandise_discount(coupon, subtotal):
 
 
 @api_view(["POST"])
+# Public: the coupon is validated against the guest's session cart.
+@permission_classes([AllowAny])
 @throttle_scope("coupon")
 def apply_coupon(request):
 

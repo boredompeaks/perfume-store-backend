@@ -493,8 +493,8 @@ class SeedE2ECleanupTests(CredentialEnvMixin, TestCase):
     def test_cleanup_keeps_the_customer_account_when_it_owns_an_order(self):
         _run()
         customer = User.objects.get(username="customer")
-        # An order the owner placed during the walk is not this command's row; deleting the
-        # account would cascade it away.
+        # An order the owner placed during the walk is not this command's
+        # row; deleting the account while it owns one is refused (PROTECT).
         order = Order.objects.create(
             user=customer,
             full_name="Customer Walk",

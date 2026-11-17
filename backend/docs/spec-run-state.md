@@ -6,6 +6,12 @@ Line references (`path:line`) inside dated entries are historical anchors from
 the tree at that time. The 2026-11-12 repo-wide comment prune shifted source
 lines; locate a current line by the named symbol, not by the old number.
 
+## Latest promotion (2026-10-24)
+
+- PR #50 **MERGED** @ `e77e9ca18e77ea78b91585fd1a5d966baa453724` (hardening batch P0-1, P0-2, P1-1..P1-5; orchestrator-verified: `gh pr view 50` state=MERGED, mergeCommit `e77e9ca`, `origin/feat/add-frontend` tip = `e77e9ca`; `master` unchanged at `27293a5b`). Gate: 3 cycles (c1 CR + missing changelog rows; c2 mypy platform branches + npm lock `undici` edge; c3 green). CI on tip green: postgres x2, lint x2, unit-build x2, gitleaks x2, GitGuardian, publish; post-merge backend-tests, frontend-tests, frontend-deploy, ghcr-publish, secret-scan, deploy all green.
+- Carry-forwards: **BUG-5** `renovate.json` invalid — `packageRules[4]` combines `matchUpdateTypes` and `separateMultipleMajor` (issue #51; Renovate stopped PRs until fixed). **BUG-6** UAT `/srv/perfume-store/.env` carries only `SENTRY_DSN`; `SENTRY_ENVIRONMENT`, `RELEASE_SHA`/`GIT_SHA`, and explicit caps are absent — release-sequence task.
+- Merged tree was measured by the RE at 2538 tests / xf=2 / 99.84% (14403 stmts, 0 missed) on both engines; the auditor Baseline below is unchanged until a BASELINE audit re-measures `e77e9ca`.
+
 ## Standing operating rules (orchestrator — read before every dispatch)
 
 These are rules for the ORCHESTRATOR, not for the agents. They live here
@@ -149,6 +155,12 @@ Deferral policy: gaps whose detailed requirements live in a later spec section a
 Statuses: `PENDING -> IN-COMPLIANCE -> BUILDING -> IN-AUDIT -> BUGS-FOUND -> SHIPPED -> PR-OPENED | ESCALATED | NOT-APPLICABLE`. Max 3 builder→auditor fix cycles per task.
 
 ## Baseline
+
+**MEASURED 2026-11-01 on integration tree `c8cc36c` (current code tree `43cf740`; the delta is ledger-only).** This is the current baseline pair.
+
+- **SQLite: CARRIED, not rerun**, from the verified committed `PRISTINE-01` artifact at `43cf740`: 2538 tests `OK`, 2 expected failures, skipped count not recorded; coverage **99.83%** (14,424 statements, 2 missed, 1,862 branches, 26 partial); test and coverage exit 0.
+- **PostgreSQL: measured now** on `c8cc36c`; `manage.py` confirmed `django.db.backends.postgresql`: 2538 tests `OK` (skipped=4, expected failures=2); coverage **99.83%** (14,424 statements, 2 missed, 1,862 branches, 26 partial); test and coverage exit 0.
+- last-promoted SHA remains **`e77e9ca`** (PR #50); this baseline measurement does not change promotion state.
 
 **MEASURED 2026-10-17 (the two post-CORS auditor SHIP reports — quoted per lane as a pair, per the pairing rule; a merged integration figure is the release-engineer's to measure at the gate).**
 

@@ -4,6 +4,7 @@ from django.conf import settings
 from django.contrib.auth.models import User
 from django.db import models
 from django.db.models import Q, Sum
+from django.utils import timezone
 
 from common.money import quantize_money
 from products.models import products
@@ -96,11 +97,16 @@ class Order(models.Model):
         unique=True,
     )
 
-    # Nullable because a guest checks out without an account; CASCADE stays
-    # right for account orders, and a guest row has no account to cascade from.
+    # [R-1.13] SPEC-1-B04: nullable because a guest checks out without an
+    # account (spec line 74). PROTECT, never CASCADE: an order is a financial
+    # record under docs/retention.md, so erasing the person must deidentify
+    # the account row and keep the order (with its payments and refunds) the
+    # tax and dispute windows require. Deleting an account that owns an order
+    # is refused rather than silently destroying the sale; a guest row has no
+    # account to protect.
     user = models.ForeignKey(
         User,
-        on_delete=models.CASCADE,
+        on_delete=models.PROTECT,
         related_name="orders",
         null=True,
         blank=True,
@@ -305,10 +311,29 @@ class Order(models.Model):
     def refundable_remaining(self):
         """Money still refundable against this order's captured payment.
 
-        The ceiling is ``total_amount``: no Payment model exists, so an order's
-        captured amount IS its total. Quantized on both sides to 2-dp money.
+        The ceiling is ``total_amount``: no Payment model exists in this
+        schema, so an order's captured amount IS its total, and the refund
+        writer only ever runs once ``payment_status`` says the payment was
+        captured. Two deductions, and they are the whole refund vocabulary:
+
+        * ``refunded_total`` - PROCESSED rows, money the provider moved;
+        * ``reserved_total`` - active PENDING reservations, money an
+          in-flight (or crashed, unexpired) gateway call has already
+          promised, which must not be promised a second time.
+
+        A FAILED row deducts nothing (the provider did not move money and
+        its reservation is released), and a PENDING row past
+        ``reserved_until`` deducts nothing either (the reservation lapsed;
+        the row remains forensic). Quantized on both sides, so the balance
+        is a 2-dp money Decimal and never a carry-over of extra decimal
+        places (conventions.md money rule, same as every other amount in
+        this file).
         """
-        return quantize_money(self.total_amount) - Refund.refunded_total(self)
+        return (
+            quantize_money(self.total_amount)
+            - Refund.refunded_total(self)
+            - Refund.reserved_total(self)
+        )
 
 
 class OrderItem(models.Model):
@@ -440,18 +465,53 @@ class OrderStatusEvent(models.Model):
 
 
 class Refund(models.Model):
-    """One refund issued against an order's captured payment.
+    """[R-1.14] One refund attempt against an order's captured payment.
 
-    ``kind`` records the REQUEST (FULL cleared the remaining balance, PARTIAL
-    left some money refundable), never the order's resulting state. ``status``
-    is written twice in one transaction: PENDING while the gateway call is in
-    flight, PROCESSED once the provider returns an id; a failed attempt rolls
-    back and leaves no row.
+    Spec section 1 puts "Payment gateway, refunds, webhooks" in the payments
+    row of the system overview, and the finance operator's job is to
+    "reconcile payments, refunds and financial reports" ([1.31]) - which
+    needs a row per refund: what was returned, why, who returned it and which
+    refund the provider acknowledged.
+
+    ``kind`` records the REQUEST, not the order's resulting state: a refund
+    is FULL when it cleared the order's remaining balance (an omitted amount,
+    or an explicit one equal to what was left) and PARTIAL when it left some
+    money still refundable. The order's payment dimension is the derived
+    answer to "what is left", never a field stored here.
+
+    ``status`` is the reservation vocabulary, and it has exactly three
+    values:
+
+    * PENDING - a COMMITTED reservation. The row is written and committed
+      before the gateway is called, so its amount reserves refundable
+      balance while the provider call is in flight. A process that dies
+      before settling leaves this value behind as forensic evidence; once
+      ``reserved_until`` passes, the reservation stops reducing the balance
+      and ``sweep_refund_reservations`` records the lapse as FAILED
+      ``reservation_expired`` (the row is never deleted).
+    * FAILED - no money moved. ``failure_code`` explains how the attempt
+      failed; the reservation is released (its row deducts nothing) and the
+      row remains as the attempt's trail.
+    * PROCESSED - the provider acknowledged the refund; the money moved.
+
+    ``failure_code`` explains a FAILED row (a definitive provider refusal or
+    an expired reservation); it is NULL for rows that failed before the field
+    existed and for rows that are not FAILED.
+
+    ``reserved_until`` bounds a PENDING reservation. NULL means the
+    reservation is held indefinitely (legacy or never-expire rows).
+    ``reserved_total`` counts those conservatively; new reservations always
+    set an expiry, and settling (FAILED/PROCESSED) clears it.
     """
 
     class Status(models.TextChoices):
         PENDING = "pending", "Pending"
         PROCESSED = "processed", "Processed"
+        FAILED = "failed", "Failed"
+
+    class FailureCode(models.TextChoices):
+        PROVIDER_REFUSED = "provider_refused", "Provider refused"
+        RESERVATION_EXPIRED = "reservation_expired", "Reservation expired"
 
     class Kind(models.TextChoices):
         FULL = "full", "Full"
@@ -471,8 +531,21 @@ class Refund(models.Model):
         default=Status.PENDING,
     )
 
-    # The provider's refund reference, nullable only for the PENDING write;
-    # unique so one gateway refund is never recorded against two rows.
+    # When a PENDING reservation stops reducing the order's refundable
+    # balance. NULL means "held indefinitely": legacy rows, and the
+    # conservative default for any row whose expiry was never recorded.
+    # Cleared on the FAILED/PROCESSED transitions, so only active
+    # reservations occupy this index.
+    reserved_until = models.DateTimeField(null=True, blank=True)
+
+    # Why a FAILED row failed. NULL for rows that failed before this field
+    # existed (and for rows that are not FAILED), so an operator can tell a
+    # definitive provider refusal from a swept expired reservation.
+    failure_code = models.CharField(max_length=32, blank=True, null=True)
+
+    # The provider's own refund reference, nullable only for the in-flight
+    # PENDING write above and unique so one gateway refund can never be
+    # recorded against two rows (the reconciliation join key).
     gateway_refund_id = models.CharField(
         max_length=100,
         blank=True,
@@ -516,14 +589,25 @@ class Refund(models.Model):
                 name="orders_refund_order_idem_uidx",
             ),
         ]
+        indexes = [
+            # Serves the reservation-aware balance read. Named to fit
+            # Django's 30-character cross-database cap (the ticket's
+            # ``..._until_idx`` spelling is 32 and fails models.E034).
+            models.Index(
+                fields=["reserved_until"],
+                name="orders_refund_reserved_until",
+            ),
+        ]
 
     @classmethod
     def refunded_total(cls, order):
         """Money already refunded against ``order``, quantized to 2 dp.
 
-        Only PROCESSED rows count: a PENDING row is an attempt not yet
-        settled, and a failed attempt left no row, so this is the money the
-        provider has actually moved.
+        Only PROCESSED rows count: the provider acknowledged those refunds,
+        so this is exactly the money that moved. PENDING is a reservation,
+        not money moved, and is accounted for separately by
+        :meth:`reserved_total`; FAILED deducts nothing because its
+        reservation was released and no money moved.
         """
         total = cls.objects.filter(
             order=order,
@@ -531,14 +615,47 @@ class Refund(models.Model):
         ).aggregate(total=Sum("amount"))["total"]
         return quantize_money(total if total is not None else Decimal("0.00"))
 
+    @classmethod
+    def reserved_total(cls, order):
+        """Money held by active PENDING reservations against ``order``.
+
+        A reservation counts while it has no expiry (NULL = held
+        indefinitely, the conservative legacy default) or while its expiry
+        is still in the future. A lapsed PENDING row stops reducing the
+        balance and is settled FAILED by
+        ``sweep_refund_reservations``; it is never deleted, so it remains
+        as forensic evidence while its promise no longer competes for the
+        order's money.
+        """
+        now = timezone.now()
+        total = (
+            cls.objects.filter(
+                order=order,
+                status=cls.Status.PENDING,
+            )
+            .filter(Q(reserved_until__isnull=True) | Q(reserved_until__gt=now))
+            .aggregate(total=Sum("amount"))["total"]
+        )
+        return quantize_money(total if total is not None else Decimal("0.00"))
+
     def __str__(self):
         return f"Refund #{self.pk} {self.amount} ({self.kind})"
 
 
-# A customer request is a different lifecycle from Refund, deliberately a
-# separate table: a Refund PENDING row means the gateway call is in flight,
-# while a pending request means staff have not decided yet. Loading both onto
-# one row would let a request masquerade as money already moving.
+# ==================================
+# [SPEC-E-01] the customer refund-request lifecycle
+# ==================================
+#
+# A customer request is a different lifecycle from ``Refund`` above, and it is
+# deliberately a separate table rather than a new status on that one. A
+# ``Refund`` PENDING row is the first phase of the two-phase writer: a
+# reservation committed before the gateway call, which then runs outside any
+# transaction before settlement in its own atomic block. A customer request
+# pending means "the customer asked and a staff member has not decided yet".
+# Loading both meanings onto one row would make the refund writer's
+# concurrency authority ambiguous and would let a request masquerade as money
+# already moving. Approval is E-02, which is the only seam allowed to call the
+# gateway and write a ``Refund``.
 
 
 class RefundRequestStatus(models.TextChoices):
