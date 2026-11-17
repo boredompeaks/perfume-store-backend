@@ -9,17 +9,23 @@ remove exactly the demo set; the seed itself is idempotent by recreation
 than refusing or deduping in place.
 """
 
+import re
+from contextlib import contextmanager
 from datetime import timedelta
 from decimal import Decimal
 from io import StringIO
+from unittest import mock
 
+from django.conf import settings
 from django.contrib.auth import authenticate
 from django.contrib.auth.models import Group, User
-from django.core.management import call_command
+from django.core.management import CommandError, call_command
 from django.test import TestCase
 from django.utils import timezone
+from rest_framework.test import APIClient
 
-from common.roles import STAFF_ROLES
+from common.roles import ROLE_SUPPORT, STAFF_ROLES
+from orders.management.commands import seed_demo
 from orders.models import Coupon, Order, OrderItem
 from products.models import StockMovement, products
 
@@ -48,6 +54,29 @@ def _run(*argv):
     out = StringIO()
     call_command("seed_demo", *argv, stdout=out)
     return out.getvalue()
+
+
+def _seed_demo_help():
+    parser = seed_demo.Command().create_parser("manage.py", "seed_demo")
+    return parser.format_help()
+
+
+def _create_paid_order(user, total_amount):
+    """The shared paid-order fixture fields; user and total vary per test."""
+    # task: AUD-20261115-local-001
+    return Order.objects.create(
+        user=user,
+        status="paid",
+        payment_status="paid",
+        fulfilment_status="unfulfilled",
+        total_amount=total_amount,
+        full_name="Real Buyer",
+        phone="1234567890",
+        address="10 Real Street",
+        city="Real City",
+        state="Real State",
+        pincode="111111",
+    )
 
 
 class SeedDemoTests(TestCase):
@@ -144,19 +173,36 @@ class SeedDemoTests(TestCase):
             },
         )
 
+    # The printed credential is now the customer's own generated value.
+    #
+    # The test id is the SPEC-T0 pin, kept so the test set cannot silently
+    # lose it; AUD-20261115-local-001 changed its contract: no shared literal
+    # exists, the value is unique per account, and printing it is opt-in.
     def test_seeded_customer_logs_in_with_the_printed_demo_credential(self):
-        out = _run()
-        # Hand-written literal, NOT the command's own constant (a pin derived
-        # from the constant would agree with a wrong constant from both
-        # sides): the demo credential is what the seed prints for humans to
-        # sign in with, so changing it must be a conscious, pinned update —
-        # and it must stay plainly fake, never password-shaped, or secret
-        # scanners read it as a real credential (GitGuardian incidents
-        # 38269594/38269595).
-        self.assertIn("demo-customer / demo-account", out)
+        self.assertIn("--print-credentials", _seed_demo_help())
+        out = _run("--print-credentials")
+        self.assertNotIn("demo-account", out)
+        credentials = dict(re.findall(r"^\s+(demo-\S+) / (\S+)$", out, re.MULTILINE))
+        self.assertEqual(set(credentials), STAFF_USERNAMES | {CUSTOMER_USERNAME})
+        self.assertEqual(len(set(credentials.values())), len(credentials))
         self.assertIsNotNone(
-            authenticate(username="demo-customer", password="demo-account")
+            authenticate(
+                username=CUSTOMER_USERNAME,
+                password=credentials[CUSTOMER_USERNAME],
+            )
         )
+
+    def test_default_run_exposes_no_credential_and_the_old_default_is_dead(self):
+        out = _run()
+        # The shared literal was the finding: one published value opened every
+        # seeded account. It must neither be printed nor authenticate anyone.
+        self.assertNotIn("demo-account", out)
+        self.assertNotIn(f"{CUSTOMER_USERNAME} / ", out)
+        for username in STAFF_USERNAMES | {CUSTOMER_USERNAME}:
+            with self.subTest(username=username):
+                self.assertIsNone(
+                    authenticate(username=username, password="demo-account")
+                )
 
 
 class SeedDemoCleanupTests(TestCase):
@@ -208,19 +254,7 @@ class SeedDemoCleanupTests(TestCase):
             valid_from=timezone.now() - timedelta(days=1),
             valid_until=timezone.now() + timedelta(days=30),
         )
-        foreign_order = Order.objects.create(
-            user=foreign_user,
-            status="paid",
-            payment_status="paid",
-            fulfilment_status="unfulfilled",
-            total_amount=Decimal("899.00"),
-            full_name="Real Buyer",
-            phone="1234567890",
-            address="10 Real Street",
-            city="Real City",
-            state="Real State",
-            pincode="111111",
-        )
+        foreign_order = _create_paid_order(foreign_user, Decimal("899.00"))
         foreign_movement = StockMovement.objects.create(
             product=foreign_product,
             delta=7,
@@ -324,3 +358,81 @@ class SeedDemoCleanupTests(TestCase):
         self.assertEqual(products.objects.count(), 0)
         self.assertEqual(Coupon.objects.count(), 0)
         self.assertEqual(Order.objects.count(), 0)
+
+
+@contextmanager
+def _production_shaped_database():
+    """A DEBUG=false boot pointed at a remote database: the guard's refusal case."""
+    with (
+        mock.patch.dict(
+            settings.DATABASES["default"],
+            {
+                "ENGINE": "django.db.backends.postgresql",
+                "HOST": "database-1.cluster.example.rds.amazonaws.com",
+            },
+        ),
+        mock.patch.object(settings, "DEBUG", False),
+    ):
+        yield
+
+
+class SeedDemoEnvironmentGuardTests(TestCase):
+    """A production-shaped environment gets no demo rows, cleanup included."""
+
+    def test_refuses_a_production_shaped_database_and_writes_nothing(self):
+        with _production_shaped_database():
+            with self.assertRaisesMessage(CommandError, "[seed_demo] refused"):
+                _run()
+        self.assertEqual(User.objects.count(), 0)
+        self.assertEqual(products.objects.count(), 0)
+
+    def test_refuses_a_production_deployment_even_with_a_local_database(self):
+        with mock.patch.object(settings, "DJANGO_ENV", "production"):
+            with self.assertRaisesMessage(CommandError, "not a test/demo environment"):
+                _run()
+        self.assertEqual(User.objects.count(), 0)
+
+    def test_cleanup_obeys_the_same_guard(self):
+        _run()
+        self.assertTrue(User.objects.filter(username="demo-support").exists())
+        with _production_shaped_database():
+            with self.assertRaisesMessage(CommandError, "[seed_demo] refused"):
+                _run("--cleanup")
+        self.assertTrue(User.objects.filter(username="demo-support").exists())
+
+
+class SeedDemoOrderBookBoundaryTests(TestCase):
+    """The refused seed leaves no staff identity that can read the order book."""
+
+    def test_refused_production_seed_cannot_reach_the_order_book(self):
+        buyer = User.objects.create_user("real-buyer", "buyer@example.com", "fixture")
+        _create_paid_order(buyer, Decimal("499.00"))
+        with _production_shaped_database():
+            with self.assertRaisesMessage(CommandError, "[seed_demo] refused"):
+                _run()
+
+        # No demo identity exists, so the published shared value authenticates
+        # nobody and no seeded staff token can be minted.
+        self.assertIsNone(
+            authenticate(username="demo-support", password="demo-account")
+        )
+        client = APIClient()
+        login = client.post(
+            "/api/accounts/login/",
+            {"username": "demo-support", "password": "demo-account"},
+        )
+        self.assertIn(login.status_code, (400, 401))
+
+        # The book stays closed to anonymous and unprovisioned callers...
+        self.assertIn(client.get("/api/admin/orders/").status_code, (401, 403))
+        client.force_authenticate(buyer)
+        self.assertIn(client.get("/api/admin/orders/").status_code, (401, 403))
+
+        # ...and only an individually provisioned role identity opens it, so
+        # the fix did not narrow the existing orders.read gate.
+        support = User.objects.create_user(
+            "real-support", "support@example.com", "fixture"
+        )
+        support.groups.add(Group.objects.get_or_create(name=ROLE_SUPPORT)[0])
+        client.force_authenticate(support)
+        self.assertEqual(client.get("/api/admin/orders/").status_code, 200)

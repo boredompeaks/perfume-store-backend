@@ -67,10 +67,9 @@
       "addLabels": ["needs-pip-compile"]
     },
     {
-      "description": "MAJOR updates: never grouped (separateMultipleMajor keeps one PR per dependency), never automerged, labelled so they are triaged as migrations rather than chores. This rule is last so it also removes majors from the ecosystem groups above.",
+      "description": "MAJOR updates: never grouped (groupName null, so each dependency keeps its own PR), never automerged, labelled so they are triaged as migrations rather than chores. This rule is last so it also removes majors from the ecosystem groups above.",
       "matchUpdateTypes": ["major"],
       "groupName": null,
-      "separateMultipleMajor": true,
       "automerge": false,
       "addLabels": ["major"]
     }

@@ -49,6 +49,7 @@ logger = logging.getLogger("ops.alerts")
 LOW_STOCK = "low_stock"
 OUT_OF_STOCK = "out_of_stock"
 PAYMENT_FAILURE_SPIKE = "payment_failure_spike"
+PAYMENT_RECONCILIATION = "payment_reconciliation"
 SECURITY_ALERT = "security_alert"
 INTEGRATION_OUTAGE = "integration_outage"
 BACKGROUND_JOB_FAILURE = "background_job_failure"
@@ -89,11 +90,16 @@ def _in_cooldown(alert_key):
     return False
 
 
-def _send(alert_key, context, subject):
+def _send(alert_key, context, subject, cooldown_key=None):
     """One cooldown-checked send through the single email path.
 
     Returns True when a mail actually left (test/observability seam);
     suppressed and failed sends both return False.
+
+    ``cooldown_key`` separates the template identity from the dedup identity.
+    It exists for alert families whose classes must each get one mail in the
+    same run (payment reconciliation): same template, one cooldown per class,
+    so a second class is not silenced by the first.
     """
     sent = False
     try:
@@ -101,8 +107,9 @@ def _send(alert_key, context, subject):
         # try as the send, so a raisable cache backend degrades to an
         # attempted (worst case un-deduped) mail, never a 500 in the
         # dashboard/health flow that tripped the alert.
-        if _in_cooldown(alert_key):
-            logger.info("alert %s suppressed (cooldown)", alert_key)
+        effective_key = cooldown_key or alert_key
+        if _in_cooldown(effective_key):
+            logger.info("alert %s suppressed (cooldown)", effective_key)
             return False
         for recipient in _recipients():
             # Per-recipient isolation: one failing mailbox must not abandon
@@ -207,6 +214,39 @@ def notify_payment_failure_spike(recent):
             "failure_lines": _failure_rows(recent),
         },
         "Payment failure spike alert",
+    )
+
+
+def notify_payment_reconciliation(
+    divergence_class, label, window_start, window_end, lines
+):
+    """Payment reconciliation divergence, one alert per class.
+
+    Trigger site: ``manage.py reconcile_payments`` (NEW-P1-1a), the read-only
+    sweep that compares local captures and refunds with the gateway. The class
+    is part of the cooldown identity rather than only the body: one run can
+    find several classes at once and each is its own operator problem, while a
+    rerun of the same class inside the cooldown stays suppressed - the sweep is
+    meant to be scheduled, and the same unresolved divergence should not email
+    on every tick.
+
+    ``lines`` are the already-rendered divergence rows; the command owns
+    detection and this function only decides whether and where a mail goes.
+    """
+    if not lines or not _recipients():
+        return False
+    return _send(
+        PAYMENT_RECONCILIATION,
+        {
+            "divergence_class": divergence_class,
+            "label": label,
+            "window_start": window_start,
+            "window_end": window_end,
+            "count": len(lines),
+            "lines": lines,
+        },
+        f"Payment reconciliation divergence: {label}",
+        cooldown_key=f"{PAYMENT_RECONCILIATION}:{divergence_class}",
     )
 
 

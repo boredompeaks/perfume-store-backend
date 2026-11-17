@@ -110,6 +110,31 @@ jobs:
       # so actionlint is the only oracle for the class, and it is what a
       # reviewer should run before pushing any workflow change here.
     steps:
+      # The sandbox directory must EXIST before any step that names it as its
+      # `working-directory`, because GitHub resolves that path when it launches
+      # the step's shell: a missing directory fails with
+      # "An error occurred trying to start process '/usr/bin/bash' with working
+      # directory '...': No such file or directory" and the script never runs.
+      # No in-script guard can repair that, so the creation cannot be guarded by
+      # a condition either -- it is the FIRST step and it is `always()`.
+      #
+      # It is deliberately NOT gated on `changed == '1'`. The step that copies
+      # backend/ into the sandbox is correctly skipped when no target file
+      # changed, but the `if: always()` summary step still declares this path as
+      # its working directory, and skipping the only creator of that path is
+      # exactly what killed run 41448110345 (2026-11-02): the job died at
+      # "start process" with no report and no score. `always()` also means a
+      # failed checkout or a failed changed-files check cannot leave the path
+      # missing on the way to the summary.
+      - name: Create the mutation sandbox directory
+        if: always()
+        env:
+          SANDBOX: ${{ runner.temp }}/mutation-sandbox
+        run: |
+          set -euo pipefail
+          mkdir -p "${SANDBOX}"
+          echo "sandbox ready: ${SANDBOX} ($(ls -A "${SANDBOX}" | wc -l) entries)"
+
       # SPEC-22-11: full commit SHA, tag in a trailing comment. Never widen a
       # pin back to a tag. These are the same three SHAs backend-tests.yml
       # already pins, so there is exactly one set of action pins in this repo.
@@ -182,6 +207,11 @@ jobs:
       # mutations/ and html/ out of the repository. Copied with the version
       # control directory NOT carried over, so nothing in the sandbox can
       # commit, push or otherwise reach the real tree.
+      #
+      # The `mkdir -p` here is idempotent and does NOT make the first step
+      # redundant: this step is skipped whenever nothing changed, and the
+      # `if: always()` summary that then runs still needs the directory to
+      # exist as its working directory.
       #
       # SANDBOX is declared HERE rather than at job level: `runner.temp` is a
       # legal expression in a step's own `env:` and an illegal one in the job's.

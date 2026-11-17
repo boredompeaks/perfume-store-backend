@@ -1,0 +1,57 @@
+{
+  "kind": "floor",
+  "task": "PRISTINE-12",
+  "tool": "scripts/changelog_figures.py",
+  "measured_at": "2026-11-01T06:31:05+00:00",
+  "pair_complete": true,
+  "engines": [
+    {
+      "engine": "sqlite",
+      "database_url": "sqlite:///db.sqlite3",
+      "commands": [
+        "/usr/local/bin/python -m coverage run manage.py test --verbosity 0",
+        "/usr/local/bin/python -m coverage report"
+      ],
+      "run": {
+        "verdict": "FAILED",
+        "tests": 2538,
+        "failures": 59,
+        "errors": 7,
+        "expected_failures": 2
+      },
+      "coverage": {
+        "statements": 14424,
+        "missed": 17,
+        "coverage_percent": "99.68",
+        "branches": 1862,
+        "partial_branches": 31
+      },
+      "test_exit": 1,
+      "coverage_exit": 0
+    },
+    {
+      "engine": "postgresql",
+      "database_url": "postgresql://test:***@db:5432/test?sslmode=disable",
+      "commands": [
+        "/usr/local/bin/python -m coverage run manage.py test --verbosity 0",
+        "/usr/local/bin/python -m coverage report"
+      ],
+      "run": {
+        "verdict": "FAILED",
+        "tests": 2538,
+        "failures": 59,
+        "errors": 25,
+        "expected_failures": 2
+      },
+      "coverage": {
+        "statements": 14424,
+        "missed": 386,
+        "coverage_percent": "97.29",
+        "branches": 1862,
+        "partial_branches": 43
+      },
+      "test_exit": 1,
+      "coverage_exit": 0
+    }
+  ]
+}

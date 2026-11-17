@@ -1,0 +1,33 @@
+{
+  "kind": "floor",
+  "task": "PRISTINE-01",
+  "tool": "scripts/changelog_figures.py",
+  "measured_at": "2026-10-31T23:52:58+05:30",
+  "pair_complete": false,
+  "engines": [
+    {
+      "engine": "sqlite",
+      "database_url": "sqlite:///db.sqlite3",
+      "commands": [
+        "C:\\Users\\Admin\\AppData\\Local\\Temp\\opencode\\comp-wt\\backend\\venv\\Scripts\\python.exe -m coverage run manage.py test --verbosity 0",
+        "C:\\Users\\Admin\\AppData\\Local\\Temp\\opencode\\comp-wt\\backend\\venv\\Scripts\\python.exe -m coverage report"
+      ],
+      "run": {
+        "verdict": "OK",
+        "tests": 2538,
+        "failures": null,
+        "errors": null,
+        "expected_failures": 2
+      },
+      "coverage": {
+        "statements": 14424,
+        "missed": 2,
+        "coverage_percent": "99.83",
+        "branches": 1862,
+        "partial_branches": 26
+      },
+      "test_exit": 0,
+      "coverage_exit": 0
+    }
+  ]
+}
