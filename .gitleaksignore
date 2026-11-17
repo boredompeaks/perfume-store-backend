@@ -1,0 +1,8 @@
+# 2026-11-17 (release reconcile, PR #92): test fixture, not a credential.
+# idempotency_key="gate0-second-2" is the operator action id literal in the
+# GATE-0 refund race regression test (backend/orders/tests_gate0_refund_race.py,
+# introduced by the R4 commit on the spec-comp line). gitleaks' generic-api-key
+# rule matches the keyword+quoted-literal shape; the value names a test case,
+# holds no credential, and is not a provider key. Fingerprint pins only this
+# historical finding (commit:file:rule:line); nothing else is masked.
+87461631c0a83d4a9c7782e1825e6e9fe8d8156c:backend/orders/tests_gate0_refund_race.py:generic-api-key:105
