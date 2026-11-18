@@ -95,6 +95,17 @@ def _entity(body, name):
     return entity if isinstance(entity, dict) else {}  # task: T-20261118-001
 
 
+def _currency_matches(order, captured_currency):
+    """True when the captured currency is present and equals the order's.
+
+    A blank code on either side is refused: an empty string is not a currency,
+    and two blanks must never compare equal.
+    """
+    if not captured_currency:
+        return False
+    return captured_currency == order.currency
+
+
 def _signature_matches(raw_body, provided):
     """True when ``provided`` is the HMAC-SHA256 hex digest of the raw body.
 
@@ -237,7 +248,7 @@ def _apply_captured(event, body):
             return PaymentEvent.Outcome.REFUSED
 
         # task: T-20261118-001
-        if not captured_currency or captured_currency != order.currency:
+        if not _currency_matches(order, captured_currency):
             # The amount alone does not identify the money: the same numeric
             # total in another currency is a different debt, and a missing
             # code on either side cannot be reconciled. Refused like any other
