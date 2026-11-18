@@ -36,7 +36,7 @@ from ..state import (
 )
 
 # Checkout owns the maintenance gate both write doors share.
-from .checkout import _maintenance_refusal
+from .checkout import _maintenance_gated
 
 logger = logging.getLogger(__name__)
 
@@ -55,13 +55,8 @@ def _object_body(data):
 @api_view(["POST"])
 @permission_classes([IsAuthenticated])
 @throttle_scope("payment")
+@_maintenance_gated
 def create_payment(request):
-
-    # A closed store mints no gateway intent: refuse before the body or the
-    # order is read, so no caller can probe which orders exist.
-    refusal = _maintenance_refusal()
-    if refusal is not None:
-        return refusal
 
     body = _object_body(request.data)
 

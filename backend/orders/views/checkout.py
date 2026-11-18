@@ -7,6 +7,7 @@ import logging
 import secrets
 from datetime import timedelta
 from decimal import Decimal
+from functools import wraps
 
 from django.apps import apps
 from django.conf import settings
@@ -72,6 +73,24 @@ def _maintenance_refusal():
         {"error": "The store is temporarily unavailable for maintenance."},
         status=status.HTTP_503_SERVICE_UNAVAILABLE,
     )
+
+
+def _maintenance_gated(view):
+    """Refuse an authenticated write while the store is in maintenance.
+
+    Wraps the view so the gate runs inside DRF's dispatch. Anonymous callers
+    are skipped: checkout's uniform guest refusal must stay their first answer.
+    """
+
+    @wraps(view)
+    def guarded(request, *args, **kwargs):
+        if request.user.is_authenticated:
+            refusal = _maintenance_refusal()
+            if refusal is not None:
+                return refusal
+        return view(request, *args, **kwargs)
+
+    return guarded
 
 
 class _CouponUsageUnavailable(Exception):
@@ -927,18 +946,13 @@ def _record_order_trail(user, order, cart_items, coupon, shipping):
 # Public mutating endpoint sharing the cart budget: checkout is the terminal
 # mutation of that same session-cart funnel.
 @throttle_scope("cart")
+@_maintenance_gated
 def create_order(request):
 
     # FIRST line of the body: every anonymous submission gets the one uniform
     # refusal, before any input is read.
     if not request.user.is_authenticated:
         return _guest_checkout_refused()
-
-    # A closed store takes no orders: refuse before the body, the cart, or any
-    # row is read, so nothing can be written for this submission.
-    refusal = _maintenance_refusal()
-    if refusal is not None:
-        return refusal
 
     # Same key means the SAME submission; the atomic block dedupes on (user, key).
     # Blank means no key, since an empty value carries no submission identity.
