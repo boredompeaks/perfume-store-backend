@@ -25,11 +25,11 @@ from common.models import AuditEvent, NotificationOutbox
 logger = logging.getLogger("common.notifications")
 
 
-def send_email(template_name, context, subject, recipient):
+def send_email(template_name, context, subject, recipient, *, reference=None):
     """Render ``emails/<template_name>.txt`` and send it to one recipient.
 
-    The single send path, with the sender always from settings. Raises on failure;
-    ``dispatch`` wraps it for sends that must never break a transaction.
+    The single send path (task: T-20261118-009), with the sender always from settings.
+    Raises on failure; ``dispatch`` wraps it for sends that must never break a transaction.
     """
     message = render_to_string(f"emails/{template_name}.txt", context)
     send_mail(
@@ -39,11 +39,11 @@ def send_email(template_name, context, subject, recipient):
         [recipient],
         fail_silently=False,
     )
-    logger.info("email sent template=%s to=%s", template_name, recipient)
+    logger.info("email sent template=%s reference=%s", template_name, reference)
 
 
 def _notify_order_paid(context):
-    """order.paid -> order-confirmation email."""
+    """order.paid -> order-confirmation email (task: T-20261118-009)."""
     order = context.get("order")
     if order is None:
         # A call-site bug, not a send failure: warn and keep the caller alive.
@@ -56,9 +56,9 @@ def _notify_order_paid(context):
             "frontend_url": settings.FRONTEND_URL,
         },
         f"Your Perfume Store order #{order.id} is confirmed",
-        # The account email or the guest address captured at checkout; reading
-        # ``order.user.email`` would raise on guest orders.
+        # Account email or guest address; ``order.user.email`` raises on guests.
         order.recipient,
+        reference=order.pk,
     )
 
 

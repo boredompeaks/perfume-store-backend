@@ -7,7 +7,9 @@ import logging
 import secrets
 from datetime import timedelta
 from decimal import Decimal
+from functools import wraps
 
+from django.apps import apps
 from django.conf import settings
 from django.contrib.auth.models import User
 from django.db import IntegrityError, transaction
@@ -37,6 +39,66 @@ from ..serializers import CouponPreviewSerializer, OrderSerializer, money_string
 from ..state import TRIGGER_ORDER_CREATE
 
 logger = logging.getLogger(__name__)
+
+
+def _maintenance_active():
+    """Whether the operator has put the store into maintenance.
+
+    # task: T-20261118-006
+    Read on every call, never cached, so clearing the flag takes effect on the
+    next request without a restart. The ops model is resolved through the app
+    registry because the layer graph admits ``ops -> orders`` but not the
+    reverse, and this read must not add a static edge. ``SiteSettings.load()``
+    is deliberately not used: its ``get_or_create`` writes the singleton on a
+    store that has never saved settings, and this gate runs before any write.
+    """
+    site_settings = apps.get_model("ops", "SiteSettings")
+    return bool(
+        site_settings.objects.filter(pk=1)
+        .values_list("maintenance_mode", flat=True)
+        .first()
+    )
+
+
+def _maintenance_refusal():
+    """The one refusal both write doors answer while maintenance is on.
+
+    Constant and input-independent: a caller cannot distinguish an existing
+    order from a missing one, or a valid submission from an invalid one,
+    through the maintenance response.
+    """
+    if not _maintenance_active():
+        return None
+    return Response(
+        {"error": "The store is temporarily unavailable for maintenance."},
+        status=status.HTTP_503_SERVICE_UNAVAILABLE,
+    )
+
+
+def _maintenance_gated(view):
+    """Refuse an authenticated write while the store is in maintenance.
+
+    Wraps the view so the gate runs inside DRF's dispatch. Anonymous callers
+    are skipped: checkout's uniform guest refusal must stay their first answer.
+    """
+
+    @wraps(view)
+    def guarded(request, *args, **kwargs):
+        if request.user.is_authenticated:
+            refusal = _maintenance_refusal()
+            if refusal is not None:
+                return refusal
+        return view(request, *args, **kwargs)
+
+    return guarded
+
+
+class _CouponUsageUnavailable(Exception):
+    """No coupon usage slot remains for the order being created."""
+
+    def __init__(self):
+        super().__init__("This coupon has reached its usage limit")
+
 
 # Cap mirrors the Order.idempotency_key column width, so an oversized value is a
 # 400 here instead of a database error at insert time.
@@ -498,6 +560,40 @@ def _resolve_checkout_coupon(body, cart, subtotal_amount):
     return _load_checkout_coupon(coupon_code, subtotal_amount)
 
 
+def _reserve_coupon(coupon, order):
+    """Hold one usage slot for ``order`` before it can reach capture.
+
+    # task: T-20261118-002
+    ``_load_checkout_coupon`` reads ``used_count`` without a lock, so two
+    submissions can both see the last slot free. The Coupon row is the
+    serialization point: lock it after the order row this transaction just
+    inserted (the writers' Order -> Coupon order) and count the orders that
+    still hold the coupon. Those rows ARE the reservations, so a rollback
+    releases the slot without restoring a counter, and ``used_count`` stays
+    the capture-time record of redemptions that the audit path reads.
+    """
+    if coupon is None:
+        return
+
+    Order.objects.select_for_update().get(pk=order.pk)
+    locked_coupon = Coupon.objects.select_for_update().get(pk=coupon.pk)
+
+    if locked_coupon.usage_limit is None:
+        return
+
+    held_by_other_orders = (
+        Order.objects.filter(coupon_id=locked_coupon.pk)
+        .exclude(pk=order.pk)
+        .exclude(status="cancelled")
+        .count()
+    )
+    if (
+        held_by_other_orders >= locked_coupon.usage_limit
+        or locked_coupon.used_count >= locked_coupon.usage_limit
+    ):
+        raise _CouponUsageUnavailable
+
+
 def _collapse_onto_duplicate(duplicate, idempotency_key, user):
     """The 200 collapse for a duplicate, and the key adoption it may need.
 
@@ -509,9 +605,8 @@ def _collapse_onto_duplicate(duplicate, idempotency_key, user):
         # spam the log on every impatient re-click (same judgement
         # as verify_payment's already-processed skip).
         logger.info(
-            "Checkout dedup: order %s replayed for %s (identical pending submission)",
-            duplicate.id,
-            duplicate.customer_name,
+            "Checkout dedup: order %s replayed (identical pending submission)",
+            duplicate.id,  # task: T-20261118-009: order pk, not customer name
         )
 
         # Scoped by `owner` above AND by `_same_purchase`, so this
@@ -580,9 +675,8 @@ def _replay_by_key(user, owner, idempotency_key):
         # Benign keyed retry, so INFO: same judgement as the dedup
         # guard's collapse log above.
         logger.info(
-            "Checkout idempotency: order %s replayed for %s (Idempotency-Key)",
-            replay.id,
-            replay.customer_name,
+            "Checkout idempotency: order %s replayed (Idempotency-Key)",
+            replay.id,  # task: T-20261118-009: order pk, not customer name
         )
 
         return _checkout_response(replay, status.HTTP_200_OK)
@@ -669,10 +763,10 @@ def _price_delivery(user, body, cart_items, coupon, merchandise_total):
         # makes, and a store that has not configured shipping yet is
         # not broken. `shipping_amount` stays the honest 0.00.
         logger.warning(
-            "Checkout priced with NO shipping charge for %s: the store "
+            "Checkout priced with NO shipping charge for user=%s: the store "
             "has no active shipping method configured (seed one with "
             "`manage.py seed_shipping_methods` to start charging)",
-            user,
+            user.pk,  # task: T-20261118-009: pk, not username
         )
     total_amount = quantize_money(merchandise_total + shipping_amount)
 
@@ -850,6 +944,7 @@ def _record_order_trail(user, order, cart_items, coupon, shipping):
 # Public mutating endpoint sharing the cart budget: checkout is the terminal
 # mutation of that same session-cart funnel.
 @throttle_scope("cart")
+@_maintenance_gated
 def create_order(request):
 
     # FIRST line of the body: every anonymous submission gets the one uniform
@@ -975,6 +1070,8 @@ def _create_order_atomically(
                 user, guest_email, body, coupon, discount_amount, shipping
             )
 
+            _reserve_coupon(coupon, order)
+
             # Bind the cart to the order in the same transaction so the capture
             # path (even a later webhook with no session) can find and empty it.
             cart.order = order
@@ -994,6 +1091,13 @@ def _create_order_atomically(
     except ShippingUnavailable as exc:
         # The transaction rolled back whole: 400 with the reason, never a 500 and
         # never a silent free shipment.
+        return Response(
+            {"error": str(exc)},
+            status=status.HTTP_400_BAD_REQUEST,
+        )
+    except _CouponUsageUnavailable as exc:
+        # The order row is the reservation and it rolled back with the block, so
+        # the loser is refused before any provider intent exists.
         return Response(
             {"error": str(exc)},
             status=status.HTTP_400_BAD_REQUEST,

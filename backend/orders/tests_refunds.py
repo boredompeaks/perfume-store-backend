@@ -572,7 +572,7 @@ class GatewayFailureTests(RefundTestBase):
 
         res = self.refund(order, amount="300.00")
 
-        self.assertEqual(res.status_code, 502, res.data)
+        self.assertEqual(res.status_code, 409, res.data)
         # The attempt is durable and honest: one FAILED row, its reservation
         # released, the payment dimension untouched, no timestamp stamped.
         refund = Refund.objects.get()
@@ -658,13 +658,42 @@ class RefundFailureTaxonomyTests(RefundTestBase):
 
         res = self.refund(order, amount="300.00")
 
-        self.assertEqual(res.status_code, 502, res.data)
+        self.assertEqual(res.status_code, 409, res.data)
         refund = Refund.objects.get()
         self.assertEqual(refund.status, Refund.Status.FAILED)
         self.assertEqual(refund.failure_code, Refund.FailureCode.PROVIDER_REFUSED)
         self.assertIsNone(refund.reserved_until)
         order.refresh_from_db()
         self.assertEqual(order.refundable_remaining, Decimal("900.00"))
+
+    def test_the_refusal_log_record_formats_with_every_logged_field(self):
+        order = self.captured_order()
+        client = self.gateway()
+        client.refund.create.side_effect = razorpay.errors.BadRequestError(
+            "provider refused"
+        )
+
+        try:
+            with self.assertLogs("orders.refunds", level="WARNING") as captured:
+                res = self.refund(order, amount="300.00")
+        except TypeError:
+            self.fail("refund failure log raised TypeError")
+
+        # getMessage() is what a logging handler eventually calls; the base
+        # tree's three-placeholder/four-argument call raises here.
+        record = captured.records[0]
+        try:
+            message = record.getMessage()
+        except TypeError:
+            self.fail("refund failure log raised TypeError")
+
+        self.assertEqual(res.status_code, 409, res.data)
+        refund = Refund.objects.get()
+        self.assertIn("refund gateway refusal", message.lower())
+        self.assertIn(f"refund {refund.pk}", message)
+        self.assertIn(f"order {order.id}", message)
+        self.assertIn("300.00", message)
+        self.assertIn("BadRequestError", message)
 
     def test_a_transport_timeout_is_ambiguous_and_holds_the_reservation(self):
         order = self.captured_order()
@@ -794,7 +823,7 @@ class RefundTwoPhaseTests(RefundTestBase):
 
     These drive the shared writer directly, so what is observed is the
     writer's lifecycle rather than a transport shape; the endpoint's own
-    201/502 responses are pinned by the classes around this one.
+    201/409/502 responses are pinned by the classes around this one.
     """
 
     def test_a_gateway_failure_leaves_exactly_one_pending_row_and_raises(self):
@@ -1064,7 +1093,7 @@ class RefundReplayTests(RefundTestBase):
             format="json",
             HTTP_IDEMPOTENCY_KEY="retry-in-place",
         )
-        self.assertEqual(first.status_code, 502, first.data)
+        self.assertEqual(first.status_code, 409, first.data)
         failed = Refund.objects.get()
         failed_pk = failed.pk
         self.assertEqual(failed.status, Refund.Status.FAILED)
@@ -1104,7 +1133,7 @@ class RefundReplayTests(RefundTestBase):
             format="json",
             HTTP_IDEMPOTENCY_KEY="different-amount",
         )
-        self.assertEqual(first.status_code, 502, first.data)
+        self.assertEqual(first.status_code, 409, first.data)
 
         second = self.client.post(
             self.REFUND_PATH.format(order_id=order.id),

@@ -1,3 +1,5 @@
+from decimal import Decimal
+
 from django.conf import settings
 from django.test import tag
 from django.utils import timezone
@@ -103,60 +105,54 @@ class CouponRaceTests(ApiTestCase):
             self.api_login(name, client=clients[name])
             self.seed_session_cart([(product, 1)], client=clients[name])
 
-        order_ids = {}
-        for name, client in clients.items():
-            res = client.post(
-                "/api/orders/checkout/",
-                self.checkout_payload(coupon_code="ONCE"),
-                format="json",
-            )
-            self.assertEqual(res.status_code, 201, res.data)
-            self.assertEqual(res.data["total_amount"], "100.00")
-            order_ids[name] = res.data["id"]
+        first = clients["alice"].post(
+            "/api/orders/checkout/",
+            self.checkout_payload(coupon_code="ONCE"),
+            format="json",
+        )
+        self.assertEqual(first.status_code, 201, first.data)
+        self.assertEqual(first.data["total_amount"], "100.00")
+
+        second = clients["bob"].post(
+            "/api/orders/checkout/",
+            self.checkout_payload(coupon_code="ONCE"),
+            format="json",
+        )
+        self.assertEqual(second.status_code, 400, second.data)
+        self.assertEqual(
+            second.data["error"], "This coupon has reached its usage limit"
+        )
+        self.assertNotIn("id", second.data)
+        self.assertFalse(Order.objects.filter(user__username="bob").exists())
 
         client_mock = self.razorpay_mock()
-        client_mock.order.create.side_effect = [
-            {"id": "order_CPN1"},
-            {"id": "order_CPN2"},
-        ]
-        for name, client in clients.items():
-            res = client.post(
-                "/api/orders/payment/", {"order_id": order_ids[name]}, format="json"
-            )
-            self.assertEqual(res.status_code, 200, res.data)
+        client_mock.order.create.return_value = {"id": "order_CPN1"}
+        intent = clients["alice"].post(
+            "/api/orders/payment/", {"order_id": first.data["id"]}, format="json"
+        )
+        self.assertEqual(intent.status_code, 200, intent.data)
 
-        first = clients["alice"].post(
+        verified = clients["alice"].post(
             "/api/orders/payment/verify/",
             {
-                "order_id": order_ids["alice"],
+                "order_id": first.data["id"],
                 "razorpay_order_id": "order_CPN1",
                 "razorpay_payment_id": "pay_CPN1",
                 "razorpay_signature": "sig",
             },
             format="json",
         )
-        self.assertEqual(first.status_code, 200, first.data)
-
-        second = clients["bob"].post(
-            "/api/orders/payment/verify/",
-            {
-                "order_id": order_ids["bob"],
-                "razorpay_order_id": "order_CPN2",
-                "razorpay_payment_id": "pay_CPN2",
-                "razorpay_signature": "sig",
-            },
-            format="json",
-        )
-        self.assertEqual(second.status_code, 409, second.data)
-        self.assertEqual(second.data["error"], "The coupon is no longer valid")
+        self.assertEqual(verified.status_code, 200, verified.data)
 
         coupon.refresh_from_db()
         self.assertEqual(coupon.used_count, 1)
-        statuses = {
-            row["id"]: row["status"] for row in Order.objects.values("id", "status")
-        }
-        self.assertEqual(statuses[order_ids["alice"]], "confirmed")
-        self.assertEqual(statuses[order_ids["bob"]], "pending")
+        self.assertEqual(Order.objects.count(), 1)
+        self.assertEqual(Order.objects.filter(coupon=coupon).count(), 1)
+        order = Order.objects.get(id=first.data["id"])
+        self.assertEqual(order.status, "confirmed")
+        self.assertEqual(order.payment_status, "captured")
+        self.assertEqual(order.discount_amount, Decimal("100.00"))
+        self.assertEqual(order.total_amount, Decimal("100.00"))
         product.refresh_from_db()
         self.assertEqual(product.stock, 4)
 

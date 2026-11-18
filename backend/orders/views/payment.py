@@ -35,6 +35,9 @@ from ..state import (
     payment_transition_allowed,
 )
 
+# Checkout owns the maintenance gate both write doors share.
+from .checkout import _maintenance_gated
+
 logger = logging.getLogger(__name__)
 
 # The unique constraint on razorpay_order_id is the concurrency authority; the
@@ -52,6 +55,7 @@ def _object_body(data):
 @api_view(["POST"])
 @permission_classes([IsAuthenticated])
 @throttle_scope("payment")
+@_maintenance_gated
 def create_payment(request):
 
     body = _object_body(request.data)
