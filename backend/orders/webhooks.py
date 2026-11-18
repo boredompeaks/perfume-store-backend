@@ -237,11 +237,7 @@ def _apply_captured(event, body):
             return PaymentEvent.Outcome.REFUSED
 
         # task: T-20261118-001
-        if (
-            not captured_currency
-            or not order.currency
-            or captured_currency != order.currency
-        ):
+        if not captured_currency or captured_currency != order.currency:
             # The amount alone does not identify the money: the same numeric
             # total in another currency is a different debt, and a missing
             # code on either side cannot be reconciled. Refused like any other

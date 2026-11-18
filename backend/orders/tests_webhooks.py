@@ -129,11 +129,8 @@ class WebhookTestCase(ApiTestCase):
             order, payment_id=payment_id, amount_minor=amount_minor
         )
         entity = body["payload"]["payment"]["entity"]
-        if currency is None:
-            entity.pop("currency", None)
-        else:
-            entity["currency"] = currency
-            body["payload"]["payment"]["currency"] = currency
+        entity["currency"] = currency
+        body["payload"]["payment"]["currency"] = currency
         body["payload"]["payment"].update(
             {
                 "id": entity["id"],
@@ -665,26 +662,38 @@ class CaptureReconciliationTests(WebhookTestCase):
     def test_capture_with_an_unusable_currency_is_recorded_and_refused(self):
         # Missing or blank on either side cannot be reconciled; a blank order
         # currency would otherwise compare equal to a blank capture currency.
+        missing_order = self.make_pending_order(
+            gateway_order="order_CURRENCY0", username="currency-0"
+        )
+        missing = self.capture_event_both_readers(
+            missing_order, payment_id="pay_CURRENCY0", currency=""
+        )
+        missing["payload"]["payment"].pop("currency", None)
+        missing["payload"]["payment"]["entity"].pop("currency", None)
+
+        blank_order = self.make_pending_order(
+            gateway_order="order_CURRENCY1", username="currency-1"
+        )
+        blank = self.capture_event_both_readers(
+            blank_order, payment_id="pay_CURRENCY1", currency=""
+        )
+
+        empty_order = self.make_pending_order(
+            gateway_order="order_CURRENCY2", username="currency-2"
+        )
+        empty_order.currency = ""
+        empty_order.save(update_fields=["currency"])
+        empty = self.capture_event_both_readers(
+            empty_order, payment_id="pay_CURRENCY2", currency="INR"
+        )
+
         cases = [
-            ("missing capture currency", None, "INR"),
-            ("blank capture currency", "", "INR"),
-            ("missing order currency", "INR", ""),
+            ("missing capture currency", missing_order, missing),
+            ("blank capture currency", blank_order, blank),
+            ("missing order currency", empty_order, empty),
         ]
-
-        for index, (label, currency, order_currency) in enumerate(cases):
+        for index, (label, order, body) in enumerate(cases):
             with self.subTest(label=label):
-                order = self.make_pending_order(
-                    gateway_order=f"order_CURRENCY{index}",
-                    username=f"currency-{index}",
-                )
-                order.currency = order_currency
-                order.save(update_fields=["currency"])
-                body = self.capture_event_both_readers(
-                    order,
-                    payment_id=f"pay_CURRENCY{index}",
-                    currency=currency,
-                )
-
                 response = self.deliver(body, event_id=f"evt_CURRENCY{index}")
 
                 self.assertEqual(response.status_code, 200)
