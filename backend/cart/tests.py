@@ -1,5 +1,3 @@
-"""Cart unit tests - docs/test-gaps.md items 23-29."""
-
 import json
 from datetime import timedelta
 from decimal import Decimal
@@ -26,7 +24,6 @@ from orders.models import Order
 
 @tag("cart")
 class CartLazyCreationTests(ApiTestCase):
-    # 23. GET creates session cart lazily ------------------------------------------------
     def test_get_creates_session_cart_lazily(self):
         self.assertEqual(Cart.objects.count(), 0)
 
@@ -58,7 +55,6 @@ class CartAddItemTests(ApiTestCase):
             format="json",
         )
 
-    # 24. new row created with correct quantity -----------------------------------------
     def test_add_item_creates_row_with_correct_quantity(self):
         res = self._add(2)
 
@@ -69,7 +65,6 @@ class CartAddItemTests(ApiTestCase):
         self.assertEqual(item.quantity, 2)
         self.assertEqual(len(res.data["items"]), 1)
         self.assertEqual(res.data["items"][0]["quantity"], 2)
-        # nested product representation gives the client everything it needs
         self.assertEqual(res.data["items"][0]["product"]["id"], self.product.id)
         self.assertEqual(res.data["items"][0]["product"]["name"], self.product.name)
 
@@ -80,7 +75,6 @@ class CartAddItemTests(ApiTestCase):
         self.assertEqual(res.status_code, 201, res.data)
         self.assertEqual(CartItem.objects.get().quantity, 1)
 
-    # 25. existing row quantity accumulates ------------------------------------------------
     def test_add_same_product_accumulates_quantity(self):
         self.assertEqual(self._add(1).status_code, 201)
         res = self._add(2)
@@ -90,20 +84,19 @@ class CartAddItemTests(ApiTestCase):
         self.assertEqual(CartItem.objects.get().quantity, 3)
         self.assertEqual(res.data["items"][0]["quantity"], 3)
 
-    # 26. quantity > stock -> 400 (new and accumulate paths) ---------------------------------
     def test_overstock_rejected_on_new_row(self):
-        res = self._add(6)  # stock is 5
+        res = self._add(6)
         self.assertEqual(res.status_code, 400, res.data)
         self.assertEqual(res.data["error"], "Not enough stock")
         self.assertEqual(CartItem.objects.count(), 0)
 
     def test_overstock_rejected_on_accumulate(self):
         self.assertEqual(self._add(3).status_code, 201)
-        res = self._add(3)  # 3 + 3 > stock 5
+        res = self._add(3)
 
         self.assertEqual(res.status_code, 400, res.data)
         self.assertEqual(res.data["error"], "Not enough stock")
-        self.assertEqual(CartItem.objects.get().quantity, 3)  # untouched
+        self.assertEqual(CartItem.objects.get().quantity, 3)
 
     def test_add_item_validation_errors(self):
         cases = [
@@ -145,7 +138,6 @@ class CartItemPatchTests(ApiTestCase):
     def _patch(self, payload):
         return self.client.patch(f"/api/cart/{self.item.id}/", payload, format="json")
 
-    # 27. 0/negative/non-numeric -> 400; > stock -> 400 -------------------------------------
     def test_patch_rejects_invalid_quantities(self):
         cases = [
             ({"quantity": 0}, "Quantity must be greater than 0"),
@@ -183,7 +175,6 @@ class CartItemDeleteTests(ApiTestCase):
         self.other = self.make_product(name="Oud Royale", category="Oriental")
         self.seed_session_cart([(self.product, 2), (self.other, 1)])
 
-    # 28. removed; response shape checked (V-09 flip test below) ---------------------------
     def test_delete_removes_only_target_item(self):
         item = CartItem.objects.get(product=self.product)
         res = self.client.delete(f"/api/cart/{item.id}/")
@@ -199,30 +190,20 @@ class CartItemDeleteTests(ApiTestCase):
         self.assertEqual(res.status_code, 404, res.data)
 
     def test_v09_cart_payload_excludes_session_id(self):
-        """V-09/F-15 (Q-S1): an unauthenticated cart payload must expose
-        neither a `session_id` field nor the raw session key anywhere in
-        the body — the client already owns the cookie, so echoing the
-        token back adds nothing but risk. Pinned against the REAL
-        GET /api/cart/ response, never a hand-built payload."""
         res = self.client.get("/api/cart/")
 
         self.assertEqual(res.status_code, 200, res.data)
-        # The real cart-body key set is the canary: a field added later
-        # must land here deliberately, and session_id can never sneak back.
         self.assertEqual(
             set(res.data.keys()),
             {"id", "items", "coupon_code", "created_at", "updated_at"},
         )
-        # The raw session key must not appear ANYWHERE in the serialized
-        # body — not even smuggled inside another value.
         session_key = self.client.session.session_key
-        self.assertTrue(session_key)  # the view minted this session
+        self.assertTrue(session_key)
         self.assertNotIn(session_key, json.dumps(res.data))
 
 
 @tag("cart")
 class CrossSessionIsolationTests(ApiTestCase):
-    # 29. item from another session -> 404 ----------------------------------------------------
     def test_item_from_another_session_is_404(self):
         owner_product = self.make_product()
         self.seed_session_cart([(owner_product, 2)])
@@ -243,7 +224,7 @@ class CrossSessionIsolationTests(ApiTestCase):
         self.assertEqual(res.status_code, 404, res.data)
 
         owned_item.refresh_from_db()
-        self.assertEqual(owned_item.quantity, 2)  # untouched
+        self.assertEqual(owned_item.quantity, 2)
         self.assertEqual(Cart.objects.count(), 2)
 
     def test_item_without_any_session_is_404(self):
@@ -274,10 +255,6 @@ class CrossSessionIsolationTests(ApiTestCase):
 
 @tag("cart")
 class CartThrottleTests(ApiTestCase):
-    """Conventions: every public mutating endpoint gets a throttle scope.
-    Cart add/update/remove share the 'cart' scope; GET is exempt so browsing
-    never consumes the mutation budget."""
-
     def _add(self, product_id):
         return self.client.post(
             "/api/cart/",
@@ -296,10 +273,7 @@ class CartThrottleTests(ApiTestCase):
         self.assertIn("cart", api_settings.DEFAULT_THROTTLE_RATES)
 
     def test_add_and_update_share_the_mutation_budget(self):
-        """Third mutation inside a 2/min budget is 429'd — here the PATCH,
-        proving update is throttled under the same scope. DRF binds
-        THROTTLE_RATES at import, so the rate is patched on the throttle
-        class rather than via override_settings."""
+        """DRF binds THROTTLE_RATES at import, so the rate is patched on the throttle class."""
         product = self.make_product(stock=10)
         rates = dict(api_settings.DEFAULT_THROTTLE_RATES)
         rates["cart"] = "2/min"
@@ -313,7 +287,7 @@ class CartThrottleTests(ApiTestCase):
             )
         self.assertEqual(throttled.status_code, 429, throttled.data)
         item.refresh_from_db()
-        self.assertEqual(item.quantity, 2)  # the throttled PATCH never landed
+        self.assertEqual(item.quantity, 2)
 
     def test_reads_do_not_consume_the_mutation_budget(self):
         product = self.make_product(stock=10)
@@ -322,23 +296,17 @@ class CartThrottleTests(ApiTestCase):
         with mock.patch.object(ScopedRateThrottle, "THROTTLE_RATES", rates):
             cache.clear()
             self.assertEqual(self._add(product.id).status_code, 201)
-            self.assertEqual(self._add(product.id).status_code, 429)  # budget spent
-            # GET stays available even with the mutation bucket exhausted
+            self.assertEqual(self._add(product.id).status_code, 429)
             self.assertEqual(self.client.get("/api/cart/").status_code, 200)
 
 
 @tag("cart")
 class CartCouponStateTests(ApiTestCase):
-    """R-9.3.5/R-9.3.6: POST/DELETE /api/cart/coupon/ manage the coupon as
-    persistent cart state (a nullable FK on Cart), so the applied coupon
-    survives across requests and is re-validated by checkout's pre-existing
-    coupon path when the payload posts no explicit code."""
-
     def setUp(self):
         self.buyer = self.make_user("buyer")
         self.api_login("buyer")
         self.product = self.make_product(price="500.00", stock=10)
-        self.seed_session_cart([(self.product, 2)])  # subtotal 1000.00
+        self.seed_session_cart([(self.product, 2)])
 
     def _apply(self, payload, client=None):
         return (client or self.client).post("/api/cart/coupon/", payload, format="json")
@@ -349,7 +317,6 @@ class CartCouponStateTests(ApiTestCase):
     def _cart(self):
         return Cart.objects.get()
 
-    # -- apply: persistence + serializer exposure ---------------------------
     def test_apply_persists_coupon_on_cart_and_surfaces_code(self):
         coupon = self.make_coupon(code="SAVE10", discount_value="10")
 
@@ -357,8 +324,6 @@ class CartCouponStateTests(ApiTestCase):
 
         self.assertEqual(res.status_code, 200, res.data)
         self.assertEqual(self._cart().coupon_id, coupon.id)
-        # The applied code rides every cart representation so the frontend
-        # can render it without a second lookup (R-9.3.5).
         self.assertEqual(res.data["coupon_code"], "SAVE10")
         self.assertEqual(self.client.get("/api/cart/").data["coupon_code"], "SAVE10")
 
@@ -369,7 +334,7 @@ class CartCouponStateTests(ApiTestCase):
 
         self.assertEqual(res.status_code, 200, res.data)
         self.assertEqual(self._cart().coupon_id, coupon.id)
-        self.assertEqual(res.data["coupon_code"], "SAVE10")  # canonical form
+        self.assertEqual(res.data["coupon_code"], "SAVE10")
 
     def test_apply_replaces_previous_coupon(self):
         first = self.make_coupon(code="SAVE10", discount_value="10")
@@ -381,7 +346,6 @@ class CartCouponStateTests(ApiTestCase):
         self.assertEqual(res.status_code, 200, res.data)
         self.assertEqual(self._cart().coupon_id, second.id)
 
-    # -- apply: rejections (delegated to the shared preview gate, V-11) -----
     def test_apply_rejections_share_the_uniform_envelope(self):
         cases = [
             ("unknown", "SAVE404"),
@@ -411,8 +375,6 @@ class CartCouponStateTests(ApiTestCase):
             with self.subTest(case=name):
                 res = self._apply({"code": code})
                 self.assertEqual(res.status_code, 400, res.data)
-                # One body for every failure reason (SPEC-9-03 envelope on
-                # the preview's uniform rejection): no reason leaks.
                 self.assertEqual(
                     res.data,
                     {
@@ -421,7 +383,7 @@ class CartCouponStateTests(ApiTestCase):
                         "details": {},
                     },
                 )
-        self.assertIsNone(self._cart().coupon_id)  # nothing persisted on rejection
+        self.assertIsNone(self._cart().coupon_id)
 
     def test_apply_without_code_is_rejected(self):
         res = self._apply({})
@@ -432,8 +394,6 @@ class CartCouponStateTests(ApiTestCase):
         self.assertIsNone(self._cart().coupon_id)
 
     def test_apply_without_cart_404s_uniformly(self):
-        """No existence leak: with no cart, a known-valid and an unknown code
-        get the identical 404 (orders.apply_coupon precedent)."""
         self.make_coupon(code="SAVE10", discount_value="10")
         fresh = self.fresh_client()
 
@@ -446,7 +406,6 @@ class CartCouponStateTests(ApiTestCase):
             known.data, {"error": "Cart not found", "code": "not_found", "details": {}}
         )
 
-    # -- remove: idempotent --------------------------------------------------
     def test_remove_clears_the_persisted_coupon(self):
         self.make_coupon(code="SAVE10", discount_value="10")
         self._apply({"code": "SAVE10"})
@@ -458,9 +417,6 @@ class CartCouponStateTests(ApiTestCase):
         self.assertIsNone(res.data["coupon_code"])
 
     def test_remove_without_coupon_applied_is_idempotent(self):
-        """Removing when nothing is applied still succeeds: the caller's end
-        state (no coupon) already holds, so no error and no 404 — the
-        response is the cart-family 200 with the cart body."""
         res = self._remove()
 
         self.assertEqual(res.status_code, 200, res.data)
@@ -474,8 +430,6 @@ class CartCouponStateTests(ApiTestCase):
         self.assertEqual(res.data["error"], "Cart not found")
 
     def test_apply_with_session_but_no_cart_row_404s(self):
-        """A session without a cart row is the same 404 as no session at
-        all: apply never lazily creates a cart to attach a coupon to."""
         self.make_coupon(code="SAVE10", discount_value="10")
         Cart.objects.all().delete()
 
@@ -484,8 +438,6 @@ class CartCouponStateTests(ApiTestCase):
         self.assertEqual(res.status_code, 404, res.data)
         self.assertEqual(res.data["error"], "Cart not found")
 
-    # -- isolation: session-scoped authority (the cart family's permission
-    #    dimension — no token can reach another session's cart state) -------
     def test_another_session_cannot_read_or_clear_my_coupon(self):
         coupon = self.make_coupon(code="SAVE10", discount_value="10")
         self._apply({"code": "SAVE10"})
@@ -494,10 +446,9 @@ class CartCouponStateTests(ApiTestCase):
         res = attacker.delete("/api/cart/coupon/")
 
         self.assertEqual(res.status_code, 404, res.data)
-        self.assertEqual(self._cart().coupon_id, coupon.id)  # untouched
+        self.assertEqual(self._cart().coupon_id, coupon.id)
         self.assertIsNone(attacker.get("/api/cart/").data["coupon_code"])
 
-    # -- throttle: conventions require a scope on public mutating endpoints --
     def test_coupon_endpoints_share_the_cart_mutation_scope(self):
         self.assertEqual(cart_coupon.view_class.throttle_scope, "cart")
         self.assertIn(ScopedRateThrottle, cart_coupon.view_class.throttle_classes)
@@ -514,17 +465,14 @@ class CartCouponStateTests(ApiTestCase):
             throttled = self._remove()
 
         self.assertEqual(throttled.status_code, 429, throttled.data)
-        # the throttled remove never landed
         self.assertIsNotNone(self._cart().coupon_id)
 
-    # -- dual mount (SPEC-9-02): one urlconf serves both route families ------
     def test_legacy_and_v1_mounts_resolve_the_same_view(self):
         legacy = resolve("/api/cart/coupon/")
         versioned = resolve("/api/v1/store/cart/coupon/")
 
         self.assertEqual(legacy.func, versioned.func)
 
-    # -- checkout re-validation composition -----------------------------------
     def test_checkout_uses_the_persisted_coupon_when_no_code_is_posted(self):
         self.make_coupon(code="SAVE10", discount_value="10")
         self._apply({"code": "SAVE10"})
@@ -538,9 +486,6 @@ class CartCouponStateTests(ApiTestCase):
         self.assertEqual(order.total_amount, Decimal("900.00"))
 
     def test_checkout_revalidates_a_coupon_invalidated_after_apply(self):
-        """The persisted reference never bypasses the rules: state changed
-        since apply, so checkout rejects through its pre-existing coupon
-        path instead of silently riding the FK into the order."""
         coupon = self.make_coupon(code="SAVE10", discount_value="10")
         self._apply({"code": "SAVE10"})
         coupon.active = False
@@ -563,8 +508,6 @@ class CartCouponStateTests(ApiTestCase):
         self.assertEqual(Order.objects.get(id=res.data["id"]).coupon.code, "FIVEPC")
 
     def test_deleted_coupon_degrades_gracefully_at_checkout(self):
-        """SET_NULL: deleting the coupon row drops it from the cart instead
-        of stranding checkout with a dangling reference."""
         coupon = self.make_coupon(code="SAVE10", discount_value="10")
         self._apply({"code": "SAVE10"})
 
@@ -580,19 +523,8 @@ class CartCouponStateTests(ApiTestCase):
 
 @tag("cart")
 class NonObjectJsonBodyTests(ApiTestCase):
-    """F7-B1 (T1b red-team, auditor-reproduced): a JSON body that is not an
-    object parses fine in DRF but has no ``.get`` to call, so every cart
-    write must refuse it with the byte-identical 400 envelope that the same
-    endpoint already returns for an object body missing the required keys —
-    never a 500.
+    """Bodies are sent as raw strings: the DRF client's format="json" path treats falsy payloads as no data."""
 
-    Bodies are sent as raw strings because the DRF test client's
-    ``format="json"`` path treats falsy payloads (``[]``, ``{}``, ``0``) as
-    "no data" and would post an empty body instead of the payload under test.
-    """
-
-    # Array, nested array, number, string, null, boolean: every non-object
-    # JSON top level a parser can produce.
     RAW_BODIES = ("[]", "[1,2]", "42", '"hello"', "null", "true")
 
     def setUp(self):
@@ -615,36 +547,27 @@ class NonObjectJsonBodyTests(ApiTestCase):
             with self.subTest(body=body):
                 res = post(body)
                 self.assertEqual(res.status_code, 400, res.data)
-                # Byte-identical wire body, not just an equal status class.
                 self.assertEqual(res.content, expected.content)
                 self.assertEqual(res.data, expected.data)
 
     def test_add_refuses_a_non_object_body_like_an_empty_object(self):
         self._refuse_same_as_empty_object(self._post)
-        self.assertEqual(CartItem.objects.count(), 1)  # cart untouched
+        self.assertEqual(CartItem.objects.count(), 1)
 
     def test_patch_refuses_a_non_object_body_like_an_empty_object(self):
         self._refuse_same_as_empty_object(self._patch)
         self.item.refresh_from_db()
-        self.assertEqual(self.item.quantity, 1)  # quantity untouched
+        self.assertEqual(self.item.quantity, 1)
 
     def test_coupon_apply_refuses_a_non_object_body_like_an_empty_object(self):
         self._refuse_same_as_empty_object(
             lambda body: self._post(body, "/api/cart/coupon/")
         )
-        self.assertIsNone(Cart.objects.get().coupon_id)  # nothing persisted
+        self.assertIsNone(Cart.objects.get().coupon_id)
 
 
 @tag("cart")
 class CartOwnershipTests(ApiTestCase):
-    """D-04a: the cart a request owns follows the credential, not the cookie.
-
-    An authenticated request owns the ACCOUNT cart (one per user); an
-    anonymous one owns its SESSION cart. Nothing may resolve a cart through
-    the other owner's key, and a guest basket must survive unchanged for a
-    visitor who never signs in.
-    """
-
     def setUp(self):
         self.product = self.make_product(stock=10)
         self.buyer = self.make_user("buyer")
@@ -667,8 +590,6 @@ class CartOwnershipTests(ApiTestCase):
         cart = Cart.objects.get(id=res.data["id"])
         self.assertIsNone(cart.user_id)
         self.assertEqual(cart.session_id, self.client.session.session_key)
-        # The test helper resolves the same row for an anonymous client (the
-        # session-key branch), not just the bearer branch used elsewhere.
         self.assertEqual(self.current_cart().id, cart.id)
 
     def test_two_users_never_share_a_cart(self):
@@ -713,17 +634,12 @@ class CartOwnershipTests(ApiTestCase):
         self.assertEqual(Cart.objects.filter(user__isnull=True).count(), 1)
 
     def test_an_account_cart_cannot_reach_a_guest_cart_line(self):
-        # The guest basket is built under this client's session cookie...
         self.seed_session_cart([(self.product, 1)])
         guest_item = CartItem.objects.get()
-        # ...then a bearer for an account is attached WITHOUT posting the
-        # storefront login (which would merge the basket in D-04b). The
-        # request must resolve the account cart, and the guest line is out of
-        # scope for it.
         login_client = self.fresh_client()
         _, token = self.api_login("buyer", client=login_client)
         self.client.credentials(HTTP_AUTHORIZATION=f"Bearer {token}")
-        self.client.get("/api/cart/")  # materialise the account cart
+        self.client.get("/api/cart/")
 
         res = self.client.patch(
             f"/api/cart/{guest_item.id}/", {"quantity": 5}, format="json"

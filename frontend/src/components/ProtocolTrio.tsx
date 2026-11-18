@@ -3,24 +3,8 @@ import type { PyramidTier } from "@/lib/products-api";
 export type { PyramidTier };
 
 /**
- * Wear & care protocol trio (design screen
- * `ther_s_culaire…refined_hero_flow`, block "WEAR GUIDANCE & TECHNICAL
- * PROTOCOLS"): three hairline cards — Application, Longevity & Sillage,
- * Maceration & Care — built U-W15-T18 as the PDP slice T6 deferred.
- *
- * Layout is the screen's; the copy is universal fragrance-knowledge
- * guidance only. The screen's product-specific claims have no field
- * behind them and are removed under P5 (spec §0b.3 placeholder table and
- * §12.D: "tenacity approximately 14–18 hours", the extrait-concentration
- * sentence, "macerated for four months in silence at our Grasse
- * atelier", the 15°C–21°C range). The copy pins in lib/pdp.test.ts
- * enforce that no digit and no em-dash ships in any body string, so a
- * future edit cannot smuggle one of those numbers back in.
- *
- * Static by design: this is reading content, and the page's one accent
- * moment is the story drift on the philosophy figure (P2). Same
- * partition system as the olfactory pyramid — gap-px over the hairline
- * colour draws the card rules; no shadows, no radius, one surface.
+ * Universal fragrance guidance only: product-specific claims have no API
+ * field, and the copy pins forbid digits and em-dashes in any body string.
  */
 const PROTOCOLS = [
   {

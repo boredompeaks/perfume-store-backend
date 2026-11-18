@@ -1,5 +1,3 @@
-"""Ops tests: /health/, /api/settings/, admin dashboard, services."""
-
 import base64
 import tempfile
 from datetime import timedelta
@@ -37,14 +35,7 @@ TINY_PNG = base64.b64decode(
 @tag("ops")
 class HealthEndpointTests(ApiTestCase):
     def test_health_public_body_holds_only_deploy_relevant_checks(self):
-        """Q-S2/F2: the anonymous probe is a liveness contract, not a
-        dashboard. release.sh's `up --wait`, the compose healthcheck and the
-        image HEALTHCHECK all gate on the HTTP status alone, so the body
-        carries only the checks that drive that status plus the pre-launch
-        shipping marker; every business counter and credential-shaped config
-        value moved behind the staff endpoint. Both key sets are pinned
-        EXACTLY, not by the absence of a few names — a future check must not
-        slip onto the public body by default (whitelist, not blacklist)."""
+        """Both key sets are pinned exactly: a future check must not slip onto the public body by default (whitelist, not blacklist)."""
         res = self.client.get("/health/")
         self.assertEqual(res.status_code, 200)
         data = res.json()
@@ -71,8 +62,6 @@ class HealthEndpointTests(ApiTestCase):
                 self.assertNotIn(key, data["checks"])
 
     def test_health_degraded_when_media_root_unwritable(self):
-        """If MEDIA_ROOT cannot be created/written the store can serve product
-        images from uploads -> status must degrade to 503, not stay ok."""
         tmp = Path(tempfile.mkdtemp())
         blocker = tmp / "blocker"
         blocker.write_text("a file, not a directory", encoding="utf-8")
@@ -87,8 +76,6 @@ class HealthEndpointTests(ApiTestCase):
         self.assertTrue(data["checks"]["database"])
 
     def test_health_degraded_when_database_unavailable(self):
-        """If the ORM raises (DB down), /health/ must degrade to 503 without
-        leaking a traceback."""
         from unittest.mock import patch
 
         with patch(
@@ -119,14 +106,6 @@ class HealthEndpointTests(ApiTestCase):
 
 @tag("ops")
 class StaffHealthEndpointTests(ApiTestCase):
-    """Q-S2/F2: the staff-capability twin of the public probe.
-
-    get_health()'s counters and configuration modes were not deleted — they
-    moved behind `reports.read`, the same capability that already gates the
-    dashboard rendering every one of these numbers, so the split discloses
-    nothing new to anyone: a reader of this endpoint could already read the
-    same payload in the dashboard HTML."""
-
     URL = "/api/v1/admin/health/"
 
     @staticmethod
@@ -189,9 +168,6 @@ class StaffHealthEndpointTests(ApiTestCase):
                         self.assertIn(key, data)
 
     def test_health_counts_pending_orders_and_carts(self):
-        """The counts the public body used to leak now live on the staff
-        endpoint: one pending order and two carts are reported there — and
-        only there."""
         from cart.models import Cart
 
         Cart.objects.create(session_id="s1")
@@ -266,14 +242,6 @@ class SettingsEndpointTests(ApiTestCase):
 
 @tag("ops")
 class SiteSettingsIdentityTests(ApiTestCase):
-    """SPEC-16-T2/05 [R-16.3, R-16.15]: merchant-editable store identity and
-    the maintenance flag on the singleton, published on /api/settings/.
-
-    The storefront's consumption of these keys (its env fallback and the
-    maintenance page) is SPEC-16-1's frontend half and SPEC-3-06; this class
-    pins the backend half only: the columns, the defaults, and the payload.
-    """
-
     def test_defaults_for_identity_and_maintenance(self):
         from ops.models import SiteSettings
 
@@ -283,8 +251,6 @@ class SiteSettingsIdentityTests(ApiTestCase):
         self.assertFalse(row.logo)
         self.assertEqual(row.locale, settings.LANGUAGE_CODE)
         self.assertFalse(row.maintenance_mode)
-        # The pre-existing contract is untouched: the raw column stays NULL and
-        # resolves to the published default.
         self.assertIsNone(row.return_window_days)
         self.assertEqual(row.resolved_return_window_days(), 30)
 
@@ -303,8 +269,6 @@ class SiteSettingsIdentityTests(ApiTestCase):
 
         locale = SiteSettings._meta.get_field("locale")
         self.assertIsInstance(locale, models.CharField)
-        # Required: a store always publishes a language, and the admin form is
-        # pre-filled from this default, so the merchant never starts empty.
         self.assertFalse(locale.blank)
         self.assertEqual(locale.default, settings.LANGUAGE_CODE)
 
@@ -395,8 +359,6 @@ class SiteSettingsIdentityTests(ApiTestCase):
         self.assertEqual(data["return_window_days"], 30)
 
     def test_publishing_zero_still_means_returns_closed(self):
-        """The three-state return-window contract is not folded into the new
-        keys: a published 0 is still served as 0, not defaulted."""
         from ops.models import SiteSettings
 
         row = SiteSettings.load()
@@ -445,7 +407,6 @@ class OpsServicesTests(ApiTestCase):
         self.assertEqual(stats["products"], 1)
         self.assertEqual(stats["orders_total"], 5)
         self.assertEqual(stats["orders_by_status"]["pending"], 1)
-        # revenue only counts money actually captured
         expected = sum(
             Decimal(v)
             for s, v in [
@@ -469,15 +430,11 @@ class OpsServicesTests(ApiTestCase):
         self._seed_orders()
         stats = get_stats()
 
-        # paid revenue 250.00 + 10.50 + 5.25 = 265.75 across 3 paid orders;
-        # the unpaid (pending) and cancelled orders must not dilute either side.
         self.assertEqual(stats["revenue"], "265.75")
         self.assertEqual(stats["average_order_value"], "88.58")
         self.assertIsInstance(stats["average_order_value"], str)
 
     def test_get_stats_average_order_value_guards_zero_paid_orders(self):
-        """Division by zero must quantize to 0.00, not crash: an order that is
-        merely created (pending) has captured no money yet."""
         from decimal import Decimal
 
         from orders.models import Order
@@ -503,9 +460,7 @@ class OpsServicesTests(ApiTestCase):
                 self.assertEqual(stats["orders_pending_fulfilment"], 0)
 
     def test_get_stats_pending_fulfilment_counts_paid_unshipped_only(self):
-        """Fulfilment-pending = payment captured but not dispatched yet:
-        only 'confirmed' qualifies — 'pending' is payment-pending, 'shipped' /
-        'delivered' have left the warehouse, 'cancelled' is dead."""
+        """Fulfilment-pending means payment captured but not dispatched: only 'confirmed' qualifies."""
         from ops.services import PENDING_FULFILMENT_STATUS
 
         self.assertEqual(PENDING_FULFILMENT_STATUS, "confirmed")
@@ -513,13 +468,9 @@ class OpsServicesTests(ApiTestCase):
         stats = get_stats()
         self.assertEqual(stats["orders_pending_fulfilment"], 1)
         self.assertEqual(stats["orders_by_status"]["confirmed"], 1)
-        # the old 'pending' (payment-pending) count must stay a separate metric
         self.assertEqual(stats["orders_by_status"]["pending"], 1)
 
     def test_low_stock_threshold_is_env_driven(self):
-        """LOW_STOCK_THRESHOLD comes from settings and is read at call time:
-        overriding it reclassifies products on the very next call, with the
-        configured value echoed back in the payload."""
         from products.models import products as Product
 
         self.make_product(name="Barely There", stock=2)
@@ -540,12 +491,9 @@ class OpsServicesTests(ApiTestCase):
         self.assertEqual(default_run["low_stock_threshold"], 5)
         self.assertEqual(default_run["low_stock"], 2)
         self.assertEqual(tight_run["low_stock_threshold"], 2)
-        # stock 3 is 'low' at the default threshold but not the tighter one
         self.assertEqual(tight_run["low_stock"], 1)
 
     def test_threshold_env_value_is_parsed_with_safe_fallback(self):
-        """settings.py parses LOW_STOCK_THRESHOLD as an int: a malformed env
-        value must fall back to the default instead of crashing startup."""
         import os
         from unittest.mock import patch
 
@@ -559,9 +507,6 @@ class OpsServicesTests(ApiTestCase):
 
 @tag("ops")
 class SalesSeriesTests(ApiTestCase):
-    """get_sales_series: chart data must come from real paid orders only,
-    zero-filled over the whole window, with the window boundary respected."""
-
     def _make_order(self, username, status, amount):
         from orders.models import Order
 
@@ -588,8 +533,6 @@ class SalesSeriesTests(ApiTestCase):
         )
 
     def test_series_covers_every_day_ending_today(self):
-        """An empty store still yields a gapless series: one entry per day
-        for the default 30-day window, ordered oldest -> newest."""
         series = get_sales_series()
         today = timezone.localdate()
 
@@ -603,9 +546,6 @@ class SalesSeriesTests(ApiTestCase):
             self.assertEqual(entry["orders"], 0)
 
     def test_revenue_and_counts_per_day_from_real_paid_orders(self):
-        """Only captured money counts: pending/cancelled never appear, two
-        paid orders on one day sum into that day's revenue, and the window
-        boundary leaves older paid orders out entirely."""
         self._make_order("buy1", "confirmed", "100.00")
         self._make_order("buy2", "shipped", "25.00")
         yesterday = self._make_order("buy3", "delivered", "10.50")
@@ -628,15 +568,12 @@ class SalesSeriesTests(ApiTestCase):
             by_date[today - timedelta(days=1)]["revenue"], Decimal("10.50")
         )
         self.assertEqual(by_date[today - timedelta(days=1)]["orders"], 1)
-        # unpaid, cancelled and out-of-window money appears on no day
         self.assertNotIn(Decimal("999.00"), revenues)
         self.assertNotIn(Decimal("500.00"), revenues)
         self.assertNotIn(Decimal("77.00"), revenues)
         self.assertEqual(sum(entry["orders"] for entry in series), 3)
 
     def test_window_boundary_respected(self):
-        """days=3 covers today plus the two previous calendar days: an order
-        two days back is the oldest in-window day, three days back is out."""
         edge = self._make_order("edgebuyer", "confirmed", "50.00")
         outside = self._make_order("stalebuyer", "confirmed", "60.00")
         self._backdate(edge, 2)
@@ -652,8 +589,6 @@ class SalesSeriesTests(ApiTestCase):
         self.assertEqual(sum(entry["orders"] for entry in series), 1)
 
     def test_zero_fill_for_empty_days_between_busy_days(self):
-        """A day with no paid orders is present with zero revenue — the chart
-        must not skip or compress gap days."""
         first = self._make_order("b1", "confirmed", "20.00")
         second = self._make_order("b2", "confirmed", "30.00")
         self._backdate(first, 5)
@@ -674,16 +609,12 @@ class SalesSeriesTests(ApiTestCase):
         )
 
     def test_window_is_env_tunable_with_explicit_override(self):
-        """The window comes from DASHBOARD_SALES_WINDOW_DAYS at call time
-        (like the low-stock threshold); an explicit argument wins."""
         self.assertEqual(settings.DASHBOARD_SALES_WINDOW_DAYS, 30)
         with override_settings(DASHBOARD_SALES_WINDOW_DAYS=7):
             self.assertEqual(len(get_sales_series()), 7)
         self.assertEqual(len(get_sales_series(days=3)), 3)
 
     def test_nonsense_window_falls_back_to_a_single_day(self):
-        """A malformed/nonsensical env value must not produce an empty or
-        reversed range — the chart degrades to today only."""
         for bad in (0, -5):
             with self.subTest(bad=bad):
                 with override_settings(DASHBOARD_SALES_WINDOW_DAYS=bad):
@@ -694,7 +625,6 @@ class SalesSeriesTests(ApiTestCase):
 class DashboardAccessTests(ApiTestCase):
     def test_dashboard_requires_staff(self):
         res = self.client.get("/admin/dashboard/")
-        # Redirects anonymous users to the admin login.
         self.assertEqual(res.status_code, 302)
         self.assertIn("login", res.headers["Location"])
 
@@ -729,9 +659,6 @@ class DashboardAccessTests(ApiTestCase):
         self.assertContains(res, "dashbuyer")
 
     def test_dashboard_renders_new_kpi_cards(self):
-        """The aggregate Orders card, the AOV card and the pending-fulfilment
-        card render real numbers; the payment-pending metric stays visible and
-        clearly labeled instead of being silently repurposed."""
         from decimal import Decimal
 
         from orders.models import Order
@@ -758,19 +685,15 @@ class DashboardAccessTests(ApiTestCase):
         self.assertEqual(res.status_code, 200)
         self.assertContains(res, "all statuses")
         self.assertEqual(res.context["stats"]["orders_total"], 3)
-        # AOV = paid revenue (100.00 + 25.00) / 2 paid orders
         self.assertContains(res, "Average order value")
         self.assertContains(res, "paid revenue ÷ paid orders")
         self.assertContains(res, "₹62.50")
         self.assertContains(res, "Pending fulfilment")
         self.assertContains(res, "paid, awaiting shipment (confirmed)")
-        # payment-pending remains its own, clearly labeled metric
         self.assertContains(res, "Orders · pending")
         self.assertContains(res, "awaiting payment")
 
     def test_dashboard_survives_orders_with_deleted_users(self):
-        """An order row whose user no longer resolves must render as a dash,
-        not crash the dashboard."""
         from decimal import Decimal
         from unittest.mock import patch
 
@@ -801,8 +724,8 @@ class DashboardAccessTests(ApiTestCase):
 
         with patch.object(User.objects, "get", side_effect=selective_get):
             res = self.client.get("/admin/dashboard/")
-        self.assertEqual(res.status_code, 200)  # no crash; username falls back
-        self.assertContains(res, "42.00")  # the orphaned order is still listed
+        self.assertEqual(res.status_code, 200)
+        self.assertContains(res, "42.00")
 
     def test_dashboard_shows_low_and_out_of_stock(self):
         from products.models import products as Product
@@ -821,8 +744,6 @@ class DashboardAccessTests(ApiTestCase):
         self.assertNotContains(res, healthy.name)
 
     def test_dashboard_low_stock_classification_follows_threshold(self):
-        """The dashboard's low-stock table is driven by the same env-driven
-        threshold as /health/: raising/lowering it moves the boundary."""
         from products.models import products as Product
 
         User.objects.create_superuser("boss", "boss@example.com", "boss-pass-123")
@@ -848,12 +769,9 @@ class DashboardAccessTests(ApiTestCase):
             self.assertEqual(res.status_code, 200)
             self.assertContains(res, "Threshold Edge Two")
             self.assertNotContains(res, "Threshold Edge Three")
-            # the heading reports the threshold actually in force
             self.assertContains(res, "(≤ 2)")
 
     def test_dashboard_recent_orders_context_shape_unchanged(self):
-        """The N+1 fix must not change the rendered context: each recent-orders
-        row keeps the stats keys plus exactly one resolved username."""
         from decimal import Decimal
 
         from orders.models import Order
@@ -884,8 +802,6 @@ class DashboardAccessTests(ApiTestCase):
         self.assertEqual(row["user_id"], buyer.id)
 
     def test_dashboard_resolves_order_users_in_one_query(self):
-        """Regression guard for the N+1: N distinct order customers cost one
-        batched auth_user fetch, not one User.objects.get per order row."""
         from decimal import Decimal
 
         from django.db import connection
@@ -920,8 +836,6 @@ class DashboardAccessTests(ApiTestCase):
         self.assertEqual(len(in_queries), 1, in_queries)
 
     def test_dashboard_survives_user_vanishing_mid_render(self):
-        """A user row that disappears between get_stats() and the batched
-        fetch degrades to the dash placeholder, never a 500."""
         from decimal import Decimal
         from unittest.mock import patch
 
@@ -951,9 +865,6 @@ class DashboardAccessTests(ApiTestCase):
 
 @tag("ops")
 class DashboardSalesChartTests(ApiTestCase):
-    """The "Sales over time" chart renders real order data server-side, per
-    spec §5.1 ("actual dashboard must use real order and payment data")."""
-
     def setUp(self):
         User.objects.create_superuser("boss", "boss@example.com", "boss-pass-123")
         self.assertTrue(self.client.login(username="boss", password="boss-pass-123"))
@@ -980,8 +891,6 @@ class DashboardSalesChartTests(ApiTestCase):
         return order
 
     def test_dashboard_renders_sales_over_time_chart_from_real_data(self):
-        """The chart block carries the window label, real per-day values from
-        the series, and unpaid money stays out of the chart's data."""
         self._order("chartbuyer", "confirmed", "42.00")
         self._order("olderbuyer", "shipped", "30.00", days_ago=2)
         self._order("windowshopper", "pending", "999.00")
@@ -992,7 +901,6 @@ class DashboardSalesChartTests(ApiTestCase):
         self.assertContains(res, "Sales over time")
         self.assertContains(res, "Last 30 days")
         self.assertContains(res, 'role="img"')
-        # real values, not illustrative numbers: both paid days appear
         self.assertContains(res, "42.00")
         self.assertContains(res, "30.00")
 
@@ -1008,8 +916,6 @@ class DashboardSalesChartTests(ApiTestCase):
         self.assertEqual(res.context["sales_max_revenue"], Decimal("42.00"))
 
     def test_dashboard_chart_aria_summary_matches_series(self):
-        """The figure's accessible name states the real totals (bars carry no
-        numbers), computed from the same paid-only series."""
         self._order("chartbuyer", "confirmed", "42.00")
         self._order("olderbuyer", "shipped", "30.00", days_ago=2)
         self._order("windowshopper", "pending", "999.00")
@@ -1022,8 +928,6 @@ class DashboardSalesChartTests(ApiTestCase):
         self.assertContains(res, f'aria-label="{expected}"')
 
     def test_dashboard_sales_window_setting_reaches_the_chart(self):
-        """The env-tunable window drives the rendered label and the series
-        length together — they can never disagree."""
         self._order("chartbuyer", "confirmed", "42.00")
 
         with override_settings(DASHBOARD_SALES_WINDOW_DAYS=7):
@@ -1036,9 +940,6 @@ class DashboardSalesChartTests(ApiTestCase):
 
 @tag("ops")
 class SiteSettingsAdminTests(ApiTestCase):
-    """The singleton settings row: changelist redirects to the change form;
-    add/delete are disabled."""
-
     def setUp(self):
         User.objects.create_superuser("boss", "boss@example.com", "boss-pass-123")
         self.assertTrue(self.client.login(username="boss", password="boss-pass-123"))
@@ -1046,14 +947,12 @@ class SiteSettingsAdminTests(ApiTestCase):
     def test_changelist_redirects_to_change_form(self):
         from ops.models import SiteSettings
 
-        SiteSettings.load()  # ensure the singleton row exists
+        SiteSettings.load()
         res = self.client.get("/admin/ops/sitesettings/")
         self.assertEqual(res.status_code, 302)
         self.assertIn("/admin/ops/sitesettings/1/change/", res.headers["Location"])
 
     def test_changelist_creates_nothing_when_row_missing(self):
-        """With no singleton row yet the changelist still renders (the row is
-        created lazily by .load(), not by the admin)."""
         res = self.client.get("/admin/ops/sitesettings/")
         self.assertEqual(res.status_code, 200)
 
@@ -1122,8 +1021,6 @@ class SiteSettingsAdminTests(ApiTestCase):
         self.assertEqual(data["locale"], "fr")
         self.assertIs(data["maintenance_mode"], True)
 
-        # A blank name is allowed and published as blank: the frontend keeps
-        # its configured fallback, so the store does not lose its name.
         self.client.post(
             "/admin/ops/sitesettings/1/change/",
             {
@@ -1180,13 +1077,6 @@ class DashboardTemplateTagTests(ApiTestCase):
 
 @tag("ops")
 class DashboardCapabilityGateTests(ApiTestCase):
-    """SPEC-17-10: the ops dashboard carries revenue + customer rows, so a
-    blanket @staff_member_required let every staff role read them. The gate
-    is now capability_required("reports.read") (finance, marketing, admin
-    per CAPABILITY_ROLES), matching the sibling audit-log route: anonymous
-    callers are redirected to the admin login, unprivileged staff get a
-    visible 403, privileged roles and superusers render the page."""
-
     def _dashboard_get(self, path="/admin/dashboard/"):
         return self.client.get(path)
 
@@ -1233,8 +1123,6 @@ class DashboardCapabilityGateTests(ApiTestCase):
         self.assertContains(res, "Store dashboard")
 
     def test_gate_covers_both_mount_families(self):
-        # SPEC-9-02 dual mount: the v1 admin family reuses the same view
-        # object, so the capability gate applies there identically.
         viewer = self._role_user(ROLE_SUPPORT, "dual-mount-support")
         self.client.force_login(viewer)
         res = self._dashboard_get("/api/v1/admin/dashboard/")

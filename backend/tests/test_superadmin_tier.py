@@ -1,33 +1,3 @@
-"""SPEC-1-B03: the superadmin tier (spec 1.1, lines 133-150).
-
-Spec 1.1 names seven staff roles and the last two are tiers:
-
-- line 137 — Admin: "Manage users, roles, settings and operational access";
-- line 146 — Superadmin: "Manage high-privilege settings, access and
-  platform configuration";
-- line 150 — "Admin is not one giant permission", so a tier ABOVE admin is
-  not the same permission: the top tier exists precisely to hold powers
-  ``admin`` must not have.
-
-Two contracts are pinned here, both by behaviour:
-
-1. the tier is real, not a label. ``platform.configure`` is granted to the
-   superadmin role only and to no other role in the map, while the two
-   capabilities the spec gives both tiers (``staff.manage`` = access,
-   ``settings.manage`` = high-privilege settings) are shared. The top tier
-   holds NO operational capability — least privilege, and the map stays
-   deny-by-default for it exactly as for everyone else.
-2. an Admin manages staff roles but can never mint or unmint its own
-   superior: granting the ``superadmin`` role group needs
-   ``platform.configure``, which the map never grants ``admin``. Django's
-   ``is_superuser`` bypass keeps working exactly as before.
-
-The module also pins the line-110 fix: the inventory/fulfilment operator
-("Manage stock, packing, shipping and returns") could not pack or ship at
-all, because ``orders.fulfill`` sat on support+admin alone. It now holds
-that capability — and nothing else beyond it.
-"""
-
 import importlib
 from decimal import Decimal
 
@@ -71,15 +41,10 @@ from .test_staff_roles_admin import user_change_post
 
 TEST_PASSWORD = "S3cure-Passphrase!"
 
-# The capabilities the spec's superadmin row grants (line 146): "high-privilege
-# settings, access and platform configuration". Nothing operational.
 TOP_TIER_CAPABILITIES = frozenset(
     {"platform.configure", "settings.manage", "staff.manage"}
 )
 
-# The capabilities the inventory/fulfilment operator holds after SPEC-1-B03:
-# stock (inventory.*), the catalogue read it needs to pick items, and
-# packing/shipping (orders.fulfill) per line 110.
 INVENTORY_CAPABILITIES = frozenset(
     {"products.read", "inventory.read", "inventory.adjust", "orders.fulfill"}
 )
@@ -103,7 +68,6 @@ def request_for(user):
 
 
 def held_capabilities(user):
-    """Every capability identifier ``user``'s roles grant."""
     return frozenset(
         capability
         for capability in CAPABILITY_ROLES
@@ -112,8 +76,6 @@ def held_capabilities(user):
 
 
 class SuperadminTierDeclarationTests(TestCase):
-    """The tier is declared, ordered above admin, and synced like the rest."""
-
     def test_superadmin_is_declared_and_ordered_above_admin(self):
         self.assertIn(ROLE_SUPERADMIN, STAFF_ROLES)
         self.assertLess(
@@ -141,11 +103,7 @@ class SuperadminTierDeclarationTests(TestCase):
                 self.assertLessEqual(roles, set(STAFF_ROLES))
 
     def test_the_group_exists_on_a_bootstrapped_database(self):
-        # The migrations ran to build this test database: the group is there
-        # without any application code running sync_role_groups(). Literal
-        # names, because the migration imports the same constants the test
-        # would otherwise derive from - a rename would match itself here while
-        # leaving every deployed database on the old spelling.
+        # Literal role names: the migration imports the same constants the test would otherwise derive from, so a rename would match itself here.
         self.assertTrue(Group.objects.filter(name="superadmin").exists())
         self.assertEqual(
             set(Group.objects.values_list("name", flat=True)),
@@ -169,9 +127,6 @@ class SuperadminTierDeclarationTests(TestCase):
         self.assertEqual(groups[ROLE_SUPERADMIN].name, "superadmin")
 
     def test_the_rebootstrap_migration_adds_the_group_to_a_populated_database(self):
-        # Existing deployments already ran 0001, so adding a role to the map
-        # cannot reach their database: this migration is what puts the new
-        # group there, and it must leave the pre-existing groups alone.
         Group.objects.filter(name=ROLE_SUPERADMIN).delete()
         survivor = Group.objects.get(name=ROLE_ADMIN)
         user = make_role_user(ROLE_ADMIN, "survivor")
@@ -183,8 +138,6 @@ class SuperadminTierDeclarationTests(TestCase):
         self.assertTrue(user.groups.filter(pk=survivor.pk).exists())
 
     def test_the_rebootstrap_migration_reverse_removes_only_the_added_group(self):
-        # 0001's reverse deletes every role group; repeating that here would
-        # drop live role assignments that predate this migration.
         module = self.rebootstrap_migration()
         keeper = make_role_user(ROLE_ADMIN, "keeper")
 
@@ -205,8 +158,6 @@ class SuperadminTierDeclarationTests(TestCase):
 
 
 class SuperadminCapabilityTests(TestCase):
-    """The tier's authority, and the map's deny-by-default, per spec line 146."""
-
     def setUp(self):
         groups = sync_role_groups()
         self.superadmin = User.objects.create_user(username="root-role")
@@ -223,9 +174,6 @@ class SuperadminCapabilityTests(TestCase):
         return request
 
     def test_the_top_tier_holds_exactly_the_capabilities_the_spec_names(self):
-        # "high-privilege settings, access and platform configuration" — and
-        # nothing operational, because the spec grants the top tier no
-        # catalogue, fulfilment, refund or reporting authority.
         self.assertEqual(held_capabilities(self.superadmin), TOP_TIER_CAPABILITIES)
 
     def test_platform_configuration_is_the_superadmin_only_capability(self):
@@ -235,8 +183,6 @@ class SuperadminCapabilityTests(TestCase):
                 self.assertFalse(user_has_capability(user, "platform.configure"))
 
     def test_an_admin_cannot_configure_the_platform_through_the_permission_class(self):
-        # The API-side twin of the map: an Admin is refused the capability
-        # with the same uniform 403 every other capability denial raises.
         with self.assertRaises(DRFPermissionDenied):
             HasPlatformConfigure().has_permission(self._request(self.admin), None)
         self.assertTrue(
@@ -249,17 +195,12 @@ class SuperadminCapabilityTests(TestCase):
         self.assertEqual(HasPlatformConfigure.__name__, "HasPlatformConfigure")
 
     def test_the_top_tier_manages_access_and_high_privilege_settings(self):
-        # Spec line 146 gives the tier "access" and "high-privilege
-        # settings" — the same two surfaces spec line 137 gives Admin, so
-        # both tiers hold them and the tier is strictly above Admin on both.
         for capability in ("staff.manage", "settings.manage"):
             with self.subTest(capability=capability):
                 self.assertTrue(user_has_capability(self.superadmin, capability))
                 self.assertTrue(user_has_capability(self.admin, capability))
 
     def test_no_operational_role_reaches_the_privileged_capabilities(self):
-        # Spec line 150: admin is not one giant permission, and it is not
-        # spread down the tiers either.
         for capability in TOP_TIER_CAPABILITIES:
             with self.subTest(capability=capability):
                 self.assertEqual(
@@ -268,8 +209,6 @@ class SuperadminCapabilityTests(TestCase):
                 )
 
     def test_deny_by_default_holds_for_the_new_tier(self):
-        # An identifier nobody wired must not open access, least of all for
-        # the highest role in the map.
         self.assertFalse(user_has_capability(self.superadmin, "platform.selfdestruct"))
         self.assertFalse(user_has_capability(self.superadmin, "orders.demolish"))
 
@@ -285,8 +224,6 @@ class SuperadminCapabilityTests(TestCase):
 
 @tag("e2e")
 class SuperadminEscalationGuardTests(ApiTestCase):
-    """An Admin manages staff roles; it can never mint or unmint its superior."""
-
     def setUp(self):
         self.admin_user = make_role_user(ROLE_ADMIN, "chief")
         self.superadmin_user = make_role_user(ROLE_SUPERADMIN, "tier-root")
@@ -297,7 +234,6 @@ class SuperadminEscalationGuardTests(ApiTestCase):
             is_staff=True,
         )
 
-    # helpers -----------------------------------------------------------------
     def change_url(self, target=None):
         target = target or self.target
         return f"/admin/auth/user/{target.id}/change/"
@@ -325,7 +261,6 @@ class SuperadminEscalationGuardTests(ApiTestCase):
             "a refused escalation must not write a role audit entry",
         )
 
-    # the field ---------------------------------------------------------------
     def test_the_roles_field_never_offers_the_top_tier_to_an_admin(self):
         self.client.force_login(self.admin_user)
 
@@ -355,7 +290,6 @@ class SuperadminEscalationGuardTests(ApiTestCase):
             set(STAFF_ROLES),
         )
 
-    # the refusals ------------------------------------------------------------
     def test_an_admin_cannot_grant_the_superadmin_role(self):
         self.client.force_login(self.admin_user)
 
@@ -374,9 +308,6 @@ class SuperadminEscalationGuardTests(ApiTestCase):
         self.assertTrue(self.admin_user.groups.filter(name=ROLE_ADMIN).exists())
 
     def test_an_admin_cannot_strip_the_top_tier_from_an_account(self):
-        # The escalation guard is symmetric: unminting the tier is as much a
-        # high-privilege access change as minting it, and an Admin may not do
-        # either — so the top tier's accounts are off-limits to them.
         self.target.groups.add(Group.objects.get(name=ROLE_SUPERADMIN))
         self.client.force_login(self.admin_user)
 
@@ -387,10 +318,6 @@ class SuperadminEscalationGuardTests(ApiTestCase):
         self.assertTrue(self.target.groups.filter(name=ROLE_SUPERADMIN).exists())
 
     def test_a_direct_role_sync_is_refused_for_an_admin(self):
-        # Defence in depth, off the view flow (the same shape as the
-        # staff.manage guard): even a caller that reaches the sync with a
-        # cleaned_data the form would never produce is refused before any
-        # group membership is written.
         user_admin = admin.site._registry[User]
 
         with self.assertRaises(PermissionDenied):
@@ -410,7 +337,6 @@ class SuperadminEscalationGuardTests(ApiTestCase):
 
         self.assert_no_superadmin_grant()
 
-    # no regression -----------------------------------------------------------
     def test_an_admin_may_still_reassign_the_operational_roles(self):
         self.target.groups.add(Group.objects.get(name=ROLE_SUPPORT))
         self.client.force_login(self.admin_user)
@@ -429,7 +355,6 @@ class SuperadminEscalationGuardTests(ApiTestCase):
             LogEntry.objects.filter(change_message='Removed role "support".').exists()
         )
 
-    # the tier and the bypass -------------------------------------------------
     def test_the_top_tier_grants_the_superadmin_role_through_the_confirm_step(self):
         self.client.force_login(self.superadmin_user)
 
@@ -451,8 +376,6 @@ class SuperadminEscalationGuardTests(ApiTestCase):
     def test_the_django_superuser_bypass_still_grants_the_top_tier(self):
         root = User.objects.create_superuser("root", "root@example.com", None)
         self.client.force_login(root)
-        # A Django superuser editor also OWNS the privilege flags (they are
-        # not read-only for them), so the payload states is_staff explicitly.
         flags = {"is_staff": "on"}
 
         first = self.post_roles([ROLE_SUPERADMIN], **flags)
@@ -463,20 +386,15 @@ class SuperadminEscalationGuardTests(ApiTestCase):
         self.target.refresh_from_db()
         self.assertTrue(self.target.groups.filter(name=ROLE_SUPERADMIN).exists())
 
-    # the predicate itself ----------------------------------------------------
     def test_the_top_tier_is_the_only_role_whose_grant_needs_platform_configure(self):
         self.assertEqual(ROLE_GRANT_CAPABILITY, {ROLE_SUPERADMIN: "platform.configure"})
         for role in STAFF_ROLES:
             with self.subTest(role=role):
                 user = make_role_user(role, f"assign-{role}")
-                # Only the tier that already holds platform.configure can
-                # grant it — which is why the grant can never climb.
                 self.assertEqual(
                     user_may_assign_role(user, ROLE_SUPERADMIN),
                     role == ROLE_SUPERADMIN,
                 )
-                # Every other role keeps the plain staff.manage contract, so
-                # the guard adds no second gate on the operational six.
                 self.assertTrue(user_may_assign_role(user, ROLE_ADMIN))
 
     def test_the_guard_never_opens_a_role_to_an_unauthenticated_caller(self):
@@ -486,19 +404,10 @@ class SuperadminEscalationGuardTests(ApiTestCase):
     def test_the_django_superuser_flag_is_the_only_bypass_on_the_guard(self):
         superuser = User.objects.create_superuser("root", "root@example.com", None)
         self.assertTrue(user_may_assign_role(superuser, ROLE_SUPERADMIN))
-        # The flag is not itself a role: it grants the grant, nothing else.
         self.assertEqual(get_user_roles(superuser), frozenset())
 
 
 class InventoryFulfilmentAuthorityTests(ApiTestCase):
-    """Spec line 110: "Manage stock, packing, shipping and returns".
-
-    The operator could not pack or ship at all — ``orders.fulfill`` sat on
-    support+admin alone. The fix grants that one capability and nothing
-    else: the spec names packing and shipping for this role, not order
-    visibility, cancellation, refunds or customer records.
-    """
-
     def setUp(self):
         self.operator = make_role_user(ROLE_INVENTORY, "packer")
         self.support = make_role_user(ROLE_SUPPORT, "supp")
@@ -571,8 +480,6 @@ class InventoryFulfilmentAuthorityTests(ApiTestCase):
             HasPlatformConfigure().has_permission(request, None)
 
     def test_support_keeps_fulfilment_authority(self):
-        # No regression from the line-110 fix: support's "permitted order
-        # issues" (line 92) still walks the fulfilment path.
         order = self._order()
         self.client.force_authenticate(self.support)
 
@@ -582,11 +489,7 @@ class InventoryFulfilmentAuthorityTests(ApiTestCase):
         self.assertEqual(res.data["status"], "confirmed")
 
     def test_the_json_seam_is_scoped_to_the_queue_for_a_fulfil_only_role(self):
-        # [R-1-B03] orders.fulfill is not order visibility (spec 1.1 line
-        # 110), so the operator may advance the orders its queue lists and no
-        # others. The out-of-queue answer is the SAME uniform 404 an unknown
-        # id gets: it must not confirm the order exists, nor name its status,
-        # to a role that was deliberately denied order visibility.
+        # orders.fulfill is not order visibility, so the operator's out-of-queue answer is the same uniform 404 an unknown id gets.
         order = self._walk_ready_order("Scoped Rose")
         settled = self._order(status="delivered", total_amount="250.00")
         self.client.force_authenticate(self.operator)
@@ -597,17 +500,12 @@ class InventoryFulfilmentAuthorityTests(ApiTestCase):
         self.assertEqual(res.status_code, 404, res.data)
         settled.refresh_from_db()
         self.assertEqual(settled.status, settled_before)
-        # ...and the queued order is still advanceable, so the scope narrows
-        # rather than closing the seam.
         queued = self.client.post(f"/api/admin/orders/{order.id}/fulfill/")
         self.assertEqual(queued.status_code, 200, queued.data)
         order.refresh_from_db()
         self.assertEqual(order.status, "confirmed")
 
     def test_an_orders_read_holder_keeps_the_unscoped_json_seam(self):
-        # Support holds orders.read (order visibility) AND orders.fulfill, so
-        # the queue scope does not apply to it: a settled order still answers
-        # the machine's own 409 with its allowed set, exactly as before.
         settled = self._order(status="delivered", total_amount="250.00")
         self.client.force_authenticate(self.support)
 
@@ -618,28 +516,13 @@ class InventoryFulfilmentAuthorityTests(ApiTestCase):
         self.assertEqual(res.data["code"], "conflict")
 
     def test_the_superuser_flag_is_not_narrowed_by_the_queue_scope(self):
-        # Django's own bypass is preserved on the scoped seam for the same
-        # reason it is preserved on every other surface: the trust anchor must
-        # not be narrowed by a least-privilege rule meant for staff roles.
         root = User.objects.create_superuser("queue-root", "root@example.com", None)
         self.assertTrue(_may_fulfil(root, self._order(status="delivered")))
-        # ...and it grants nothing on its own to an anonymous caller: no
-        # capability, no bypass.
         self.assertFalse(_may_fulfil(AnonymousUser(), self._order()))
 
 
 @tag("e2e")
 class FulfilmentQueueSurfaceTests(ApiTestCase):
-    """[R-1-B03] The operator-reachable listing the packing capability needs.
-
-    Holding ``orders.fulfill`` gives the changelist a 200 (Django gates it on
-    the model's change permission) while the admin index hid the module, so
-    the operator could advance an order only by guessing its pk and had no way
-    to discover which orders awaited packing. ``OrderAdmin``'s scoped viewer
-    is the fix: a queue listing, discoverable from the index, narrowed to
-    packing — and ``orders.read`` itself stays where spec 1.1 puts it.
-    """
-
     CHANGELIST = "/admin/orders/order/"
 
     def setUp(self):
@@ -657,8 +540,6 @@ class FulfilmentQueueSurfaceTests(ApiTestCase):
             subtotal=Decimal("1500.00"),
         )
         Order.objects.filter(pk=self.queued.pk).update(payment_status="captured")
-        # Not this operator's work: delivered (no fulfilment edge) and
-        # cancelled (same), both out of the queue.
         self.settled = self._order("PACK-0002", status="delivered", total="250.00")
         self.cancelled = self._order("PACK-0003", status="cancelled", total="80.00")
 
@@ -680,8 +561,6 @@ class FulfilmentQueueSurfaceTests(ApiTestCase):
         return admin.site._registry[Order]
 
     def test_the_index_offers_the_operator_its_queue(self):
-        # Discoverability is the whole defect: the module was hidden, so the
-        # surface existed but nothing pointed at it.
         self.client.force_login(self.operator)
         res = self.client.get("/admin/")
         self.assertEqual(res.status_code, 200)
@@ -691,8 +570,6 @@ class FulfilmentQueueSurfaceTests(ApiTestCase):
         )
 
     def test_the_index_hides_the_queue_from_a_role_that_may_neither_read_nor_pack(self):
-        # Deny-by-default in the other direction: marketing holds neither
-        # capability, so the module stays off their index.
         self.client.force_login(make_role_user(ROLE_MARKETING, "queue-marketing"))
         res = self.client.get("/admin/")
         self.assertEqual(res.status_code, 200)
@@ -712,15 +589,12 @@ class FulfilmentQueueSurfaceTests(ApiTestCase):
         self.assertEqual(res.status_code, 200)
         for action in ("mark_confirmed", "mark_shipped", "mark_delivered"):
             self.assertContains(res, action)
-        # export_csv rides orders.read, which this role deliberately lacks.
         self.assertNotContains(res, "export_csv")
 
     def test_the_queue_withholds_the_money_and_the_customer_record(self):
         self.client.force_login(self.operator)
         res = self.client.get(self.CHANGELIST)
         self.assertEqual(res.status_code, 200)
-        # The money columns and the customer's own details are orders.read's
-        # (and customers.read's), not a packer's.
         self.assertNotContains(res, str(self.queued.total_amount))
         self.assertNotContains(res, self.queued.full_name)
         self.assertNotContains(res, self.queued.phone)
@@ -731,8 +605,6 @@ class FulfilmentQueueSurfaceTests(ApiTestCase):
         by_reference = self.client.get(self.CHANGELIST, {"q": self.queued.order_number})
         self.assertEqual(by_reference.status_code, 200)
         self.assertContains(by_reference, self.queued.order_number)
-        # A customer record is not a lookup key for this role: searching by
-        # name or phone finds nothing, because get_search_fields is narrowed.
         for term in (self.queued.full_name, self.queued.phone, self.buyer.email):
             with self.subTest(term=term):
                 res = self.client.get(self.CHANGELIST, {"q": term})
@@ -752,8 +624,6 @@ class FulfilmentQueueSurfaceTests(ApiTestCase):
         self.assertEqual(entry.user.username, "queue-packer")
 
     def test_a_forged_selection_outside_the_queue_is_inert(self):
-        # The actions read their queryset from this admin's get_queryset, so
-        # a hand-posted pk cannot reach an order the queue does not list.
         self.client.force_login(self.operator)
         res = self.client.post(
             self.CHANGELIST,
@@ -772,11 +642,9 @@ class FulfilmentQueueSurfaceTests(ApiTestCase):
         self.client.force_login(self.operator)
         res = self.client.get(f"{self.CHANGELIST}{self.queued.pk}/change/")
         self.assertEqual(res.status_code, 200)
-        # What to pack: the item snapshot, without its prices.
         self.assertContains(res, self.product.name)
         self.assertNotContains(res, "1500.00")
         self.assertNotContains(res, "750.00")
-        # The customer record and the money block stay out.
         self.assertNotContains(res, self.queued.full_name)
         self.assertNotContains(res, self.queued.phone)
         self.assertNotContains(res, self.buyer.email)
@@ -789,8 +657,6 @@ class FulfilmentQueueSurfaceTests(ApiTestCase):
                 self.assertEqual(res.status_code, 302)
 
     def test_the_queue_offers_no_saved_view_bar_it_could_never_save(self):
-        # The bar's own endpoints gate on has_view_permission, which this role
-        # does not hold, so rendering it would offer a form that only 404s.
         self.client.force_login(self.operator)
         res = self.client.get(self.CHANGELIST)
         self.assertEqual(res.status_code, 200)
@@ -800,7 +666,7 @@ class FulfilmentQueueSurfaceTests(ApiTestCase):
         model_admin = self.order_admin()
         for user, expected in (
             (self.operator, True),
-            (self.support, False),  # holds orders.read as well
+            (self.support, False),
             (
                 make_role_user(ROLE_ADMIN, "queue-chief"),
                 False,
@@ -812,16 +678,11 @@ class FulfilmentQueueSurfaceTests(ApiTestCase):
                 self.assertIs(model_admin.is_scoped_viewer(request), expected)
 
     def test_the_queue_declaration_reads_from_the_machine_and_the_map(self):
-        # The queue can only ever be the statuses the fulfilment walk can
-        # advance (single source: orders.state), and the second door is
-        # declared as a capability that exists in the roles map — an unknown
-        # identifier would deny, which is why the drift pin below matters.
         model_admin = self.order_admin()
         self.assertEqual(
             tuple(model_admin.scoped_queryset), tuple(ADMIN_FULFILMENT_NEXT)
         )
         self.assertIn(model_admin.scoped_view_capability, set(CAPABILITY_ROLES))
-        # The withheld columns really are the ones orders.read holds.
         full = set(model_admin.list_display)
         withheld = {
             "user",
@@ -834,7 +695,6 @@ class FulfilmentQueueSurfaceTests(ApiTestCase):
         }
         self.assertLessEqual(withheld, full)
         self.assertFalse(withheld & set(model_admin.scoped_list_display))
-        # The customer record is withheld from search as well as from the grid.
         self.assertFalse(
             {"full_name", "phone", "user__email", "user__username"}
             & set(model_admin.scoped_search_fields)
@@ -850,7 +710,6 @@ class FulfilmentQueueSurfaceTests(ApiTestCase):
         self.assertContains(res, str(self.queued.total_amount))
         self.assertContains(res, self.queued.full_name)
         self.assertContains(res, "export_csv")
-        # The saved-view bar is untouched for a role that may save one.
         self.assertContains(res, 'id="saved-filters"')
         self.assertContains(res, self.settled.order_number)
 
@@ -867,29 +726,10 @@ class FulfilmentQueueSurfaceTests(ApiTestCase):
 
 @tag("e2e")
 class ScopedFulfilWritePathTests(ApiTestCase):
-    """[R-1-B03] cycle 3: what the packing door may WRITE, on both admin paths.
-
-    Cycle 2 narrowed this surface for reading and left the write path wide: a
-    role holding exactly ``{products.read, inventory.read, inventory.adjust,
-    orders.fulfill}`` could cancel a pending order through the change form AND
-    through the ``list_editable`` cell (``pending -> cancelled`` is a legal
-    machine edge), and could rewrite the delivery address — the one surface
-    where the machine gate says nothing, because the value is not the status.
-
-    The two admin write paths are the change form and the changelist formset.
-    Django builds both through ``formfield_for_dbfield`` and
-    ``get_readonly_fields``, so one declaration in the base closes both; these
-    tests drive the real POSTs and then assert on the PERSISTED row, not on the
-    status code, because a refusal that still moved the row would be no
-    refusal at all.
-    """
-
     CHANGELIST = "/admin/orders/order/"
 
     def setUp(self):
         self.operator = make_role_user(ROLE_INVENTORY, "write-packer")
-        # Support holds orders.cancel (and orders.read, so it is NOT a scoped
-        # viewer): the control that proves the seam refuses only the packer.
         self.support = make_role_user(ROLE_SUPPORT, "write-support")
         self.chief = make_role_user(ROLE_ADMIN, "write-chief")
         self.root = User.objects.create_superuser(
@@ -919,11 +759,9 @@ class ScopedFulfilWritePathTests(ApiTestCase):
             quantity=1,
             subtotal=Decimal("750.00"),
         )
-        # Paid, so the fulfilment preconditions are met for the queue advance.
         Order.objects.filter(pk=order.pk).update(payment_status="captured")
         return order
 
-    # helpers -----------------------------------------------------------------
     def order_admin(self):
         return admin.site._registry[Order]
 
@@ -931,14 +769,6 @@ class ScopedFulfilWritePathTests(ApiTestCase):
         return f"{self.CHANGELIST}{self.queued.pk}/change/"
 
     def change_post(self, **fields):
-        """A complete change-form POST, exactly as the grid's form renders it.
-
-        It states the full surface's editable fields (so the same payload is an
-        honest submission for a cancel holder and for the superuser) plus the
-        item inline's management form, whose fields are read-only on every
-        surface. A scoped viewer's extra fields are not form fields there, so
-        they are ignored — which is exactly what the address test relies on.
-        """
         order = self.queued
         payload = {
             "user": order.user_id,
@@ -960,7 +790,6 @@ class ScopedFulfilWritePathTests(ApiTestCase):
         return self.client.post(self.change_url(), payload)
 
     def changelist_post(self, status="confirmed"):
-        """The ``list_editable`` formset POST, exactly as the grid renders it."""
         order = self.queued
         payload = {
             "_save": "Save",
@@ -975,8 +804,6 @@ class ScopedFulfilWritePathTests(ApiTestCase):
         return self.client.post(self.CHANGELIST, payload)
 
     def assert_row_unchanged(self):
-        """The persisted row is the contract: status AND every stamp the
-        refused write would have set."""
         order = self.queued
         order.refresh_from_db()
         self.assertEqual(order.status, "pending")
@@ -986,7 +813,6 @@ class ScopedFulfilWritePathTests(ApiTestCase):
             "a refused status write must leave no transition audit row",
         )
 
-    # the packing work that must survive the fix ------------------------------
     def test_a_fulfil_only_role_advances_a_packing_status_on_the_change_form(self):
         self.client.force_login(self.operator)
 
@@ -1000,8 +826,6 @@ class ScopedFulfilWritePathTests(ApiTestCase):
         self.assertEqual(event.actor, self.operator)
 
     def test_a_fulfil_only_role_advances_a_packing_status_on_the_list_edit_cell(self):
-        # The other surviving write path: the grid cell is how a packer walks a
-        # queue, so narrowing the cancel target must not close it.
         self.client.force_login(self.operator)
 
         res = self.changelist_post(status="confirmed")
@@ -1010,14 +834,11 @@ class ScopedFulfilWritePathTests(ApiTestCase):
         self.queued.refresh_from_db()
         self.assertEqual(self.queued.status, "confirmed")
 
-    # the destructive target, both paths ---------------------------------------
     def test_a_fulfil_only_role_cannot_cancel_through_the_change_form(self):
         self.client.force_login(self.operator)
 
         res = self.change_post(status="cancelled")
 
-        # Django's own field validation refuses the hand-posted value and
-        # re-renders; nothing reaches save_model.
         self.assertEqual(res.status_code, 200)
         self.assertIn("status", res.context["adminform"].form.errors)
         self.assert_row_unchanged()
@@ -1047,7 +868,6 @@ class ScopedFulfilWritePathTests(ApiTestCase):
             for value, _label in res.context["adminform"].form.fields["status"].choices
         ]
         self.assertNotIn("cancelled", offered)
-        # ...and the queue walk is still offered in full.
         self.assertLessEqual({"confirmed", "shipped", "delivered"}, set(offered))
         self.assertNotContains(res, '<option value="cancelled">')
 
@@ -1057,12 +877,9 @@ class ScopedFulfilWritePathTests(ApiTestCase):
         res = self.client.get(self.CHANGELIST)
 
         self.assertEqual(res.status_code, 200)
-        # The cell exists (the packing advance still lives there) but its
-        # widget carries no cancel target.
         self.assertContains(res, 'name="form-0-status"')
         self.assertNotContains(res, '<option value="cancelled"')
 
-    # the delivery address (BUG-5) --------------------------------------------
     def test_a_fulfil_only_role_cannot_rewrite_the_delivery_address(self):
         self.client.force_login(self.operator)
 
@@ -1089,14 +906,9 @@ class ScopedFulfilWritePathTests(ApiTestCase):
         for field in ("address", "city", "state", "pincode", "order_number"):
             with self.subTest(field=field):
                 self.assertNotContains(res, f'name="{field}"')
-        # ...while the one writable field is still an input.
         self.assertContains(res, 'name="status"')
 
-    # no over-blocking ---------------------------------------------------------
     def test_a_cancel_holder_keeps_its_change_form_authority(self):
-        # Support holds orders.cancel and orders.read, so it is not a scoped
-        # viewer: the pending -> cancelled edge it may commit on the sanctioned
-        # API path must stay committable here too.
         self.client.force_login(self.support)
 
         res = self.change_post(status="cancelled")
@@ -1151,7 +963,6 @@ class ScopedFulfilWritePathTests(ApiTestCase):
         self.assertEqual(self.queued.status, "cancelled")
         self.assertIsNotNone(self.queued.cancelled_at)
 
-    # the declaration itself ---------------------------------------------------
     def test_the_write_declaration_names_the_packing_field_and_the_cancel_capability(
         self,
     ):
@@ -1161,14 +972,10 @@ class ScopedFulfilWritePathTests(ApiTestCase):
             model_admin.scoped_value_capabilities,
             {"status": {"cancelled": "orders.cancel"}},
         )
-        # One authority, not three that can drift: the change form, the cell and
-        # the bulk action all answer on orders.cancel.
         self.assertEqual(
             model_admin.scoped_value_capabilities["status"]["cancelled"],
             model_admin.action_capabilities["cancel_pending"],
         )
-        # Least privilege: the refusal costs the operator nothing else, and the
-        # operator still holds no orders.read (so no export_csv).
         self.assertFalse(user_has_capability(self.operator, "orders.cancel"))
         self.assertFalse(user_has_capability(self.operator, "orders.read"))
         self.assertEqual(held_capabilities(self.operator), INVENTORY_CAPABILITIES)
@@ -1176,10 +983,6 @@ class ScopedFulfilWritePathTests(ApiTestCase):
     def test_every_machine_target_outside_the_fulfilment_walk_is_capability_mapped(
         self,
     ):
-        # Deny-by-default drift pin. The machine is the source of every target
-        # a scoped viewer could ever reach; any edge that is not a fulfilment
-        # step must be mapped to the capability that owns it, or the next edge
-        # someone adds would be writable by a packer by omission.
         model_admin = self.order_admin()
         machine_targets = set().union(*ALLOWED_TRANSITIONS.values())
         fulfilment_targets = set(ADMIN_FULFILMENT_NEXT.values())
@@ -1188,8 +991,6 @@ class ScopedFulfilWritePathTests(ApiTestCase):
         self.assertEqual(mapped, {"cancelled"})
 
     def test_the_seam_is_deny_by_default_for_an_admin_that_declares_no_writes(self):
-        # The base's own defaults, probed directly: a ModelAdmin that opens the
-        # door without declaring its writes must offer a read, not an editor.
         bare = RoleAwareModelAdmin(Order, admin.site)
         bare.scoped_view_capability = "orders.fulfill"
         request = RequestFactory().get(self.change_url())
@@ -1203,15 +1004,9 @@ class ScopedFulfilWritePathTests(ApiTestCase):
             for field in options["fields"]
         }
         self.assertTrue(exposed <= set(bare.get_readonly_fields(request, self.queued)))
-        # ...and with nothing mapped, no value is withheld (the field set is
-        # what refuses the write) — which is why the orders admin must map the
-        # destructive one explicitly.
         self.assertTrue(bare.scoped_value_permitted(request, "status", "cancelled"))
 
     def test_the_value_predicate_answers_on_the_capability_not_on_the_role(self):
-        # The predicate is the seam's single decision point, so it is pinned on
-        # both answers: the packer is refused the cancel target, a cancel holder
-        # is allowed it, and an unmapped value needs nothing extra.
         model_admin = self.order_admin()
         for user, cancelled_allowed in ((self.operator, False), (self.support, True)):
             with self.subTest(username=user.username):
@@ -1227,8 +1022,6 @@ class ScopedFulfilWritePathTests(ApiTestCase):
 
 
 class SuperuserBypassTests(TestCase):
-    """SPEC-1-B03 must not move Django's own superuser bypass (permissions.py)."""
-
     def setUp(self):
         self.superuser = User.objects.create_superuser(
             "root-bypass", "root-bypass@example.com", None
@@ -1241,22 +1034,15 @@ class SuperuserBypassTests(TestCase):
         self.model_admin = RoleAwareModelAdmin(Order, admin.site)
 
     def test_is_privileged_still_short_circuits_on_the_superuser_flag(self):
-        # The bypass line itself is untouched: a superuser with no role group
-        # at all is still privileged, which is what makes the MFA enrollment
-        # surface reachable for them.
         self.assertFalse(self.superuser.groups.exists())
         self.assertTrue(is_privileged(self.superuser))
 
     def test_the_top_tier_is_privileged_for_mandatory_mfa(self):
-        # The tier holds ``staff.manage`` (it manages access), so R-17.9
-        # reaches it through the existing rule rather than a new one.
         self.assertTrue(is_privileged(self.superadmin))
         self.assertTrue(is_privileged(self.admin))
 
     def test_the_bypass_is_not_narrowed_to_the_roles_map(self):
         request = request_for(self.superuser)
-        # Even an identifier no role grants: the superuser bypass answers
-        # before the map is consulted, exactly as before SPEC-1-B03.
         self.assertTrue(
             self.model_admin._holds_capability(request, "platform.selfdestruct")
         )

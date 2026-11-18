@@ -1,26 +1,10 @@
-"""Unit tests for ``scripts/changelog_figures.py``'s parsers and its `check` gate.
+"""Unit tests for ``scripts/changelog_figures.py`` parsers and the `check` gate.
 
-This script exists to kill hand-transcribed figures, so its own failure mode is
-the interesting one: a parser that reads a plausible number off the wrong token
-would print a wrong figure with the same authority as a right one, and the
-changelog row that quotes it would carry the error forward exactly as the typed
-figure did. The cases below are therefore mostly negative -- the traps this
-repo has already hit in a different script.
-
-The runner output below is COPIED from real runs on this tree (SQLite and
-PostgreSQL 17.11, Python 3.14) rather than invented. Two shapes are load
-bearing and could not be guessed:
-
-  * ``FAILED (failures=6, errors=1, expected failures=4)`` -- the xfail count
-    shares the substring ``failures=`` with the failure count, which is how
-    ``scripts/pg_gate.py`` once printed ``problems=5`` for a 7-problem run;
-  * a green run prints ``OK (expected failures=4)`` and no failure count at
-    all. Nothing is not zero, so ``failures`` must be None rather than 0 --
-    a fabricated 0 is a figure nobody measured.
-
-`cmd_check` is exercised against a real git repository built in a temp
-directory rather than against this one, so the assertions do not move every
-time a row is appended to ``docs/changes.md``.
+The failure mode this guards is a parser reading a plausible number off the
+wrong token. Fixtures are copied from real runs (SQLite, PostgreSQL 17.11,
+Python 3.14): the xfail count shares the ``failures=`` substring with the
+failure count, and a green run reports no failure count at all. `cmd_check`
+runs against a thrown-away git repository, not this one.
 """
 
 import contextlib
@@ -106,10 +90,8 @@ class ParseRunTests(unittest.TestCase):
     def test_a_stray_ok_before_the_summary_does_not_win_the_verdict(self):
         """The runner prints its summary LAST, so the scan runs backwards.
 
-        A test that echoes its own bare `OK` -- an assertion helper is enough --
-        appears earlier in the stream than the runner's summary line. A forward
-        scan would take that stray line and turn a red run green.
-        """
+        A forward scan would take a stray `OK` echoed earlier and turn a red
+        run green."""
         noisy = "OK\n" + RED_RUN
         self.assertEqual(cf.parse_run(noisy)["verdict"], "FAILED")
         self.assertEqual(cf.parse_run(noisy)["failures"], 6)
@@ -156,8 +138,7 @@ class FormattingTests(unittest.TestCase):
     """The rendered bullet: a green run must not acquire a failure count."""
 
     def test_green_verdict_keeps_its_xfail_count_and_no_failures(self):
-        """`xf` is a floor invariant, so the bullet has to carry it -- while the
-        failure count the runner did not report stays out."""
+        """`xf` is a floor invariant, so the bullet carries it and not a fabricated count."""
         self.assertEqual(
             cf.format_verdict(cf.parse_run(GREEN_RUN)),
             "OK (expected failures=4)",
@@ -218,12 +199,10 @@ class PostgresUrlTests(unittest.TestCase):
         self.assertEqual(cf.postgres_url(""), "postgresql://u:p@localhost:5432/db")
 
     def test_a_schemeless_database_url_is_not_postgres(self):
-        """The value in backend/.env here: a bare hostname, no scheme.
+        """The value in backend/.env: a bare hostname, no scheme.
 
-        settings.py reads that as unparseable and falls back to sqlite without
-        a word, so accepting it as the postgres leg would label a SQLite run
-        `postgresql`. The floor must come out SINGLE-ENGINE instead.
-        """
+        settings.py falls back to sqlite without a word, so accepting it would
+        label a SQLite run `postgresql`. The floor must be SINGLE-ENGINE."""
         os.environ["DATABASE_URL"] = "database-1.cluster.example.com"
         self.assertEqual(cf.postgres_url(""), "")
 
@@ -369,20 +348,12 @@ class AddedLinesTests(unittest.TestCase):
 
 
 class CheckFixture:
-    """A git repository in a temp directory, for exercising `check` end to end.
+    """A throwaway git repository, for exercising `check` end to end.
 
-    NOT a TestCase, and deliberately so. `scripts/tests`'s CI guard counts the
-    test-function declarations in these sources with a grep and compares that
-    number with the count the runner reports, requiring them to be equal,
-    because that equality is what proves discovery found every file. It is a
-    line grep, so prose in a docstring that quotes a declaration would be
-    counted as one -- this docstring names the rule in words for that reason.
-    Subclassing a TestCase to reuse its setUp is worse: it re-collects every
-    test the parent declares under the subclass, so collected rises, declared
-    does not, and the guard goes red on a suite that has lost nothing. This
-    mixin holds the fixture and no test method, so several concrete TestCases
-    share it and each contributes only the cases it declares itself.
-    """
+    Deliberately NOT a TestCase: the CI guard greps test-function declarations
+    from these sources and compares them with the collected count, so
+    subclassing would re-collect the parent's tests. This mixin holds the
+    fixture and no test method, so several TestCases share it."""
 
     def setUp(self):
         self._saved_root = cf.REPO_ROOT
@@ -538,12 +509,8 @@ class CheckGateTests(CheckFixture, unittest.TestCase):
         self.assertIn("NO TASK ID", out)
 
     def test_a_decorated_date_row_is_still_gated_end_to_end(self):
-        """The reproduction, as an assertion rather than as a report.
-
-        The undecorated form of this row is caught by the case below, so the
-        pair brackets the defect: bolding the date must not change the exit
-        code, and must not turn the row into a reported sub-table.
-        """
+        """The reproduction: bolding the date must not change the exit code or
+        turn the row into a reported sub-table."""
         self.append(
             "| **2026-10-04** | NOARTIFACT-TASK-X | builder | a | b | Ran 1836 tests |"
             " s |"
@@ -561,12 +528,8 @@ class CheckGateTests(CheckFixture, unittest.TestCase):
         self.assertEqual(self.run_check()[0], 1)
 
     def test_a_decorated_date_row_that_is_backed_still_passes_and_says_so(self):
-        """Reporting the shape must not fail a row nobody can improve.
-
-        The row is checked exactly as the undecorated one is, so a backed row is
-        green, and the decorated date is printed so a reviewer sees the shape
-        that nearly escaped rather than having to notice it.
-        """
+        """Reporting the shape must not fail a row nobody can improve: the row
+        is checked as usual and the decorated date is printed."""
         self.append(
             "| **2026-10-04** | GATE-7 | builder | a | b | FAILED (failures=6, "
             "errors=1, expected failures=4), cov 99.80% | s |"
@@ -609,10 +572,8 @@ class CheckGateTests(CheckFixture, unittest.TestCase):
 class ProseTableTests(unittest.TestCase):
     """A sub-table in a section's prose is not an agent-run row.
 
-    Read out of ``docs/changes.md`` verbatim (cells trimmed): the before/after
-    engine comparison and the floors table that sit inside a section, none of
-    which names a task in the position a row keeps its date.
-    """
+    Read verbatim from ``docs/changes.md``: the before/after engine comparison
+    and floors tables name no task where a row keeps its date."""
 
     SUBTABLES = (
         "| before (`92139d0`) | `1790 / OK / xf 4 / 100.00% / 8828 stmts` | `1790"
@@ -637,12 +598,8 @@ class ProseTableTests(unittest.TestCase):
     def test_a_blank_first_cell_is_not_prose(self):
         """A figure-bearing line with no date is a malformed ROW, not prose.
 
-        It stays a failure, because a figure nobody can attribute to a task
-        cannot be given a backing artifact either -- the alternative would let a
-        row drop its date and walk out of the gate. The floors table's own
-        header, `| | SQLite | PostgreSQL 17 |`, is the same shape and carries no
-        figure, so it never reaches this test at all.
-        """
+        It stays a failure, so a row cannot drop its date and walk out of the
+        gate; the floors-table header carries no figure, so it never arrives."""
         self.assertFalse(cf.is_prose_table_row("| | | | `Ran 1836 tests` | |"))
         self.assertFalse(cf.is_prose_table_row("| | SQLite | PostgreSQL 17 |"))
 
@@ -650,33 +607,23 @@ class ProseTableTests(unittest.TestCase):
         self.assertFalse(cf.is_prose_table_row("a paragraph quoting 1836 tests"))
 
     def test_a_task_id_is_not_read_out_of_a_sub_table_cell(self):
-        """The defect this class exists to fix, named as a unit.
-
-        `1790` is a test count. Read as a task id it demanded an artifact called
-        ``scripts/figures/1790.json``, which nothing can produce.
-        """
+        """The defect this class fixes: `1790` is a test count, and read as a
+        task id it demanded an artifact called ``scripts/figures/1790.json``."""
         row = self.SUBTABLES[0]
         self.assertEqual(cf.task_id_of(row), "1790")
         self.assertTrue(cf.is_prose_table_row(row))
 
     def test_a_decorated_date_cell_is_still_a_row(self):
-        """The fail-open defect this class exists to close, named as a unit.
-
-        `**2026-10-05**` is an agent-run row, not a sub-table in a section's
-        prose. Classified as prose it was reported as one and every figure in it
-        escaped a gate that catches the identical row undecorated.
-        """
+        """The fail-open defect: `**2026-10-05**` classified as prose let every
+        figure in an agent-run row escape."""
         row = "| **2026-10-05** | GATE-7 | builder | a | 1836 tests | s |"
         self.assertFalse(cf.is_prose_table_row(row))
         self.assertEqual(cf.task_id_of(row), "GATE-7")
 
     def test_every_way_of_writing_a_date_keeps_the_row_a_row(self):
-        """Decoration must not be a way out of the gate, so each spelling is a case.
-
-        Bold, a footnote asterisk, a leading label and a backtick are the four
-        shapes markdown actually produces around a date. Each is a row, because
-        the only way to leave the row path is to delete the date itself.
-        """
+        """Decoration must not be a way out of the gate: bold, an asterisk, a
+        label and a backtick are the shapes markdown produces around a date,
+        and each stays a row -- only deleting the date leaves the row path."""
         cells = [
             "2026-10-05",
             "**2026-10-05**",
@@ -705,13 +652,9 @@ class ProseTableTests(unittest.TestCase):
         self.assertFalse(cf.has_decorated_date_cell("| before | `Ran 1797` |"))
 
     def test_the_rule_is_a_date_somewhere_and_not_a_conjunction(self):
-        """Why prose is not also "the second cell is not task-shaped".
-
-        The sub-tables this file contains have task-shaped second cells, so a
-        conjunction would reclassify all of them as rows and demand an artifact
-        named after a table cell -- the defect the conjunction was meant to
-        close. Each shape below is prose, and each has a task-shaped cell 1.
-        """
+        """Why prose is not also "the second cell is not task-shaped": the
+        sub-tables here have task-shaped second cells, so that conjunction
+        would reclassify them as rows."""
         rows = [
             "| 1784 | `1784 / OK / xf 4` | `1784 / FAILED` |",
             "| Ran | before this change | `Ran 1797 / OK` |",
@@ -726,10 +669,8 @@ class ProseTableTests(unittest.TestCase):
 class ExemptionInventoryTests(CheckFixture, unittest.TestCase):
     """The committed inventory, and the shapes it must not accept.
 
-    Inherits the git fixture, so these are end-to-end through `cmd_check`: an
-    exemption that only looks right to a reader of the JSON is not an exemption
-    the gate honours.
-    """
+    Inherits the git fixture: an exemption that only looks right in the JSON
+    is not one the gate honours."""
 
     INVENTORY = "backend/docs/changes.md"
     GOOD_REASON = (
@@ -957,12 +898,8 @@ class FakeOutcome:
 class FakeMutationModule:
     """A stand-in for scripts/mutation_evidence.py, to test the pairing only.
 
-    The real replay is mutation_evidence.py's job and is proven by running it;
-    what is under test here is that a run is paired to the mutation whose
-    `test_scope` produced it, and that a mutation which never reached a run is
-    reported as having run nothing. `skip` names the mutations that abort before
-    a run, which is what a `find` that no longer occurs does.
-    """
+    Under test is that a run is paired to the mutation whose `test_scope`
+    produced it; `skip` names mutations that abort before a run."""
 
     class EvidenceError(Exception):
         pass
@@ -1034,11 +971,9 @@ class MutationPairingTests(unittest.TestCase):
         self.assertIn("2/2 mutations killed", out)
 
     def test_a_mutation_that_never_ran_gets_no_figure(self):
-        """The `find` that no longer occurs aborts before any suite runs.
-
-        Pairing by position would hand that mutation the NEXT mutation's
-        failures. It must print NO RUN and nothing countable.
-        """
+        """The `find` that no longer occurs aborts before any suite runs;
+        pairing by position would hand that mutation the NEXT mutation's
+        failures."""
         module = FakeMutationModule(
             [
                 {"id": "M1", "test_scope": ["orders"]},

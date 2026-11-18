@@ -1,42 +1,21 @@
-# SPEC-22-11: every action is pinned to a full commit SHA with the tag in a
-# trailing comment. A mutable tag (@v4) is a remote-controlled pointer to
-# whatever that tag says today, so pinning is supply-chain hardening: to move
-# an action, resolve the new tag with
-# `git ls-remote https://github.com/<owner>/<action>.git refs/tags/<tag>^{}`
-# (the `^{}` peel matters for an annotated tag) and replace the SHA - never
-# widen the pin back to a tag.
+# Every action is pinned to a full commit SHA with its tag in a trailing
+# comment: a mutable tag is a remote-controlled pointer, so pinning is
+# supply-chain hardening. Resolve bumps with `git ls-remote ... refs/tags/<tag>^{}`
+# and replace the SHA - never widen the pin back to a tag.
 #
-# NODE24 (P1-4): every pin in this workflow now targets an action whose
-# `runs.using: node24`. GitHub deprecates the Node 20 runtime, and a Node-20
-# action is what the runner warned about on every job ("actions/checkout@11d5…
-# and actions/setup-python@a26a… target Node.js 20"). The pinned releases:
-# actions/checkout v7.0.1, actions/setup-python v7.1.0, actions/cache v6.1.0,
-# actions/upload-artifact v7.0.2 (v7 majors, resolved 2026-10-24 with the
-# command above). A future bump must keep `runs.using` at node24 or newer --
-# check it, do not assume it.
+# Every pin targets an action whose `runs.using` is node24 (GitHub deprecates
+# Node 20). A future bump must check that, not assume it.
 name: backend-tests
 
 on:
   push:
     branches: [spec-comp, feat/add-frontend, master]
-    # The deployment wiring (SPEC-2-10b/22-07) is part of the backend's
-    # production path, so a push that only touches it still runs this gate --
-    # deploy.yml is triggered by THIS workflow's completion, and a commit with
-    # no run here could never be released. scripts/backup.sh is here for the
-    # same reason: the backup cadence (R-22.9) is the deploy host's scheduled
-    # entry point, so a commit that only changes it still runs the gate.
-    #
-    # scripts/** sits here IN ADDITION to the two named .sh files, not instead
-    # of them, and the two earn their place differently. The named entries are
-    # a text contract the suite pins -- tests/test_backup_db.py and
-    # tests/test_deployment_contract.py assert these literals in the trigger
-    # list -- so a deploy entry point cannot be dropped from the gate by a
-    # well-meaning refactor of this file. The glob is what makes the same
-    # guarantee true for a file added tomorrow: scripts/doc_claims.py is a
-    # BUILD GATE (the "Documentation claim scan" step below runs it), and a
-    # commit that only touches the gate's own tooling must still run the gate
-    # that executes the tooling. Naming two .sh files stops being true the day
-    # a third script lands.
+    # Deployment wiring and scripts are part of the backend's production path:
+    # deploy.yml triggers on THIS workflow's completion, so a commit that only
+    # touches them could otherwise never be released. The named .sh entries are
+    # a text contract the suite pins (tests/test_backup_db.py,
+    # tests/test_deployment_contract.py); scripts/** covers new scripts, e.g.
+    # doc_claims.py, itself a build gate run below.
     paths:
       - "backend/**"
       - "docker-compose.yml"
@@ -48,22 +27,13 @@ on:
       - ".github/workflows/deploy.yml"
   pull_request:
     branches: [spec-comp, feat/add-frontend, master]
-    # OWNER-DIRECTED RULESET FIX (PROMOTE-39b): ruleset 25129526 requires the
-    # `postgres` and `lint` contexts on every PR into feat/add-frontend, but
-    # this trigger's `paths` filter meant a frontend-only PR started NO run,
-    # the two contexts never reported, and the PR was blocked by a backend
-    # gate it could not influence. GitHub rulesets cannot express
-    # path-conditional required checks, so the resolution is a SENTINEL: the
-    # trigger now fires on every PR (`**` first below), and each job decides
-    # for itself -- a change touching any path in the real-gate list runs the
-    # REAL suite exactly as before, a change touching none of them reports the
-    # same two contexts green via a seconds-fast sentinel step (no python, no
-    # pip). Nothing is weakened for backend changes: the explicit list is kept
-    # after `**` because it IS the real-gate set the jobs' change-detection
-    # steps re-implement, and because the backend suite pins it as a text
-    # contract (tests/test_backup_db.py gates BOTH triggers on
-    # "scripts/backup.sh"; tests/test_deployment_contract.py pins the
-    # deployment wiring into this file).
+    # Ruleset 25129526 requires the `postgres` and `lint` contexts on every PR,
+    # but rulesets cannot express path-conditional checks and a paths filter
+    # meant a frontend-only PR started no run, blocking it on contexts that
+    # could not report. So every PR triggers, and each job reports a fast
+    # sentinel green when the diff touches no real-gate path (the explicit list
+    # after `**` is that set, re-implemented by the change-detection steps and
+    # pinned by tests/test_backup_db.py and tests/test_deployment_contract.py).
     paths:
       - "**"
       - "backend/**"
@@ -75,43 +45,26 @@ on:
       - ".github/workflows/backend-tests.yml"
       - ".github/workflows/deploy.yml"
 
-# Least privilege: the suite only needs to read the checkout.
+# The suite only needs to read the checkout.
 permissions:
   contents: read
 
-# One run per ref; a new push to the same ref cancels the stale run.
 concurrency:
   group: backend-tests-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
-  # GATE-3: PostgreSQL is the SINGLE CI engine (PG-ONLY-CI). Until this
-  # commit the suite also ran on a separate SQLite job; SQLite serialises
-  # writes and has no row-level locking, so the oversell/double-spend/TOCTOU
-  # class of defect cannot manifest on it at all, and it silently ignores
-  # varchar(n) limits Postgres enforces -- a green SQLite job said nothing
-  # about the engine production runs on -- so that job was removed and every
-  # gate it carried was moved into THIS job: Django system check, migration
-  # drift (makemigrations --check), the doc_claims claim scan, the changelog
-  # figure gate and the scripts/tests unit suite all run here, and this job
-  # alone is the backend gate.
+  # PostgreSQL is the SINGLE CI engine: SQLite cannot manifest the
+  # oversell/double-spend/TOCTOU class (no row-level locking) and ignores
+  # varchar(n) limits, so it said nothing about production. Every gate lives in
+  # this job, and this job alone is the backend gate.
   #
-  # The suite is GREEN on PostgreSQL (floor: 2077 tests OK, 3 expected
-  # failures, cov 99.77% on PostgreSQL 17.11), but pg_gate still enforces the
-  # SET rather than a count: scripts/pg_gate.py compares the run against
-  # scripts/pg_baseline.json and fails on any failure OUTSIDE it, while a
-  # baseline entry that stopped failing is only a warning -- the six
-  # certified PG-2b/PG-2e ids are healed, so they warn and do not fail. A
-  # count could not do this -- "failures=6" is identical for the six known
-  # failures and for those six plus a new regression, and only the set tells
-  # them apart.
+  # pg_gate enforces the failure SET, not a count: "failures=6" cannot tell the
+  # six known failures from those six plus a regression. A baseline entry that
+  # stopped failing only warns.
   #
-  # CI-REDIS-SERVICE: THROTTLE-CACHE's two live-Redis shared-cache pins skip
-  # loudly when REDIS_URL is undeclared, which is how CI ran them -- as
-  # skips -- until this commit. The redis service + REDIS_URL env below
-  # declare it, so CI now EXECUTES the real two-connection and
-  # spawned-process 30-budget pins (0 skips), the same shape the shipped
-  # floors were certified with.
+  # The redis service exists so the THROTTLE-CACHE live-Redis shared-cache pins
+  # EXECUTE instead of skipping, matching the shape the floors were certified on.
   postgres:
     runs-on: ubuntu-latest
     defaults:
@@ -119,40 +72,29 @@ jobs:
         working-directory: backend
     services:
       postgres:
-        # Pinned to an exact tag, not `latest` and not a floating minor: the
-        # certified baseline was measured on this version, and a silent
-        # version bump can add or remove a failure without any commit here
-        # changing. A moving tag would make the baseline untrustworthy in
-        # exactly the way this job exists to prevent.
+        # Exact tag, not `latest` or a floating minor: the certified baseline
+        # was measured on this version, and a silent bump can change failures
+        # without a commit, making the baseline untrustworthy.
         image: postgres:17.11-alpine
         env:
           POSTGRES_DB: perfume_store
           POSTGRES_USER: perfume
-          # Ephemeral, throwaway CI-only credential for a database that lives
-          # and dies inside this job's runner. Not a secret: nothing outside
-          # this job can reach it, and .env/RDS credentials are never read
-          # here. Same reasoning as the dummy Razorpay values in the env
-          # block below.
+          # Ephemeral CI-only credential for a database that lives and dies in
+          # this runner; not a secret, and no real .env is read.
           POSTGRES_PASSWORD: ci_pg_only_not_a_secret
         ports:
           - 5432:5432
-        # Without the health check, a fast test step can reach Postgres before
-        # initdb has finished and fail every test with a connection error --
-        # which would look exactly like a real regression and train everyone
-        # to ignore this job.
+        # Without this, a fast test step reaches Postgres before initdb is done
+        # and fails with errors that look like a real regression.
         options: >-
           --health-cmd "pg_isready -U perfume -d perfume_store"
           --health-interval 10s
           --health-timeout 5s
           --health-retries 10
-      # CI-REDIS-SERVICE: the live-Redis half of the THROTTLE-CACHE pins.
-      # Tag rationale: what those pins certify is cache BUDGET behaviour (30
-      # spent across two independent connections and across a spawned OS
-      # process), which is client+settings behaviour and not a
-      # server-version detail, and this repo already floats the same minor
-      # for the same reason (docker-compose.yml pins postgres:17-alpine);
-      # the redis CLIENT that actually speaks the protocol is hash-pinned in
-      # backend/requirements.lock.
+      # The live-Redis half of the THROTTLE-CACHE pins. They certify cache
+      # BUDGET behaviour (shared across connections and a spawned process), not
+      # a server-version detail; the protocol-speaking client is hash-pinned in
+      # requirements.lock.
       redis:
         image: redis:7-alpine
         ports:
@@ -163,56 +105,35 @@ jobs:
           --health-timeout 5s
           --health-retries 10
     env:
-      # CI never reads a real .env; dummy Razorpay values prove the suite
-      # never depends on live credentials (V-01 containment).
+      # No real .env is read; the dummy Razorpay values prove the suite never
+      # depends on live credentials.
       DJANGO_DEBUG: "true"
       RAZORPAY_KEY_ID: rzp_test_CI_DUMMY
       RAZORPAY_KEY_SECRET: ci-dummy-secret
-      # Honoured by config/settings.py; an unset or unparseable value falls
-      # back to SQLite silently, and this job would then certify a SQLite run
-      # under a Postgres name -- so the engine is asserted below rather than
-      # assumed from the presence of this variable.
+      # settings.py falls back to SQLite silently on an unset/unparseable
+      # value, so the engine is asserted below rather than assumed.
       DATABASE_URL: postgres://perfume:ci_pg_only_not_a_secret@localhost:5432/perfume_store
-      # CI-REDIS-SERVICE: DECLARING REDIS_URL is the switch that flips the
-      # default cache alias from LocMemCache to RedisCache
-      # (config/settings.py; an empty value would fall back to LocMem, so the
-      # URL is a real one pointed at the redis service above). With it
-      # declared, the two live-Redis throttle pins RUN instead of skipping,
-      # and the spawned-process pin's child inherits this env. The hermetic
-      # LocMem pins are unaffected: the settings-import harness scrubs
-      # REDIS_URL from every subprocess it boots, so both shapes stay pinned.
+      # Declaring REDIS_URL flips the cache alias from LocMemCache to
+      # RedisCache (an empty value would not), so the live-Redis throttle pins
+      # RUN and the spawned child inherits it. The hermetic LocMem pins are
+      # unaffected: the settings harness scrubs REDIS_URL in subprocesses.
       REDIS_URL: redis://localhost:6379/0
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          # Full history, and the remote-tracking refs, because the claim
-          # scan below is DIFF-SCOPED: it runs `git diff --unified=0
-          # <base>...HEAD` where <base> is a SHA resolved at RUN TIME -- the
-          # step's own DOC_CLAIMS_BASE env, further down. The default
-          # fetch-depth: 1 checkout fetches neither that SHA nor the history,
-          # so the diff would abort with a git error and the step would exit
-          # 2, turning the gate red on a green tree. A 3-dot diff also needs
-          # a merge base, which a shallow clone cannot compute. The
-          # byte-integrity half needs no history, but it is the same command,
-          # so the whole step pays this once. (PG-ONLY-CI: this checkout
-          # belonged to the removed SQLite job and moved here with the scan.)
-          # The change-detection step below ALSO needs the history (it diffs
-          # the PR base -- or the push's previous tip -- against HEAD), so
-          # fetch-depth: 0 now serves two steps.
+          # Full history: the claim scan is a three-dot diff against a base
+          # resolved at run time, and a shallow clone has neither that object
+          # nor a merge base (the diff would abort, exiting 2 on a green tree).
+          # The change-detection step also diffs a base, so this one fetch
+          # serves both.
           fetch-depth: 0
 
-      # RULESET-SENTINEL (PROMOTE-39b): decide once, here, whether this run is
-      # the REAL backend gate or the frontend-only sentinel. The verdict is a
-      # fail-safe towards the REAL suite: the sentinel is chosen only when the
-      # diff POSITIVELY contains none of the real-gate paths (the same list
-      # the trigger carries). Branch creation (all-zeros `before`) and an
-      # unknown base commit (force push) both fall through to real=true, so
-      # uncertainty runs the suite rather than skipping it. On a pull_request
-      # the diff is PR-base..merge-HEAD, i.e. exactly what the PR would land; on a
-      # push it is before..HEAD, i.e. exactly what landed -- so a
-      # backend-touching merge into feat/add-frontend post-merge still runs
-      # the real suite, and a change to THIS workflow file or to deploy.yml
-      # counts as backend-relevant (no silent skip of a modified gate).
+      # Decide once whether this run is the REAL gate or the sentinel, failing
+      # safe towards the real suite: sentinel only when the diff positively
+      # contains none of the real-gate paths. Branch creation (all-zeros
+      # `before`) and an unknown base (force push) fall through to real=true.
+      # The diff is PR-base..merge-HEAD or before..HEAD, so a modified gate file
+      # itself counts as backend-relevant.
       - name: Detect backend-relevant changes (real suite vs sentinel)
         id: changes
         working-directory: ${{ github.workspace }}
@@ -244,13 +165,9 @@ jobs:
           echo "real=${real}"
           echo "real=${real}" >> "${GITHUB_OUTPUT}"
 
-      # The sentinel half of the ruleset fix: when the change touches no
-      # backend-relevant path, THIS step is the whole job and its success is
-      # what reports the `postgres` context on a frontend-only PR. It
-      # deliberately installs nothing and starts no suite -- the point is that
-      # a frontend-only PR pays seconds, while the CONTEXT NAME the ruleset
-      # requires still reports, and the message states plainly what did not
-      # run so the green can never be mistaken for a certified backend run.
+      # When no backend-relevant path changed, this step is the whole job and
+      # its success reports the `postgres` context. It installs nothing, and the
+      # message states what did not run.
       - name: "Sentinel: no backend-relevant changes (postgres context reports green)"
         if: steps.changes.outputs.real != 'true'
         run: |
@@ -263,21 +180,15 @@ jobs:
         with:
           python-version: "3.14"
           cache: pip
-          # The LOCK, not requirements.txt: it is the file whose contents
-          # decide what gets installed, so it is what the cache key must
-          # follow. requirements.txt is a pointer to it and changes far less
-          # often, so keying on the pointer would keep serving a cache built
-          # from a lock nobody re-read.
+          # The LOCK, not requirements.txt: the lock decides what installs, so
+          # it must drive the cache key; keying on the pointer would serve a
+          # cache built from a stale lock.
           cache-dependency-path: backend/requirements.lock
 
-      # requirements.lock is the compiled, hash-pinned resolution of
-      # requirements.in, and it is what every job here installs. Two reasons
-      # it is the install source rather than requirements.txt: it pins the
-      # TRANSITIVE dependencies (asgiref, sqlparse, tzdata, urllib3 and the
-      # rest -- nothing in this repo imports those directly, so no hand-written
-      # file can pin them), and its `--hash` lines make pip verify every wheel
-      # it downloads. requirements.txt is a one-line pointer to it, kept so
-      # the documented developer command in backend/README.md still works.
+      # requirements.lock is the hash-pinned resolution of requirements.in: it
+      # pins transitive dependencies (nothing here imports them directly) and
+      # its --hash lines make pip verify every wheel. requirements.txt is only
+      # a pointer kept for the documented dev command.
       - name: Install pinned dependencies from the lock
         if: steps.changes.outputs.real == 'true'
         run: pip install -r requirements.lock
@@ -290,8 +201,8 @@ jobs:
         if: steps.changes.outputs.real == 'true'
         run: python manage.py makemigrations --check --dry-run
 
-      # settings.py falls back to SQLite without complaint when DATABASE_URL is
-      # unset or malformed, so "the job ran" would otherwise not mean "PG ran".
+      # settings.py falls back to SQLite silently, so "the job ran" must not be
+      # mistaken for "PG ran".
       - name: Assert the engine is PostgreSQL
         if: steps.changes.outputs.real == 'true'
         run: |
@@ -303,95 +214,41 @@ jobs:
             exit 1
           fi
 
-      # PARALLEL-4 (P1-4): MEASURED, NOT ENABLED. `--parallel 4` is NOT wired
-      # here because this suite is not parallel-safe, and the measurement says
-      # so rather than the wiring guessing:
+      # `--parallel 4` is MEASURED, not enabled: 27 test ids are red under
+      # parallel that serial never reds (throttle budgets shared across
+      # connections/processes, the whole-DB restore drill), and repo tags are
+      # feature tags, so no `--exclude-tag` split can separate them. The 3.1x
+      # speedup is real but unavailable until a `shared_state` tag exists.
       #
-      #   * Full suite, SAME tree, SAME database, serial vs `--parallel 4`
-      #     (Linux/Python 3.14.9, coverage combined from every worker): 27 test
-      #     ids are red under parallel that the serial run never reds --
-      #       accounts.tests.AuthThrottleTests (6, the auth throttle budget),
-      #       tests.test_restore_drill (6, dump/restore of the shared test DB),
-      #       products.test_restock (4), tests.test_mfa (3), cart.tests (2),
-      #       shipping.tests_tracking_hardening (2), orders.tests,
-      #       orders.tests_guest, tests.test_audit_trail,
-      #       tests.test_notification_outbox_worker (1 each).
-      #   * Two families carry most of that set and neither is a defect: the
-      #     throttle pins certify a SHARED budget across connections and
-      #     PROCESSES (they are the reason the redis service exists), and the
-      #     restore drill operates on the whole test database. Four workers
-      #     deliberately break exactly the state those pins exist to prove, and
-      #     a drill cannot restore a database three siblings are connected to.
-      #   * No in-workflow exclusion can separate them: they are interleaved
-      #     with parallel-safe siblings inside the same modules (6 of
-      #     accounts/tests.py's 109 tests), and the repo's tags are FEATURE tags
-      #     (`accounts`, `restock`, `ops`), not parallel-safety tags -- so a
-      #     `--exclude-tag` split would drop thousands of safe tests with them.
-      #   * The speed would be real -- measured on Windows, 271s parallel vs
-      #     848s serial (3.1x), with 5 coverage data files combined and the
-      #     statement total still exactly 14005 -- but that run was RED for the
-      #     isolation reasons above, so the speed is not available until they
-      #     are fixed: tag the classes above with one `shared_state` tag, then
-      #     this job can run `--parallel 4 --exclude-tag shared_state` plus a
-      #     serial `--tag shared_state` leg and combine the two. That needs
-      #     test-file edits (not this workflow's to make) and `pip install
-      #     tblib` (Django's parallel runner cannot ship a traceback without it
-      #     -- measured: `TypeError: cannot pickle 'traceback' object` on the
-      #     two expected failures alone).
-      #
-      # The suite is expected GREEN on PostgreSQL, but this step still does
-      # not fail on the suite's own exit code: `pipefail` is deliberately NOT
-      # set, which leaves the pipeline's status as tee's (0), and the gate
-      # below judges the run -- by SET, not by count. pg_gate exits non-zero
-      # on any failure outside scripts/pg_baseline.json, on a missing or
-      # unreadable runner summary (exit 2), and on a failure-header count the
-      # runner's own summary disagrees with (exit 2) -- so a crashed or
-      # truncated run cannot read as clean, and a NEW failure is red even
-      # though this step is green. The log is tee'd because that is what
-      # pg_gate.py reads.
+      # `pipefail` is deliberately NOT set, so this step's status is tee's 0 and
+      # the gate below judges the run by SET: pg_gate exits non-zero on a
+      # failure outside scripts/pg_baseline.json, or on a missing/truncated
+      # summary - so a crashed run cannot read as clean. The log is tee'd
+      # because pg_gate.py reads it.
       - name: Test suite on PostgreSQL (failures judged as a set below)
         if: steps.changes.outputs.real == 'true'
         run: |
           python -m coverage run manage.py test 2>&1 | tee pg-suite.log
 
-      # `--fail-under=90` is spelled out here as well as in backend/.coveragerc:
-      # the config's fail_under is what a developer's local run honours, and
-      # this flag is what makes the CI gate explicit in the workflow that
-      # depends on it -- a gate whose threshold can only be found in another
-      # file is a gate nobody re-reads.
+      # Repeated from backend/.coveragerc (which a local run honours) so the CI
+      # threshold is visible in the workflow that depends on it.
       - name: Coverage report (fail_under=90)
         if: steps.changes.outputs.real == 'true'
         run: python -m coverage report --fail-under=90
 
-      # PARTIAL-DATA GUARD (P1-4). Two independent invariants, both of the same
-      # shape -- "shrank = red, grew = notice" -- so neither turns red on the
-      # day the suite legitimately grows:
-      #
-      #   statements 14005: the size of the measured FILE SET. Measured equal on
-      #     both engines and both hosts (Windows serial 99.84%/14005 stmts; CI
-      #     Linux serial 99.83%/14005 stmts, run 39960450424). Honest limit, so
-      #     nobody trusts it for more than it does: a run that executes fewer
-      #     tests still reports 14005, because Django's discovery IMPORTS every
-      #     measured module either way. What it catches is a data file that
-      #     never arrived or an erased one -- which is exactly the failure the
-      #     parallel path would have introduced (a worker whose `.coverage.*`
-      #     file is missing).
-      #   tests 2468: the runner's own count, which DOES fall when the run is
-      #     truncated or a shard silently stops running. pg_gate judges the
-      #     failure SET; this judges that the set was produced from a complete
-      #     run, which is the other half of the same question.
-      #
-      # An unparseable number is red, never a pass: a guard that cannot read its
-      # input must not report a green.
+      # Two invariants, "shrank = red, grew = notice" (so growth never reds):
+      # statements 14005 = the measured file set (catches a data file that never
+      # arrived - the failure the parallel path would introduce); tests 2468 =
+      # the runner's own count, which falls on a truncated run. An unparseable
+      # number is red, never a pass.
       - name: Partial-data invariant (statements + test count)
         if: steps.changes.outputs.real == 'true'
         run: |
           set -euo pipefail
           statements_baseline=14005
           tests_baseline=2468
-          # `|| true` inside the substitutions: an unreadable report or a missing
-          # summary line must reach the explicit "could not parse" branch below
-          # with its own message, not abort the step silently at the assignment.
+          # `|| true` so an unreadable report reaches the explicit "could not
+          # parse" branch with its own message instead of aborting silently.
           statements="$( (python -m coverage report || true) | awk '$1=="TOTAL"{print $2; exit}')"
           tests="$( (grep -E '^Ran [0-9]+ tests' pg-suite.log || true) | tail -1 | awk '{print $2}')"
           echo "statements=${statements:-<unparsed>} (baseline ${statements_baseline})"
@@ -421,90 +278,56 @@ jobs:
         working-directory: ${{ github.workspace }}
         run: python scripts/pg_gate.py --log backend/pg-suite.log
 
-      # Prose had no oracle until SPEC-1-B07d (scripts/doc_claims.py). This is
-      # a SIBLING step, not a wrapper around the runner, on purpose: the gate
-      # above is coverage-gated and a wrapper that shells out to the runner
-      # risks perturbing the measurement coverage report is about to gate on.
+      # A SIBLING step, not a wrapper around the runner: the gate above is
+      # coverage-gated, and shelling out to the runner from a wrapper risks
+      # perturbing that measurement.
       #
-      # Exit 1 on the mechanically decidable classes only -- a quoted `test_*`
-      # name with no `def`, a cited `.py` that does not exist, a `file.py:123`
-      # past EOF, or a byte-integrity regression on a tracked doc blob (this
-      # repo's changes.md has been silently corrupted three times by shell
-      # writes). Undecidable claims (a count, a universal) are printed as
-      # warnings and never fail: the script does not judge prose, and a gate
-      # that guessed at prose would be a gate that got loosened to pass.
+      # Exit 1 only on mechanically decidable classes (missing `def`, missing
+      # cited file, line past EOF, byte-integrity regression); undecidable
+      # claims warn and never fail, since a gate that guessed at prose would get
+      # loosened to pass. The byte baseline holds byte FACTS only and never
+      # self-updates; red on pre-existing claims is a finding, not a baseline
+      # edit.
       #
-      # The byte baseline (scripts/doc_claims_baseline.json) holds byte FACTS
-      # only and is never self-updating -- a self-updating baseline records
-      # whatever the prose claimed, which is the defect this exists to catch.
-      # If this step ever goes red on PRE-EXISTING claims, that is a finding to
-      # report, not a reason to baseline it away.
-      #
-      # scripts/mutation_evidence.py is deliberately NOT wired here: it is
-      # opt-in and slow (it replays six full-suite runs), and it is a
-      # pre-publication check for a mutation claim, not a build gate.
+      # mutation_evidence.py is deliberately NOT wired here: opt-in, slow
+      # (replays six full-suite runs), and a pre-publication check, not a gate.
       - name: Documentation claim scan (doc_claims)
         if: steps.changes.outputs.real == 'true'
         working-directory: ${{ github.workspace }}
-        # THE BASE MUST MOVE WITH THE PROMOTION, and it must be the ONLY thing
-        # that picks it. resolve_base() takes the FIRST hit of --base, then
-        # $DOC_CLAIMS_BASE, then origin/$GITHUB_BASE_REF under CI, then the
-        # local default -- so a pinned `--base origin/spec-comp` was not merely
-        # redundant, it SHADOWED every source below it and made this step scan
-        # ZERO claims, permanently (BUG-5, TOOL-01). On a pull_request event
-        # HEAD is the merge commit whose SECOND parent is origin/spec-comp, so
-        # `origin/spec-comp...HEAD` is empty by construction: a green gate that
-        # had read no prose at all, indistinguishable from a gate that passed.
-        # Naming no --base hands the decision to the one input that actually
-        # tracks the promotion -- the PR's base sha when there is a PR, else the
-        # pushed ref's previous tip.
+        # No `--base`: resolve_base() takes the first hit of --base, then
+        # $DOC_CLAIMS_BASE, then origin/$GITHUB_BASE_REF. A pinned
+        # `--base origin/spec-comp` shadowed those and scanned ZERO claims (on a
+        # PR, spec-comp...HEAD is empty by construction). Naming no --base hands
+        # the decision to the input that tracks the promotion.
         env:
           DOC_CLAIMS_BASE: ${{ github.event.pull_request.base.sha || github.event.before }}
         run: |
           set -euo pipefail
-          # `github.event.before` is forty zeros when the ref is CREATED, and
-          # `git diff 0000...HEAD` is "fatal: bad object" -> exit 2 -> a red
-          # gate on a branch that has never been promoted. A newly created ref
-          # has no prior promoted state to diff against, so drop the variable
-          # and let resolve_base() fall through to its own defaults. The
-          # scanner prints its loud zero-file notice on stderr in that case, so
-          # this is an HONEST green rather than a silent one, and the
-          # byte-integrity half runs either way.
+          # `github.event.before` is forty zeros on ref creation, and diffing
+          # that is "fatal: bad object" -> exit 2. A new ref has no prior
+          # promoted state, so drop the variable and let resolve_base() use its
+          # defaults; the scanner still prints a loud zero-file notice.
           if [ -z "${DOC_CLAIMS_BASE}" ] || [ "${DOC_CLAIMS_BASE}" = "0000000000000000000000000000000000000000" ]; then
             echo "doc_claims: no usable diff base (empty or all-zeros -- branch creation); falling back to the scanner's own defaults."
             unset DOC_CLAIMS_BASE
           fi
           python scripts/doc_claims.py --head HEAD
 
-      # GATE-7's `check` subcommand, wired here (TIER-2 cycle 2, BUG-4). The
-      # changelog's floor and `failures=N` figures were, until
-      # scripts/changelog_figures.py existed, typed by hand -- which is the
-      # mechanism behind every stale-figure finding in this repo's history --
-      # and the tool that PRINTS them was in no workflow at all, so nothing
-      # ever CHECKED them. The printer and the checker earn their place
-      # differently: the printer stops a figure being invented, this step stops
-      # one being published without a measurement behind it.
+      # `check` stops a figure being published with no measurement behind it
+      # (the printer only stopped one being invented). A sibling of the claim
+      # scan for the same reason - no wrapper around the coverage-gated suite -
+      # and diff-scoped against the SAME base, so both judge the rows this
+      # change added.
       #
-      # A SIBLING of the claim scan above, for the same reason: neither step
-      # wraps the runner, because a wrapper around the coverage-gated suite
-      # risks perturbing the measurement it is about to report on. It is also
-      # diff-scoped against the SAME base, so both steps judge the rows this
-      # change added and neither judges the whole corpus every run.
-      #
-      # `check` returns 1 naming the row and the figure when a changelog row
-      # carries a floor or `failures=N` figure with no artifact recording it.
-      # That is a real failure and is not baselined away: the artifact is the
-      # evidence, and a figure with none is exactly the defect this catches.
-      # Rows that predate the artifacts are the auditor's to certify, not this
-      # step's to excuse -- so if this ever goes red on a pre-existing row,
-      # report it rather than relaxing the gate.
+      # Returns 1 naming the row when a floor or `failures=N` figure has no
+      # artifact recording it. That is a real failure, never baselined away; red
+      # on a pre-existing row is a finding to report, not to relax.
       - name: Changelog figure gate (changelog_figures check)
         if: steps.changes.outputs.real == 'true'
         working-directory: ${{ github.workspace }}
-        # `--base` is REQUIRED by the subcommand, so it cannot be left to a
-        # default the way the claim scan's is: the same variable, and the same
-        # branch-creation fallback, or the two steps would judge different row
-        # sets and a green run would mean nothing.
+        # `--base` is REQUIRED here (unlike the claim scan), so it must use the
+        # same variable and branch-creation fallback, or the two steps would
+        # judge different row sets.
         env:
           DOC_CLAIMS_BASE: ${{ github.event.pull_request.base.sha || github.event.before }}
         run: |
@@ -515,34 +338,15 @@ jobs:
           fi
           python scripts/changelog_figures.py check --base "${DOC_CLAIMS_BASE}"
 
-      # GATE-5: scripts/tests/ holds the unit tests for the pipeline's own
-      # tooling (doc_claims.py's parser, mutation_evidence.py's format), and
-      # until this step they were run by nobody -- they were orphaned the day
-      # they were written, which is the exact defect scripts/tests/__init__.py
-      # exists to document: without its package marker, discover descends into
-      # no subdirectory and reports "Ran 0 tests / NO TESTS RAN". That file
-      # records the empty run as exiting 0; measured here on the pinned
-      # Python 3.14 it exits 5. The COUNT is deliberately not written into this
-      # comment: it moves every time a case is added to any module under
-      # scripts/tests/, and a pinned figure here is a figure that will be wrong
-      # again. The step below prints both counts on every run and requires them
-      # to agree, which is the property that actually matters. The guard
-      # therefore does not trust the exit code either way -- it asserts the
-      # COUNT, so an absent suite is
-      # red with an explicit reason whatever the runner's exit convention is,
-      # and a suite that merely SHRANK is caught too (an exit code cannot
-      # tell those two apart).
+      # Unit tests for the pipeline's own tooling. They were run by nobody, and
+      # without scripts/tests/__init__.py discovery reports "Ran 0 tests" (exit
+      # 0, or 5 on 3.14). So the guard asserts the COUNT, not the exit code:
+      # declared `def test_` functions must be non-zero and equal the runner's
+      # count, which catches both an absent suite and a shrunken one. The number
+      # is deliberately not pinned here.
       #
-      # Two independent counts: the sources' own `def test_` declarations, and
-      # the number the runner reports. Both must be non-zero and equal; both
-      # are printed, so a red step says which side moved.
-      #
-      # workspace-root scoped (like the claim scan above): the documented
-      # command is `python -m unittest discover -s scripts -p "test_*.py"`
-      # from the repo root, and -s scripts is relative to where it runs.
-      # Stdlib only -- no pip install in this step -- so it cannot go red on a
-      # wheel that failed to download, and it cannot disagree with
-      # requirements.txt about what the scripts import.
+      # Workspace-root scoped (`-s scripts` is relative), stdlib only, so no
+      # wheel download can red it.
       - name: scripts/tests unit suite (discovery is the defect it catches)
         if: steps.changes.outputs.real == 'true'
         working-directory: ${{ github.workspace }}
@@ -564,14 +368,11 @@ jobs:
           fi
           exit "${status}"
 
-      # `coverage report` is the gate (fail_under=90 in .coveragerc); the HTML
-      # report is a separate step so the upload below always has an artifact to
-      # publish -- including on a red gate, where it is the diagnostic.
-      # Directory comes from [html] directory in .coveragerc.
+      # Separate from the gate above so the upload always has an artifact,
+      # including on a red gate. Directory comes from .coveragerc's [html].
       - name: Generate coverage HTML report
-        # always() so the diagnostic exists on a red real run; gated on real
-        # so the sentinel path never reaches python (there is no coverage data
-        # and no interpreter to read it).
+        # always() so the diagnostic exists on a red run; `real` so the
+        # sentinel path never reaches python (no coverage data, no interpreter).
         if: always() && steps.changes.outputs.real == 'true'
         run: python -m coverage html
 
@@ -583,39 +384,27 @@ jobs:
           path: backend/htmlcov/
           retention-days: 7
 
-  # GATE-1: ruff lints AND formats this tree. Config lives in
-  # backend/pyproject.toml; the version is pinned in backend/requirements.in
-  # (ruff==0.16.10, carried into backend/requirements.lock, which is what this
-  # job installs) -- one source for it, so this job and a local run cannot
-  # disagree about which ruff ran. TIER-2 cycle 2 (BUG-3): this comment named
-  # backend/requirements.txt, which since TIER-2-LOCK is a one-line POINTER
-  # holding no pins of its own, so it named a file that no longer decides
-  # anything. A separate job rather than more steps inside the suite job: a
-  # dirty tree should be reported without waiting on the full suite, and a
-  # red suite should never be what hides an unformatted commit.
+  # ruff lints AND formats this tree. Config lives in backend/pyproject.toml and
+  # the version (ruff==0.16.10) is pinned in requirements.lock, which this job
+  # installs - one source, so CI and a local run cannot disagree. A separate job
+  # so a dirty tree reports without waiting for the suite, and a red suite never
+  # hides an unformatted commit.
   lint:
     runs-on: ubuntu-latest
     defaults:
       run:
         working-directory: backend
     steps:
-      # Same two SHAs the `postgres` job pins above, tags in trailing comments
-      # -- the SPEC-22-11 rule in this file's header applies to every job in
-      # it. (RULESET-SENTINEL, PROMOTE-39b: fetch-depth is now 0 rather than
-      # the old deliberate 1 -- the change-detection step below diffs the PR
-      # base, or the push's previous tip, against HEAD, and a shallow clone
-      # cannot see that base. ruff still reads only the working tree, so the
-      # wider fetch changes no lint verdict.)
+      # Same pins as the `postgres` job above. fetch-depth 0 because the
+      # change-detection step diffs a base; ruff still reads only the working
+      # tree, so the wider fetch changes no lint verdict.
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
 
-      # Identical verdict logic to the `postgres` job's step of the same name
-      # (RULESET-SENTINEL, PROMOTE-39b): real suite when the diff touches any
-      # backend-relevant path -- including this workflow file and deploy.yml
-      # -- sentinel otherwise, with every uncertainty falling through to the
-      # real suite. The two jobs must agree, or one context could go green on
-      # a change the other one gated.
+      # Identical verdict logic to the `postgres` job's step of the same name;
+      # the two jobs must agree, or one context goes green on a change the
+      # other gated.
       - name: Detect backend-relevant changes (real suite vs sentinel)
         id: changes
         working-directory: ${{ github.workspace }}
@@ -647,9 +436,7 @@ jobs:
           echo "real=${real}"
           echo "real=${real}" >> "${GITHUB_OUTPUT}"
 
-      # The `lint` half of the sentinel: same owner-directed ruleset fix, same
-      # explicit skip message so a green on a frontend-only PR can never be
-      # mistaken for a ruff/pre-commit/mypy verdict.
+      # The `lint` half of the sentinel; the message states what did not run.
       - name: "Sentinel: no backend-relevant changes (lint context reports green)"
         if: steps.changes.outputs.real != 'true'
         run: |
@@ -668,9 +455,8 @@ jobs:
         if: steps.changes.outputs.real == 'true'
         run: pip install -r requirements.lock
 
-      # Both halves of the gate, both exit codes measured: `ruff check .`
-      # exits 0 only on a clean lint, and `ruff format --check .` exits 0
-      # only when not one file would be rewritten.
+      # Both halves are gates: check exits 0 only on a clean lint, format
+      # --check only when no file would be rewritten.
       - name: ruff check (lint)
         if: steps.changes.outputs.real == 'true'
         run: ruff check .
@@ -679,24 +465,14 @@ jobs:
         if: steps.changes.outputs.real == 'true'
         run: ruff format --check .
 
-      # TIER-2 item 3: the same rules, plus check-yaml, as the hooks in
-      # .pre-commit-config.yaml. This is REDUNDANT with the two steps above on
-      # purpose and is not a stronger version of them: it runs the identical
-      # pinned ruff (the hook rev is v0.16.10 to match the pin in
-      # requirements.in, so the two cannot disagree about formatting) and adds
-      # the YAML parse and the whitespace/secret checks on files the `lint`
-      # job's working-directory never sees -- the workflow files, Procfile,
-      # docker-compose.yml, and every other tracked file in the repository.
-      #
-      # `--all-files` rather than a changed-files list, because a check scoped
-      # to the diff is a check that only ever sees the last commit: the whole
-      # point of check-yaml is that a workflow which does not PARSE cannot be
-      # pushed at all, and the push that would carry the broken file is
-      # precisely the one a diff-scoped run would have to notice.
-      #
-      # The hook store is cached because each of these revs is installed into
-      # its own virtualenv on a cold cache; the config is committed and the
-      # revs are commit SHAs, so the cache key tracks the real inputs.
+      # Deliberately REDUNDANT with the two steps above: the same pinned ruff
+      # (hook rev matches requirements.lock), plus check-yaml, whitespace and
+      # secret checks on files the lint job's working-directory never sees
+      # (workflows, Procfile, compose).
+      # `--all-files`, not diff-scoped: check-yaml exists because a workflow
+      # that does not PARSE cannot be pushed, and the push carrying it is what a
+      # diff-scoped run would have to notice.
+      # The hook store is cached; the config is committed and revs are SHAs.
       - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         if: steps.changes.outputs.real == 'true'
         with:
@@ -708,63 +484,34 @@ jobs:
         if: steps.changes.outputs.real == 'true'
         run: pre-commit run --all-files --show-diff-on-failure
 
-      # TIER-2 item 4: mypy, scoped by [tool.mypy] in backend/pyproject.toml to
-      # common/ and orders/state.py -- the RBAC capability maps and the order
-      # lifecycle machine, i.e. the two files where a wrong value is a security
-      # or money defect rather than a cosmetic one, and orders/state.py is also
-      # what the weekly mutation job targets.
-      #
-      # The paths are passed on the command line rather than left to a config
-      # `files` setting, so this step and a local run cannot disagree about
-      # what is in scope; the config carries the RULES (ignore_missing_imports,
-      # check_untyped_defs, the two measured per-module suppressions) and this
-      # line carries the SCOPE. A new module is added to the gate by editing
-      # this line, which is a visible diff in the workflow rather than a
-      # silently-widening default.
-      #
-      # Exit 0 is the whole gate: mypy exits non-zero on any reported error.
-      #
-      # The step name is QUOTED because it contains a colon. Unquoted,
-      # `name: mypy (scoped: common/ ...)` is a YAML mapping value and the file
-      # does not parse at all -- which GitHub rejects at push time, so the
-      # workflow never runs and every gate in it silently stops existing. The
-      # pre-commit check-yaml hook caught exactly this, which is the argument
-      # for having it: the failure was in a file three commits had already
-      # touched and no test in this repo parses YAML (deliberately -- PyYAML is
-      # not a dependency, see tests/test_deployment_contract.py).
+      # Scoped to common/ and orders/state.py - the RBAC capability maps and
+      # the order lifecycle machine, where a wrong value is a security or money
+      # defect - and orders/state.py is also the mutation job's target.
+      # Paths are on the command line, not a config `files` setting, so CI and a
+      # local run cannot disagree: the config carries the RULES, this line the
+      # SCOPE, and widening it is a visible diff.
+      # The step name is QUOTED because it contains a colon; unquoted it becomes
+      # a YAML mapping, the file stops parsing, and GitHub rejects the push so
+      # every gate silently stops existing.
       - name: "mypy (scoped: common/ + orders/state.py)"
         if: steps.changes.outputs.real == 'true'
         run: mypy common/ orders/state.py
 
-      # R-17.27 (P1-1): the dependency vulnerability gate. FAILS on
-      # CRITICAL/HIGH only -- moderate/low are printed and never block, so a
-      # low-severity advisory cannot freeze the pipeline.
-      #
-      # pip-audit carries NO severity in any output format: measured on this
-      # lock, `--format json` reports 41 findings in 4 packages and the same 41
-      # in `--format cyclonedx-json` with ZERO `ratings` entries. A
-      # "high/critical only" gate therefore cannot be built on pip-audit's own
-      # output, and the severity is resolved per advisory from the GitHub
-      # advisory database through the OSV REST API (`database_specific.severity`)
-      # -- the same database `npm audit --audit-level` reads on the frontend
-      # side, so the two halves of R-17.27 agree about what "high" means.
-      #
-      # Fail-closed on what cannot be judged: an advisory whose severity will
-      # not resolve is BLOCKING rather than ignored (an unknown must never read
-      # as a pass), and the printed line says which of the two shapes it was
-      # (UNRATED = the advisory has no severity, UNRESOLVED = the API call
-      # failed). The scan is not a "looks fine" step that exits 0 on an
-      # unreadable report: a missing/unparseable report is an error.
+      # Fails on CRITICAL/HIGH only; moderate/low print and never block.
+      # pip-audit carries NO severity in any format, so severity is resolved per
+      # GHSA through the OSV API (`database_specific.severity`) - the same
+      # database npm audit reads, so both halves of the gate agree on "high".
+      # Fail-closed on what cannot be judged: an unresolvable severity is
+      # BLOCKING (UNRATED vs UNRESOLVED), and a missing/unparseable report is an
+      # error rather than a clean scan.
       - name: Dependency vulnerability audit (pip-audit, high/critical)
         if: steps.changes.outputs.real == 'true'
         run: |
           set -euo pipefail
           python -m pip install --quiet "pip-audit==2.10.1"
-          # requirements.lock is the resolved, hash-pinned set this job installs,
-          # so the audit reads exactly what would run. pip-audit's own exit
-          # status is not the gate -- the set is this step's INPUT and the
-          # blocking decision belongs to the classification below -- so a
-          # finding must not end the step with a bare unexplained failure.
+          # Audits exactly what installs (the hash-pinned lock). pip-audit's own
+          # exit status is not the gate; the classification below decides, so a
+          # finding must not end the step with a bare failure.
           python -m pip_audit -r requirements.lock --format json -o pip-audit.json || true
           if [ ! -s pip-audit.json ]; then
             echo "::error::pip-audit produced no report; refusing to report a clean scan that did not happen."

@@ -2,6 +2,10 @@
 
 Source of truth for the spec-compliance run. Updated at every status transition with evidence (commit SHA, test command + result, or report verdict).
 
+Line references (`path:line`) inside dated entries are historical anchors from
+the tree at that time. The 2026-11-12 repo-wide comment prune shifted source
+lines; locate a current line by the named symbol, not by the old number.
+
 ## Latest promotion (2026-10-24)
 
 - PR #50 **MERGED** @ `e77e9ca18e77ea78b91585fd1a5d966baa453724` (hardening batch P0-1, P0-2, P1-1..P1-5; orchestrator-verified: `gh pr view 50` state=MERGED, mergeCommit `e77e9ca`, `origin/feat/add-frontend` tip = `e77e9ca`; `master` unchanged at `27293a5b`). Gate: 3 cycles (c1 CR + missing changelog rows; c2 mypy platform branches + npm lock `undici` edge; c3 green). CI on tip green: postgres x2, lint x2, unit-build x2, gitleaks x2, GitGuardian, publish; post-merge backend-tests, frontend-tests, frontend-deploy, ghcr-publish, secret-scan, deploy all green.

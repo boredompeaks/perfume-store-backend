@@ -1,10 +1,3 @@
-"""E2E admin/ops tests - docs/test-gaps.md e2e item 12 plus admin surface.
-
-The order admin enforces a legal status flow (ALLOWED_TRANSITIONS in
-orders/admin.py): paid orders can never reach 'cancelled' because there is
-no refund flow yet (V-03) - this suite pins that contract.
-"""
-
 from datetime import timedelta
 from decimal import Decimal
 
@@ -17,9 +10,6 @@ from orders.models import Order, OrderItem
 
 
 def _attach_order_item(order):
-    """SPEC-10-03 fixture helper: give an ORM-created order the checkout
-    line a real checkout always leaves behind (items are a shipped
-    precondition); product is nullable so no catalogue row is needed."""
     return OrderItem.objects.create(
         order=order,
         product_name="Fixture perfume",
@@ -45,8 +35,6 @@ def make_order(user, status="pending", total="100.00"):
 
 @tag("e2e")
 class AdminOrderLifecycleTests(ApiTestCase):
-    # e2e 12. admin transitions confirmed -> shipped -> delivered; cancelling
-    # a paid order must be blocked (V-03: no refund flow to reconcile with)
     def setUp(self):
         User.objects.create_superuser(
             "opsboss", "ops@example.com", "S3cure-Passphrase!"
@@ -80,15 +68,13 @@ class AdminOrderLifecycleTests(ApiTestCase):
 
     def test_legal_lifecycle_pending_confirmed_shipped_delivered(self):
         order = make_order(self.buyer)
-        # SPEC-10-03 fixture: the shipped step requires items + captured
-        # payment, i.e. the row a real checkout + verify_payment produces.
         _attach_order_item(order)
         Order.objects.filter(pk=order.pk).update(payment_status="captured")
 
         res = self._change_status(order, "shipped")
         self.assertEqual(res.status_code, 200)
         order.refresh_from_db()
-        self.assertEqual(order.status, "pending")  # pending -> shipped is illegal
+        self.assertEqual(order.status, "pending")
 
         res = self._change_status(order, "confirmed")
         self.assertEqual(res.status_code, 200)
@@ -112,7 +98,7 @@ class AdminOrderLifecycleTests(ApiTestCase):
                 res = self._change_status(order, "cancelled")
                 self.assertEqual(res.status_code, 200)
                 order.refresh_from_db()
-                self.assertEqual(order.status, paid_status)  # unchanged
+                self.assertEqual(order.status, paid_status)
 
     def test_cancelling_an_unpaid_order_is_allowed(self):
         order = make_order(self.buyer, status="pending")
@@ -131,8 +117,6 @@ class AdminOrderLifecycleTests(ApiTestCase):
                 self.assertEqual(order.status, current)
 
     def test_paid_order_cannot_be_reprocessed_through_the_payment_api(self):
-        """The API side of the same guard: verify_payment can never move an
-        order out of a post-pending state (idempotency block)."""
         order = make_order(self.buyer, status="confirmed")
         buyer_client = self.fresh_client()
         self.api_login("buyer", client=buyer_client)
@@ -177,7 +161,6 @@ class AdminBulkActionsTests(ApiTestCase):
 
     def test_mark_shipped_bulk_respects_transitions(self):
         confirmed = make_order(self.buyer, status="confirmed")
-        # SPEC-10-03 fixture: the shipped edge requires items + captured.
         _attach_order_item(confirmed)
         Order.objects.filter(pk=confirmed.pk).update(payment_status="captured")
         delivered = make_order(self.buyer, status="delivered")
@@ -186,8 +169,8 @@ class AdminBulkActionsTests(ApiTestCase):
         self.assertEqual(res.status_code, 200)
         confirmed.refresh_from_db()
         delivered.refresh_from_db()
-        self.assertEqual(confirmed.status, "shipped")  # legal
-        self.assertEqual(delivered.status, "delivered")  # skipped
+        self.assertEqual(confirmed.status, "shipped")
+        self.assertEqual(delivered.status, "delivered")
 
     def test_mark_confirmed_and_mark_delivered_bulk(self):
         pending = make_order(self.buyer, status="pending")
@@ -203,13 +186,13 @@ class AdminBulkActionsTests(ApiTestCase):
         self.assertEqual(res.status_code, 200)
         shipped.refresh_from_db()
         delivered.refresh_from_db()
-        self.assertEqual(shipped.status, "delivered")  # legal
-        self.assertEqual(delivered.status, "delivered")  # skipped
+        self.assertEqual(shipped.status, "delivered")
+        self.assertEqual(delivered.status, "delivered")
 
         res = self._run_action("mark_confirmed", [shipped])
         self.assertEqual(res.status_code, 200)
         shipped.refresh_from_db()
-        self.assertEqual(shipped.status, "delivered")  # terminal states skipped
+        self.assertEqual(shipped.status, "delivered")
 
     def test_cancel_pending_bulk_spares_paid_orders(self):
         pending = make_order(self.buyer, status="pending")
@@ -235,8 +218,6 @@ class AdminBulkActionsTests(ApiTestCase):
 
 @tag("e2e")
 class AdminSurfaceSmokeTests(ApiTestCase):
-    """The admin customizations render for staff and are closed to others."""
-
     def setUp(self):
         User.objects.create_superuser(
             "opsboss", "ops@example.com", "S3cure-Passphrase!"
@@ -309,8 +290,8 @@ class AdminSurfaceSmokeTests(ApiTestCase):
         self.assertContains(res, "expired")
         self.assertContains(res, "scheduled")
         self.assertContains(res, "inactive")
-        self.assertContains(res, "0 / ∞")  # usage display without a limit
-        self.assertContains(res, "7 / 50")  # usage display with a limit
+        self.assertContains(res, "0 / ∞")
+        self.assertContains(res, "7 / 50")
 
     def test_product_and_cart_changelists_render(self):
         from cart.models import Cart, CartItem
@@ -320,10 +301,10 @@ class AdminSurfaceSmokeTests(ApiTestCase):
 
         res = self.client.get("/admin/products/products/")
         self.assertEqual(res.status_code, 200)
-        self.assertContains(res, "low (2)")  # stock_flag branch
+        self.assertContains(res, "low (2)")
         res = self.client.get("/admin/cart/cart/")
         self.assertEqual(res.status_code, 200)
-        self.assertContains(res, "session-abc")  # session_short branch
+        self.assertContains(res, "session-abc")
 
     def test_user_admin_lists_order_stats(self):
         res = self.client.get(f"/admin/auth/user/{self.buyer.id}/change/")

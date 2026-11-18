@@ -18,25 +18,17 @@ from .services import (
     get_stats,
 )
 
-# Page size for the audit-log table: a presentation constant for an
-# internal staff surface, not deployment config — named here so the route
-# has no magic numbers.
+# Page size for the audit-log table (presentation constant, not deployment
+# config).
 AUDIT_PAGE_SIZE = 50
 
-# Q-S2 (decisions.md F2): what the ANONYMOUS probe may carry. Every
-# release-time waiter — release.sh's `up --wait`, the compose healthcheck
-# and the image HEALTHCHECK — gates on the HTTP status alone (urlopen exits
-# non-zero on the 503), so the body only needs the checks that DRIVE that
-# status plus the pre-launch shipping marker a merchant reads before going
-# live. It is a whitelist, not a blacklist: a new check stays staff-only
-# until it is deliberately added here.
+# What the anonymous probe may carry: release waiters gate on the HTTP status
+# alone, so the body needs only the checks that drive it plus the pre-launch
+# shipping marker. A whitelist, not a blacklist.
 PUBLIC_HEALTH_CHECKS = ("database", "media_writable", "shipping_configured")
 
-# The top-level keys that left the public body with the F2 split — order
-# and cart counts, the stock counters and the marker the stock alert never
-# fires from inside the probe. get_health() still computes all of them
-# (the dashboard renders them, health_detail serves them); this list only
-# names what /health/ strips.
+# Top-level keys /health/ strips; get_health() still computes them for the
+# dashboard and health_detail.
 STAFF_ONLY_HEALTH_KEYS = frozenset(
     {
         "pending_orders",
@@ -50,14 +42,9 @@ STAFF_ONLY_HEALTH_KEYS = frozenset(
 
 
 def _public_health(health):
-    """Project get_health()'s full payload onto the public Q-S2 contract.
+    """Project get_health()'s full payload onto the public contract.
 
-    Subtract-by-name rather than pick-whole-dict on purpose: the
-    error-envelope seam substitutes arbitrary 503 bodies (tests patch
-    get_health with a bare ``{"status": ...}`` or one carrying an
-    ``"error"`` key), and this projection must pass those through with only
-    the moved keys stripped — dropping unknown keys would swallow the
-    envelope the middleware is about to wrap.
+    Subtract by name rather than rebuilding: the error-envelope seam substitutes arbitrary 503 bodies, and dropping unknown keys would swallow the envelope the middleware is about to wrap.
     """
     body = {k: v for k, v in health.items() if k not in STAFF_ONLY_HEALTH_KEYS}
     checks = body.get("checks")
@@ -67,23 +54,14 @@ def _public_health(health):
 
 
 def health(request):
-    """Public health endpoint — deploy-relevant checks only, no network
-    calls. Business counters and configuration modes moved to
-    health_detail (Q-S2/F2); the status contract (200 ok / 503 degraded)
-    is unchanged, which is what every release-time waiter polls."""
+    """Public health endpoint: deploy-relevant checks only, no network calls; 200 ok / 503 degraded is the contract release waiters poll."""
     health = get_health()
-    # [SPEC-19-2] Integration-outage alert ([R-19.20] alerting half) beside
-    # the existing detection: a degraded probe notifies the staff mailbox
-    # once per cooldown (the probe is polled, so the rule protects the
-    # inbox). The dispatch is log-only on failure and cannot alter the
-    # response — the monitor must never become the outage it reports.
+    # Integration-outage alert beside the existing detection; log-only
+    # dispatch cannot alter the response.
     if health["status"] != "ok":
-        # Best-effort detail: get_health's shape is its own contract (the
-        # error-envelope seam may substitute arbitrary 503 bodies), so the
-        # alert renders whatever keys are present instead of assuming
-        # `checks` — an alert must never 500 the probe that tripped it.
-        # Deliberately the FULL payload: the mailbox is the staff surface,
-        # so the alert keeps the checks the public body no longer carries.
+        # Best-effort detail: render whatever keys are present rather than
+        # assuming `checks`, so an alert never 500s the probe that tripped it.
+        # The full payload is deliberate: the mailbox is the staff surface.
         checks = health.get("checks") or {}
         checks_text = " ".join(f"{key}={value}" for key, value in checks.items())
         alerts.notify_integration_outage(
@@ -97,26 +75,12 @@ def health(request):
 @api_view(["GET"])
 @permission_classes([HasReportsRead])
 def health_detail(request):
-    """GET /api/v1/admin/health/ — the full probe payload, staff eyes only.
-
-    Q-S2/F2 moved the business counters and configuration modes off the
-    anonymous /health/ body without deleting them: they live here behind
-    ``reports.read``, the same capability that gates the dashboard already
-    rendering every one of these numbers (finance, marketing, admin per
-    CAPABILITY_ROLES) — so the split removes a public disclosure without
-    granting any reader anything new."""
+    """GET /api/v1/admin/health/ — the full probe payload behind ``reports.read``, the same capability that gates the dashboard."""
     return Response(get_health())
 
 
 def _absolute_media_url(request, file_field):
-    """The public absolute URL of an uploaded media file, or None when unset.
-
-    Absolute rather than the storage-relative ``/media/...``: the storefront is
-    served from a different origin than the API, so a relative URL would
-    resolve against the page host and 404. None rather than an empty string
-    because "no logo uploaded" is a state the frontend branches on, and "" is
-    indistinguishable from a broken path.
-    """
+    """The public absolute URL of an uploaded media file, or None when unset. Absolute because the storefront is on a different origin; None because "" is indistinguishable from a broken path."""
     if not file_field:
         return None
     return request.build_absolute_uri(file_field.url)
@@ -129,29 +93,19 @@ def api_settings(request):
     row = SiteSettings.load()
     return JsonResponse(
         {
-            # [R-16.3] SPEC-16-T2/05: merchant-editable store identity. Keys
-            # are listed explicitly (never a model dump) so a future column is
-            # not disclosed here by accident.
+            # Keys are listed explicitly, never a model dump, so a future
+            # column is not disclosed by accident.
             "name": row.name,
             "logo": _absolute_media_url(request, row.logo),
             "locale": row.locale,
-            # [R-16.15] SPEC-16-T2/05: the flag only. The maintenance page and
-            # the gating that sends customers to it are SPEC-3-06.
             "maintenance_mode": row.maintenance_mode,
             "support_email": row.support_email,
             "support_phone": row.support_phone,
             "whatsapp_number": row.whatsapp_number,
             "whatsapp_message": row.whatsapp_message,
             "instagram_url": row.instagram_url,
-            # SPEC-1-B07d: the RESOLVED window, not the raw column. Publishing
-            # it is a policy disclosure, and a customer who cannot see the
-            # deadline cannot meet it - this is the same class of data as the
-            # contact channels above (a published store rule: no PII, no money,
-            # no capability or order information), so it belongs on the one
-            # public settings surface the spec already has. It is read-only
-            # here, so disclosing it hands a caller nothing they could not get
-            # by asking a shop assistant, and the resolve means the storefront
-            # never keeps its own copy of the default.
+            # The RESOLVED window, not the raw column, so the storefront never
+            # keeps its own copy of the default.
             "return_window_days": row.resolved_return_window_days(),
         }
     )
@@ -159,35 +113,19 @@ def api_settings(request):
 
 @capability_required("reports.read")
 def dashboard(request):
-    """Store dashboard (spec 5 / route /admin/dashboard): revenue, order and
-    inventory aggregates. SPEC-17-10: gated by ``reports.read`` (finance,
-    marketing, admin per CAPABILITY_ROLES), not the blanket
-    @staff_member_required it replaces — every role on this page reads
-    revenue and customer rows, so "any staff account" was never the right
-    authority; the sibling audit-log route already used the capability
-    decorator and this closes the last blanket-staff chrome route. The
-    decorator's contract matches it: anonymous callers are redirected to
-    the admin login, unprivileged staff get a visible 403, superusers keep
-    their explicit bypass."""
+    """Store dashboard: revenue, order and inventory aggregates, gated by ``reports.read`` (finance, marketing, admin) rather than blanket staff access."""
     health = get_health()
     stats = get_stats()
     sales_series = get_sales_series()
-    # [SPEC-19-2] The dashboard load is a natural alert poll for the
-    # low/out-of-stock breach (same threshold definition the table below
-    # renders); log-only + cooldown-deduped, so staff page views cannot
-    # mail-bomb anyone.
+    # The dashboard load is a natural alert poll for stock breaches; log-only
+    # and cooldown-deduped, so page views cannot mail-bomb anyone.
     check_stock_alerts()
-    # [SPEC-19-2 audit c1 BUG-1] The spike detector's production call site:
-    # the AuditEvent trail already holds the failed-payment events, and the
-    # dashboard poll mirrors the stock-alert wiring (detector owned here,
-    # trigger beside its sibling alert — the audit-trail query itself is
-    # skipped entirely when ALERT_RECIPIENTS is empty, so the page stays
-    # cheap with alerts unconfigured).
+    # The payment-failure spike detector's production call site; its audit
+    # query is skipped when ALERT_RECIPIENTS is empty.
     check_payment_failure_spike()
 
-    # Chart helpers for the template: bar heights scale against the busiest
-    # day, and the aria summary gives screen readers the real totals (the
-    # bars themselves carry no numbers).
+    # Chart helpers: bar heights scale against the busiest day, and the aria
+    # summary gives screen readers the real totals.
     sales_max_revenue = max(day["revenue"] for day in sales_series)
     sales_total_revenue = sum((day["revenue"] for day in sales_series), Decimal("0.00"))
     sales_total_orders = sum(day["orders"] for day in sales_series)
@@ -201,9 +139,8 @@ def dashboard(request):
     from orders.models import Order
     from products.models import StockMovement, products
 
-    # One batched pk -> username fetch replaces the old per-order
-    # User.objects.get (N+1 on recent orders). A user row that vanishes
-    # between get_stats() and this fetch degrades to the dash, never a 500.
+    # One batched pk -> username fetch (no N+1); a user that vanishes between
+    # get_stats() and here degrades to a dash, never a 500.
     user_ids = {row["user_id"] for row in stats["recent_orders"]}
     users = User.objects.in_bulk(user_ids)
     recent_orders = []
@@ -241,15 +178,7 @@ def dashboard(request):
 
 @capability_required("staff.manage")
 def audit_log(request):
-    """Audit-log route (spec 6.12, /admin/audit-log): the single staff-gated
-    reader for the privileged-action trail. Every admin form save, gated
-    bulk action (RoleAwareModelAdmin) and API-side write (log_api_action)
-    lands a LogEntry — this page reads that one source.
-
-    Gated by ``staff.manage`` (admin role, the map's only grantee): the
-    trail names actors across every domain, including role changes, so
-    reading it is privilege-management oversight, not a per-team report.
-    """
+    """Audit-log route: the single staff-gated reader for the privileged-action trail, behind ``staff.manage`` (admin only) because it names actors across every domain."""
     entries = LogEntry.objects.select_related("user", "content_type").order_by(
         "-action_time"
     )

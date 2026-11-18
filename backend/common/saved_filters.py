@@ -1,33 +1,7 @@
-"""Per-user saved changelist filters (SPEC-20-6, spec 20.1 [R-20.11]).
+"""Per-user saved changelist filters.
 
-Spec 20.1 asks every major admin listing to support "Saved filters/views
-where useful" and Django ships no such mechanism, so the two
-highest-traffic changelists (orders, products) get one. It is deliberately
-thin, and thin in a specific way: a saved filter is a *shortcut to a URL*,
-never a second path to the rows.
-
-- ``SavedFilterMixin.changelist_view`` folds a ``?_saved_filter=<pk>``
-  marker into the same ``request.GET`` the changelist already reads, and
-  then lets Django do the rest — filtering, validation, ordering, the
-  queryset. A saved filter therefore cannot surface a row the changelist
-  would not have shown anyway, because it never touches the queryset
-  itself.
-- The pk lookup is scoped to the requesting user *in the query*, so another
-  user's saved view is indistinguishable from one that does not exist: the
-  apply link can neither apply nor confirm the existence of a foreign view.
-- Both write endpoints hang off the ModelAdmin's own
-  ``has_view_permission`` (spec 6.12 least privilege), so the surface is
-  reachable for exactly the users who could list those rows to begin with.
-- A stored spec is validated with ``get_changelist_instance`` before it is
-  written. Django's ``ChangeList`` is the authority on which query
-  parameters a changelist accepts, and it turns the rest into a 400 — which
-  a spec replayed from the database on a later request must never be able
-  to produce.
-
-Ordering (``o``) is deliberately NOT part of a saved spec: it is a list of
-``list_display`` column *indexes*, so a saved copy silently re-sorts a
-different column the moment a column is inserted, and Django re-derives a
-sane ordering per request anyway. A saved filter is a filter.
+A saved filter is a shortcut to a URL, never a second path to rows: the marker is
+folded into ``request.GET`` and Django's changelist does the filtering.
 """
 
 from django import forms
@@ -56,27 +30,14 @@ from django.views.decorators.http import require_POST
 
 from common.models import SavedFilter
 
-# The query parameter that names the saved filter to apply, and the save
-# form's hidden field carrying the selection being saved. Module constants,
-# not inline literals, because the changelist, the bar template, both write
-# endpoints and the stored-spec filter all have to agree on the spelling.
-# ``APPLY_PARAM`` is the only query parameter this feature owns — the
-# selection itself travels in the POST body as ``SPEC_FIELD``, which is a
-# form field name (hence no leading underscore: a template cannot resolve
-# one).
+# Shared spellings: ``APPLY_PARAM`` is the only query parameter this feature
+# owns; the selection travels in the POST body as the form field ``SPEC_FIELD``.
 APPLY_PARAM = "_saved_filter"
 SPEC_FIELD = "filter_spec"
-# A changelist URL is short; this bounds the work a crafted POST can ask of
-# the changelist-authority probe below (one probe per parameter) and makes
-# an over-long selection an honest form error rather than a silent success.
+# Bounds the changelist-authority probes a crafted POST can ask for.
 SPEC_FIELD_MAX_LENGTH = 2000
-# Everything Django itself ignores on a changelist (show-all, ordering, the
-# search term, the popup/source/to_field/facets verbs) plus the two it
-# deletes separately (page, error flag) is plumbing, not a filter selection,
-# so none of it may be stored. `q` is the one member that IS a real
-# selection — the search term — so it is kept. Both names are imported from
-# Django rather than retyped, so this set cannot drift from the changelist's
-# own idea of "not a filter".
+# Changelist plumbing, not a filter selection, so it is never stored; ``q`` is
+# the exception. Names are imported from Django so the set cannot drift.
 NON_SPEC_PARAMS = (frozenset(IGNORED_PARAMS) - {SEARCH_VAR}) | {
     PAGE_VAR,
     ERROR_FLAG,
@@ -86,13 +47,10 @@ NON_SPEC_PARAMS = (frozenset(IGNORED_PARAMS) - {SEARCH_VAR}) | {
 
 
 class SavedFilterForm(forms.Form):
-    """The saved-view bar's save form: a name plus the current selection.
+    """The save form: a name plus the current selection.
 
-    ``filter_spec`` rides as a hidden field because the POST target is the
-    save endpoint, not the changelist the bar was rendered on. It is
-    treated as untrusted input regardless: :func:`clean_spec` asks the
-    changelist which of the submitted parameters it accepts, so a crafted
-    value is dropped rather than stored.
+    ``filter_spec`` is untrusted regardless; :func:`clean_spec` drops anything the
+    changelist would not accept.
     """
 
     name = forms.CharField(
@@ -118,10 +76,7 @@ def content_type_for(model_admin):
 def registered_model_admin(app_label, model_name):
     """The registered ModelAdmin for this model, or ``None``.
 
-    Resolved from the registry by name rather than imported, so this shared
-    module never imports an app's models (the dependency direction in §14
-    runs common -> apps) and an app without a changelist simply does not
-    participate.
+    Resolved by name so this shared module never imports an app's models.
     """
     try:
         model = apps.get_model(app_label, model_name)
@@ -131,14 +86,8 @@ def registered_model_admin(app_label, model_name):
 
 
 def viewable_model_admin(request, app_label, model_name):
-    """The ModelAdmin for this model, or 404 — and only to a viewer.
-
-    The gate is the ModelAdmin's own ``has_view_permission``, i.e. the same
-    capability-driven method the changelist is gated by, so a saved filter
-    exists for exactly the users who can list the rows it filters. An
-    unregistered model is a 404 too: there is no changelist to save a
-    filter for.
-    """
+    """The ModelAdmin for this model, or 404 — and only to a viewer, via its
+    own ``has_view_permission``."""
     model_admin = registered_model_admin(app_label, model_name)
     if model_admin is None or not model_admin.has_view_permission(request):
         raise Http404
@@ -146,24 +95,15 @@ def viewable_model_admin(request, app_label, model_name):
 
 
 def require_admin_session(request):
-    """Anonymous callers go to the admin login; staff sessions carry on.
-
-    The same contract the ``capability_required`` chrome routes use
-    (conventions.md:26 — a new surface is not open by default, and an
-    expired session should land on the login rather than a 404).
-    """
+    """Anonymous callers go to the admin login; staff sessions carry on."""
     if not request.user.is_authenticated:
         return redirect_to_login(request.get_full_path(), reverse("admin:login"))
     return None
 
 
 def current_spec(request):
-    """The filter selection on screen, as a query string for the form.
-
-    Changelist plumbing is dropped here (and again in :func:`clean_spec`)
-    so the form never carries a page number or an apply marker into a
-    stored view.
-    """
+    """The selection on screen as a query string, with changelist plumbing
+    dropped (and dropped again in :func:`clean_spec`)."""
     params = request.GET.copy()
     for key in list(params.keys()):
         if key in NON_SPEC_PARAMS:
@@ -172,31 +112,21 @@ def current_spec(request):
 
 
 def apply_saved_filter(model_admin, request):
-    """Fold the requested saved filter into ``request.GET``.
+    """Fold the requested saved filter into ``request.GET``, returning it or None.
 
-    Returns the SavedFilter that was applied, or ``None``. The lookup is
-    scoped to the requesting user and the model, so a foreign or
-    malformed pk is simply "no saved filter": the apply link can neither
-    apply nor confirm the existence of another user's view.
-
-    A parameter already on the URL always wins. A saved view is a starting
-    point an operator can always adjust from, and this also keeps the
-    marker idempotent — re-applying the same filter twice is the same URL.
+    A foreign or malformed pk is simply no filter, and a parameter already on the
+    URL wins so re-applying the same marker is idempotent.
     """
     raw = request.GET.get(APPLY_PARAM, "")
-    # The marker is stripped UNCONDITIONALLY, whether or not it resolves: it
-    # is this feature's own parameter, and the changelist reads every
-    # unrecognised query key as a filter lookup — left in place it would be
-    # rejected as an unknown lookup and bounce the operator to `?e=1`.
+    # Stripped unconditionally: the changelist reads every unrecognised query
+    # key as a lookup and would bounce the operator to ``?e=1``.
     params = request.GET.copy()
     params.pop(APPLY_PARAM, None)
     saved = _owned_filter(model_admin, request, raw) if raw else None
     if saved is not None:
         for key, value in saved.params.items():
-            # A JSON column is not schema-validated, so a hand-edited row
-            # can hold a non-string. Such an entry is not a filter
-            # selection: skip it rather than let it reach the QueryDict,
-            # which takes strings.
+            # A hand-edited row may hold a non-string; skip it because
+            # QueryDict takes strings.
             if isinstance(value, str) and key not in params:
                 params[key] = value
     request.GET = params
@@ -204,11 +134,7 @@ def apply_saved_filter(model_admin, request):
 
 
 def _owned_filter(model_admin, request, raw):
-    """The caller's own saved filter named by ``raw``, or ``None``.
-
-    A malformed or foreign pk is "no saved filter" — never an error and
-    never a hint that someone else's view exists.
-    """
+    """The caller's own saved filter named by ``raw``, or ``None``."""
     if not raw.isdigit():
         return None
     return SavedFilter.objects.filter(
@@ -219,13 +145,8 @@ def _owned_filter(model_admin, request, raw):
 
 
 def saved_filter_context(model_admin, request):
-    """Apply the requested saved filter and build the bar's context.
-
-    Called from ``changelist_view`` BEFORE delegating to Django: the merge
-    has to reach ``request.GET`` because that is what the changelist reads,
-    and the form's selection is read AFTER the merge so "save this view"
-    captures what is actually on screen.
-    """
+    """Apply the requested filter and build the bar's context; called before
+    delegating so the merge reaches ``request.GET``."""
     active = apply_saved_filter(model_admin, request)
     return {
         "saved_filters": SavedFilter.objects.filter(
@@ -244,16 +165,8 @@ def saved_filter_context(model_admin, request):
 def _changelist_accepts(model_admin, request, key, value):
     """Ask this admin's own changelist whether ``key=value`` is playable.
 
-    ``get_changelist_instance`` raises for a parameter the changelist
-    cannot honour, which the changelist renders as a 400. A stored spec is
-    replayed from the database on a later request, so anything that would
-    400 must never reach the table — and Django, not a re-implementation of
-    its filter vocabulary, decides.
-
-    The probe borrows the live request and puts its query string back in a
-    ``finally``: a shallow copy would share the session and the message
-    store with the real response, which is exactly what a validation probe
-    must not touch.
+    A stored spec must never be one that would 400, and Django decides. The probe
+    restores the query string in a ``finally``.
     """
     original = request.GET
     request.GET = QueryDict(urlencode({key: value}), mutable=True)
@@ -273,15 +186,8 @@ def _changelist_accepts(model_admin, request, key, value):
 
 
 def clean_spec(model_admin, request, raw_spec):
-    """The saveable filter selection inside a submitted spec field.
-
-    Two filters, both about what may be REPLAYED later:
-
-    - the parameter must not be changelist plumbing and must carry a single
-      value — a multi-valued key is a hand-built one-off URL, not a view
-      worth keeping;
-    - the changelist must accept it (see :func:`_changelist_accepts`).
-    """
+    """The saveable selection: no plumbing, single values only, each accepted by
+    the changelist."""
     if not raw_spec:
         return {}
     candidate = QueryDict(raw_spec)
@@ -327,10 +233,8 @@ def save_saved_filter(request, app_label, model_name):
     name = form.cleaned_data["name"].strip()
     try:
         with transaction.atomic():
-            # Re-saving a name replaces its selection — update_or_create
-            # makes that one call, and the (user, model, name) constraint
-            # stays the authority on uniqueness: a concurrent save of the
-            # same name loses the race and is told so, rather than 500ing.
+            # update_or_create makes re-saving an update; the unique constraint
+            # stays the authority, so a lost race is told, not 500'd.
             SavedFilter.objects.update_or_create(
                 user=request.user,
                 content_type=content_type_for(model_admin),
@@ -347,20 +251,14 @@ def save_saved_filter(request, app_label, model_name):
 
 @require_POST
 def delete_saved_filter(request, pk):
-    """Drop one of the caller's own saved views.
-
-    A pk that is not the caller's is a 404, the same answer as a pk that
-    does not exist: the apply and delete links are guessable ids, and
-    neither may confirm that someone else's view is there.
-    """
+    """Drop one of the caller's own saved views; another user's pk is a 404,
+    same as one that does not exist."""
     login = require_admin_session(request)
     if login is not None:
         return login
     saved = get_object_or_404(SavedFilter, pk=pk, user=request.user)
-    # No view-permission gate on the way in: the row is the caller's own
-    # preference, not domain data, so a staff member who has since lost the
-    # capability can still clear a stale saved view. The redirect target is
-    # then refused by the changelist's own gate, which is the honest answer.
+    # No view-permission gate here: a preference row outlives a lost capability,
+    # and the redirect target is gated by the changelist anyway.
     model_admin = registered_model_admin(
         saved.content_type.app_label, saved.content_type.model
     )
@@ -371,22 +269,15 @@ def delete_saved_filter(request, pk):
 
 
 class SavedFilterMixin:
-    """Adds the saved-view bar to a changelist (SPEC-20-6 [R-20.11]).
+    """Adds the saved-view bar to a changelist.
 
-    Sits FIRST in the ModelAdmin's bases so this ``changelist_view`` runs
-    before the admin's own override — ``ProductAdmin`` narrows
-    ``list_editable`` for a role without ``inventory.adjust`` and must
-    still route through the saved-filter merge. The merge has to reach
-    ``request.GET`` before anything builds a ChangeList from it, and the
-    bar's context has to be built after the merge so "save this view"
-    captures the selection actually on screen.
+    Sits FIRST in the bases so this ``changelist_view`` runs before the admin's
+    own override, and the merge happens before anything builds a ChangeList.
     """
 
     def changelist_view(self, request, extra_context=None):
         context = dict(extra_context or {})
-        # Gated on the changelist's own permission, which Django re-checks
-        # right below and answers with a 403: a user who cannot list these
-        # rows must not reach the saved-filter table at all.
+        # Gated on the changelist's own permission, which Django re-checks below.
         if self.has_view_or_change_permission(request):
             context.update(saved_filter_context(self, request))
         return super().changelist_view(request, context)

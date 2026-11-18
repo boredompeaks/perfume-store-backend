@@ -1,41 +1,7 @@
 "use client";
 
-/**
- * /track-order — public shipment tracking (UI-UX-SPEC §5.6), dressed to
- * the D1 screen (maison_ther_suivi_public_de_commande): a bronze
- * registry eyebrow, serif display h1, one ledger-column form, then the
- * lookup result below a hairline seam as a registry record.
- *
- * The lookup contract is unchanged and is pinned by page.test.ts: the
- * request fires only on explicit submit (`GET /api/shipping/track/
- * {order_number}/` with `X-Guest-Order-Token` when a token was given),
- * the credential never enters React state and the field is cleared the
- * instant its value has been read, and a miss renders the backend's
- * message VERBATIM in one panel. A 404 there is byte-identical for "no
- * credential", "wrong token", "no such order", "someone else's order"
- * and "no shipment yet" (_tracking_lookup_miss); any UI that told those
- * cases apart would reopen the order-existence oracle the backend
- * closed. A network failure is the only outcome with its own copy and
- * a retry affordance.
- *
- * The result panel speaks the same vocabulary as the order detail
- * page's ShipmentTracking (W12-T9): backend statuses humanised, events
- * oldest-first in the API's append order with the latest emphasised,
- * a waybill plate (select-all + copy), and the checkpoint rail. Where
- * this page departs from the screen: the token field stays masked (the
- * screen shows it in clear; it is a credential), the screen's
- * "simulate not found" button is mockup chrome and does not ship, the
- * staggered per-node timeline cascade is replaced by the one
- * token-driven settle the result container already had, and the
- * archival certification stamp is omitted (the claim would be
- * fictional).
- *
- * Head tags live on the server segment layout (./layout.tsx): a
- * "use client" page cannot export `metadata`, and the manual tags a
- * client page renders are shadowed by the root layout's defaults.
- * Title "Track your order", canonical /track-order, `noindex, follow`
- * (§8.1; robots.txt + sitemap exclusion ride the same pages.ts row).
- */
+// Lookup contract (pinned by page.test.ts): explicit submit only, token read once
+// and never in state, and a 404 is one uniform miss — no order-existence oracle.
 import { useState } from "react";
 import { inputClass } from "@/lib/ui";
 import {
@@ -47,18 +13,12 @@ import {
 type State =
   | { kind: "idle" }
   | { kind: "pending" }
-  /** The uniform miss — server message verbatim, one shape, no branching. */
   | { kind: "miss"; message: string }
-  /** The only retryable outcome. */
   | { kind: "network" }
   | { kind: "found"; shipments: Shipment[] };
 
-/**
- * Presentation of a status VALUE, never a new status: the backend's five
- * values (label_created, dispatched, in_transit, delivered, exception)
- * spelled the way its own labels spell them. Underscores to spaces, first
- * letter up; nothing renamed, nothing invented.
- */
+// Presentation of a backend status value only: underscores to spaces, first
+// letter up; nothing renamed or invented.
 function humanizeStatus(value: string): string {
   const flat = value.replace(/_/g, " ").trim();
   return flat.charAt(0).toUpperCase() + flat.slice(1);
@@ -88,8 +48,8 @@ function ParcelBlock({
   const last = parcel.events.length - 1;
   const [copied, setCopied] = useState(false);
 
-  // Convenience over the plate's select-all; the selection fallback stands
-  // when the clipboard API is unavailable (insecure context, denial).
+  // The select-all plate is the fallback when the clipboard API is unavailable
+  // (insecure context or denial).
   const copyWaybill = async () => {
     if (!navigator.clipboard) return;
     try {
@@ -97,7 +57,7 @@ function ParcelBlock({
       setCopied(true);
       setTimeout(() => setCopied(false), 1600);
     } catch {
-      // select-all on the number still lets the customer copy by hand.
+      // Select-all still lets the customer copy by hand.
     }
   };
 
@@ -118,7 +78,6 @@ function ParcelBlock({
         </p>
       </div>
 
-      {/* Waybill plate: hairline frame, select-all tabular digits, copy. */}
       <div className="flex flex-wrap items-center justify-between gap-3 border border-hairline px-4 py-3">
         <p className="text-small">
           <span className="uppercase text-ink-secondary">Waybill</span>{" "}
@@ -135,7 +94,6 @@ function ParcelBlock({
         </button>
       </div>
 
-      {/* The one bronze accent on this page: the arrival horizon. */}
       {parcel.estimated_delivery && (
         <div className="border-l-2 border-bronze py-1 pl-4">
           <p className="text-eyebrow uppercase text-ink-secondary">
@@ -147,8 +105,7 @@ function ParcelBlock({
         </div>
       )}
 
-      {/* Checkpoint rail, the order-detail vocabulary (W12-T9): the API's
-          append order is oldest-first, and the latest scan is emphasised. */}
+      {/* API events are oldest-first; the latest scan is emphasised. */}
       {parcel.events.length > 0 && (
         <div>
           <div className="border-b border-hairline pb-2">
@@ -198,8 +155,7 @@ export default function TrackOrderPage() {
       "track-token",
     ) as HTMLInputElement | null;
     const token = (tokenField?.value ?? "").trim();
-    // The credential leaves the DOM here — read once into this call, never
-    // stored in state, never rendered back.
+    // Read once, then cleared: never stored in state or rendered back.
     if (tokenField) tokenField.value = "";
     setState({ kind: "pending" });
     try {
@@ -221,10 +177,7 @@ export default function TrackOrderPage() {
 
   return (
     <>
-      {/* Plain container, not <main>: the layout already renders the page's
-          single <main id="main"> (layout.tsx) and every other page nests
-          inside it. max-w-2xl is the screen's ledger column (code.html
-          line 24), wider than the old measure-bound form. */}
+      {/* Not <main>: the root layout already renders the single main landmark. */}
       <div className="mx-auto w-full max-w-2xl px-4 py-16 sm:px-6">
         <p className="text-eyebrow uppercase text-bronze">
           Public shipping registry
@@ -264,8 +217,8 @@ export default function TrackOrderPage() {
             >
               Order token (optional)
             </label>
-            {/* Masked, unlike the screen's clear fixture: the token is a
-                credential (see docblock). Uncontrolled by design. */}
+            {/* Masked credential, uncontrolled so it can be cleared without
+                state. */}
             <input
               id="track-token"
               name="track-token"

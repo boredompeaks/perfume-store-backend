@@ -1,18 +1,7 @@
 import { redirect } from "next/navigation";
 
-/**
- * /admin is a redirect NON-surface (U-W5-T1 / BE-010): the Django admin is
- * served by the API origin (backend `config/urls.py` mounts `admin.site.urls`
- * at `admin/`, settings installs `config.admin.MFAAdminConfig`), so the
- * storefront carries no chrome here — only the hop.
- *
- * Fail-if-unset mirrors BE-007's stated site-url rule ("prod build FAILS if
- * unset"); no such check exists in-tree, so this is the smallest equivalent —
- * the one module that requires the value, checked at module scope. `next build`
- * evaluates it while collecting page data for /admin, so an unset var fails the
- * build. NO localhost default: a missing origin must break loudly, never send a
- * visitor to 127.0.0.1.
- */
+// Module scope so `next build` fails when the origin is unset; no localhost
+// fallback, which would send visitors to 127.0.0.1.
 const rawOrigin = process.env.NEXT_PUBLIC_ADMIN_ORIGIN?.trim();
 if (!rawOrigin) {
   throw new Error(
@@ -23,8 +12,6 @@ if (!rawOrigin) {
 
 let adminUrl: string;
 try {
-  // The backend mounts the admin at /admin/ (config/urls.py); a seeded value
-  // that already carries that path normalizes to the same URL.
   adminUrl = new URL("/admin/", rawOrigin).href;
 } catch {
   throw new Error(
@@ -37,8 +24,7 @@ export const metadata = {
 };
 
 export default function AdminRedirectPage() {
-  // Plain redirect() = 307 Temporary Redirect (never permanentRedirect/308):
-  // the origin is env-driven and can move between deploys, so a cached
-  // permanent redirect must never pin browsers to a stale admin host.
+  // 307, never 308: the env-driven origin can move between deploys, so a
+  // cached permanent redirect must not pin browsers to a stale admin host.
   redirect(adminUrl);
 }

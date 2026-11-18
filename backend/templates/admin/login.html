@@ -1,16 +1,7 @@
 {% extends "admin/base_site.html" %}
 {% load i18n static %}
-{% comment %}
-SPEC-17-05 [R-17.9]: overridden to render the MFA authentication-code
-field of accounts.admin.MFAAdminAuthenticationForm — the stock admin
-login template hardcodes only the username/password rows. SPEC-20-13
-adds the enrollment REACH: mandatory MFA refuses an unenrolled
-privileged login, so the page has to say where to enroll (the link row
-below the code field, plus a louder notice when MFA is the reason the
-attempt failed). Both read context built by config.admin.MFAAdminSite.
-Otherwise kept byte-faithful to
-django/contrib/admin/templates/admin/login.html; re-diff on upgrade.
-{% endcomment %}
+{% comment %}Overrides the stock admin login only because it hardcodes the
+username/password rows; keep the rest byte-faithful to Django's template.{% endcomment %}
 
 {% block title %}{% if form.errors %}{% translate "Error:" %} {% endif %}{{ block.super }}{% endblock %}
 {% block extrastyle %}{{ block.super }}<link rel="stylesheet" href="{% static "admin/css/login.css" %}" {% csp_nonce_attr %}>
@@ -70,19 +61,12 @@ django/contrib/admin/templates/admin/login.html; re-diff on upgrade.
     <input type="hidden" name="next" value="{{ next }}">
   </div>
   {% if mfa_enrollment_blocked %}
-  {% comment %}
-  SPEC-20-13: the R-17.9 block itself. Without this the account is stuck:
-  MFA refuses the login and nothing on this page said how to enroll.
-  {% endcomment %}
   <p class="errornote">
     {% translate "Your account requires an authentication app. Enroll your device below, then sign in again." %}
     <a href="{{ mfa_enroll_url }}">{% translate "Set up multi-factor authentication" %}</a>
   </p>
   {% endif %}
-  {% comment %}
-  mfa_enroll_url is supplied by config.admin.MFAAdminSite.each_context on
-  every admin page; it is the way out for an account MFA has blocked.
-  {% endcomment %}
+  {# mfa_enroll_url comes from MFAAdminSite.each_context on every admin page. #}
   <div class="mfa-enroll-link">
     <a href="{{ mfa_enroll_url }}">{% translate "Setting up multi-factor authentication? Enroll your device" %}</a>
   </div>

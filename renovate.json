@@ -4,7 +4,8 @@
     "Dependency automation for the perfume store (owner decision: Renovate, not Dependabot).",
     "Coverage: pip (backend/requirements.in + the hash-pinned backend/requirements.lock), npm (frontend/package.json + package-lock.json) and GitHub Actions (every workflow under .github/workflows/).",
     "Cadence: one grouped PR per ecosystem, weekly (Monday before 06:00 UTC). MAJOR updates are never grouped and never automerged: they open one PR per dependency so a breaking migration is reviewed on its own.",
-    "No automerge anywhere: every PR here lands only after CI is green and a human merges it (the release engineer promotes; Renovate never touches master or feat/add-frontend)."
+    "No automerge anywhere: every PR here lands only after CI is green and a human merges it (the release engineer promotes; Renovate never touches master or feat/add-frontend).",
+    "constraints.npm '<12': npm 12 defaults allow-remote=none and refuses to fetch the registry tarball of @tailwindcss/oxide-wasm32-wasi (it declares bundleDependencies), so every npm artifact update fails with EALLOWREMOTE and its PRs carry a stale package-lock.json (npm/cli#9796). Pin the artifact engine to npm 11, which regenerates the lock correctly; remove this once npm ships the fix."
   ],
   "extends": [
     "config:recommended",
@@ -12,6 +13,9 @@
     ":semanticCommits",
     "schedule:weekly"
   ],
+  "constraints": {
+    "npm": "<12"
+  },
   "timezone": "UTC",
   "schedule": ["before 6am on monday"],
   "prConcurrentLimit": 5,

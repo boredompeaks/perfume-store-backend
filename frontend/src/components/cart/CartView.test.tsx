@@ -5,11 +5,8 @@ import type { Cart } from "@/lib/types";
 import CartView from "./CartView";
 
 /**
- * D-04b cycle 1: the cart cache is keyed by the settled auth identity, so a
- * guest basket cached during the anonymous bootstrap can never be the data
- * the signed-in page renders. The server render reads the cache directly —
- * the same optimistic read the browser makes on first paint — so seeding the
- * two slots is a faithful reproduction of the sign-in transition.
+ * The cache is keyed by settled auth identity, so seeding both slots reproduces
+ * the sign-in transition and proves a guest basket cannot leak into it.
  */
 const auth = vi.hoisted(() => ({
   status: "anonymous" as "loading" | "authenticated" | "anonymous",
@@ -75,8 +72,7 @@ describe("CartView identity-keyed cart cache", () => {
     const html = renderWith([[["cart", "anonymous"], GUEST_CART]]);
 
     expect(html).not.toContain("Guest Bergamot");
-    // No authenticated cache entry exists yet, so the page waits on the
-    // (gated) account fetch instead of painting the guest basket.
+    // No authenticated cache entry: wait on the gated fetch, not the guest cart.
     expect(html).toContain("skeleton");
   });
 
@@ -97,10 +93,7 @@ describe("CartView identity-keyed cart cache", () => {
     const html = renderWith([[["cart", "anonymous"], GUEST_CART]]);
 
     expect(html).toContain("Guest Bergamot");
-    // spec-ui's anonymous CTA (guest checkout flag on): the cart still offers
-    // the checkout door plus a sign-in alternative. The assertion above is the
-    // one that pins D-04b's identity-keyed cache; this one only verifies the
-    // anonymous basket is not a dead end.
+    // The anonymous basket is not a dead end.
     expect(html).toContain("Continue to checkout");
     expect(html).toContain("sign in");
   });

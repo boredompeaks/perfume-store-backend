@@ -1,12 +1,3 @@
-"""D-05: ``manage.py remint_legacy_order_numbers``.
-
-The repair rewrites references a customer may already hold, so the pins below
-cover the gate (dry run by default, ``--apply`` needs ``--yes``), the scope
-(only rows outside the checkout format, conforming rows untouched), the
-generator (the checkout one, imported rather than copied), the collision
-retry, the mapping CSV and the idempotent second run.
-"""
-
 import csv
 import os
 import shutil
@@ -24,8 +15,8 @@ from orders.management.commands import remint_legacy_order_numbers as remint
 from orders.models import Order
 from orders.views import checkout as checkout_views
 
-# Hand-written literals: a pin that recomputes its expectation from the code
-# under test agrees with a wrong value from both sides.
+# Hand-written literals: an expectation recomputed from the code under test agrees with a
+# wrong value from both sides.
 CONFORMING = "ORD-2026-ABCDEF12"
 LEGACY_SEQUENTIAL = "ORD-2026-000001"
 LEGACY_SEQUENTIAL_B = "ORD-2026-000002"
@@ -171,8 +162,8 @@ class RemintApplyTests(RemintTestCase):
         self.assertEqual(generate.call_count, 2)
 
     def test_exhausted_retries_leave_every_row_untouched(self):
-        # CONFORMING is already held by a conforming row, so every retry for
-        # the second legacy row loses the unique-constraint race.
+        # CONFORMING is held by a conforming row, so every retry for the second legacy row
+        # loses the unique-constraint race.
         self.make_order(CONFORMING)
         first = self.make_order(LEGACY_SEQUENTIAL)
         second = self.make_order(LEGACY_SEQUENTIAL_B)
@@ -192,8 +183,8 @@ class RemintApplyTests(RemintTestCase):
         legacy = self.make_order(LEGACY_SEQUENTIAL)
 
         def concurrent_remint():
-            # Another run commits its own reference after this run built its
-            # plan; the row lock is what lets this run see that and skip it.
+            # Another run commits its own reference after this run built its plan; the row lock is
+            # what lets this run see it and skip.
             Order.objects.filter(pk=legacy.pk).update(order_number=CONFORMING)
             return FRESH
 
@@ -206,9 +197,8 @@ class RemintApplyTests(RemintTestCase):
         self.assertIn("reminted concurrently", out)
 
     def test_the_unique_constraint_refuses_a_duplicate_new_number(self):
-        # The command does not check new numbers: the database does. Pin that
-        # authority here, so the docstring's claim rests on a failing save
-        # rather than on a comment.
+        # The command does not check new numbers, the database does: pin that authority here so
+        # the claim rests on a failing save rather than a comment.
         self.make_order(CONFORMING)
         legacy = self.make_order(LEGACY_SEQUENTIAL)
         legacy.order_number = CONFORMING

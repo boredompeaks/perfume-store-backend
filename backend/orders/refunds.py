@@ -105,8 +105,7 @@ class RefundGatewayRefused(RefundGatewayError):
 
 def _minor_units(amount):
     """``Decimal('10.00') -> 1000``: the provider counts in the currency's
-    smallest unit. Quantized first, so a half-paise request is rounded once
-    here and never again by the provider."""
+    smallest unit, quantized once here so the provider never rounds again."""
     return int(quantize_money(amount) * 100)
 
 
@@ -124,12 +123,9 @@ def refund_payment(*, payment_id, amount, idempotency_key):
     if not payment_id:
         raise RefundGatewayError("no captured payment reference to refund")
 
-    # Keyword form, never positional. The SDK's signature is
-    # ``__init__(self, session=None, auth=None, **options)``, so passing the
-    # credential pair positionally binds the KEY ID to ``session`` and the
-    # SECRET to ``auth``; the client then calls ``.post`` on a string and every
-    # refund dies as an AttributeError. ``orders.views.payment`` has always
-    # used the keyword form - this seam must match it.
+    # Keyword form, never positional: the SDK's __init__(session, auth,
+    # **options) would bind the KEY ID to session and the SECRET to auth, and
+    # every refund would die as an AttributeError.
     client = razorpay.Client(
         auth=(settings.RAZORPAY_KEY_ID, settings.RAZORPAY_KEY_SECRET),
     )
@@ -167,8 +163,8 @@ def refund_payment(*, payment_id, amount, idempotency_key):
 
     refund_id = (response or {}).get("id")
     if not refund_id:
-        # A success with no id is not a refund: recording one would put a row
-        # in the reconciliation trail that nobody can look up at the provider.
+        # A success with no id is not a refund: nobody could look it up at the
+        # provider.
         raise RefundGatewayError("gateway refund response carried no id")
 
     return refund_id
@@ -177,10 +173,8 @@ def refund_payment(*, payment_id, amount, idempotency_key):
 class RefundRefused(Exception):
     """A refund the store refuses before any money moves.
 
-    ``message`` is the operator-facing text and is shown verbatim by both
-    surfaces. ``code`` is the machine-readable bucket the API maps onto an
-    HTTP status, so moving the decision here did not move the HTTP contract:
-    ``not_found`` -> 404, ``invalid`` -> 400, ``conflict`` -> 409.
+    ``message`` is operator-facing and shown verbatim; ``code`` is the
+    machine-readable bucket the API maps to 404/400/409.
     """
 
     def __init__(self, message, code="conflict"):
@@ -193,8 +187,8 @@ class RefundRefused(Exception):
 class RefundReceipt:
     """What one issuance attempt produced.
 
-    ``replayed`` means the ``Idempotency-Key`` collapsed this call onto a
-    refund that already existed: no new row, no second gateway call.
+    ``replayed`` means the ``Idempotency-Key`` collapsed this call onto a refund
+    that already existed: no new row, no second gateway call.
     """
 
     refund: Refund
@@ -388,8 +382,8 @@ def reserve_refund(
                 order=order,
                 amount=amount,
                 reason=reason,
-                # FULL means "this attempt cleared what was left"; the order's
-                # payment dimension below is the authority on what is left.
+                # The order's payment dimension below is the authority on what
+                # is left.
                 kind=(Refund.Kind.FULL if amount == remaining else Refund.Kind.PARTIAL),
                 status=Refund.Status.PENDING,
                 actor=request.user,

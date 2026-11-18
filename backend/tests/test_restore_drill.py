@@ -1,17 +1,3 @@
-"""SPEC-21-3 [R-21.2.12]: the restore drill's hermetic-safety pins.
-
-Three properties matter more than the drill's happy path, so they are pinned
-first: it refuses to read a real database, ``--dry-run`` writes nothing, and
-it exits non-zero when the restore does not round-trip. The passing run is
-pinned too, otherwise "exits non-zero" could be satisfied by a command that
-always fails.
-
-The refusals run through the real path -- the command reads its own
-connection configuration, decides, and stops. No safety check is patched out,
-and the "production" database is a path that is never created, so the refusal
-tests cannot touch the filesystem at all.
-"""
-
 import io
 import os
 import shutil
@@ -37,16 +23,12 @@ from ops.management.commands.restore_drill import (
     is_rehearsal_safe,
 )
 
-# An absolute path that looks exactly like a deployment's database file and
-# that this test suite never creates.
 PRODUCTION_DB = os.path.abspath(
     os.sep + os.path.join("srv", "perfume-store", "db.sqlite3")
 )
 
 
 def _sqlite_settings(alias, name):
-    """A complete sqlite connection entry under ``alias``, so the override is
-    a real connection configuration rather than a partial one."""
     return {
         alias: {
             "ENGINE": "django.db.backends.sqlite3",
@@ -68,51 +50,25 @@ def _sqlite_settings(alias, name):
 
 @contextmanager
 def without_temp_containment():
-    """Run the block with the temp-directory shape switched off.
-
-    The runner rewrites a PostgreSQL name to a BARE database name, the
-    containment check resolves a bare name against the working directory, and a
-    checkout that lives under the system temp directory -- which this one does --
-    therefore has that shape wave the bare name through whatever the rule under
-    test says. Switching it off leaves the remaining shapes as the only ones in
-    play, which is what the pins below are about. The shape itself is pinned
-    separately, against a real temp path.
-    """
+    """The runner rewrites a PostgreSQL name to a BARE database name, which the containment check resolves against the working directory; switching that shape off isolates the rule under test."""
     with patch.object(drill, "_within", return_value=False):
         yield
 
 
 class DrillHygieneAssertionsMixin:
-    """After any run the scratch alias must be unresolvable again and the
-    drill's temp directory gone: the drill is a rehearsal, never a second
-    restore waiting to happen.
-
-    Both halves read THIS TEST's own workdir scope: the drill's `mkdtemp` is
-    redirected into a per-test directory for the duration of the test, and
-    the glob looks only there. The shared system temp root is mutable state a
-    concurrently running suite also writes ``restore-drill-*`` dirs into, and
-    a before/after comparison over it passes or fails according to what that
-    other process happened to do mid-test - the cross-process race this
-    scoping removes (measured pre-fix: five mixin assertions went red while a
-    second process churned such dirs). Observing only this scope still proves
-    the drill cleaned up, because the drill itself creates through the
-    redirected `mkdtemp`; a foreign process writing the shared root can no
-    longer be read as our own leak.
-    """
+    """Both halves read THIS test's own workdir scope: the shared system temp root is mutable state a concurrent suite also writes into."""
 
     def setUp(self):
         super().setUp()
-        # The scope's own prefix deliberately does NOT start with
-        # "restore-drill-": if some other process ever globs the shared root,
-        # this directory must not look like a drill workdir to it either.
+        # The prefix deliberately avoids "restore-drill-", so no other process
+        # globs this directory as a drill workdir.
         self.workdir_scope = Path(mkdtemp(prefix="drill-hygiene-scope-"))
         self.addCleanup(shutil.rmtree, self.workdir_scope, True)
         real_mkdtemp = tempfile.mkdtemp
 
         def scoped_mkdtemp(prefix=None, suffix=None, dir=None):
-            # Only the drill's own workdirs are relocated; every other
-            # mkdtemp call in the process keeps its default destination, so
-            # the patch changes nothing except where `restore-drill-*` lands.
+            # Only `restore-drill-*` mkdtemp calls are relocated; every other
+            # mkdtemp keeps its default destination.
             if dir is None and (prefix or "").startswith("restore-drill-"):
                 dir = str(self.workdir_scope)
             return real_mkdtemp(prefix=prefix, suffix=suffix, dir=dir)
@@ -136,17 +92,9 @@ class DrillHygieneAssertionsMixin:
 
 @tag("ops")
 class RestoreDrillSafetyTests(DrillHygieneAssertionsMixin, SimpleTestCase):
-    """The drill must be structurally incapable of touching real data."""
-
     @contextmanager
     def alias_configured_as(self, alias, db_path):
-        """Run the block with ``alias`` configured to point at ``db_path``.
-
-        The connection handler caches its settings, so ``override_settings``
-        alone never reaches it; adding the entry to ``connections.databases``
-        is the very object the handler reads, which is how a second
-        configured database looks in production.
-        """
+        """The connection handler caches its settings, so override_settings alone never reaches it; adding to connections.databases is the object it reads."""
         entry = _sqlite_settings(alias, db_path)[alias]
         connections.databases[alias] = entry
         try:
@@ -161,14 +109,9 @@ class RestoreDrillSafetyTests(DrillHygieneAssertionsMixin, SimpleTestCase):
                 pass
 
     def production_configured_as(self, alias):
-        """The production case: the alias' configured file is a real
-        deployment database path that this suite never creates."""
         return self.alias_configured_as(alias, PRODUCTION_DB)
 
     def test_refuses_a_configured_production_database(self):
-        """The load-bearing refusal: an alias whose configured file is a real
-        database is the production case, and the drill stops before a single
-        query -- so the file is never even opened, let alone written."""
         alias = "restore_drill_prod"
 
         with self.production_configured_as(alias):
@@ -179,14 +122,11 @@ class RestoreDrillSafetyTests(DrillHygieneAssertionsMixin, SimpleTestCase):
         self.assertIn("refuses to run", message)
         self.assertIn(PRODUCTION_DB, message)
         self.assertIn("never reads a real database", message)
-        # nothing was created and no scratch connection was left behind
         self.assertFalse(os.path.exists(PRODUCTION_DB))
         self.assert_scratch_unregistered()
         self.assert_no_drill_workdirs_left()
 
     def test_refusal_leaves_no_scratch_connection_behind(self):
-        """A refused run must not register the scratch alias either, so a
-        refusal can never be the start of an accidental restore."""
         with self.production_configured_as("restore_drill_prod2"):
             with self.assertRaises(CommandError):
                 call_command("restore_drill", database="restore_drill_prod2")
@@ -195,8 +135,6 @@ class RestoreDrillSafetyTests(DrillHygieneAssertionsMixin, SimpleTestCase):
         self.assert_no_drill_workdirs_left()
 
     def test_dry_run_writes_nothing_and_opens_no_connection(self):
-        """--dry-run is the operator's "just tell me what it would do" path:
-        exit 0, nothing written, nothing read and no restore attempted."""
         out = io.StringIO()
 
         call_command("restore_drill", "--database", "default", "--dry-run", stdout=out)
@@ -209,9 +147,6 @@ class RestoreDrillSafetyTests(DrillHygieneAssertionsMixin, SimpleTestCase):
         self.assert_no_drill_workdirs_left()
 
     def test_dry_run_is_not_a_bypass_of_the_production_refusal(self):
-        """Dry-run is not an override switch: a real database is refused
-        with or without the flag, because the refusal is a property of the
-        target, not of what the command intends to do."""
         alias = "restore_drill_prod3"
 
         with self.production_configured_as(alias):
@@ -221,10 +156,6 @@ class RestoreDrillSafetyTests(DrillHygieneAssertionsMixin, SimpleTestCase):
         self.assertFalse(os.path.exists(PRODUCTION_DB))
 
     def test_unusable_database_is_a_readable_refusal_not_a_traceback(self):
-        """An operator pointing the drill at a database with no schema gets a
-        sentence and a non-zero exit, never a stack trace -- and the drill
-        still tears down after itself, even though it never got as far as
-        registering the scratch connection."""
         workdir = Path(mkdtemp(prefix="schema-less-"))
         self.addCleanup(shutil.rmtree, workdir, True)
         schemaless = workdir / "empty.sqlite3"
@@ -248,10 +179,6 @@ class RestoreDrillSafetyTests(DrillHygieneAssertionsMixin, SimpleTestCase):
         self.assert_no_drill_workdirs_left()
 
     def test_the_derived_test_database_is_accepted(self):
-        """The wiring, not the rule: a connection whose name the test runner
-        rewrote to the database it derives from this deployment's name is the
-        drill's own test database, and the command runs against it instead of
-        refusing it."""
         alias = "restore_drill_derived"
         captured = {alias: {"NAME": PRODUCTION_DB, "TEST_NAME": ""}}
         out = io.StringIO()
@@ -268,9 +195,6 @@ class RestoreDrillSafetyTests(DrillHygieneAssertionsMixin, SimpleTestCase):
         self.assert_no_drill_workdirs_left()
 
     def test_an_uncaptured_alias_is_still_refused(self):
-        """Fail closed at the command level too: the same rewritten name with
-        nothing captured for that alias leaves no derivation to check, so the
-        drill stops rather than assume one it never had."""
         alias = "restore_drill_uncaptured"
 
         with (
@@ -287,20 +211,10 @@ class RestoreDrillSafetyTests(DrillHygieneAssertionsMixin, SimpleTestCase):
 
 @tag("ops")
 class RestoreDrillSafetyRuleTests(SimpleTestCase):
-    """The decision behind those refusals, pinned directly so the rule cannot
-    be widened without a test noticing. Every name below is absolute, so the
-    assertions do not depend on where the repository happens to be checked out
-    -- which matters more than it looks here: the runner rewrites a PostgreSQL
-    name to a BARE database name, the containment check resolves a bare name
-    against the working directory, so on a checkout that lives under the system
-    temp directory that shape decides these assertions by accident and the rule
-    under test is never consulted."""
-
     def test_in_memory_is_safe(self):
         self.assertTrue(is_rehearsal_safe(":memory:", PRODUCTION_DB))
 
     def test_django_test_database_uri_is_safe(self):
-        """The name the test runner actually uses for sqlite."""
         self.assertTrue(
             is_rehearsal_safe(
                 "file:memorydb_default?mode=memory&cache=shared", PRODUCTION_DB
@@ -316,15 +230,9 @@ class RestoreDrillSafetyRuleTests(SimpleTestCase):
         )
 
     def test_a_name_other_than_the_configured_one_is_safe(self):
-        """A connection pointing at a database this deployment does not use
-        is the test database; reading it cannot harm production."""
         self.assertTrue(is_rehearsal_safe(PRODUCTION_DB + "-test", PRODUCTION_DB))
 
     def test_the_test_database_the_runner_derived_is_safe(self):
-        """The case the rule above cannot decide: once the test runner has
-        rewritten the connection's name, the name it points at IS the configured
-        one, so only the derivation from what this process started with tells the
-        drill's own test database apart from a deployment's database."""
         with without_temp_containment():
             self.assertTrue(
                 is_rehearsal_safe(
@@ -333,29 +241,20 @@ class RestoreDrillSafetyRuleTests(SimpleTestCase):
             )
 
     def test_the_configured_test_database_name_is_safe(self):
-        """A deployment that names its test database explicitly has that name
-        used verbatim, so it is accepted on the same grounds."""
         named = f"{PRODUCTION_DB}-drill"
         with without_temp_containment():
             self.assertTrue(is_rehearsal_safe(named, named, PRODUCTION_DB, named))
 
     def test_the_configured_database_is_not_safe_even_with_a_capture(self):
-        """The capture must not become an allow-anything switch: a real database
-        is refused even by a process that knows what it started with."""
         self.assertFalse(is_rehearsal_safe(PRODUCTION_DB, PRODUCTION_DB, PRODUCTION_DB))
 
     def test_no_capture_fails_closed(self):
-        """An alias this process never saw -- or a command module imported after
-        the rewrite -- offers no derivation to check, so equal names are refused
-        instead of guessed at."""
         with without_temp_containment():
             self.assertFalse(
                 is_rehearsal_safe(f"test_{PRODUCTION_DB}", f"test_{PRODUCTION_DB}")
             )
 
     def test_the_derived_shape_is_a_whole_name_not_a_prefix(self):
-        """A name that merely begins with the runner's prefixed start name is a
-        different database, and nothing in the configuration says who made it."""
         longer = f"test_{PRODUCTION_DB}-backup"
         with without_temp_containment():
             self.assertFalse(is_rehearsal_safe(longer, longer, PRODUCTION_DB))
@@ -364,13 +263,9 @@ class RestoreDrillSafetyRuleTests(SimpleTestCase):
         self.assertFalse(is_rehearsal_safe(PRODUCTION_DB, PRODUCTION_DB))
 
     def test_an_unset_name_is_not_safe(self):
-        """Fail closed: an empty name identifies nothing, so it is refused
-        rather than waved through."""
         self.assertFalse(is_rehearsal_safe("", ""))
 
     def test_a_sibling_of_the_temp_directory_is_not_inside_it(self):
-        """The temp containment is the directory itself, not a path that
-        merely starts with the same characters."""
         temp_root = Path(tempfile.gettempdir())
         self.assertTrue(_within(str(temp_root / "throwaway.sqlite3"), temp_root))
         self.assertFalse(_within(str(temp_root.with_suffix(".sqlite3")), temp_root))
@@ -378,20 +273,12 @@ class RestoreDrillSafetyRuleTests(SimpleTestCase):
 
 @tag("ops")
 class RestoreDrillRunTests(DrillHygieneAssertionsMixin, ApiTestCase):
-    """The rehearsal itself: snapshot -> migrate -> load -> verify, run
-    against the throwaway database the test runner created."""
-
     def run_drill(self, **kwargs):
-        """One full drill run against the test database, capturing output."""
         out = io.StringIO()
         call_command("restore_drill", "--database", "default", stdout=out, **kwargs)
         return out.getvalue()
 
     def test_drill_round_trips_the_test_database_and_cleans_up(self):
-        """The whole rehearsal in one pass, because each run really does
-        build and tear down a database: a restore that round-trips is
-        reported PASSED, the source is untouched, the scratch connection is
-        unregistered and the temp directory is gone."""
         self.make_user("drill-buyer")
         source_before = User.objects.count()
 
@@ -401,7 +288,6 @@ class RestoreDrillRunTests(DrillHygieneAssertionsMixin, ApiTestCase):
         self.assertIn("Restore:", output)
         self.assertIn("Restore drill PASSED", output)
         self.assertIn("round-tripped and verified", output)
-        # the source is read-only: same rows, same connection, still usable
         self.assertEqual(User.objects.count(), source_before)
         self.assertTrue(User.objects.filter(username="drill-buyer").exists())
         self.assertIn("auth_user", connection.introspection.table_names())
@@ -409,21 +295,15 @@ class RestoreDrillRunTests(DrillHygieneAssertionsMixin, ApiTestCase):
         self.assert_no_drill_workdirs_left()
 
     def test_failed_restore_simulation_exits_non_zero(self):
-        """The signal an operator needs from CI: a restore that does not
-        round-trip is a failure (a non-zero exit), not a warning."""
         with self.assertRaises(CommandError) as caught:
             self.run_drill(simulate_failure=True)
 
         message = str(caught.exception)
         self.assertIn("Restore verification FAILED", message)
         self.assertIn("did not round-trip", message)
-        # the failure names the model whose rows went missing, with both
-        # counts, so the operator knows what to look at
         self.assertRegex(message, r"\w+\.\w+: snapshot \d+ -> restored \d+")
 
     def test_failing_drill_cleans_up_exactly_like_a_passing_one(self):
-        """A red CI run must not leave a scratch database or a scratch
-        connection behind either -- that is how drills rot."""
         with self.assertRaises(CommandError):
             self.run_drill(simulate_failure=True)
 
@@ -431,10 +311,6 @@ class RestoreDrillRunTests(DrillHygieneAssertionsMixin, ApiTestCase):
         self.assert_no_drill_workdirs_left()
 
     def test_drill_verifies_a_populated_database(self):
-        """The verification is a real comparison, not a constant: the fresh
-        test database already holds the migration-created rows (permissions,
-        content types), so a PASSED line means real rows were dumped and
-        reloaded rather than an empty-file no-op."""
         self.make_user("drill-buyer")
 
         output = self.run_drill()
@@ -446,8 +322,6 @@ class RestoreDrillRunTests(DrillHygieneAssertionsMixin, ApiTestCase):
         self.assertIn("Restore drill PASSED", output)
 
     def test_drill_works_with_no_fixture_data_at_all(self):
-        """A brand-new deployment's empty database is a legitimate thing to
-        restore; the drill must pass on it rather than inventing a failure."""
         from orders.models import Order
 
         Order.objects.all().delete()
@@ -457,24 +331,10 @@ class RestoreDrillRunTests(DrillHygieneAssertionsMixin, ApiTestCase):
         self.assertIn("Restore drill PASSED", output)
 
     def test_drill_removes_its_own_workdir_even_when_it_fails(self):
-        """Cleanup runs in a finally, so the restored sqlite file and the
-        dump are removed on the failure path too.
-
-        The directory under test is the one THIS run created, captured
-        through ``_remove_workdir`` -- the seam the teardown itself uses --
-        and not through a glob of the system temp directory. Asserting
-        against an ambient glob asserts on whatever the last run happened to
-        leave lying around, which is why the previous form also demanded
-        that some earlier run had already leaked a workdir: it passed or
-        failed according to the machine's history, and a clean CI runner had
-        nothing to find.
-        """
         seen = {}
         original = Command._remove_workdir
 
         def spy(command, workdir):
-            # Recorded before the real teardown runs, so this sees the failed
-            # run's directory exactly as the failure left it.
             path = Path(workdir)
             seen["path"] = path
             seen["existed"] = path.is_dir()
@@ -487,8 +347,6 @@ class RestoreDrillRunTests(DrillHygieneAssertionsMixin, ApiTestCase):
 
         self.assertIn("path", seen, "the failed run never tore its workdir down")
         self.assertTrue(seen["existed"], "the workdir was already gone at teardown")
-        # the drill really did build the rehearsal before failing, so this is
-        # not an empty directory that happened to match the prefix
         self.assertIn("snapshot.json", seen["contents"])
         self.assertIn("restored.sqlite3", seen["contents"])
         self.assertFalse(
@@ -499,9 +357,6 @@ class RestoreDrillRunTests(DrillHygieneAssertionsMixin, ApiTestCase):
 
 @tag("ops")
 class RestoreDrillWorkdirHygieneTests(SimpleTestCase):
-    """The drill deletes what it wrote, and the helper it uses to do that is
-    what makes that true for sqlite's journal siblings too."""
-
     def test_remove_workdir_deletes_every_file_it_contains(self):
         workdir = Path(mkdtemp(prefix="restore-drill-cleanup-"))
         self.addCleanup(shutil.rmtree, workdir, True)

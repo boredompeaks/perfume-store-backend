@@ -1,42 +1,13 @@
 """Replay recorded mutations and verify the evidence they claim.
 
-Seven separate findings in the SPEC-1 run were unmeasured figures written as
-if they had been measured. The inflated set from SPEC-1-B07d cycle 1 is the
- clearest: M2/M3/M4/M5/M6 were claimed at 4/4/8/10/12 and measured 1/3/7/2/6.
-The conclusion ("6 of 6 killed") was true; every figure but one was invented.
-The recurring shape is a tidy ascending run, which is what a narrative about
-having run a battery looks like -- a real measurement is never tidy.
+A manifest names, per mutation, the exact bytes to find, the replacement and
+the tests that must fail. Replay requires the ``find`` text to occur EXACTLY
+ONCE, refuses a dirty worktree, holds every original in memory and restores
+it in a ``finally``, verifying the restore by sha256. Nothing reaches the
+network and nothing is Django-aware -- it shells out to the runner it is
+told to use, defaulting to the project's own.
 
-``doc_claims.py`` enumerates those numbers so a human sees them. This script
-does the stronger thing: it makes the number *unrepeatably wrong* to publish,
-by replaying the mutation and checking the claim.
-
-A manifest names, per mutation, the exact bytes to find, the replacement, and
-the tests that must fail. Replay refuses to proceed unless the `find` text
-occurs EXACTLY ONCE in the target file -- which is precisely the trap that
-produced the M3/M4 dispute, where two parties measured different edits and
-each believed the other was wrong.
-
-Safety, in order:
-
-  1. refuses to run against a dirty worktree, so a failure can never leave
-     uncommitted work half-mutated
-  2. holds every original file's bytes in memory and restores from those
-     bytes in a ``finally``, never via git (``git checkout`` is denied in
-     this repo; the byte-equivalent restore is used instead)
-  3. verifies the restore by sha256 and reports the mismatch rather than
-     trusting it
-
-Nothing here reaches the network, and nothing is Django-aware -- it shells
-out to whatever runner it is told to use, defaulting to the project's own.
-
-Usage::
-
-    python scripts/mutation_evidence.py --list
-    python scripts/mutation_evidence.py SPEC-1-B07d
-    python scripts/mutation_evidence.py SPEC-1-B07d --verify-count
-    python scripts/mutation_evidence.py SPEC-1-B07d --json > evidence.json
-
+Usage: --list, a manifest name, --verify-count, --json.
 Exit codes: 0 every replay held, 1 at least one failed, 2 usage/environment.
 """
 
@@ -58,23 +29,17 @@ BACKEND_DIR = REPO_ROOT / "backend"
 
 # "FAIL: test_x (orders.tests_returns.SomeTests.test_x)" and the ERROR twin.
 RE_RESULT_LINE = re.compile(r"^(FAIL|ERROR):\s+(\S+)\s+\(([^)]+)\)")
-# Failures are counted from this line, never from the run summary. The summary
-# prints "FAILED (failures=2)" only on a red run and says nothing on green.
-#
-# `failures=` specifically, not `failures|errors`: unittest prints the two
-# components in that order and prints only the non-zero ones, so an
-# "FAILED (errors=2)" line is an ERROR count. Reading it as a failure count
-# would let a mutant that merely breaks an import satisfy a claimed figure.
+# Failures are counted from this line, never the run summary (a green run
+# prints none). ``failures=`` only: an errors-only line is an ERROR count, and
+# must not satisfy a claimed failure figure.
 RE_FAILURES_LINE = re.compile(r"^FAILED \(failures=(\d+)")
 RE_ANY_FAILED_LINE = re.compile(r"^FAILED \((?:failures|errors)=")
 
-# Keys every mutation entry must carry, or the replay would die on a KeyError
-# halfway through rather than naming the malformed manifest.
 REQUIRED_KEYS = ("id", "path", "find")
 
 
 class EvidenceError(RuntimeError):
-    """A manifest is malformed, or the world is not in a fit state to replay."""
+    """A manifest is malformed, or the world is not fit to replay."""
 
 
 @dataclass
@@ -91,13 +56,9 @@ class MutationOutcome:
     restored: bool = False
 
 
-# --------------------------------------------------------------------------
-# Pure core. No filesystem, no subprocess.
-# --------------------------------------------------------------------------
 
 
 def count_occurrences(haystack: bytes, needle: bytes) -> int:
-    """Count non-overlapping occurrences of ``needle`` in ``haystack``."""
     if not needle:
         raise EvidenceError("mutation 'find' text is empty")
     return haystack.count(needle)
@@ -106,14 +67,9 @@ def count_occurrences(haystack: bytes, needle: bytes) -> int:
 def match_bytes(original: bytes, find: bytes) -> bytes:
     """Re-express ``find`` in the target file's own line ending.
 
-    A manifest is authored from the COMMITTED blob, which is LF-only, but
-    `core.autocrlf` is on with no `.gitattributes`, so the worktree copy this
-    script edits is CRLF. A byte-exact LF needle therefore occurs ZERO times in
-    a CRLF file and every replay would refuse for a reason that has nothing to
-    do with the mutation. Translating the needle -- and only the needle -- keeps
-    "exactly one occurrence" honest while letting the write-back preserve the
-    file's own ending, so the restore stays byte-exact.
-    """
+    The manifest is authored from the LF-only committed blob, but the worktree
+    copy may be CRLF (``core.autocrlf``, no ``.gitattributes``), so an LF needle
+    occurs zero times. Translating only the needle keeps the write-back exact."""
     if b"\r\n" not in original:
         return find
     if b"\r\n" in find:
@@ -124,10 +80,8 @@ def match_bytes(original: bytes, find: bytes) -> bytes:
 def apply_mutation(original: bytes, find: bytes, replace: bytes) -> bytes:
     """Return the mutated bytes, or refuse.
 
-    Exactly-one occurrence is the whole point. A mutation that matches twice
-    is not the mutation that was measured, and replaying it would certify a
-    claim about a different edit -- the SPEC-1-B07d M3/M4 defect.
-    """
+    Exactly one occurrence is required so the replayed edit is provably the
+    recorded one."""
     occurrences = count_occurrences(original, match_bytes(original, find))
     if occurrences != 1:
         raise EvidenceError(
@@ -142,9 +96,8 @@ def apply_mutation(original: bytes, find: bytes, replace: bytes) -> bytes:
 def parse_failure_lines(output: str) -> list[str]:
     """Extract failing test identifiers from unittest-style output.
 
-    Returns dotted ids where available, so a manifest may name either a bare
-    method name or the full dotted path.
-    """
+    Dotted ids are returned where available, so a manifest may name either a
+    bare method name or the full dotted path."""
     found: list[str] = []
     for line in output.splitlines():
         match = RE_RESULT_LINE.match(line.strip())
@@ -164,11 +117,8 @@ def parse_failure_lines(output: str) -> list[str]:
 def parse_failure_count(output: str) -> int | None:
     """Read the FAILURE count off the ``FAILED (failures=N`` line.
 
-    Never read the run summary: on a green run it reports nothing, which is
-    how "0 dirty everywhere" and similar vanishances get believed. A line that
-    reports errors alone returns ``None`` rather than an error count, because
-    an error is not a failure and must not satisfy a claimed figure.
-    """
+    Never the run summary: a green run prints none. An errors-only line returns
+    ``None``, because an error is not a failure and must not satisfy a count."""
     for line in output.splitlines():
         match = RE_FAILURES_LINE.match(line.strip())
         if match:
@@ -179,17 +129,14 @@ def parse_failure_count(output: str) -> int | None:
 def ran_red(output: str) -> bool:
     """Whether the run finished red at all.
 
-    Distinct from :func:`parse_failure_count`: "no count is readable" and "the
-    run was green" are different facts, and collapsing them is how a mutant
-    that breaks an import passes for a clean run.
-    """
+    "No count is readable" and "the run was green" are different facts, and
+    collapsing them lets a mutant that breaks an import pass for a clean run."""
     return any(RE_ANY_FAILED_LINE.match(line.strip()) for line in output.splitlines())
 
 
 def confirm_expected_failures(
     expected: list[str], observed: list[str]
 ) -> tuple[bool, list[str]]:
-    """Did every expected test actually show up as a failure?"""
     if not expected:
         return False, ["manifest names no expected_failing_tests"]
     seen = set(observed)
@@ -197,9 +144,6 @@ def confirm_expected_failures(
     return (not missing), missing
 
 
-# --------------------------------------------------------------------------
-# Shell.
-# --------------------------------------------------------------------------
 
 
 def _dirty_paths() -> list[str]:
@@ -239,11 +183,9 @@ def load_manifest(task: str) -> dict:
 def run_tests(labels: list[str], coverage: bool = True) -> str:
     """Run the project's suite for the given labels and return its output.
 
-    Defaults to the project's own command so a replay measures the same thing
-    the changelog claims about. ``manage.py test`` is invoked through
-    coverage exactly as the floor is measured. An argv list, not a command
-    string, so a label containing a space is one argument and not two.
-    """
+    Defaults to the project's own coverage-wrapped command so a replay measures
+    what the changelog claims. An argv list, not a string, so a label
+    containing a space stays one argument."""
     prefix = ["-m", "coverage", "run"] if coverage else ["-m"]
     argv = [sys.executable, *prefix, "manage.py", "test", *labels]
     result = subprocess.run(
@@ -261,10 +203,8 @@ def run_tests(labels: list[str], coverage: bool = True) -> str:
 def replay_mutation(mutation: dict, coverage: bool = True) -> MutationOutcome:
     """Apply one mutation, run its tests, assert the failures, restore.
 
-    The original bytes are captured before anything is written and restored in
-    a ``finally``. If restoration fails the outcome says so loudly rather than
-    leaving a mutated file behind quietly.
-    """
+    Originals are captured before anything is written and restored in a
+    ``finally``; a failed restore is reported loudly, never left quietly."""
     target = REPO_ROOT / mutation["path"]
     outcome = MutationOutcome(
         mutation_id=mutation["id"],
@@ -302,9 +242,8 @@ def replay_mutation(mutation: dict, coverage: bool = True) -> MutationOutcome:
         outcome.expected_failures = expected
         confirmed, missing = confirm_expected_failures(expected, observed)
         if not confirmed and not ran_red(output):
-            # The mutant survived. This is the finding the whole exercise
-            # exists to surface, so it is named rather than reported as a
-            # replay that merely failed to find a name.
+            # The mutant survived: the finding this exercise exists to surface,
+            # named rather than reported as a name that did not match.
             outcome.status = "failed"
             outcome.detail = (
                 "SURVIVED: the suite stayed green under this mutation, so "

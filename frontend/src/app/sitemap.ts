@@ -4,15 +4,10 @@ import { site } from "@/lib/site";
 import { pages } from "@/lib/pages";
 import type { ProductPage } from "@/lib/types";
 
-// Regenerated hourly. NOTE: walking every product page costs ~count/12
-// requests at the backend's default PRODUCTS_PAGE_SIZE of 12: an
-// env-overridable setting (backend/config/settings.py:978), consumed by the
-// Paginator in backend/products/views.py:108, not a hardcoded constant.
+// Regenerated hourly. The product walk paginates; the backend's page size is
+// env-overridable, not a hardcoded constant.
 export const revalidate = 3600;
 
-// Static-route priorities: home leads, the shop listing is close behind, and
-// supporting/legal pages sit lower. Product slugs are ranked below the shop
-// index itself.
 function staticPriority(path: string): number {
   if (path === "/") return 1;
   if (path === "/products") return 0.9;
@@ -25,8 +20,7 @@ function staticChangeFrequency(path: string): "weekly" | "monthly" {
 }
 
 export default async function sitemap(): Promise<MetadataRoute.Sitemap> {
-  // Static entries are generated from the page registry so sitemap and robots
-  // can never disagree about which routes exist or are indexable.
+  // Registry-derived, so sitemap and robots cannot disagree about indexability.
   const staticRoutes: MetadataRoute.Sitemap = pages
     .filter((p) => p.indexable)
     .map((p) => ({
@@ -59,7 +53,6 @@ export default async function sitemap(): Promise<MetadataRoute.Sitemap> {
     } while (page <= totalPages);
     return [...staticRoutes, ...productRoutes];
   } catch {
-    // Backend unreachable — ship the static routes rather than failing.
     return staticRoutes;
   }
 }

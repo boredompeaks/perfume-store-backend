@@ -2,19 +2,9 @@ import { describe, expect, it } from "vitest";
 import { DEFAULT_SEED, seedToCssVars, type FontKey, type ThemeSeed } from "./theme";
 
 /**
- * U-W1-T2 contract: the default seed re-states the canonical token values
- * shipped in globals.css (zero visual delta), a custom seed touches only the
- * slots its fields drive, and an unknown font key falls back to the default
- * stack rather than emitting an invalid family list.
- *
- * U-W14-T13 contract: the seed also drives the palette (paper, surface, ink,
- * ink-secondary, hairline, danger, success) and a runnable contrast guard
- * fails any seed — default or merchant-supplied — that breaks a §2.1.2/§7.3
- * floor. The guard computes WCAG ratios from the seed hexes themselves.
- *
- * Expected values are hand-written literals copied from globals.css's @theme
- * block — never derived from the module under test — so a wrong default in
- * theme.ts fails here rather than agreeing with itself.
+ * The default seed restates globals.css (zero visual delta); a custom seed
+ * touches only its own slots; the contrast guard computes WCAG ratios from the
+ * seed itself. Expected values are hand-written, never derived from theme.ts.
  */
 describe("theme seed maps onto token slots (U-W1-T2)", () => {
   it("DEFAULT_SEED produces the canonical current token values", () => {
@@ -98,21 +88,10 @@ describe("theme seed maps onto token slots (U-W1-T2)", () => {
   });
 });
 
-/* ==========================================================================
- * Contrast guard (U-W14-T13).
- *
- * The wave-1 doctrine kept derived colours stylesheet-owned because no
- * runnable guard existed — a merchant hex could silently drop the §2.1.2
- * text floors. This block IS that guard: WCAG 2.x ratios computed from the
- * seed values themselves (6-digit hex -> sRGB -> linearised relative
- * luminance -> (L1+0.05)/(L2+0.05)), so it guards ANY seed, not just the
- * defaults. A failing floor throws with the measured ratio printed.
- *
- * The focus ring is the one constant: --color-focus #9c6a2e (§2.1.4 D1 /
- * §7.3), stylesheet-owned and NOT seedable. The guard checks the seeded
- * paper and ink against this fixed ring rather than re-deriving the ring
- * from a merchant hex.
- * ========================================================================== */
+/**
+ * WCAG ratios computed from the seed itself, so any merchant seed is guarded.
+ * The focus ring is a fixed stylesheet token, not seedable.
+ */
 
 const FOCUS_RING = "#9c6a2e"; // globals.css --color-focus (§2.1.4 D1 / §7.3)
 
@@ -139,9 +118,8 @@ function contrastRatio(a: string, b: string): number {
 }
 
 /**
- * Every floor the seed must clear. All failures are COLLECTED (not thrown on
- * first contact) so a merchant seed that breaks several floors reports each
- * measured ratio at once — and so no floor can hide behind an earlier one.
+ * Failures are collected rather than thrown on first contact, so a seed that
+ * breaks several floors reports every measured ratio at once.
  */
 function seedContrastFailures(seed: ThemeSeed): string[] {
   const checks: ReadonlyArray<readonly [string, number, number]> = [
@@ -176,9 +154,7 @@ describe("theme seed contrast guard (U-W14-T13)", () => {
   });
 
   it("rejects a seed whose ink drops body contrast below 4.5:1, printing the ratio", () => {
-    // #b8b4ac on the canonical paper measures ~1.97:1 — far under AA. A
-    // light ink also buries the fixed focus ring on ink, so both floors
-    // report; the body-contrast line must be among them with its ratio.
+    // ~1.97:1: under AA; the focus ring on ink also fails.
     const failures = seedContrastFailures({ ...DEFAULT_SEED, ink: "#b8b4ac" });
     expect(failures.length).toBeGreaterThan(0);
     expect(failures.join("\n")).toMatch(
@@ -192,9 +168,8 @@ describe("theme seed contrast guard (U-W14-T13)", () => {
   });
 
   it("rejects a seed whose paper darkens the fixed focus ring below 3:1", () => {
-    // A near-ink paper buries #9c6a2e — only the focus-floor line catches
-    // this shape of merchant seed; the text floors report too, but the
-    // focus line is the one that names the 3:1 control boundary.
+    // A near-ink paper buries the fixed ring: the focus-floor line is the one
+    // that names the 3:1 control-boundary failure.
     const failures = seedContrastFailures({ ...DEFAULT_SEED, paper: "#3d3830" });
     expect(failures.join("\n")).toMatch(/focus ring on paper: [0-9.]+:1 \(floor 3:1\)/);
   });
@@ -210,9 +185,7 @@ describe("theme seed contrast guard (U-W14-T13)", () => {
   });
 
   it("reports the paper-on-ink button-label floor with its own measured ratio", () => {
-    // paper on ink is the same pair as ink on paper, so any seed that breaks
-    // one breaks both — assert BOTH lines are present for a light-ink seed
-    // so neither floor can be silently dropped from the check list.
+    // paper-on-ink is the same pair reversed, so both lines must report.
     const failures = seedContrastFailures({ ...DEFAULT_SEED, ink: "#a39e96" });
     const joined = failures.join("\n");
     expect(joined).toMatch(/ink on paper \(body text\): [0-9.]+:1/);

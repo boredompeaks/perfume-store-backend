@@ -23,11 +23,8 @@ const contactLinksSource = readFileSync(
 );
 
 /**
- * A5.11 / A5.8 pins for the contact + legal surface (U-W8-T3). The pages are
- * static server components, so the guards read the source the way the build
- * ships it. Everything here is a rule the prose spec states in words and that
- * a refactor can otherwise break silently: the ToC's anchors, the phone-less
- * contact page staying form-less, and the §5.8 boundary token.
+ * Source-level pins for the static legal/contact pages: ToC anchors, the
+ * form-less contact page and the control-boundary token.
  */
 function sectionIds(source: string): string[] {
   return [...source.matchAll(/^\s+id: "([a-z0-9-]+)",$/gm)].map((m) => m[1]);
@@ -47,10 +44,8 @@ describe("legal ToC (§5.11)", () => {
   });
 
   it("binds the ToC href and the section id to the same field, so they cannot drift", () => {
-    // The nav renders `href={`#${section.id}`}` and the body renders
-    // `id={section.id}` from the same prop — a hardcoded `href="#…"` or a
-    // heading without its anchor would be a dead ToC link, which is the one
-    // way this pattern actually fails.
+    // Href and id derive from one prop, so a hardcoded href or missing anchor
+    // would be a dead ToC link.
     expect(proseSource).toContain("href={`#${section.id}`}");
     expect(proseSource).toContain("id={section.id}");
     expect(proseSource).toContain('aria-label="Table of contents"');
@@ -62,8 +57,7 @@ describe("legal ToC (§5.11)", () => {
     expect(proseSource).toContain("lg:sticky");
     expect(proseSource).toContain("lg:top-24");
     expect(proseSource).toContain("lg:grid-cols-[200px_1fr]");
-    // §5.11: the ToC does not highlight the current section — no observer, no
-    // scroll listener, no client island for a navigation aid.
+    // No scroll spy: no observer, listener or client island for a nav aid.
     expect(proseSource).not.toMatch(
       /"use client"|IntersectionObserver|addEventListener|useState/,
     );
@@ -87,15 +81,14 @@ describe("legal copy discipline (P5, §0b.1)", () => {
   it("terms cross-links the shipped policy pages instead of restating their numbers", () => {
     expect(termsSource).toContain('href="/shipping"');
     expect(termsSource).toContain('href="/returns"');
-    // The return window is the API's number or no number — never a typed one.
+    // The window is the API's number or no number, never a typed one.
     expect(termsSource).toContain("{days ?");
     expect(termsSource).not.toMatch(/within \d+ days/);
   });
 
   it("introduces no new window, warranty or retention figure on either legal page", () => {
     for (const source of [termsSource, privacySource]) {
-      // Any prose claim of the refs' class ("30 JOURS", "14 jours
-      // calendaires") typed into the copy is the defect §0b exists to stop.
+      // A typed window in the copy is exactly the defect the rule stops.
       expect(source).not.toMatch(/within \d+ (days|jours)/);
       expect(source).not.toMatch(/\b\d+[-–]\d+ (day|business day)/);
     }
@@ -104,16 +97,13 @@ describe("legal copy discipline (P5, §0b.1)", () => {
 
 describe("contact (§5.8)", () => {
   it("stays channels-only: no form and no invented POST target", () => {
-    // §5.8: there is no contact-submission endpoint; the real channels render
-    // and that is the whole page. A form posting nowhere is the worst outcome.
+    // No contact-submission endpoint exists, so the page is channels only.
     expect(contactSource).not.toMatch(/<form|onSubmit|\baction=/);
     expect(contactSource).toContain("<ContactLinks");
   });
 
   it("the contact button boundary is the control token, not the hairline", () => {
-    // §5.8 CHANGE: the control boundary token replaces the decorative hairline
-    // on a 40×40 affordance. Both classes are real tokens, so this is a value
-    // pin, not a token-existence check.
+    // Both are real tokens; this pins the value, not token existence.
     expect(contactLinksSource).toContain("border-field-border");
     expect(contactLinksSource).not.toContain("border-hairline");
   });
@@ -127,9 +117,8 @@ describe("contact (§5.8)", () => {
 
 describe("motion (§5.12.4 rule 3, P2)", () => {
   it("declares no accent moment on any of the four surfaces", () => {
-    // These pages are 0% animated, not 2%: no scroll reveal, no entrance, no
-    // route transition. `transition-colors`/`transition-all` on hover is
-    // state feedback, not an accent moment, and is allowed.
+    // 0% animated: no reveal/entrance/route transition. Hover colour changes
+    // are state feedback and allowed.
     for (const source of [
       proseSource,
       termsSource,

@@ -1,15 +1,3 @@
-"""SPEC-6-04: role-aware ModelAdmin least privilege (spec 6.12).
-
-Pins the capability-driven admin base end to end:
-
-- the whole registered store admin surface is role-aware (nothing missed),
-- the view/add/change/delete matrix per role follows ``CAPABILITY_ROLES``
-  exactly (least privilege, admin role keeps full function),
-- bulk/export actions are role-gated and destructive ones are
-  confirmation-gated, including through the real admin UI,
-- the superuser bypass behaves like Django's own (unchanged trust anchor).
-"""
-
 from decimal import Decimal
 
 from django.contrib import admin
@@ -36,7 +24,6 @@ from products.models import products
 
 TEST_PASSWORD = "S3cure-Passphrase!"
 
-# The pinned store admin surface (registry test asserts nothing else leaks in).
 EXPECTED_MODELS = frozenset(
     {products, Order, Coupon, SiteSettings, Cart, User, TOTPDevice}
 )
@@ -92,11 +79,7 @@ def store_admins():
 
 
 class RoleAwareAdminRegistryTests(ApiTestCase):
-    """Every store ModelAdmin is role-aware and consistently configured."""
-
     def test_every_store_model_admin_is_registered(self):
-        # admin.site._registry is the ground truth: if a future ModelAdmin
-        # forgets the role-aware base, this equality fails.
         self.assertEqual(
             {model: type(model_admin) for model, model_admin in store_admins().items()},
             EXPECTED_REGISTRY,
@@ -117,8 +100,6 @@ class RoleAwareAdminRegistryTests(ApiTestCase):
                 self.assertLessEqual(used, set(CAPABILITY_ROLES))
 
     def test_every_declared_action_is_capability_gated(self):
-        # An action without a capability mapping would be usable by anyone
-        # who can reach the changelist — pin the invariant that cannot drift.
         for model, model_admin in store_admins().items():
             with self.subTest(model=model.__name__):
                 self.assertEqual(
@@ -128,8 +109,6 @@ class RoleAwareAdminRegistryTests(ApiTestCase):
 
 
 class RoleAwareAdminPermissionMatrixTests(ApiTestCase):
-    """view/add/change/delete × role follows CAPABILITY_ROLES exactly."""
-
     def test_matrix_for_every_role_kind_and_admin(self):
         for model, model_admin in store_admins().items():
             for role in STAFF_ROLES:
@@ -162,9 +141,6 @@ class RoleAwareAdminPermissionMatrixTests(ApiTestCase):
                     )
 
     def test_admin_role_keeps_full_function(self):
-        # Admin holds every capability the map grants, so it passes every
-        # capability-backed kind on every admin — the RBAC equivalent of the
-        # legacy blanket staff authority.
         request = request_for(make_role_user(ROLE_ADMIN, "chief"))
         for model, model_admin in store_admins().items():
             for kind in PERMISSION_KINDS:
@@ -175,11 +151,7 @@ class RoleAwareAdminPermissionMatrixTests(ApiTestCase):
                         )
 
     def test_superuser_bypass_covers_every_kind_including_capability_less(self):
-        # Django's own superuser bypass is preserved verbatim: even kinds no
-        # role may perform (cart edits, manual order rows) keep working. The
-        # only exceptions are SiteSettings' add/delete, whose unconditional
-        # singleton denial (pre-existing, deliberate) outranks the bypass, and
-        # the TOTP register, which refuses every write to everyone.
+        # Django's superuser bypass is preserved except SiteSettings add/delete and the TOTP register, which refuse every write.
         superuser = User.objects.create_superuser(
             "root", "root@example.com", TEST_PASSWORD
         )
@@ -206,14 +178,6 @@ class RoleAwareAdminPermissionMatrixTests(ApiTestCase):
 
 
 class TOTPDeviceAdminTests(ApiTestCase):
-    """The MFA factor register is a read-only audit surface.
-
-    The owner's e2e finding: support could not see whether an account had a
-    working second factor. The register answers that, but a writable one could
-    silently strip a privileged account's factor or plant one, and the secret
-    must never be readable outside the enrollment flow.
-    """
-
     SECRET = "JBSWY3DPEHPK3PXP"
 
     def setUp(self):
@@ -272,8 +236,6 @@ class TOTPDeviceAdminTests(ApiTestCase):
         self.assertEqual(res.status_code, 200)
         self.assertContains(res, self.account.username)
         self.assertNotContains(res, self.SECRET)
-        # The row the superuser sees is the CONFIRMED device, not merely some
-        # row for the account: enabled plus a confirmation timestamp.
         listed = list(res.context["cl"].result_list)
         self.assertEqual(listed, [self.device])
         self.assertTrue(listed[0].enabled)
@@ -299,8 +261,6 @@ class TOTPDeviceAdminTests(ApiTestCase):
 
 
 class RoleAwareAdminActionGatingTests(ApiTestCase):
-    """Bulk/export actions appear only for roles holding their capability."""
-
     def test_order_action_availability_per_role(self):
         order_admin = admin.site._registry[Order]
         cases = {
@@ -311,16 +271,9 @@ class RoleAwareAdminActionGatingTests(ApiTestCase):
                 "cancel_pending",
                 "export_csv",
             },
-            # SPEC-D-03: finance holds ``refunds.create``, so it is the role
-            # that gets the refund action; support's set below is unchanged.
             "finance": {"export_csv", "issue_refund"},
             "marketing": set(),
             "catalogue": set(),
-            # SPEC-1-B03 (spec 1.1 line 110): the inventory/fulfilment
-            # operator manages "packing, shipping and returns", so it now
-            # packs and ships like support does — and nothing else. Before
-            # this the case below was an empty set, which is the live
-            # DEVIATE this task closed.
             "inventory": {"mark_confirmed", "mark_shipped", "mark_delivered"},
         }
         for role, expected in cases.items():
@@ -330,10 +283,6 @@ class RoleAwareAdminActionGatingTests(ApiTestCase):
                 self.assertEqual(set(actions), expected)
 
     def test_delete_selected_needs_the_delete_capability(self):
-        # The admin-site-wide delete action rides Django's allowed_permissions
-        # against our capability-driven has_delete_permission. Orders map
-        # delete to no capability, so no staff role — not even admin — gets
-        # the bulk delete action; only the superuser bypass does.
         order_admin = admin.site._registry[Order]
         support = order_admin.get_actions(
             request_for(make_role_user("support", "del-sup"))
@@ -355,13 +304,6 @@ class RoleAwareAdminActionGatingTests(ApiTestCase):
             request_for(make_role_user("inventory", "act-inv"))
         )
         self.assertEqual(set(inventory), {"adjust_stock", "export_csv"})
-        # Catalogue holds products.publish, so the admin-wide bulk delete is
-        # available to it on top of the export. MERCHANT-DELIST: the same
-        # capability also gates delist/relist (the unpublish power the
-        # capability exists for), so the catalogue set grew by exactly those
-        # two actions -- a deliberate extension of this pin, not a drift:
-        # inventory (no products.publish) still cannot take anything off
-        # sale.
         catalogue = product_admin.get_actions(
             request_for(make_role_user("catalogue", "act-cat"))
         )
@@ -389,15 +331,10 @@ class RoleAwareAdminActionGatingTests(ApiTestCase):
 
 @tag("e2e")
 class RoleAwareAdminSurfaceTests(ApiTestCase):
-    """The gating holds through the real admin UI (no direct-call bypass)."""
-
     def setUp(self):
         self.buyer = self.make_user("buyer")
         self.pending = make_order(self.buyer, status="pending")
         self.confirmed = make_order(self.buyer, status="confirmed", total="250.00")
-        # SPEC-10-03 fixture: the shipped edge requires items + a captured
-        # payment; this row plays the paid, fulfilable order in the tests
-        # below that mark it shipped.
         OrderItem.objects.create(
             order=self.confirmed,
             product_name="Fixture perfume",
@@ -410,11 +347,9 @@ class RoleAwareAdminSurfaceTests(ApiTestCase):
     def test_view_only_role_browses_but_cannot_change(self):
         self.client.force_login(make_role_user("support", "surf-support"))
         self.assertEqual(self.client.get("/admin/orders/order/").status_code, 200)
-        # Finance reads orders but cannot fulfil: change page renders
-        # read-only, and a POSTed save is rejected outright.
         self.client.force_login(make_role_user("finance", "surf-finance"))
         change_page = self.client.get(f"/admin/orders/order/{self.pending.id}/change/")
-        self.assertEqual(change_page.status_code, 200)  # read-only render
+        self.assertEqual(change_page.status_code, 200)
         denied = self.client.post(
             f"/admin/orders/order/{self.pending.id}/change/",
             {
@@ -443,7 +378,6 @@ class RoleAwareAdminSurfaceTests(ApiTestCase):
         self.client.force_login(make_role_user("catalogue", "surf-catalogue"))
         add_page = self.client.get("/admin/products/products/add/")
         self.assertEqual(add_page.status_code, 200)
-        # ...but orders are none of catalogue's business beyond the map.
         self.assertEqual(self.client.get("/admin/orders/order/").status_code, 403)
 
     def test_cancel_pending_requires_explicit_confirmation(self):
@@ -457,7 +391,7 @@ class RoleAwareAdminSurfaceTests(ApiTestCase):
         self.assertContains(first, "Yes, proceed")
         self.pending.refresh_from_db()
         self.confirmed.refresh_from_db()
-        self.assertEqual(self.pending.status, "pending")  # nothing happened yet
+        self.assertEqual(self.pending.status, "pending")
         self.assertEqual(self.confirmed.status, "confirmed")
 
         second = self.client.post(
@@ -467,7 +401,7 @@ class RoleAwareAdminSurfaceTests(ApiTestCase):
         self.pending.refresh_from_db()
         self.confirmed.refresh_from_db()
         self.assertEqual(self.pending.status, "cancelled")
-        self.assertEqual(self.confirmed.status, "confirmed")  # paid order spared
+        self.assertEqual(self.confirmed.status, "confirmed")
 
     def test_superuser_keeps_direct_execution_without_confirmation(self):
         User.objects.create_superuser("root", "root@example.com", TEST_PASSWORD)
@@ -476,17 +410,11 @@ class RoleAwareAdminSurfaceTests(ApiTestCase):
             "/admin/orders/order/",
             {"action": "cancel_pending", "_selected_action": [str(self.pending.id)]},
         )
-        self.assertEqual(res.status_code, 302)  # executed, back to the changelist
+        self.assertEqual(res.status_code, 302)
         self.pending.refresh_from_db()
         self.assertEqual(self.pending.status, "cancelled")
 
-    # ——— SPEC-20-1 [R-20.20]: the interstitial states the consequences ———
-
     def test_cancel_confirmation_names_amount_currency_items_and_state(self):
-        # The delivered interstitial only rendered description + count +
-        # str(obj); a financially significant confirmation has to name the
-        # money, the lines and the state each row lands in. Values are
-        # pinned, not just the presence of a section.
         OrderItem.objects.create(
             order=self.pending,
             product_name="Oud Nocturne",
@@ -505,7 +433,6 @@ class RoleAwareAdminSurfaceTests(ApiTestCase):
         self.assertEqual(res.status_code, 200)
         self.assertTemplateUsed(res, "admin/action_confirmation.html")
         details = res.context["details"]
-        # One pending row of 2 is cancellable; the roll-up names both facts.
         self.assertEqual(
             details["summary"],
             f"1 of 2 selected order(s) will be cancelled, totalling 100.00 "
@@ -528,22 +455,16 @@ class RoleAwareAdminSurfaceTests(ApiTestCase):
             ("Resulting state", "confirmed → unchanged (paid, never cancelled here)"),
         )
         self.assertEqual(confirmed_row["items"], ["Fixture perfume x 1"])
-        # ...and the payload actually reaches the page, not just the context.
         self.assertContains(res, "100.00")
         self.assertContains(res, self.pending.currency)
         self.assertContains(res, "Oud Nocturne x 2")
         self.assertContains(res, "pending → cancelled")
-        # The delivered description/count/object list still renders.
         self.assertContains(res, "Affected (2)")
         self.assertContains(res, "Yes, proceed")
-        # Nothing committed on the interstitial.
         self.pending.refresh_from_db()
         self.assertEqual(self.pending.status, "pending")
 
     def test_already_cancelled_row_is_not_told_it_is_paid(self):
-        # SPEC-20-1b: the reason clause, not the resulting state, was wrong.
-        # An already-cancelled row lands in "unchanged" either way; calling
-        # it "paid" told the operator something false about their selection.
         cancelled = make_order(self.buyer, status="cancelled")
         self.client.force_login(make_role_user("support", "surf-cancelled"))
         res = self.client.post(
@@ -562,20 +483,13 @@ class RoleAwareAdminSurfaceTests(ApiTestCase):
         self.assertNotIn("paid", row["fields"][2][1])
 
     def test_confirmation_details_are_empty_without_a_declared_payload(self):
-        # Only a declared financial action spells out its consequences; the
-        # generic default must stay empty so no other confirmation grows an
-        # invented payload.
         request = request_for(make_role_user("support", "surf-nodefault"))
         order_admin = admin.site._registry[Order]
         self.assertEqual(
             order_admin.confirmation_details(request, "mark_shipped", []), {}
         )
-        # An admin that declares no payload at all — the base default —
-        # renders the delivered interstitial unchanged.
         coupon_admin = admin.site._registry[Coupon]
         self.assertEqual(coupon_admin.confirmation_details(request, "export", []), {})
-
-    # ——— SPEC-20-5 [R-20.28]: optional reason on cancel_pending ———
 
     def test_cancel_reason_is_merged_into_the_change_message(self):
         self.client.force_login(make_role_user("support", "log-reason"))
@@ -584,11 +498,9 @@ class RoleAwareAdminSurfaceTests(ApiTestCase):
             "/admin/orders/order/", {"action": "cancel_pending", **selected}
         )
         self.assertEqual(step.status_code, 200)
-        # The textarea is offered here, and it is optional.
         note_field = step.context["note_form"].fields["confirmation_note"]
         self.assertFalse(note_field.required)
         self.assertIn('name="confirmation_note"', step.content.decode())
-        # ...and what is typed there rides the commit into the audit trail.
         self.client.post(
             "/admin/orders/order/",
             {
@@ -629,21 +541,14 @@ class RoleAwareAdminSurfaceTests(ApiTestCase):
             "confirm": "yes",
             "confirmation_note": "  Customer asked  ",
         }
-        # Declared and supplied -> the trimmed reason comes back...
         self.assertEqual(
             order_admin.confirmation_note(request, "cancel_pending"),
             "Customer asked",
         )
-        # ...while any other action reads no reason at all, whatever was
-        # posted: the gate is the action name, not the presence of the key.
         self.assertEqual(order_admin.confirmation_note(request, "mark_shipped"), "")
         self.assertIsNone(order_admin.confirmation_reason_form("mark_shipped"))
-        # An over-long (crafted) note is dropped, never truncated into the
-        # audit trail, and never blocks the mutation.
         request.POST["confirmation_note"] = "x" * (CONFIRMATION_NOTE_MAX_LENGTH + 1)
         self.assertEqual(order_admin.confirmation_note(request, "cancel_pending"), "")
-        # The declaration cannot drift: a reason is only ever asked for on an
-        # action that is itself behind an interstitial.
         for model_admin in store_admins().values():
             with self.subTest(model=model_admin.model.__name__):
                 self.assertLessEqual(
@@ -652,8 +557,6 @@ class RoleAwareAdminSurfaceTests(ApiTestCase):
                 )
 
     def test_bulk_status_change_leaves_a_log_entry(self):
-        # [6.12.5]: bulk actions bypass save_model, so the base must log the
-        # privileged mutation itself.
         self.client.force_login(make_role_user("support", "log-support"))
         res = self.client.post(
             "/admin/orders/order/",
@@ -684,20 +587,16 @@ class RoleAwareAdminSurfaceTests(ApiTestCase):
             "/admin/orders/order/",
             {"action": "mark_shipped", "_selected_action": [str(self.confirmed.id)]},
         )
-        # Django's own handling of an action name outside the (gated) choice
-        # list: warn and bounce back to the changelist — nothing executes.
         self.assertEqual(res.status_code, 302)
         self.confirmed.refresh_from_db()
         self.assertEqual(self.confirmed.status, "confirmed")
 
 
 class AuthHelperTokenBranchTests(ApiTestCase):
-    """Closes the last common/testing.py gap: auth() with a real token."""
-
     def test_auth_helper_attaches_a_bearer_token(self):
         self.make_user("tokenbuyer")
         _, token = self.api_login("tokenbuyer")
-        self.client.credentials()  # drop what api_login attached
+        self.client.credentials()
         self.assertEqual(self.client.get("/api/orders/").status_code, 401)
         self.auth(token)
         self.assertEqual(self.client.get("/api/orders/").status_code, 200)

@@ -1,40 +1,6 @@
-"""SPEC-22-10 [R-22.18]: prove mail actually LEAVES, not merely that SMTP is set.
+"""Send (or dry-run) one delivery-probe email to an allowlisted operator address, to prove real mail leaves this deployment.
 
-`/health/`'s `smtp_configured` check (`ops/services.py`) proves three env keys
-are non-empty. That is configuration, not delivery, and it cannot tell an
-operator the difference between "the app can attempt a send" and "every
-customer's password-reset mail is landing in a spam folder" - the failure this
-command exists to rule out.
-
-Gates, in the order they apply. Every one refuses by name rather than guesses:
-
-* **An allowlisted recipient only.** The recipient must already be in
-  `settings.ALERT_RECIPIENTS` - the operator's own staff mailboxes, which
-  already receive every admin alert. There is no way to aim this at a customer
-  address, and the command never reads a `User.email`, so it cannot leak
-  another person's address because it never looks at one. An empty allowlist
-  is refused rather than defaulted to some address.
-* **Dry run by default.** Nothing is delivered unless `--send` is passed, so
-  the safe answer to "what would this do?" is the answer you get.
-* **A backend that never speaks SMTP is refused.** console/locmem/dummy accept
-  the message and report success, so probing against them would report a
-  delivery that never happened - the false green this command must not be.
-  The test suite runs on the locmem backend, which is why the suite can never
-  send real mail through this command even by accident.
-* **One message, deployment facts only.** The body carries the environment,
-  host, port, sender and timestamp - no order, no username, no product data.
-
-The send goes through `common.notifications.send_email` (SPEC-19-1's single
-send path), so the sender address and the backend are the ones the app really
-uses: a probe that used a private code path would be able to pass while the
-app's own mail failed.
-
-Exit status: 0 for a dry run and for an accepted send; non-zero (`CommandError`)
-for every refusal, and for a send the server rejected - a refused delivery is a
-delivery failure and has to be loud.
-
-See `docs/deploy-runbook.md` ("Email delivery verification") for the operator
-procedure, the SPF/DKIM/DMARC setup and what to check when mail lands in spam.
+Only ever addresses `settings.ALERT_RECIPIENTS`, dry-runs by default, and refuses a non-SMTP backend; a rejected send exits non-zero.
 """
 
 from django.conf import settings
@@ -43,8 +9,8 @@ from django.utils import timezone
 
 from common import notifications
 
-# Backends that accept a message and report success without a single SMTP
-# conversation. A probe against one of these is a false green, so it is refused.
+# Backends that report success without a single SMTP conversation; probing one
+# is a false green, so it is refused.
 NON_DELIVERING_BACKENDS = frozenset(
     {
         "django.core.mail.backends.console.EmailBackend",
@@ -58,12 +24,7 @@ PROBE_SUBJECT = "Perfume Store delivery probe"
 
 
 def allowlisted_recipients():
-    """`settings.ALERT_RECIPIENTS` as an ordered, de-duplicated address list.
-
-    Parsed here rather than imported from `ops.alerts` so the command states
-    its own contract: the allowlist is the deployment's own staff mailboxes,
-    and a customer address cannot be in it by accident.
-    """
+    """`settings.ALERT_RECIPIENTS` as an ordered, de-duplicated address list."""
     recipients = []
     for raw in settings.ALERT_RECIPIENTS.split(","):
         address = raw.strip()
@@ -139,11 +100,10 @@ class Command(BaseCommand):
                     PROBE_TEMPLATE, context, PROBE_SUBJECT, address
                 )
             except Exception as exc:
-                # The server's own text is the actionable part for an operator
-                # (535 auth refused, 550 relay denied, connection refused), and
-                # neither smtplib nor Django ever puts the configured
-                # credential in it - so it is safe to surface. Exit non-zero: a
-                # rejected probe IS a delivery failure, not a warning.
+                # The server's text (535 auth refused, 550 relay denied,
+                # connection refused) is the actionable part and never carries
+                # the configured credential, so it is safe to surface. Exit
+                # non-zero: a rejected probe IS a delivery failure.
                 raise CommandError(
                     f"probe delivery to {address} failed: {type(exc).__name__}: {exc}"
                 )
@@ -161,8 +121,8 @@ class Command(BaseCommand):
         for address in allowlist:
             if address.lower() == wanted:
                 return [address]
-        # The allowlist is the whole safety property here: an operator naming
-        # anything else is a typo (or an attempt), and both are refused.
+        # The allowlist is the whole safety property: anything else is a typo
+        # (or an attempt), and both are refused.
         raise CommandError(
             f"refusing: {requested.strip()!r} is not in ALERT_RECIPIENTS, so "
             "this command will not send to it. The probe only ever addresses "

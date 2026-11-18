@@ -13,10 +13,10 @@ export function fetchProduct(slug: string): Promise<Product> {
   return apiFetch<Product>(`/api/products/${slug}/`, { revalidate: 60 });
 }
 
-/** One display tier of the olfactory pyramid (Top / Heart / Base). */
+/** One display tier of the olfactory pyramid. */
 export type PyramidTier = {
   key: "top" | "heart" | "base";
-  /** Wide-tracked indicator, e.g. "N° 01" (design system: 11px uppercase). */
+  /** Wide-tracked indicator, e.g. "N° 01". */
   index: string;
   label: string;
   notes: NonNullable<ProductNotes["top"]>;
@@ -33,11 +33,8 @@ const PYRAMID_TIERS: ReadonlyArray<{
 ];
 
 /**
- * Maps the server's optional notes object onto display tiers (U-W11-T6).
- * Returns [] when the server publishes nothing usable: the PDP then renders
- * no pyramid section at all. The free-text prose field is never parsed into
- * tiers (§5.2 item 5; §12-G10: no structured notes ship today — gap logged
- * in BACKEND_REQUESTS.md).
+ * Empty array means the PDP renders no pyramid section. The free-text prose
+ * is never parsed into tiers; only structured notes count.
  */
 export function toOlfactoryTiers(notes: ProductNotes | undefined): PyramidTier[] {
   if (!notes) return [];
@@ -50,7 +47,7 @@ export function toOlfactoryTiers(notes: ProductNotes | undefined): PyramidTier[]
   return tiers;
 }
 
-/** SPEC-19-4 [R-19.11]: one armed preference on one product. */
+/** One armed preference on one product. */
 export interface RestockPreference {
   product_id: number;
   slug: string;
@@ -59,28 +56,17 @@ export interface RestockPreference {
 
 export interface RestockOptIn {
   /**
-   * True when the server signalled a registration: authed 201 (first
-   * opt-in) or the guest 202 (uniform first-or-repeat, by design).
-   * False only for the authed 200 re-arm of an existing preference.
+   * True for the authed 201 and the guest 202; false only for the authed 200
+   * re-arm of an existing preference.
    */
   created: boolean;
   preference: RestockPreference;
 }
 
 /**
- * Back-in-stock opt-in (§12.G6, SPEC-Q-RS1). Two live arms:
- * an AUTHENTICATED caller gets 201 on a first opt-in and 200 when an
- * existing preference is re-armed (their submitted email is ignored —
- * the trigger mails user.email); a GUEST caller who submits an email
- * gets one uniform 202, first-time or repeat, valid or invalid format —
- * deliberately zero oracle — and the trigger mails that address. A guest
- * POST with no submitted email (or an unparseable body) and every guest
- * DELETE stay 401. Throttled on two scopes: `restock` (per-IP anonymous,
- * per-user authed) plus `restock-guest` (per IP+email pair). The status
- * is captured via apiFetch's `onStatus` because the preference body is
- * identical at all three 2xx codes. Every 4xx arrives as the uniform
- * SPEC-9-03 envelope and surfaces as ApiError with the server's message
- * verbatim — the caller never rewrites it.
+ * Authed: 201 first opt-in, 200 re-arm. Guest: one uniform 202 whatever the
+ * input (zero oracle). The body is identical across all three 2xx codes, so
+ * `onStatus` captures which one answered. 4xx messages are the server's.
  */
 export async function restockSubscribe(
   slug: string,
@@ -102,10 +88,8 @@ export async function restockSubscribe(
 }
 
 /**
- * Opt-out: a uniform, existence-hiding 200 (`{active: false}`) whether or
- * not a preference existed. Authenticated-only — a guest DELETE keeps the
- * 401 (opt-out is ownership-scoped to request.user; a guest row has no
- * caller identity to scope by).
+ * Uniform 200 whether or not a preference existed. Authenticated-only: a
+ * guest DELETE stays 401 because opt-out is scoped to request.user.
  */
 export function restockUnsubscribe(slug: string): Promise<{ active: boolean }> {
   return apiFetch<{ active: boolean }>(

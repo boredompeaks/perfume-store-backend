@@ -1,17 +1,3 @@
-"""SPEC-20-4 [R-20.27]/[R-20.29]: structured before -> after values and a
-source discriminator on guarded mutations.
-
-- Every guarded mutation that previously recorded only prose — the API
-  catalogue writes, the admin staff-role change, the admin promotion toggle —
-  now records the REAL old and new values per field, and the surface the
-  mutation arrived through as a field on the row (not as a word in a
-  message). Order transitions already carry ``OrderStatusEvent.from_status``
-  / ``.to_status`` and ``StockMovement.delta`` / ``.stock_after``.
-- The security contract: structured values go through ONE sanitizing path, so
-  a field on the credential-name exclusion list can never reach the audit
-  detail or the log mirror, however a caller reaches it.
-"""
-
 import re
 from decimal import Decimal
 
@@ -51,7 +37,6 @@ def make_role_user(role, username):
 
 
 def fake_request(user):
-    """The one attribute every audit writer reads off a request."""
     return type("FakeRequest", (), {"user": user})()
 
 
@@ -67,8 +52,6 @@ def write_payload(name):
 
 
 class CleaningPathTests(ApiTestCase):
-    """The single sanitizing path — the guarantee, pinned on its own."""
-
     def test_credential_bearing_names_are_excluded(self):
         for name in (
             "password",
@@ -87,8 +70,6 @@ class CleaningPathTests(ApiTestCase):
                 self.assertTrue(is_excluded_field(name))
 
     def test_ordinary_names_survive_the_exclusion(self):
-        # razorpay_order_id / razorpay_payment_id are order references, pinned
-        # by SPEC-7-01's payment trail: the exclusion must not eat them.
         for name in (
             "price",
             "stock",
@@ -104,12 +85,7 @@ class CleaningPathTests(ApiTestCase):
                 self.assertFalse(is_excluded_field(name))
 
     def test_the_exclusion_covers_this_projects_real_material(self):
-        # A denylist of conventional names is only trustworthy if the names
-        # this project actually uses are in it — read from the models and the
-        # settings rather than typed out, so the pin cannot drift from reality.
-        # (RAZORPAY_KEY_ID is deliberately absent: it is the public half of the
-        # pair, and the delivered SPEC-7-02 no-secrets pin already governs what
-        # may be printed.)
+        # Conventional credential names are read from the models and settings, not typed out; RAZORPAY_KEY_ID is deliberately absent (public half of the pair).
         self.assertTrue(is_excluded_field(TOTPDevice._meta.get_field("secret").name))
         self.assertTrue(is_excluded_field(User._meta.get_field("password").name))
         self.assertTrue(is_excluded_field("RAZORPAY_KEY_SECRET"))
@@ -118,7 +94,6 @@ class CleaningPathTests(ApiTestCase):
         self.assertIsNone(clean_audit_value(None))
         self.assertIs(clean_audit_value(True), True)
         self.assertEqual(clean_audit_value(7), 7)
-        # Money keeps its exact decimal text; it never becomes a float.
         self.assertEqual(clean_audit_value(Decimal("511.00")), "511.00")
         overlong = "x" * (AUDIT_VALUE_MAX_LENGTH + 10)
         cleaned = clean_audit_value(overlong)
@@ -149,8 +124,6 @@ class CleaningPathTests(ApiTestCase):
         self.assertEqual(clean_audit_payload(None), {})
 
     def test_change_set_drops_an_excluded_field_entirely(self):
-        # Not redacted to a placeholder: the field must not appear at all,
-        # so the trail never records that it moved.
         changes = field_changes(
             [
                 ("price", "10.00", "11.00"),
@@ -183,8 +156,6 @@ class CleaningPathTests(ApiTestCase):
 
 
 class RecordSanitizingTests(ApiTestCase):
-    """AuditEvent.record applies the cleaner itself — no bypass exists."""
-
     def test_record_strips_a_credential_field_from_detail_and_log(self):
         with self.assertLogs("common.audit", level="INFO") as logs:
             event = AuditEvent.record(
@@ -195,7 +166,6 @@ class RecordSanitizingTests(ApiTestCase):
         self.assertNotIn("S3cure-Passphrase!", "\n".join(logs.output))
 
     def test_record_keeps_the_business_trail_payloads(self):
-        # The sanitizer must not quietly empty the delivered payment trail.
         event = AuditEvent.record(
             AuditEvent.EventType.PAYMENT_VERIFIED,
             detail={"razorpay_order_id": "order_1", "razorpay_payment_id": "pay_1"},
@@ -246,8 +216,6 @@ class RecordSanitizingTests(ApiTestCase):
 
 
 class ProductApiMutationTests(ApiTestCase):
-    """The API catalogue writes: real before -> after, source=api."""
-
     def setUp(self):
         self.writer = make_role_user(ROLE_ADMIN, "scribe")
         self.client = self.fresh_client()
@@ -290,9 +258,7 @@ class ProductApiMutationTests(ApiTestCase):
         )
         self.assertEqual(event.source, AuditEvent.Source.API)
         self.assertEqual(event.detail["object_id"], str(product.pk))
-        # ``stock`` is read-only on an existing row (SPEC-6-02: inventory moves
-        # only through adjust_stock), so the audit records exactly what was
-        # written — the ignored value is absent, not fabricated.
+        # ``stock`` is read-only on an existing row, so the audit records exactly what was written.
         self.assertEqual(
             event.detail["changes"],
             [{"field": "price", "before": "499.99", "after": "511.00"}],
@@ -331,8 +297,6 @@ class ProductApiMutationTests(ApiTestCase):
         self.assertFalse(products.objects.filter(pk=product.pk).exists())
 
     def test_a_secret_named_field_cannot_enter_the_audit_trail(self):
-        # The security invariant on a real write: whatever a caller puts in
-        # the change set, the credential-named field lands nowhere.
         product = self.make_product(name="Guarded Rose")
         with self.assertLogs("common.audit", level="INFO") as logs:
             log_mutation(
@@ -360,8 +324,6 @@ class ProductApiMutationTests(ApiTestCase):
 
 
 class AdminRoleChangeMixin:
-    """The confirmed role-change leg (SPEC-20-2's interstitial)."""
-
     def _role_post(self, target, role):
         return user_change_post(
             target,
@@ -377,15 +339,12 @@ class AdminRoleChangeMixin:
 
 
 class AdminMutationTests(AdminRoleChangeMixin, ApiTestCase):
-    """The admin surfaces: real before -> after, source=admin."""
-
     def setUp(self):
         self.chief = make_role_user(ROLE_ADMIN, "chief")
         self.client.force_login(self.chief)
 
     def test_role_change_records_before_and_after_role_sets_as_admin(self):
         target = make_role_user(ROLE_SUPPORT, "target")
-        # SPEC-20-2's interstitial answers the first leg...
         unconfirmed = self.client.post(
             f"/admin/auth/user/{target.pk}/change/",
             self._role_post(target, ROLE_MARKETING),
@@ -398,7 +357,6 @@ class AdminMutationTests(AdminRoleChangeMixin, ApiTestCase):
             ).count(),
             0,
         )
-        # ...and the confirmed leg commits the grant and the structured row.
         res = self._confirm(target, ROLE_MARKETING)
         self.assertEqual(res.status_code, 302)
         event = AuditEvent.objects.get(
@@ -440,7 +398,6 @@ class AdminMutationTests(AdminRoleChangeMixin, ApiTestCase):
             **grid,
             "_save": "Save",
             "form-0-id": str(coupon.pk),
-            # "active" is the list_editable column; omitting it deactivates.
         }
         res = self.client.post(COUPON_CHANGELIST, payload, follow=True)
         self.assertEqual(res.status_code, 200)
@@ -458,8 +415,6 @@ class AdminMutationTests(AdminRoleChangeMixin, ApiTestCase):
         )
 
     def test_adding_a_coupon_records_no_before_after_row(self):
-        # Only an edit has a before -> after to record; the add form's own
-        # LogEntry already names the creation.
         res = self.client.post(
             "/admin/orders/coupon/add/",
             {
@@ -484,8 +439,6 @@ class AdminMutationTests(AdminRoleChangeMixin, ApiTestCase):
 
 
 class SourceDiscriminatorTests(AdminRoleChangeMixin, ApiTestCase):
-    """admin vs api is a field a query can filter, not prose in a message."""
-
     def test_admin_and_api_mutations_are_separately_queryable(self):
         chief = make_role_user(ROLE_ADMIN, "chief")
         self.client.force_login(chief)
@@ -502,7 +455,6 @@ class SourceDiscriminatorTests(AdminRoleChangeMixin, ApiTestCase):
         self.assertEqual(api_rows.count(), 1)
         self.assertEqual(admin_rows.get().event_type, "staff.roles_updated")
         self.assertEqual(api_rows.get().event_type, "catalogue.created")
-        # Nothing claims the admin surface without naming it.
         self.assertFalse(
             AuditEvent.objects.filter(source=AuditEvent.Source.SYSTEM)
             .filter(event_type__startswith="staff.")

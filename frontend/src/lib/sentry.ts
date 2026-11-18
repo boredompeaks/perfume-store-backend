@@ -1,34 +1,7 @@
 /**
- * Browser error reporting with a minimal noise denylist.
- *
- * A client error loop (a render that throws on every frame, a chunk that
- * fails to load on every navigation) can emit thousands of events in an
- * hour. Sentry's free tier is a monthly event budget, so an unguarded SDK
- * can spend the whole month in one afternoon and leave the real incidents
- * of the following weeks unsampled. A local per-tab cap was deliberately
- * removed: it went quiet exactly when errors spiked, and the events it
- * dropped were invisible to Sentry. Spend is bounded by Sentry's own
- * controls instead:
- *
- * - Nothing is initialised unless a DSN is configured, so a local run or a
- *   preview build sends nothing.
- * - `NEXT_PUBLIC_SENTRY_SAMPLE_RATE` keeps a fixed fraction of events, and
- *   the Sentry project's rate limit and inbound filters are the ceiling.
- * - `beforeSend` is only a denylist for known noise. It never drops an event
- *   because a local counter says so.
- * - `beforeSend` is wrapped in try/catch: telemetry must never be able to
- *   break the page it is measuring, so a malformed event is dropped, not
- *   thrown.
- *
- * The SDK is `@sentry/browser`, not `@sentry/nextjs`: the repo does not have
- * the Next wrapper, and the wrapper's build plugin would rewrite the bundle
- * for a single error boundary. The lighter browser SDK covers the one call
- * site (`captureException` in `app/error.tsx`) without a build-time hook.
- *
- * Pinned to the v10 line deliberately: v11 removed `sendDefaultPii`, and an
- * explicit "collect no PII" switch that the code can be read for is worth
- * more here than a major-version bump. v10 still supports every option used
- * below.
+ * Telemetry must never break the page it measures: the guard fails closed, and
+ * spend is bounded by DSN, sample rate and Sentry's own limits, not a local
+ * counter that would go silent during an incident.
  */
 import * as Sentry from "@sentry/browser";
 import type { BrowserOptions, ErrorEvent } from "@sentry/browser";
@@ -36,10 +9,7 @@ import type { BrowserOptions, ErrorEvent } from "@sentry/browser";
 /** Sentry's default sample rate: every error event is kept. */
 export const DEFAULT_SAMPLE_RATE = 1.0;
 
-/**
- * The slice of a Sentry event the guard reads. Kept structural so tests can
- * drive the guard with plain objects instead of fabricating a full `Event`.
- */
+/** Structural slice of an event so tests need not fabricate a full `Event`. */
 export interface SentryEventLike {
   message?: string;
   exception?: {
@@ -57,9 +27,8 @@ export interface SentryGuard<T extends SentryEventLike> {
 }
 
 /**
- * Parse the client-side sample rate. Anything that is not a number inside
- * 0.0-1.0 falls back to the default, so a typo in the env file cannot turn
- * sampling into "send nothing" (0) by accident.
+ * Out-of-range or non-numeric values fall back to the default, so a typo
+ * cannot silently turn sampling into "send nothing".
  */
 export function parseSampleRate(raw: string | undefined): number {
   const trimmed = (raw ?? "").trim();
@@ -80,16 +49,8 @@ function defaultOffline(): boolean {
 }
 
 /**
- * Noise the SDK should never bill for. Each entry is a class of error the
- * runtime recovers from on its own:
- * - ResizeObserver loop warnings are emitted by the browser after layout
- *   settles; nothing is broken and they recur on every resize.
- * - Hydration mismatches are dev-time React/Next diagnostics that a
- *   production build does not even render the same way.
- * - Chunk-load failures are retried by Next on the next navigation, so the
- *   first one is not necessarily a user-visible failure.
- * - `Failed to fetch` while the browser is offline is the expected state of
- *   an offline tab, not a server fault.
+ * Known noise the runtime recovers from on its own: ResizeObserver loops,
+ * dev-only hydration warnings, Next-retried chunk loads and offline fetches.
  */
 export function denylistReason(
   event: SentryEventLike,
@@ -126,11 +87,7 @@ export function denylistReason(
   return null;
 }
 
-/**
- * Build a guard around the denylist. The default instance below is the one
- * the SDK uses; tests construct isolated instances so one case cannot leak
- * the offline seam into the next.
- */
+/** Isolated instances let tests inject the offline seam without leaking. */
 export function createSentryGuard<T extends SentryEventLike = SentryEventLike>(
   options: SentryGuardOptions = {},
 ): SentryGuard<T> {
@@ -158,10 +115,8 @@ export function sentryDsn(): string | undefined {
 }
 
 /**
- * Sample rate from the environment. The literal `process.env.*` member
- * expression below is what Next.js can statically inline into the browser
- * bundle; a dynamic lookup through a variable would compile to a runtime
- * object access that is always undefined in the client.
+ * The literal `process.env.*` member expression is what Next.js can inline
+ * into the browser bundle; a dynamic lookup would always be undefined.
  */
 export function sentrySampleRate(): number {
   return parseSampleRate(process.env.NEXT_PUBLIC_SENTRY_SAMPLE_RATE);
@@ -171,15 +126,8 @@ export function sentrySampleRate(): number {
 let initializedFor: string | null = null;
 
 /**
- * Initialise the SDK only when a DSN is configured. Idempotent for the same
- * DSN; re-initialises if the configured DSN changes (dev server restarts
- * with a different `.env.local`).
- *
- * `sendDefaultPii: false` and the zeroed trace/replay rates are deliberate:
- * this storefront handles customer data, and the free tier is event-budgeted,
- * so performance and session replay stay off. Sampling is Sentry's own knob,
- * so a deployment can lower its spend without a local counter that would
- * silence errors during an incident.
+ * No DSN means no init. `sendDefaultPii: false` and zeroed trace/replay rates
+ * are deliberate: customer data stays out, and spend is not locally capped.
  */
 export function initSentry(): boolean {
   const dsn = sentryDsn();
@@ -201,9 +149,8 @@ export function initSentry(): boolean {
 }
 
 /**
- * Report an error from the client error boundary. Every failure here is
- * swallowed: a telemetry outage (blocked DSN host, ad blocker, bad config)
- * must not turn a handled render error into an unhandled one.
+ * Report from the error boundary; every failure here is swallowed so a
+ * telemetry outage cannot turn a handled render error into an unhandled one.
  */
 export function captureException(error: unknown): void {
   try {

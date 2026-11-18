@@ -1,36 +1,18 @@
 #!/usr/bin/env python
-"""SPEC-T1b red-team runner: families 6-9 (BUILD-QUEUE Phase T, T1 items 6-9).
+"""SPEC-T1b red-team runner: families 6-9 against the live UAT API.
 
-Second half of the T1 attack catalog, attacking the REAL UAT API (owner
-approved, test mode only, no real money ever) over HTTPS from this sandbox
-with stdlib urllib only. The method is T1a's: every attack records attempted
-/ invariant / result / severity so the report table is evidence-backed, every
-BLOCKED row names the exact environment gap, and nothing is faked when the
-box cannot host the attack. Family 10 (the security_smoke.sh extension) is
-delivered by that script itself, not by this runner.
+Second half of the T1 catalog; reuses T1a's transport (Http, Ledger,
+browser_csrf, ...) by import. Owner-approved, test mode only, stdlib
+urllib. Every attack records attempted / invariant / result / severity, and
+every BLOCKED row names the environment gap. Family 10 is security_smoke.sh.
 
-Reuses T1a's transport (Http, Ledger, browser_csrf, ...) by import - the two
-runners are siblings in scripts/, so `python scripts/redteam_t1b.py` puts the
-module on sys.path - rather than copying the learned transport rules
-(browser UA, no-redirect opener, browser-shaped sessioned POSTs).
-
-Safety rails (T1a's, plus this half's own):
-- volume is capped and every burst is logged row by row: auth spray <= 45
-  shots, register/recovery sprays <= 25, no payload above ~6 MB (one upload
-  probe) or ~300 KB (one huge-JSON probe) or depth-2500 (one nesting probe) -
-  the three requests that must be large to be the attack at all;
-- sprays that measure a throttle budget fire INVALID payloads (empty bodies),
-  so a register/recovery measurement creates no accounts and sends no email -
-  ScopedRateThrottle spends in initial(), before the view runs, so the budget
-  is measured identically;
-- every flood phase starts by sleeping a full 60 s window: spend on that
-  scope from earlier processes (other agents, earlier runs) is invisible to
-  this runner, so a fresh window is forced rather than assumed;
-- nothing targets a non-test environment: base URL is explicit per run.
+Rails: capped volume, every burst logged row by row; throttle-budget sprays
+fire INVALID payloads so no account is created and no email is sent
+(ScopedRateThrottle spends in initial(), before the view); each flood phase
+first sleeps a full 60s window because earlier spend is invisible.
 
 Evidence JSON (default scripts/t1b_evidence.json, untracked) is rewritten
-after every family phase, so a partial run still leaves usable rows behind.
-Exit 0 when the run completes; 1 when the run itself broke.
+after every family phase. Exit 0 when the run completes, 1 when it broke.
 """
 
 from __future__ import annotations
@@ -63,34 +45,29 @@ from redteam_t1a import (
 
 FIXTURE_USER = "rt_t1b_fixture"
 FIXTURE_EMAIL = "rt_t1b_fixture@redteam.invalid"
-# Low password shape on purpose (single-case words, spaces, no digits or
-# symbols): the value is a committed fixture, and this repo's secret scanner
-# flags high-shape password literals (GATE-FIX-CYCLE1 precedent). It still
-# clears the register endpoint's validate_password policy - it is neither
-# similar to the username nor short nor common.
+# Low password shape on purpose: the value is a committed fixture and this
+# repo's secret scanner flags high-shape literals. It still clears
+# validate_password (not similar to the username, not short, not common).
 FIXTURE_PASS = "quiet harbor lane"
 
-# Burst caps. Each is >= 3x the shipped default for its scope (auth 10/min,
-# register 5/min, recovery 5/min per settings) so a refusal index can be
-# observed at all: F3-C5 measured a 5/min scope first refusing at shot 19 on
-# this deployment (per-process throttle cache), so a cap below ~3x would
-# measure nothing but the inflation T1a already found.
+# Each cap is >= 3x its scope's shipped default (auth 10/min, register and
+# recovery 5/min) so a refusal index can be observed at all: the deployed
+# throttle cache is per-process, and a 5/min scope first refused at shot 19.
 AUTH_SPRAY_CAP = 45
 REGISTER_SPRAY_CAP = 25
 RECOVERY_SPRAY_CAP = 25
 RESTOCK_SPRAY_CAP = 25
 FRESH_WINDOW_S = 62
 
-# Nesting bomb: ~2.5k brackets is well past Python's json recursion limit
-# while staying a few KB on the wire - one request, not a flood.
+# ~2.5k brackets is past Python's json recursion limit while staying a few
+# KB on the wire: one request, not a flood.
 NEST_DEPTH = 2500
-# One huge-JSON probe, below any sane body-size ceiling, above anything a
-# validator should ever be handed.
+# One huge-JSON probe: below any sane body-size ceiling, above anything a
+# validator should be handed.
 HUGE_PAD_BYTES = 300_000
 
-# Cross-phase memory: env verdicts and the f7 forced-error evidence that f8
-# re-uses instead of re-firing (dumped into the evidence file's meta so a
-# later `--only f8` still sees the earlier run's verdicts).
+# Cross-phase memory: env verdicts and f7's forced-error evidence re-used by
+# f8, dumped into the evidence meta so a later `--only f8` still sees them.
 SHARED: dict = {}
 
 
@@ -129,11 +106,9 @@ def _median(values):
 def _sleep_fresh(scope: str):
     """Force one full throttle window before a flood phase.
 
-    Unconditional: spend on this scope from OTHER processes (T1a's runs,
-    other agents) is not visible in this runner's own timestamps, so the only
-    honest way to promise a fresh window is to wait one out. Why one sleep
-    covers every earlier caller on the scope: DRF window keys are per 60 s.
-    """
+    Unconditional: spend from other processes is invisible in this runner's
+    timestamps, and DRF window keys are per 60 s, so one full sleep covers
+    every earlier caller on the scope."""
     time.sleep(FRESH_WINDOW_S)
     return scope
 
@@ -211,8 +186,7 @@ def _get_ref(H: Http, path, hops=3):
 
     A redirect that leaves the base host is returned as-is: following it
     with this identity's jar would smuggle cookies cross-host, and the
-    status/Location IS the evidence the caller wants.
-    """
+    status/Location IS the evidence."""
     base_host = H.base.split("//", 1)[-1].split("/", 1)[0]
     current = path
     for _ in range(hops):
@@ -237,11 +211,9 @@ def _get_ref(H: Http, path, hops=3):
 def _ensure_fixture(H: Http):
     """The one throwaway account this run is allowed to register.
 
-    Idempotent: fixed username, so a re-run's 400 (username/email taken) IS
-    the 'already exists' signal and no second account is created. The account
-    stays inactive until an emailed token - that gap is the environment's,
-    recorded as such in the env phase.
-    """
+    Idempotent: the fixed username means a re-run's 400 IS the "already
+    exists" signal, so no second account is created. The account stays
+    inactive until an emailed token this sandbox cannot receive."""
     if SHARED.get("fixture_user"):
         return
     resp = H.request(
@@ -258,10 +230,6 @@ def _ensure_fixture(H: Http):
     SHARED["fixture_register_status"] = resp["status"]
 
 
-# --------------------------------------------------------------------------
-# STEP ZERO: re-probe T1a's four owner ops (seed / webhook secret / account /
-# shipping) and register the fixture. All probes appended to F.env.
-# --------------------------------------------------------------------------
 def phase_env(H: Http, F, base=None):
     probes = [
         ("public-health", "GET", "/health/", UNSET, {}),
@@ -306,9 +274,9 @@ def phase_env(H: Http, F, base=None):
     state["demo_login"] = state["login-demo-customer"]["status"]
     state["webhook_configured"] = state["webhook-unsigned"]["status"] != 503
 
-    # The one throwaway fixture account (credentials recorded as fixtures in
-    # the report). Registration is live (Q-S3 shape), but activation still
-    # needs an emailed token this sandbox cannot receive.
+    # The one throwaway fixture account; its credentials are recorded as
+    # fixtures in the report. Registration is live, but activation needs an
+    # emailed token this sandbox cannot receive.
     resp = H.request(
         "/api/v1/account/register/",
         method="POST",
@@ -339,13 +307,9 @@ def phase_env(H: Http, F, base=None):
     SHARED["fixture_active"] = login["status"] in (200, 201)
 
 
-# --------------------------------------------------------------------------
-# Family 6: Auth / MFA
-# --------------------------------------------------------------------------
 def phase6(H: Http, F, bare: Http):
     ensure_session(bare)
 
-    # -- F6-A1: credential-stuffing window on the auth scope ----------------
     _sleep_fresh("auth")
     spray = []
     for i in range(AUTH_SPRAY_CAP):
@@ -396,9 +360,8 @@ def phase6(H: Http, F, bare: Http):
         "n/a" if ok else "Medium",
     )
 
-    # -- F6-A2: register 5/min measured on INVALID payloads -----------------
-    # Empty bodies: throttling spends in initial(), so the budget is
-    # measured while validation refuses everything - zero accounts created.
+    # Empty bodies: throttling spends in initial(), so the budget is measured
+    # while validation refuses everything - zero accounts created.
     _sleep_fresh("register")
     reg = []
     for i in range(REGISTER_SPRAY_CAP):
@@ -436,7 +399,6 @@ def phase6(H: Http, F, bare: Http):
         "n/a" if ok else "Medium",
     )
 
-    # -- F6-M1: unauthenticated MFA battery (Q-S4 re-verify against prod) ---
     battery = [
         ("setup-no-creds", "POST", "/api/v1/account/mfa/setup/", {}),
         ("confirm-no-creds", "POST", "/api/v1/account/mfa/confirm/", {}),
@@ -468,7 +430,6 @@ def phase6(H: Http, F, bare: Http):
         verdict(shape_ok and not secret_leak),
     )
 
-    # -- F6-M2: enrollment abuse with REAL registered (inactive) credentials
     _ensure_fixture(H)
     fixture_user = SHARED.get("fixture_user", FIXTURE_USER)
     fixture_pass = SHARED.get("fixture_pass", FIXTURE_PASS)
@@ -497,7 +458,6 @@ def phase6(H: Http, F, bare: Http):
         verdict(uniform and with_creds["status"] == 401),
     )
 
-    # -- F6-M3: ghost vs ghost setup uniformity (double control) -----------
     g1 = H.request(
         "/api/v1/account/mfa/setup/",
         method="POST",
@@ -518,7 +478,6 @@ def phase6(H: Http, F, bare: Http):
         verdict(same(g1, g2) and g1["status"] == 401),
     )
 
-    # -- F6-R1: refresh Origin gate (post-Q-P1) -----------------------------
     evil = H.request(
         "/api/v1/account/token/refresh/",
         method="POST",
@@ -541,11 +500,9 @@ def phase6(H: Http, F, bare: Http):
         verdict(evil["status"] == 403 and gate_named and not swept),
     )
 
-    # -- F6-R2: refresh cookie attribute contract on the observable path ----
     # No login succeeds on this env, so the issuance path is blocked (F6-J5);
-    # the rejection path still mints the cookie's clearing Set-Cookie, whose
-    # attribute set must carry the same HttpOnly contract, and no response
-    # body may ever carry a refresh token.
+    # the rejection path still mints the clearing Set-Cookie, whose attributes
+    # must carry the same HttpOnly contract, and no body may carry a token.
     trusted = H.request(
         "/api/v1/account/token/refresh/",
         method="POST",
@@ -596,7 +553,6 @@ def phase6(H: Http, F, bare: Http):
         verdict(cookie_seen and flags_ok and not body_token),
     )
 
-    # -- F6-J1: JWT alg confusion ------------------------------------------
     now = int(time.time())
     claims = {"user_id": 1, "exp": now + 3600, "token_type": "access"}
     alg_none = _jwt({"alg": "none", "typ": "JWT"}, claims)
@@ -625,7 +581,6 @@ def phase6(H: Http, F, bare: Http):
         verdict(ok),
     )
 
-    # -- F6-J2: key confusion + exp shaping ---------------------------------
     wrong_key = _jwt({"alg": "HS256", "typ": "JWT"}, claims, key=b"not-the-secret")
     wrong_key_expired = _jwt(
         {"alg": "HS256", "typ": "JWT"},
@@ -640,10 +595,9 @@ def phase6(H: Http, F, bare: Http):
         "/api/v1/store/orders/",
         headers={"Authorization": f"Bearer {wrong_key_expired}"},
     )
-    # Honest scope note: without the server key a forged exp cannot be
-    # isolated from a forged signature - rejection proves the signature
-    # gate; exp enforcement on a server-minted token needs a real session
-    # (blocked at F6-J3/J5 on this deployment).
+    # Without the server key a forged exp cannot be isolated from a forged
+    # signature: rejection proves the signature gate, while exp enforcement
+    # needs a real session (blocked at F6-J3/J5).
     F.add(
         "F6-J2",
         "6",
@@ -659,7 +613,6 @@ def phase6(H: Http, F, bare: Http):
         verdict(r1["status"] == 401 and r2["status"] == 401),
     )
 
-    # -- F6-J3/J4/J5: session-dependent JWT invariants ---------------------
     gap = (
         "no activated account is obtainable on this deployment: seed_demo "
         "never ran (demo-customer 401) and the run's registered fixture "
@@ -696,7 +649,6 @@ def phase6(H: Http, F, bare: Http):
         gap,
     )
 
-    # -- F6-P1/P2: password-reset oracle ------------------------------------
     _sleep_fresh("recovery")
     absent_bodies = []
     absent_times = []
@@ -737,13 +689,9 @@ def phase6(H: Http, F, bare: Http):
     )
 
 
-# --------------------------------------------------------------------------
-# Family 7: input / validation
-# --------------------------------------------------------------------------
 def phase7(H: Http, F, bare: Http):
     ensure_session(bare)
 
-    # -- F7-MA1: mass assignment on register --------------------------------
     _ensure_fixture(H)
     spoof_user = f"rt_t1b_mass_{uuid.uuid4().hex[:6]}"
     mass = H.request(
@@ -797,7 +745,6 @@ def phase7(H: Http, F, bare: Http):
         ),
     )
 
-    # -- F7-MA2: product write mass assignment (anonymous) ------------------
     prod = H.request(
         "/api/v1/store/products/",
         method="POST",
@@ -823,7 +770,6 @@ def phase7(H: Http, F, bare: Http):
         verdict(prod["status"] in (401, 403) and envelope_ok(prod, (401, 403))),
     )
 
-    # -- F7-MA3: order-address mass assignment via guest checkout ----------
     addr = H.request(
         "/api/v1/store/orders/checkout/",
         method="POST",
@@ -872,7 +818,6 @@ def phase7(H: Http, F, bare: Http):
         ),
     )
 
-    # -- F7-SQ1: SQLi via search --------------------------------------------
     payloads = [
         "' OR '1'='1",
         "'; DROP TABLE products_products;--",
@@ -903,7 +848,6 @@ def phase7(H: Http, F, bare: Http):
         verdict(no_5xx and _no_sql_error(*sqli)),
     )
 
-    # -- F7-SQ2: SQLi via ordering/filter -----------------------------------
     inj = [
         _timed(
             H,
@@ -936,7 +880,6 @@ def phase7(H: Http, F, bare: Http):
         verdict(no_5xx and ordering_ok and price_ok and _no_sql_error(*inj)),
     )
 
-    # -- F7-XS1: reflected XSS sweep (API) ----------------------------------
     xss_payload = "<script>alert(1)</script>"
     x1 = _timed(
         H,
@@ -962,7 +905,6 @@ def phase7(H: Http, F, bare: Http):
         verdict(json_only and x1["status"] == 200 and x2["status"] in (200, 400)),
     )
 
-    # -- F7-XS2: admin login reflected XSS ----------------------------------
     breakout = quote('"><script>alert(1)</script>', safe="")
     admin = _get_ref(H, f"/admin/login/?next={breakout}")
     raw_present = "<script>alert(1)</script>" in admin["body"]
@@ -982,7 +924,6 @@ def phase7(H: Http, F, bare: Http):
         ),
     )
 
-    # -- F7-XS3: stored XSS via product fields -> admin/storefront render --
     stored = H.request(
         "/api/v1/store/products/",
         method="POST",
@@ -1016,7 +957,6 @@ def phase7(H: Http, F, bare: Http):
         else "unexpected state, see response codes above",
     )
 
-    # -- F7-UP1: anonymous file-upload abuse --------------------------------
     boundary = "----t1bboundary7"
     polyglot = b"GIF89a" + b"<script>alert(1)</script>" + b"\x00" * 16
     traversal = "../../..//evil.png"
@@ -1050,12 +990,9 @@ def phase7(H: Http, F, bare: Http):
         content_type=f"multipart/form-data; boundary={boundary}",
         headers=browser_csrf(bare.jar, TRUSTED_ORIGIN),
     )
-    # The oversize leg may never yield an HTTP status: this sandbox
-    # aborts a multi-MB send mid-flight (measured on this deployment:
-    # ConnectionAbortedError 10053 after ~19 s, no response - the server
-    # answers and closes before this client finishes writing the body).
-    # None therefore means "nothing accepted", never a leak; a 2xx or a
-    # 5xx would be the finding.
+    # The oversize leg may yield no HTTP status: this sandbox aborts a
+    # multi-MB send mid-flight (ConnectionAbortedError, no response). None
+    # therefore means "nothing accepted", never a leak; a 2xx/5xx is the finding.
     poly_ok = poly["status"] in (401, 403)
     big_ok = big["status"] is None or 400 <= big["status"] < 500
     clean = poly_ok and big_ok and all(_no_traceback(r["body"]) for r in (poly, big))
@@ -1091,12 +1028,9 @@ def phase7(H: Http, F, bare: Http):
         "this deployment (seed absent, R-17.9 MFA door)",
     )
 
-    # -- F7-B1/B2: serialization bombs (forced-error vectors for F8-S1) ----
     # Three shapes separate the classic bomb (deep array) from depth (deep
-    # object) from shape (bare scalar). The first f7 execution fired only
-    # the array and read the 500 as a depth failure; the object/scalar
-    # controls show the fault is the NON-OBJECT body reaching a
-    # dict-assuming view line - depth-2500 objects are handled (400).
+    # object) from shape (bare scalar); the controls show the fault is the
+    # NON-OBJECT body reaching a dict-assuming view - depth-2500 objects 400.
     nest = "[" * NEST_DEPTH + "1" + "]" * NEST_DEPTH
     bomb = bare.request(
         "/api/v1/store/cart/",
@@ -1170,13 +1104,9 @@ def phase7(H: Http, F, bare: Http):
     )
 
 
-# --------------------------------------------------------------------------
-# Family 8: oracles / info leaks
-# --------------------------------------------------------------------------
 def phase8(H: Http, F, bare: Http):
     ensure_session(bare)
 
-    # -- F8-E1: product existence differential ------------------------------
     if SHARED.get("seeded"):
         resp = H.request("/api/v1/store/products/")
         results = json.loads(resp["body"]).get("results") or []
@@ -1223,7 +1153,6 @@ def phase8(H: Http, F, bare: Http):
             "absent side exists",
         )
 
-    # -- F8-E2: order id uniformity (anon) ---------------------------------
     o_times = {"id1": [], "id999": []}
     o_bodies = []
     for key, path in (
@@ -1251,7 +1180,6 @@ def phase8(H: Http, F, bare: Http):
         verdict(uniform),
     )
 
-    # -- F8-E3: user existence via login (fresh auth window) ---------------
     _sleep_fresh("auth")
     fixture = SHARED.get("fixture_user", FIXTURE_USER)
     l_times = {"exists": [], "ghost": []}
@@ -1295,7 +1223,6 @@ def phase8(H: Http, F, bare: Http):
         verdict(user_uniform),
     )
 
-    # -- F8-E4: cartless coupon oracle regression (T1a F3-C1 re-check) -----
     c1 = H.request(
         "/api/v1/store/orders/apply-coupon/",
         method="POST",
@@ -1318,7 +1245,6 @@ def phase8(H: Http, F, bare: Http):
         verdict(c1["status"] == 404 and same(c1, c2)),
     )
 
-    # -- F8-H1: /health/ post-F2 split regression --------------------------
     health = H.request("/health/")
     try:
         payload = json.loads(health["body"])
@@ -1364,7 +1290,6 @@ def phase8(H: Http, F, bare: Http):
         ),
     )
 
-    # -- F8-H2: source maps on the storefront -------------------------------
     store = Http("https://test.boredompeaks.me", "storefront")
     index = _get_ref(store, "/")
     script_srcs = []
@@ -1374,10 +1299,9 @@ def phase8(H: Http, F, bare: Http):
     map_statuses = []
     unresolved = []
     for src in script_srcs:
-        # Probe PATHS, never absolute URLs: Http.request prefixes base, so
-        # passing an absolute URL would build a malformed target and record
-        # a transport error that looks like a probe (the bug this run
-        # caught in its first f8 execution).
+        # Probe PATHS, never absolute URLs: Http.request prefixes base, so an
+        # absolute URL builds a malformed target and records a transport
+        # error that looks like a probe.
         if src.startswith("http"):
             parts = urlsplit(src)
             path = parts.path
@@ -1448,11 +1372,10 @@ def phase8(H: Http, F, bare: Http):
         )
         SHARED["map_blocked"] = False
 
-    # -- F8-S1: stack traces under forced 5xx (reuse f7's bomb evidence) ----
     bomb = SHARED.get("bomb_nest") or {}
     huge = SHARED.get("bomb_huge") or {}
-    # One more forced-error vector: a lone-surrogate JSON body the decoder
-    # cannot round-trip.
+    # One forced-error vector: a lone-surrogate JSON body the decoder cannot
+    # round-trip.
     bad_bytes = b'{"pad": "\xed\xa0\x80"}'
     surrogate = bare.request(
         "/api/v1/store/cart/",
@@ -1490,7 +1413,6 @@ def phase8(H: Http, F, bare: Http):
         verdict(not leaked),
     )
 
-    # -- F8-D1: Django debug page ------------------------------------------
     missing = H.request("/definitely-not-a-real-path-t1b/")
     admin_missing = H.request("/admin/definitely-not-a-real-path-t1b/")
     debug_markers = [
@@ -1519,7 +1441,6 @@ def phase8(H: Http, F, bare: Http):
         ),
     )
 
-    # -- F8-C1: CORS preflight abuse ----------------------------------------
     def preflight(origin):
         return H.request(
             "/api/v1/store/products/",
@@ -1551,7 +1472,6 @@ def phase8(H: Http, F, bare: Http):
         verdict(acao_evil == ""),
     )
 
-    # -- F8-C2: null origin + credentials tricks ---------------------------
     null_origin = preflight("null")
     simple = H.request(
         "/api/v1/store/products/",
@@ -1575,7 +1495,6 @@ def phase8(H: Http, F, bare: Http):
         verdict(acao_null == "" and acao_simple == ""),
     )
 
-    # -- F8-H3: Host-header / cache-poisoning probes ------------------------
     host_evil = H.request("/health/", headers={"Host": "evil.example"})
     xfh = H.request(
         "/api/v1/store/products",
@@ -1597,8 +1516,8 @@ def phase8(H: Http, F, bare: Http):
         ctype = resp["headers"].get("content-type", "")
         body = resp["body"].lower()
         # An edge error page naming the Host it could not route is the edge
-        # doing its job (Cloudflare pages carry its markers by design) - only
-        # an APPLICATION body/header reflecting the attacker host counts.
+        # doing its job; only an APPLICATION body/header reflecting the
+        # attacker host counts.
         edge = "cloudflare" in body or "error 10" in body
         if not edge and "evil.example" in resp["body"] and ("json" in ctype):
             reflections.append(name + "-body")
@@ -1625,13 +1544,9 @@ def phase8(H: Http, F, bare: Http):
     )
 
 
-# --------------------------------------------------------------------------
-# Family 9: notifications / outbox
-# --------------------------------------------------------------------------
 def phase9(H: Http, F, bare: Http):
-    # -- F9-F1: recovery-trigger flood (resend-verification) ----------------
     # Empty email: throttle spends in initial() while the view's query
-    # matches nobody - the budget is measured with zero outbound mail.
+    # matches nobody, so the budget is measured with zero outbound mail.
     _sleep_fresh("recovery")
     flood = []
     for _ in range(RECOVERY_SPRAY_CAP):
@@ -1675,11 +1590,9 @@ def phase9(H: Http, F, bare: Http):
         "n/a" if ok else "Medium",
     )
 
-    # -- F9-F2: durable-outbox enqueue trigger reachability matrix ----------
     # Fresh SESSIONLESS identity on purpose: a sessioned POST without CSRF
-    # material is refused by the CSRF layer before the view (T1a's
-    # wrong-layer lesson), which would measure Django's referer check
-    # instead of the trigger's own gate. No cookie = no CSRF question.
+    # material is refused before the view, which would measure Django's
+    # referer check instead of the trigger's gate.
     matrix = Http(F.base, "matrix-sessionless")
     triggers = []
     webhook = matrix.request(
@@ -1709,10 +1622,9 @@ def phase9(H: Http, F, bare: Http):
         restock_path, method="POST", body={"email": "guest@redteam.invalid"}
     )
     triggers.append(f"restock={restock['status']}")
-    # Every durable-outbox enqueue path (orders lifecycle, verify, gateway
-    # hook) is gated before it can write a row; the restock arm needs a
-    # product row (seed absent). The only reachable triggers are the INLINE
-    # SMTP recovery views, whose own throttle is F9-F1.
+    # Every durable-outbox enqueue path is gated before it can write a row;
+    # the restock arm needs a product row (seed absent). The reachable
+    # triggers are the inline SMTP recovery views, whose throttle is F9-F1.
     gated = (
         webhook["status"] == 503
         and verify["status"] == 401
@@ -1734,7 +1646,6 @@ def phase9(H: Http, F, bare: Http):
         verdict(gated),
     )
 
-    # -- F9-F3: dedup-key collision -----------------------------------------
     _blocked(
         F,
         "F9-F3",
@@ -1752,7 +1663,6 @@ def phase9(H: Http, F, bare: Http):
         "from outside the box",
     )
 
-    # -- F9-F4: dead-letter alert abuse -------------------------------------
     forged = H.request(
         "/api/v1/account/password-reset/confirm/",
         method="POST",
@@ -1780,7 +1690,6 @@ def phase9(H: Http, F, bare: Http):
         verdict(refused),
     )
 
-    # -- F9-F5: drain worker under poisoned payloads ------------------------
     _blocked(
         F,
         "F9-F5",
@@ -1796,7 +1705,6 @@ def phase9(H: Http, F, bare: Http):
         "(box-side verification belongs to T2/ops with shell access)",
     )
 
-    # -- F9-F6: restock arm flood -------------------------------------------
     if SHARED.get("seeded"):
         _sleep_fresh("restock")
         shots = []
@@ -1840,7 +1748,6 @@ def phase9(H: Http, F, bare: Http):
         )
 
 
-# --------------------------------------------------------------------------
 def main():
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--base", default=DEFAULT_BASE)
@@ -1868,7 +1775,7 @@ def main():
     refreshed_fams = {fam_by_phase[p] for p in phases if p in fam_by_phase}
 
     # Carry env verdicts forward: a later `--only f8` reuses the previous
-    # run's STEP ZERO verdicts instead of silently branching wrong.
+    # run's STEP ZERO verdicts instead of branching wrong.
     try:
         with open(out_path, encoding="utf-8") as fh:
             old = json.load(fh)

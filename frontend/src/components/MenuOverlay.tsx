@@ -6,10 +6,7 @@ import { useAuth } from "@/lib/auth";
 import { site } from "@/lib/site";
 import { templateConfig } from "@/lib/template.config";
 
-// Mobile menu = Home + the manifest's shop footer group, minus the sign-in
-// link: the overlay renders auth in its own footer block below (and Home is
-// already the logo's hardcoded root link in Header). Kept as a derived list
-// so a manifest edit moves this menu with the footer (U-W3-T5).
+// Derived from the footer manifest; sign-in is rendered separately below.
 const links = [
   { href: "/", label: "Home" },
   ...templateConfig.footer.shop.filter((link) => link.href !== "/login"),

@@ -1,15 +1,3 @@
-"""SPEC-12-03 [R-12.9]: the expire_reservations reconciler (§12.1 step 7).
-
-Reading implemented: a hold still ACTIVE whose expires_at has lapsed is
-marked EXPIRED (the model's own transition map assigns step 7 to EXPIRED;
-RELEASED is step 6's in-flow vocabulary, owned by the 12-02 checkout/admin
-writers), and each affected product lands one StockMovement ledger row —
-delta 0 BY DESIGN because a hold never left on-hand stock (the SALE
-decrement is verify_payment's conversion; a hold only gated
-available-to-sell), so the row records reserved units returning to the
-pool with stock_after gated on the locked on-hand.
-"""
-
 from datetime import timedelta
 from io import StringIO
 from unittest.mock import patch
@@ -24,8 +12,6 @@ from products.models import StockMovement, StockReservation, products
 
 
 class SweepHarness(ApiTestCase):
-    """Shared fixtures: mint real checkouts, then backdate their holds."""
-
     def make_hold(self, username, product, quantity=1, expired=True):
         """Checkout through the public API so the hold is the real 12-02
         artifact, then (optionally) push its TTL into the past."""
@@ -51,8 +37,6 @@ class ExpireReservationsCommandTests(SweepHarness):
         self.make_hold("buyer", product, expired=False)
         out = StringIO()
         call_command("expire_reservations", verbosity=0, stdout=out)
-        # The live hold survives, the ledger records nothing, and a
-        # verbosity-0 sweep (the cron invocation) prints nothing.
         self.assertTrue(
             StockReservation.objects.filter(
                 status=StockReservation.Status.ACTIVE
@@ -91,8 +75,6 @@ class ExpireReservationsCommandTests(SweepHarness):
         live_order = self.make_hold("alice", live_product, expired=False)
         converted_order = self.make_hold("bob", converted_product)
         released_order = self.make_hold("carol", released_product)
-        # Terminal holds with lapsed TTLs: a status filter, not just the
-        # expiry filter, keeps them terminal (no resurrection).
         StockReservation.objects.filter(order=converted_order).update(
             status=StockReservation.Status.CONVERTED
         )
@@ -118,8 +100,6 @@ class ExpireReservationsCommandTests(SweepHarness):
         self.assertEqual(StockMovement.objects.count(), 1)
         call_command("expire_reservations", verbosity=0)
 
-        # Exactly one ledger row across both runs: the second sweep finds
-        # nothing matching (status, expires_at) and must not double-book.
         self.assertEqual(StockMovement.objects.count(), 1)
         self.assertEqual(
             StockReservation.objects.filter(
@@ -159,12 +139,7 @@ class ExpireReservationsCommandTests(SweepHarness):
         self.assertEqual(other.stock, 6)
 
     def test_hold_rearmed_mid_sweep_is_skipped_not_released(self):
-        """Race: a checkout retry re-targets a lapsed hold (fresh TTL)
-        between the sweep's snapshot and its per-product flip — the same
-        window _mint_order_reservations' IntegrityError re-arm runs in.
-        The conditional UPDATE re-filters on status AND expiry at flip
-        time, so the re-armed hold survives with no phantom ledger row,
-        while the untouched product's release proceeds."""
+        """Race: a checkout retry re-arms a lapsed hold between the sweep's snapshot and its flip; the conditional UPDATE re-filters on status AND expiry at flip time."""
         raced = self.make_product(name="Raced", stock=3)
         clean = self.make_product(name="Clean", stock=5)
         raced_order = self.make_hold("alice", raced, quantity=2)
@@ -174,9 +149,7 @@ class ExpireReservationsCommandTests(SweepHarness):
         rearmed = False
 
         class RacingManager:
-            # Minimal shim over the real manager: the first product the
-            # sweep locks wins the race for the "raced" hold, re-arming it
-            # exactly like the checkout retry's re-target would.
+            # Minimal shim over the real manager: the first product the sweep locks wins the race, re-arming the hold like a checkout retry would.
             def select_for_update(self):
                 return self
 

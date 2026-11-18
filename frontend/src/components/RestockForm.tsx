@@ -8,25 +8,9 @@ import { restockSubscribe, restockUnsubscribe } from "@/lib/products-api";
 import { inputClass } from "@/lib/ui";
 
 /**
- * Sold-out PDP restock opt-in (U-W4-F3, spec §5.2 item 4 / §12.G6): the
- * one component that stands in for the add-to-cart row while `stock <= 0`.
- * An in-stock PDP never renders it — the page gates on the same `stock > 0`
- * derivation the button uses, unchanged.
- *
- * Server truth only (P5), two arms (SPEC-Q-RS1): an AUTHENTICATED submit
- * answers 201 on a first opt-in and 200 when an existing preference is
- * re-armed ("already registered"); a GUEST submit that carries an email
- * answers one uniform 202 — first-time and repeat are deliberately
- * indistinguishable (zero oracle), so 201 and 202 both render the "on
- * the list" copy and only the authed 200 renders "already". DELETE 200 =
- * opted out. Every 4xx message is rendered VERBATIM from the backend's
- * uniform envelope — this component writes no error copy of its own
- * beyond the client-side email shape check, which it must own because
- * the guest success body carries no error channel. A 401 still exists
- * for a signed-out caller (a POST with no submitted email edge, and
- * every DELETE — opt-out stays ownership-scoped), so the server's
- * message plus the sign-in door stays inline — no toast, no retry loop
- * (throttles `restock` + `restock-guest`, so one submit is one attempt).
+ * Guest opt-in returns one uniform 202 whether first-time or repeat (zero
+ * oracle), so only the authed 200 renders "already". Every 4xx message is the
+ * backend's, verbatim; one submit is one attempt.
  */
 
 type Phase = "idle" | "registered" | "already" | "unsubscribed";
@@ -42,13 +26,8 @@ export default function RestockForm({ slug }: { slug: string }) {
   const [drawn, setDrawn] = useState(false);
   const secondFrame = useRef<number | null>(null);
 
-  // The one icon draw in the system (spec §2.4): the check's
-  // `strokeDashoffset` animating on a 16px SVG, once, at the `state`
-  // intent token. A paint property on a single small SVG is the spec's own
-  // named exception; the token layer zeroes the duration under reduced
-  // motion, so the check simply appears whole. It confirms the opt-in in
-  // words as well — motion never carries information that is not also text
-  // (§3 P3).
+  // One small SVG paint animation; text carries the same confirmation, and
+  // the token layer zeroes the duration under reduced motion.
   useEffect(() => {
     if (phase !== "registered" && phase !== "already") return;
     setDrawn(false);
@@ -68,9 +47,8 @@ export default function RestockForm({ slug }: { slug: string }) {
     onSuccess: (result) => {
       setError(null);
       setNeedsSignIn(false);
-      // `created` is true for the authed 201 and the guest's uniform
-      // 202 (first-or-repeat by design); only the authed 200 re-arm
-      // reads as "already on the list".
+      // `created` is true for the authed 201 and the guest's uniform 202;
+      // only the authed 200 re-arm reads as "already on the list".
       setPhase(result.created ? "registered" : "already");
     },
     onError: (err) => {
@@ -148,13 +126,9 @@ export default function RestockForm({ slug }: { slug: string }) {
                 style={{
                   strokeDasharray: 17,
                   strokeDashoffset: drawn ? 0 : 17,
-                  // The one property that changes is the path's dash
-                  // offset; the declaration stays `all` because `ui.test.ts`
-                  // scans this file for `stroke-*` colour candidates and the
-                  // hyphenated CSS spelling of that property is
-                  // indistinguishable from a typo'd token there. Duration
-                  // and easing are tokens, so the reduced-motion block
-                  // reaches this transition like every other.
+                  // Declaration stays `all`: ui.test.ts scans this file for
+                  // `stroke-*` colour candidates and would misread the
+                  // hyphenated dash-offset property.
                   transition:
                     "all var(--motion-state-dur) var(--motion-ease)",
                 }}

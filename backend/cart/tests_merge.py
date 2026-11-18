@@ -1,5 +1,3 @@
-"""D-04b: the guest basket follows the account it signs into."""
-
 from datetime import timedelta
 from decimal import Decimal
 from io import StringIO
@@ -23,7 +21,6 @@ class CartMergeOnLoginTests(ApiTestCase):
         self.buyer = self.make_user("buyer", password=PASSWORD)
 
     def _guest_cart(self, quantity=2, client=None):
-        """A guest basket built through the public cart API."""
         client = client or self.client
         res = client.get("/api/cart/")
         self.assertEqual(res.status_code, 200, res.data)
@@ -56,14 +53,13 @@ class CartMergeOnLoginTests(ApiTestCase):
         self.assertEqual(cart.user, self.buyer)
         self.assertIsNone(cart.session_id)
         self.assertEqual(res.data["cart_id"], cart.id)
-        # ADOPT keeps the rows: same cart, same line, still quantity 2.
         self.assertEqual(CartItem.objects.get(cart=cart).pk, source_item.pk)
         self.assertEqual(cart.items.get().quantity, 2)
         self.assertFalse(Cart.objects.filter(user__isnull=True).exists())
 
     def test_existing_account_cart_sums_quantities_without_duplicate_lines(self):
         _, token = self.api_login("buyer")
-        self.seed_session_cart([(self.product, 1)])  # account cart
+        self.seed_session_cart([(self.product, 1)])
         self.client.credentials()
         source_id = self._guest_cart(quantity=2)
 
@@ -79,7 +75,7 @@ class CartMergeOnLoginTests(ApiTestCase):
         _, token = self.api_login("buyer")
         self.seed_session_cart([(self.product, 1)])
         self.client.credentials()
-        self.client.get("/api/cart/")  # guest cart
+        self.client.get("/api/cart/")
         res = self.client.post(
             "/api/cart/", {"product_id": other.id, "quantity": 3}, format="json"
         )
@@ -103,7 +99,7 @@ class CartMergeOnLoginTests(ApiTestCase):
         self._storefront_login()
 
         cart = Cart.objects.get(user=self.buyer)
-        self.assertEqual(cart.items.get().quantity, 3)  # capped, not 4
+        self.assertEqual(cart.items.get().quantity, 3)
 
     def test_account_coupon_wins_over_the_guest_coupon(self):
         account_coupon = self.make_coupon(code="ACCOUNT5", discount_value="5")
@@ -143,12 +139,10 @@ class CartMergeOnLoginTests(ApiTestCase):
         self.assertEqual(cart.coupon, guest_coupon)
 
     def test_merge_drops_lines_whose_stock_cap_is_zero(self):
-        """Stock can reach zero between the two baskets: the summed line is
-        capped at it, and a cap of zero must remove the line rather than
-        store an unpurchasable one."""
+        """A cap of zero removes the line rather than storing an unpurchasable row."""
         sold_out = self.make_product(name="Sold Out", price="100.00", stock=0)
         _, token = self.api_login("buyer")
-        self.seed_session_cart([(self.product, 1)])  # account line, cap 0 later
+        self.seed_session_cart([(self.product, 1)])
         self.product.stock = 0
         self.product.save(update_fields=["stock"])
         self.client.credentials()
@@ -186,7 +180,7 @@ class CartMergeOnLoginTests(ApiTestCase):
 
         self.assertEqual(res.status_code, 201, res.data)
         cart = Cart.objects.get(user__username="newbuyer")
-        self.assertEqual(cart.id, source_id)  # adopted, rows kept
+        self.assertEqual(cart.id, source_id)
         self.assertEqual(cart.items.get().quantity, 2)
         self.assertEqual(res.data["cart_id"], cart.id)
         self.assertFalse(Cart.objects.filter(user__isnull=True).exists())

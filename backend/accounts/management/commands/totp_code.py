@@ -1,17 +1,8 @@
 """``manage.py totp_code <username>``: the current code for a local login.
 
-LOCAL TEST HELPER ONLY. Mandatory MFA (R-17.9) makes the second factor a
-precondition of every privileged login, including the owner's E2E walk
-through ``/admin/``. This command reads the already-enrolled device's secret
-and prints the RFC 6238 code valid at ``common.totp.now()`` so that walk can
-be driven without a phone. It reuses the production TOTP implementation
-(no second algorithm) and deliberately prints neither the secret nor the
-otpauth URI -- the factor itself stays the authority; this only tells a
-human what the factor currently computes.
-
-It must never run against a live store: printing a live staff code is
-equivalent to handing over the second factor. The output is labelled as a
-test helper for that reason.
+LOCAL TEST HELPER ONLY: never run against a live store, where printing a staff
+code would hand over the second factor. The secret and otpauth URI are
+deliberately never printed.
 """
 
 from django.contrib.auth.models import User

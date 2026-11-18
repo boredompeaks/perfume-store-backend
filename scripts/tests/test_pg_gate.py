@@ -1,16 +1,9 @@
 """Unit tests for ``scripts/pg_gate.py``'s output parsing.
 
-BUG-1 was a parser defect that every other gate in this repository had already
-been bitten by in a different costume: the extractor matched 5 of a
-7-problem run, the count cross-check correctly noticed, and the PostgreSQL CI
-job was therefore red on every execution while reading as a healthy gate whose
-only job was to stay green. These cases pin the three header shapes unittest
-actually emits, so the next change to ``HEADER_RE`` has to keep all three.
-
-The lines below are COPIES of real rendered output (PostgreSQL 17.11, Python
-3.14), not invented strings. The subTest shape in particular cannot be
-guessed: it is the runner printing the sub-case parameters after the test id,
-and it is what made the committed gate red.
+Pins the three header shapes unittest emits (plain, subTest with a trailing
+parameter group, docstring-bare) so a HEADER_RE change cannot silently
+under-read a run; the fixtures are copies of real rendered output
+(PostgreSQL 17.11, Python 3.14).
 """
 
 import sys
@@ -25,21 +18,18 @@ import pg_gate  # noqa: E402
 class HeaderParsingTests(unittest.TestCase):
     """The three shapes unittest renders for a failing test."""
 
-    # Plain failure: short name, qualified id.
     PLAIN = (
         "FAIL: test_order_number_stays_satisfied_by_its_unique_constraint "
         "(orders.tests.OrderIndexSchemaTests."
         "test_order_number_stays_satisfied_by_its_unique_constraint)"
     )
-    # subTest case: the parameters follow the id on the SAME line. This is the
-    # shape BUG-1 failed to match.
+    # subTest: the parameter group follows the id on the SAME line.
     SUBTEST = (
         "FAIL: test_payment_provider_references_stay_constraint_covered "
         "(orders.tests.OrderIndexSchemaTests."
         "test_payment_provider_references_stay_constraint_covered) "
         "(column='razorpay_order_id')"
     )
-    # Docstring-bearing test at a verbosity that renders the id bare.
     BARE = "FAIL: test_unhandled_exception_500_still_returns_the_request_id "
 
     def test_plain_header_yields_qualified_id(self):
@@ -58,10 +48,7 @@ class HeaderParsingTests(unittest.TestCase):
     def test_subtest_header_is_matched_and_keeps_the_parent_id(self):
         """The trailing `(column=...)` group must not hide the header.
 
-        The id asserted here is the PARENT test: the certified baseline holds
-        parent ids, because the runner reports one id per sub-case while
-        discovery collects the parent once.
-        """
+        The id asserted here is the PARENT test: discovery collects it once."""
         headers = pg_gate.collect_headers(self.SUBTEST + "\n")
         self.assertEqual(len(headers), 1, "subTest header was not matched at all")
         self.assertEqual(
@@ -92,10 +79,7 @@ class HeaderParsingTests(unittest.TestCase):
         """`(alpha)` is a parameter, not an id, and must not be read as one.
 
         Without the dotted-path restriction the params group would satisfy the
-        id group, and the gate would certify a test id that does not exist.
-        Here the real id IS dotted, so it is the id group that matches and the
-        parameter is consumed as params.
-        """
+        id group and certify a test id that does not exist."""
         headers = pg_gate.collect_headers(
             "FAIL: test_x (module.Class.test_x) (alpha)\n"
         )
@@ -105,10 +89,8 @@ class HeaderParsingTests(unittest.TestCase):
     def test_params_only_group_leaves_the_id_unresolved(self):
         """A bare parameter group with no dotted id must yield no id at all.
 
-        This is the shape that would otherwise let `(column='x')` be read as a
-        qualified id; instead the short name is left for the resolver, which
-        either confirms it against the collected suite or fails the run.
-        """
+        Otherwise `(column='x')` would be read as a qualified id; instead the
+        short name is left for the resolver."""
         headers = pg_gate.collect_headers("FAIL: test_x (column='razorpay_order_id')\n")
         self.assertEqual(headers, [("test_x", None)])
 
@@ -116,8 +98,7 @@ class HeaderParsingTests(unittest.TestCase):
         """A case-insensitive scan sweeps these in as failures.
 
         Django's audit logging interleaves `ERROR 2026-... django.request`
-        records into the very stream unittest writes its results to.
-        """
+        records into the same stream unittest writes to."""
         text = "ERROR 2026-10-04 17:54:33,165 django.request Internal Server Error: /\n"
         self.assertEqual(pg_gate.collect_headers(text), [])
 
@@ -126,12 +107,10 @@ class SummaryParsingTests(unittest.TestCase):
     """The runner's own count, which the header count is checked against."""
 
     def test_expected_failures_is_not_counted_as_failures(self):
-        """`expected failures=4` also matches `failures\\s*=\\s*(\\d+)`.
+        """`expected failures=4` also matches the failures key.
 
-        Reading the body with a bare key regex kept the LAST match and reported
-        failures=4 for a run that reported 6, so the gate printed problems=5 for
-        a 7-problem run.
-        """
+        A bare key regex kept the LAST match and printed problems=5 for a
+        7-problem run."""
         verdict, failures, errors = pg_gate.parse_summary(
             "FAILED (failures=6, errors=1, expected failures=4)"
         )
@@ -161,8 +140,7 @@ class DecodeTests(unittest.TestCase):
         """The suite's log output carries cp1252 bytes on Windows.
 
         A raw 0x97 appears in real captured output; decoded strictly it would
-        raise and take the whole run down with it.
-        """
+        raise and take the whole run down."""
         raw = b"junk \x97 more\nFAILED (failures=2, errors=0)\n"
         self.assertIn("FAILED (failures=2, errors=0)", pg_gate.decode(raw))
 

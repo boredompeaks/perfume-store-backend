@@ -18,10 +18,8 @@ const viewSource = readFileSync(join(here, "CheckoutView.tsx"), "utf8");
 const addressSource = readFileSync(join(here, "AddressForm.tsx"), "utf8");
 
 /**
- * The flag-gated guest wall (spec CHANGE-11, backend TIER1-GUEST-DEADEND).
- * This branch is an audited contract, not a UI preference: flag OFF must be
- * the pre-guest sign-in wall verbatim, flag ON must hand the decision to the
- * server — the client mints nothing either way.
+ * Flag off keeps the pre-guest sign-in wall; flag on defers to the server and
+ * the client mints nothing either way.
  */
 describe("guest wall flag gate", () => {
   it("walls an anonymous visitor when guestCheckout is off", () => {
@@ -29,8 +27,7 @@ describe("guest wall flag gate", () => {
   });
 
   it("lets an anonymous visitor reach review when guestCheckout is on", () => {
-    // The 403 refusal (and its verbatim message) happens at submit — the gate
-    // itself never pre-judges, and never fabricates a session.
+    // The 403 happens at submit; the gate never pre-judges.
     expect(checkoutGate("anonymous", true)).toBe("flow");
   });
 
@@ -45,9 +42,7 @@ describe("guest wall flag gate", () => {
   });
 });
 
-/**
- * 5.4's step indicator: fill = stepsCompleted / 2. Three steps, so 0, half, 1.
- */
+/** Fill = stepsCompleted / 2: 0, 0.5, 1. */
 describe("step indicator fraction", () => {
   it("is empty on Delivery, half on Review, full on Payment", () => {
     expect(stepFraction("details")).toBe(0);
@@ -56,10 +51,7 @@ describe("step indicator fraction", () => {
   });
 });
 
-/**
- * 5.4: the estimate's 400 shows the refusal WITH the backend's own message
- * verbatim; only a transport failure gets local copy.
- */
+/** A 400 keeps the backend's message; transport errors get local copy. */
 describe("delivery estimate error copy", () => {
   it("keeps the backend's 400 message verbatim behind the spec line", () => {
     const server =
@@ -82,7 +74,7 @@ describe("delivery estimate error copy", () => {
   });
 });
 
-/** 5.4: the cheapest option is preselected — selection over server quotes. */
+/** 5.4: cheapest option preselected from server quotes. */
 describe("cheapest option selection", () => {
   const standard: EstimateOption = {
     method: "standard",
@@ -113,7 +105,7 @@ describe("cheapest option selection", () => {
   });
 });
 
-/** 5.4 step 2: one key per attempt, stable across retries, server cap 128. */
+/** One key per attempt, stable across retries; server cap is 128 chars. */
 describe("order-attempt idempotency key", () => {
   it("stays within the backend's 128-character cap and differs per attempt", () => {
     const first = newAttemptKey();
@@ -124,11 +116,7 @@ describe("order-attempt idempotency key", () => {
   });
 });
 
-/**
- * Source-level preservation pins: the behaviours the task lists as
- * non-negotiable are asserted where they live, so a refactor that drops a
- * hook or a token fails here rather than in review.
- */
+/** Source-level pins for behaviours a refactor must not drop. */
 describe("checkout preservation pins (5.4)", () => {
   it("keeps the guest hand-off, wall and order hooks by testid", () => {
     for (const id of [
@@ -142,8 +130,7 @@ describe("checkout preservation pins (5.4)", () => {
   });
 
   it("mints and stores no credential in the view", () => {
-    // No faked JWT, no client-side token store — the refusal path must stay
-    // a sign-in hand-off (TIER1-GUEST-DEADEND).
+    // No credential is stored client-side, so refusal stays a sign-in hand-off.
     expect(viewSource).not.toContain("localStorage");
     expect(viewSource).not.toContain("sessionStorage");
     expect(viewSource).not.toContain("btoa(");
@@ -175,17 +162,12 @@ describe("checkout preservation pins (5.4)", () => {
 });
 
 /**
- * Owner directive D2 (U-W10-T2): an unauthenticated visitor who reaches
- * /checkout is immediately replaced with /register?next=/checkout — not a
- * dead-end wall, not the guest flow. Source-level, like the rest of this
- * file (vitest runs in the node environment). Every half of that sentence is
- * load-bearing and separately pinned: the TARGET is exact, `replace` is what
- * keeps Back from bounce-landing on checkout, and the guard is what keeps a
- * state update (or StrictMode's double-invoke) from looping the redirect.
+ * An anonymous visitor is replaced with /register?next=/checkout. All three
+ * halves matter: exact target, `replace` (Back cannot land here again), and a
+ * once-per-mount guard (StrictMode cannot loop it).
  */
 describe("D2 anonymous redirect (U-W10-T2)", () => {
-  // The redirect effect, located structurally (guard ref → effect → replace
-  // → deps) so no comment quoting the target can make a pin pass.
+  // Located structurally so a comment quoting the target cannot pass the pin.
   const redirectBody = () => {
     const guardAt = viewSource.indexOf("const redirected = useRef(false);");
     const effectAt = viewSource.indexOf("useEffect(() => {", guardAt);
@@ -203,8 +185,7 @@ describe("D2 anonymous redirect (U-W10-T2)", () => {
     expect(
       viewSource.slice(replaceAt, depsAt),
     ).toContain('router.replace("/register?next=/checkout")');
-    // `push` would leave /checkout in the history, so Back from /register
-    // would land straight back on the route that just redirected.
+    // `push` would leave /checkout in history, so Back would land here again.
     expect(viewSource).not.toContain("router.push(");
   });
 
@@ -214,43 +195,34 @@ describe("D2 anonymous redirect (U-W10-T2)", () => {
       'if (authStatus !== "anonymous" || redirected.current) return;',
     );
     expect(viewSource).toContain("redirected.current = true;");
-    // The decision reads the auth context this component already has — the
-    // effect body itself must carry no request of any kind (no probe
-    // endpoint, no credential invented to decide with).
+    // The decision uses the existing auth context; the effect makes no request.
     const effectBody = viewSource.slice(effectAt, depsAt);
     expect(effectBody).not.toMatch(/fetch|apiFetch|queryKey|axios/);
     expect(replaceAt).toBeGreaterThan(effectAt);
   });
 
   it("falls through to the existing loading state while auth is undetermined", () => {
-    // "loading" is not "anonymous": no signal, no guess, no redirect — the
-    // page keeps today's loading surface instead of looping or walling.
+    // "loading" is not "anonymous": keep the loading surface, no redirect.
     const anonymousReturn = viewSource.indexOf(
       'if (gate === "loading" || authStatus === "anonymous" || cartLoading)',
     );
     expect(anonymousReturn).toBeGreaterThan(-1);
-    // And it returns BEFORE the wall branch can render: an anonymous view is
-    // the redirect in flight — neither the dead end nor the guest flow paints
-    // for a route the customer is already leaving.
+    // It returns before the wall can paint: the redirect is already in flight.
     expect(anonymousReturn).toBeLessThan(
       viewSource.indexOf('if (gate === "wall")'),
     );
   });
 
   it("keeps the flag-off wall contract intact behind the redirect", () => {
-    // checkoutGate is not rewritten by D2 — the pin below is the contract the
-    // wall branch still answers, even though the redirect now precedes it.
+    // checkoutGate keeps answering the flag-off wall.
     expect(checkoutGate("anonymous", false)).toBe("wall");
     expect(checkoutGate("anonymous", true)).toBe("flow");
   });
 });
 
 /**
- * D2's round-trip, both sides. /checkout hands over `?next=/checkout`; both
- * auth doors must take it through `safeNext` (the W8 source-verified chain),
- * and the cart's sign-in escape must still point at the login door carrying
- * the same target. The register door reads the param into `GuestOnly`, so an
- * already-signed-in visitor is replaced straight back onto checkout.
+ * Both auth doors take ?next= through safeNext; the cart's sign-in escape
+ * carries the same target.
  */
 describe("the next=/checkout chain (D2, U-W10-T2)", () => {
   const read = (rel: string) => readFileSync(join(here, rel), "utf8");
@@ -277,12 +249,9 @@ describe("the next=/checkout chain (D2, U-W10-T2)", () => {
 });
 
 /**
- * D1 screen (U-W12-T8), media/designs/maison_ther_commande_r_glement: the
- * checkout restyle's load-bearing halves. The screen drives the visuals; these
- * pins hold what it must not silently drop — the fill arithmetic that reaches
- * the pixels (active tab's third of the rule, not a redefinition of the pinned
- * stepFraction), the open-hairline field treatment in the control-boundary
- * token, and the eyebrow+serif-heading pairs §7.2 moves focus between.
+ * Pins the checkout restyle's load-bearing halves: active-third fill,
+ * open-hairline fields using the shared control-boundary style, and the
+ * eyebrow/heading pairs.
  */
 describe("D1 checkout screen restyle (U-W12-T8)", () => {
   it("fills the rule from the active tab's fraction, derived from stepFraction", () => {
@@ -298,15 +267,14 @@ describe("D1 checkout screen restyle (U-W12-T8)", () => {
   });
 
   it("keeps the address fields open-hairline in the control-boundary token", () => {
-    // Bottom rule only, and the rule uses --color-field-border (3.90:1) —
-    // never the decorative hairline, and never back into the boxed inputClass.
+    // Bottom rule only, using the shared control-boundary style, never inputClass.
     expect(addressSource).toContain("border-b border-field-border");
     expect(addressSource).toContain("bg-transparent");
     expect(addressSource).not.toContain(
       "border border-field-border bg-surface",
     );
     expect(addressSource).not.toContain("inputClass");
-    // Label above the field, in the small tracked eyebrow step.
+    // Label above the field, in the tracked eyebrow step.
     expect(addressSource).toContain(
       'className="mb-1 block text-eyebrow text-bronze"',
     );
@@ -323,7 +291,7 @@ describe("D1 checkout screen restyle (U-W12-T8)", () => {
       );
       expect(viewSource).toContain(`\n              ${heading}\n`);
     }
-    // The summary rail the screen shows, and its provider note's processor.
+    // The summary rail names the real processor.
     expect(viewSource).toContain("Processed securely via Razorpay.");
     expect(viewSource).not.toContain("Stripe");
   });

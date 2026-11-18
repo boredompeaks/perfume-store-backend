@@ -1,10 +1,8 @@
 from django.conf import settings
 from django.db import models
 
-# SPEC-17-05 [R-17.9] user-facing MFA messages, shared by the login
-# serializer (staff API) and the admin login form so both enforcement
-# surfaces speak with one voice. They name no username/state beyond what
-# the already-submitted correct password proved.
+# User-facing MFA messages, shared by the staff API and the admin login form so
+# both enforcement surfaces speak with one voice.
 MFA_ENROLLMENT_REQUIRED = (
     "Multi-factor authentication is mandatory for this account. "
     "Enroll a device at /api/accounts/mfa/setup/ before signing in."
@@ -14,25 +12,11 @@ MFA_CODE_INVALID = "Invalid or expired authentication code."
 
 
 class TOTPDevice(models.Model):
-    """One RFC 6238 TOTP secret per user (SPEC-17-05, R-17.9).
+    """One RFC 6238 TOTP secret per user; it counts only when ``enabled`` and
+    ``confirmed_at`` are set, and ``secret`` leaves the server once at enrollment.
 
-    Enforcement gate: a device counts only when ``enabled`` AND
-    ``confirmed_at`` is set — setup mints an unconfirmed, disabled row that
-    must pass a valid-code confirm before it can ever satisfy a login.
-    Disabling keeps the row (enrollment history) but the secret is dead for
-    verification; re-enrollment overwrites it with a fresh secret.
-
-    Secret exposure discipline: ``secret`` is returned by the setup
-    endpoint exactly once (enrollment) and by nothing else — not this
-    model's str, not the status endpoint, never logged.
-
-    SPEC-20-8: ``trusted_until`` is the "trust this device" opt-in. It is
-    NULL on every device until the privileged user asks for it explicitly
-    (never silently, never as a side effect of any other action), and it
-    only ever *raises* how long the existing factor is challenged — it
-    cannot stand in for the code. Setup (re-enrollment) and disable clear
-    it, because a rotated secret or a stripped factor is a different device
-    state than the one that was trusted.
+    ``trusted_until`` is the explicit "trust this device" opt-in and never stands
+    in for a code.
     """
 
     user = models.OneToOneField(
@@ -44,11 +28,9 @@ class TOTPDevice(models.Model):
     secret = models.CharField(max_length=64)
     enabled = models.BooleanField(default=False)
     confirmed_at = models.DateTimeField(null=True, blank=True)
-    # RFC 6238 §5.2 replay guard: the counter of the last accepted code;
-    # codes at or below it never verify again. None until first use.
+    # RFC 6238 §5.2 replay guard: codes at or below this counter never verify again.
     last_used_counter = models.BigIntegerField(null=True, blank=True)
-    # SPEC-20-8 "trust this device for N days": the instant the opt-in stops
-    # covering this device. NULL = never trusted = challenged every login.
+    # NULL = never trusted = challenged every login.
     trusted_until = models.DateTimeField(null=True, blank=True)
     created_at = models.DateTimeField(auto_now_add=True)
 
@@ -68,17 +50,12 @@ class TOTPDevice(models.Model):
 
 
 class Address(models.Model):
-    """A saved delivery address owned by exactly one customer (SPEC-9-T4).
+    """A saved delivery address owned by exactly one customer.
 
-    Ownership is the authorization boundary: every read and write goes
-    through a queryset filtered by ``user``, so another customer's id is
-    indistinguishable from a missing one (uniform 404, no existence leak).
-
-    The per-user default is a *view-level* invariant, not a database one:
-    writers clear the previous default inside the same transaction that
-    sets the new one (see ``accounts.views._lock_user_addresses``). The
-    length caps on ``postal_code`` and ``phone`` are the validation
-    surface — absurd values are rejected at the serializer, not stored.
+    Every read/write is filtered by ``user``, so a foreign id is indistinguishable
+    from a missing one (uniform 404); the per-user default is a view-level
+    invariant maintained inside one transaction
+    (``accounts.views._lock_user_addresses``).
     """
 
     user = models.ForeignKey(

@@ -1,24 +1,8 @@
-"""The RBAC admin seam for shipping methods and rates (SPEC-1-B05 [R-1.07])
-and for the shipments that leave on them (SPEC-1-B06 [R-1.08]).
+"""RBAC admin seam for shipping methods/rates and for shipments.
 
-`shipping.manage` follows the money: finance and admin, exactly as
-`refunds.create` does (see common/roles.py for why the packing operator's
-spec 1.1 line 110 "shipping" is `orders.fulfill` and NOT rate authority).
-A rate is a price every future order will be charged, so managing one is
-managing money, not working a shipment.
-
-Every permission kind maps to the same capability: reading the rate table is
-part of managing it (a staff member who can see a rate can work out what an
-order will be charged), and nothing here is customer data.
-
-`shipments.read` / `shipments.write` are the OPPOSITE answer for the shipment
-surface, and the difference is the point. A rate holds no customer data; a
-shipment reaches one through its order, so "which parcels are moving" is
-order work rather than money work and follows support + admin (spec 6.9's
-admin order actions, lines 1749/1757/1759). Neither ModelAdmin below declares
-`scoped_view_capability`, so the packing operator's `orders.fulfill` opens no
-second door onto shipments: it was never granted the capability, and
-SPEC-1-B03's exact-set pin on that role stays true.
+Rate management follows the money (``shipping.manage``), while shipment data
+needs ``shipments.read``/``shipments.write``; neither admin declares
+``scoped_view_capability``, so the packing operator gets no second door.
 """
 
 from django.contrib import admin, messages
@@ -53,8 +37,7 @@ SHIPMENT_CAPABILITY_MAP = {
     "delete": SHIPMENT_WRITE,
 }
 
-# Shown beside the order select on the add form, which is the only place the
-# link can be chosen: the change form renders it read-only.
+# Shown beside the order select on the add form; the change form is read-only.
 SHIPMENT_ORDER_HELP_TEXT = (
     "A parcel belongs to the order it was created for. To serve another "
     "order, create a new parcel."
@@ -85,9 +68,8 @@ class ShippingRateAdmin(RoleAwareModelAdmin):
         "is_active",
     )
     list_filter = ("is_active", "method")
-    # Autocomplete (not a raw id box) because the method is picked from a
-    # table whose codes ARE the client-facing identifiers: a staff member
-    # typing "express" into an id box would mint a method nobody can order.
+    # Autocomplete, not a raw id box: method codes are the client-facing
+    # identifiers, so typing an id would mint a method nobody can order.
     autocomplete_fields = ("method",)
     search_fields = ("region", "postal_code_prefix")
     ordering = ("method__code", "amount")
@@ -95,38 +77,12 @@ class ShippingRateAdmin(RoleAwareModelAdmin):
 
 @admin.register(Shipment)
 class ShipmentAdmin(RoleAwareModelAdmin):
-    """[R-1.08] The `/admin/shipments` surface (spec 6.9 line 1991).
+    """The ``/admin/shipments`` surface.
 
-    Read is ``shipments.read`` and every write is ``shipments.write``, so a
-    role can be given the trail without the pen. ``internal_note`` is the one
-    field a customer never sees (spec 6.9 line 2027), which is why it is
-    writable here and absent from the tracking serializer.
-
-    ``order`` is a plain select rather than an autocomplete widget on purpose:
-    autocomplete would resolve through ``OrderAdmin.search_fields``, and that
-    search does not contain ``order_number``, so the operator would be
-    picking an order by customer name instead of by the reference they are
-    holding. Adding it would edit the SPEC-1-B03-audited order admin, which
-    this task has no reason to touch.
-
-    ``provider`` is a plain select too, for the opposite reason to ``order``
-    and the same one that governs every field on this surface: the operator
-    who links a parcel holds ``shipments.write`` (support + admin), while the
-    autocomplete endpoint resolves through ``ShippingProviderAdmin``'s view
-    permission, which is ``shipping.manage`` (finance + admin). Support holds
-    the first and not the second, so an autocomplete provider widget would
-    403 for exactly the role this surface exists to serve and the operator
-    would save the parcel unlinked. A plain select reads the provider table
-    directly, adds no read authority on the provider admin, and therefore
-    keeps both capabilities where they were instead of widening
-    ``shipping.manage`` to make a widget work.
-
-    ``order`` is chosen once. It is selectable on the add form and read-only
-    on the change form (``get_readonly_fields``), because a parcel's order is
-    what its whole trail and its tracking page are about - re-pointing a
-    dispatched parcel at a different order would rewrite the customer's
-    history without a trace. Serving another order means creating another
-    parcel, which is what the add form's help text says.
+    ``order`` and ``provider`` are plain selects by design: the order admin's
+    search lacks ``order_number``, and provider autocomplete would 403 the
+    support role that holds ``shipments.write`` but not ``shipping.manage``.
+    ``order`` is bound once (add-only) so a parcel's trail cannot be re-pointed.
     """
 
     capability_map = SHIPMENT_CAPABILITY_MAP
@@ -140,9 +96,6 @@ class ShipmentAdmin(RoleAwareModelAdmin):
         "updated_at",
     )
     list_filter = ("status", "carrier", "provider")
-    # Spec 6.9 line 2013: the tracking number is how staff and customers find
-    # a parcel, so it is searchable alongside the order reference it belongs to
-    # and the provider it travels with.
     search_fields = (
         "tracking_number",
         "carrier",
@@ -156,11 +109,8 @@ class ShipmentAdmin(RoleAwareModelAdmin):
     def get_readonly_fields(self, request, obj=None):
         """Bind the parcel to its order after creation.
 
-        Django's ``get_form`` EXCLUDES a read-only field from the ModelForm,
-        so a hand-posted ``order`` on a change form is not a field at all and
-        cannot re-point an existing parcel: the instance's stored value is
-        what gets saved. The add form keeps the select, where the binding is
-        decided exactly once.
+        Django's ``get_form`` drops read-only fields from the ModelForm, so a
+        posted ``order`` on the change form cannot re-point an existing parcel.
         """
         readonly = super().get_readonly_fields(request, obj)
         if obj is not None:
@@ -175,50 +125,10 @@ class ShipmentAdmin(RoleAwareModelAdmin):
     def save_model(self, request, obj, form, change):
         """Append the tracking event for this save, in the same transaction.
 
-        Spec 10.3 lists an "Audit record" as the last element of every
-        transition's contract, and this form is the only writer a shipment has
-        today, so the event is written HERE rather than left to a caller to
-        remember - that is what keeps "a status change with a timestamp"
-        (spec 6.9 line 2015) true of every path, including this one.
-
-        ``old`` is read from the row under ``select_for_update()``, not from the
-        posted form and not from a second unlocked read, so the event's source
-        state is the status the database holds for as long as this save
-        commits - two operators editing the same parcel cannot both record the
-        same ``from_status``. (SQLite emits no FOR UPDATE, so the lock is inert
-        there; the explicit ``transaction.atomic()`` around the whole pair is
-        what holds on both engines, and it is the reason the block exists here
-        rather than relying on the change form's own transaction the way the
-        comment above does.)
-
-        One event per ACTUAL move. ``old`` is None on the add form, so the
-        creation this form performs records its opening step (a shipment
-        arriving); an edit that leaves the status alone (``old == obj.status``)
-        writes nothing, so the trail records transitions rather than clicks.
-        A row minted straight through the ORM records no opening step, and
-        that is deliberate: an event means a status CHANGED, and nothing
-        changed at creation.
-
-        This form is also the only writer of a status move, and
-        ``ShipmentQuerySet.update`` is what makes that true rather than merely
-        intended: a bulk ``update(status=...)`` would move a parcel with no
-        record of where it moved from, so it is refused.
-
-        SPEC-D-01 adds the order half: because this is the only place a parcel
-        moves, it is also the only place the linked order can be kept in step,
-        and the sync runs inside the same transaction so the parcel, its event
-        and the order move commit together. ``old is None`` (the add form)
-        passes through too, because a parcel created already dispatched has
-        moved just as surely as one edited into it.
-
-        A refused order move is a WARNING, never a failed save. The parcel
-        status is a fact about the parcel and the order machine is the
-        authority on the order, so a paid-parcel/pending-order mismatch must
-        still record the dispatch; what it must not do is leave the operator
-        guessing why the order did not follow. ``sync_order_status`` builds
-        that reason from the machine's own ``transition_allowed`` /
-        ``precondition_failures`` answer and the all-parcels gate, so this
-        surface reports the rule rather than restating it.
+        ``old`` is read under ``select_for_update()`` so concurrent operators
+        cannot record the same ``from_status``; an unchanged status writes no
+        event, and the linked order's move runs in the same transaction with a
+        refusal surfaced as a warning rather than a failed save.
         """
         with transaction.atomic():
             old = None
@@ -243,17 +153,11 @@ class ShipmentAdmin(RoleAwareModelAdmin):
 
 @admin.register(ShipmentEvent)
 class ShipmentEventAdmin(RoleAwareModelAdmin):
-    """[R-1.08] View-only surface for the append-only tracking trail.
+    """View-only surface for the append-only tracking trail.
 
-    Mirrors ``OrderStatusEventAdmin``: staff holding ``shipments.read`` can
-    read the trail, no staff role gets add/change/delete (all capability-less),
-    and even the superuser bypass is refused at add and delete - audit history
-    is never creatable or deletable through the admin. The change form renders
-    every field read-only, so it is a view, not an editor, and the model's
-    save/delete guards plus ``ShipmentEventQuerySet`` are the immutable layers
-    behind this one: they are what a bulk ``update()``/``bulk_update()``/
-    ``delete()``/``bulk_create()`` runs into, which this admin surface never
-    does.
+    Staff with ``shipments.read`` can read it; add/change/delete are
+    capability-less and refused even for superusers, with the model and
+    queryset guards as the immutable layers behind it.
     """
 
     capability_map = {
@@ -270,16 +174,15 @@ class ShipmentEventAdmin(RoleAwareModelAdmin):
         "actor__username",
     )
     readonly_fields = ("shipment", "from_status", "to_status", "actor", "created_at")
-    # Newest first, overriding the model's oldest-first ordering: an operator
-    # reads the trail backwards, while the customer's tracking page reads it
-    # forward.
+    # Newest first, overriding the model's oldest-first: operators read the
+    # trail backwards, while the customer's tracking page reads it forward.
     ordering = ("-created_at", "-id")
 
     def has_add_permission(self, request):
-        return False  # append-only: nobody hand-writes audit rows
+        return False
 
     def has_delete_permission(self, request, obj=None):
-        return False  # audit history is never deletable
+        return False
 
 
 @admin.register(ShippingProvider)

@@ -19,17 +19,9 @@ type Phase =
   | { kind: "enabled" };
 
 /**
- * SPEC-20-13: the enrollment surface an unenrolled privileged account needs.
- *
- * Mandatory MFA (R-17.9) refuses its login at both doors, and the login
- * page sends blocked accounts here. Both steps prove the first factor with
- * username+password (the backend's bootstrap window, open precisely while
- * no device is active) because such an account cannot hold a JWT yet — it
- * could not have logged in to get one.
- *
- * The password stays in component state between the two steps and is never
- * persisted or logged; the secret is rendered once, from the setup response,
- * and the component holds nothing after the device is confirmed.
+ * Both steps prove the first factor with username+password because an
+ * unenrolled account cannot hold a JWT yet. The password stays in component
+ * state only; the secret is rendered once and never persisted.
  */
 export default function MfaEnrollForm() {
   const [username, setUsername] = useState("");

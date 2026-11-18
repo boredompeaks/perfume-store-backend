@@ -72,17 +72,7 @@ type ContactItem = {
   external?: boolean;
 };
 
-/**
- * The one contact-row used in the footer and the contact page. Values come
- * from admin-configured settings (fallback: env/site.ts); unconfigured
- * channels render nothing instead of dead links.
- *
- * §5.8 CHANGE: the 40×40 button boundary is the control token
- * (`border-field-border`), not the decorative hairline — a control whose only
- * affordance is a border and a glyph needs a 1.4.11 boundary, and the
- * hairline is decorative-only (§2.1). The glyph already passed on its own;
- * now the boundary does too.
- */
+/** Unconfigured channels render nothing rather than dead links. */
 export default function ContactLinks({
   settings = fallbackContact,
   className,

@@ -11,10 +11,8 @@ type State =
   | { kind: "error"; message: string };
 
 /**
- * Shared form for the enumeration-safe email flows (resend verification,
- * forgot username, request password reset). The backend answers uniformly
- * regardless of account existence — the message is shown verbatim, and the
- * UI never branches on it.
+ * Shared form for enumeration-safe email flows: the backend answers uniformly
+ * whether or not the account exists, so the message is shown verbatim.
  */
 export default function EmailOnlyForm({
   path,
@@ -54,11 +52,8 @@ export default function EmailOnlyForm({
   return (
     <div>
       {state.kind === "sent" ? (
-        // §5.10: the success state is a field-border panel, so the swap from
-        // form to message is a visible container change rather than vanished
-        // fields. The server's message renders verbatim — the backend answers
-        // uniformly whether or not the account exists, and the UI never
-        // branches on it (uniform-response rule, conventions.md Security).
+        // Success swaps the whole form for a panel; the server's message is
+        // rendered verbatim because the backend answer is uniform.
         <div className="border border-field-border p-8">
           <p className="text-ink" role="status" aria-live="polite">
             {state.message}

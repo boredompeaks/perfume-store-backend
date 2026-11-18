@@ -3,11 +3,8 @@ import { site } from "./site";
 import { shippingStorageKey } from "./shipping-store";
 
 /**
- * The prefill key must derive from the configured brand, never from a
- * hardcoded tenant slug — otherwise a white-label deployment either shares
- * saved addresses across tenants or leaks the original brand name
- * ("aurel.shipping"). localStorage round-trips are out of scope here: the
- * vitest environment is node, so only the key derivation is provable.
+ * The key must derive from the configured brand, or white-label tenants would
+ * share saved addresses or leak the original brand name.
  */
 describe("shippingStorageKey", () => {
   it("slugifies a brand name: lowercased, separators collapsed to dots", () => {

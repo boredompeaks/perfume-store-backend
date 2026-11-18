@@ -1,36 +1,15 @@
 import type { ReactNode } from "react";
 
 export type LegalProseSection = {
-  /** In-page anchor target AND the ToC href — one field, so they cannot drift. */
+  /** Anchor target and ToC href from one field, so they cannot drift. */
   id: string;
   title: string;
   body: ReactNode;
 };
 
 /**
- * A5.11 CHANGE (terms + privacy only): the long-form legal body gains a plain
- * table of contents. A `<nav>` of in-page anchors sits above the first section,
- * hidden below `md` (a 7-item ToC on a phone is worse than none), and becomes a
- * sticky left column at `lg` so the page is `grid-cols-[200px_1fr]` —
- * `lg:sticky lg:top-24`, `self-start` so the grid item can actually stick.
- * **No scroll spy** (§5.11): that would be a JS scroll listener plus a
- * visibility observer for a navigation aid, with its own reduced-motion
- * story, and it would add nothing the plain anchors do not already say.
- *
- * Prose runs at `--measure` / `--text-body` (§5.11, §2.2.4) in
- * `--color-ink-secondary`; section headings are `--text-h2` Playfair with
- * `--space-6` to their first paragraph (§5.12.2, §5.12.4 rule 2). Defined
- * terms are promoted by the page copy itself (`<strong className="text-ink">`),
- * which is the pattern `privacy/page.tsx` already established.
- *
- * Motion: none. Zero accent moments (§5.7, §5.12.4 rule 3) — a legal page that
- * animates is a legal page nobody trusts, and P2's wrong-when clause names
- * these pages as 0% animated, not 2%. The links' hover is a colour change, the
- * same state feedback every other legal link on the site already has.
- *
- * Server component: no client directive, no effects, no listeners. The ToC
- * and the anchors are server-rendered HTML, so crawlers and the first paint
- * see the same document.
+ * Plain in-page anchors only: a scroll spy would add a client listener and
+ * observer for a nav aid. Server-rendered, so ToC and body share one document.
  */
 export function LegalProse({
   sections,

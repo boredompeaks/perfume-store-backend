@@ -6,10 +6,6 @@ export const metadata: Metadata = {
   title: "Privacy Policy",
 };
 
-// A5.11: identical construction to /terms — same ToC, same measure, same
-// rhythm (§5.12.2: the two must be visually indistinguishable in structure).
-// The copy is the shipped policy text; no new claim about data handling,
-// retention or third parties is introduced (P5, §0b.1).
 const sections: LegalProseSection[] = [
   {
     id: "what-we-collect",

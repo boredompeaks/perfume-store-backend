@@ -1,38 +1,7 @@
-"""Uniform error envelope for every JSON error response (SPEC-9-03).
+"""The one JSON error envelope.
 
-Spec §9.2 (line 3002) closes the account-API contract with "Use appropriate
-HTTP status codes, validation errors and consistent error responses" — it
-prescribes consistency, not a literal shape, so this module defines THE one
-shape and converts every error response to it:
-
-    {"error": <human-readable message>,   # always a string
-     "code":  <status-family label>,      # machine-readable, from the map
-     "details": {<field errors / other context>}}  # {} when there is none
-
-Two producers, ONE shape: ``_envelope`` below is the only place the shape is
-built, and each error response is converted exactly once.
-
-- DRF exceptions (401 authentication, 403 permission, 400 serializer
-  validation, 404/405, 429 throttling, ...) are enveloped by
-  ``error_envelope_exception_handler``, wired as ``REST_FRAMEWORK[
-  "EXCEPTION_HANDLER"]``. The handler runs before the response is rendered,
-  so the envelope becomes the bytes on the wire.
-- Ad-hoc ``Response({"error": ...})`` view returns raise no exception, so no
-  handler sees them; ``ErrorEnvelopeMiddleware`` envelops those. Django's
-  base handler renders the response BEFORE the middleware chain runs
-  (``django.core.handlers.base``), so the middleware rewrites
-  ``response.content`` — the bytes actually emitted — rather than only
-  ``response.data``, which would leave the client with the raw body (that
-  mismatch is exactly the wire bug this split fixed). The middleware is
-  idempotent: a body that is already the envelope passes through untouched,
-  so a handler-produced envelope is never double-wrapped.
-
-Recognition is deliberately conservative: a dict body counts as an error
-payload only when it carries a string ``error``/``detail`` key (the two
-shapes views and DRF emit today) or list values (serializer field errors —
-mappings of field name to message list). Plain JSON 4xx/5xx bodies with
-scalar or nested-dict context — the health probe's 503 checks body, for
-example — pass through byte-identical.
+A DRF exception handler envelops exception responses at the source, and middleware
+rewrites the ad-hoc ``Response({"error": ...})`` returns no handler sees.
 """
 
 import json
@@ -40,8 +9,7 @@ import json
 from rest_framework.utils.encoders import JSONEncoder
 from rest_framework.views import exception_handler as drf_exception_handler
 
-# Status-family labels, not cause labels: the cause lives in the message,
-# the code lets clients branch on the status class without parsing text.
+# Status-family labels, not causes: clients can branch without parsing text.
 _STATUS_CODE_LABELS = {
     400: "validation_error",
     401: "not_authenticated",
@@ -54,22 +22,17 @@ _STATUS_CODE_LABELS = {
 
 
 def _is_error_payload(body):
-    """True when the dict body identifies itself as an error payload (see
-    module docstring for the conservative recognition rule)."""
+    """True when the dict body identifies itself as an error payload."""
     if isinstance(body.get("error"), str) or isinstance(body.get("detail"), str):
         return True
-    # Serializer field errors are mappings of field name to message LIST; a
-    # body whose non-message values are all scalars or plain dicts (the
-    # health probe's checks block) is not an error payload.
+    # Serializer field errors map names to message lists; scalar or plain-dict
+    # context (the health probe's checks) is not an error payload.
     return any(isinstance(value, list) for value in body.values())
 
 
 def _is_envelope(body):
-    """True when the dict body is already the uniform envelope.
-
-    The handler and the middleware both produce envelopes; each one must
-    recognise the other's output and leave it untouched, or a response
-    would be wrapped twice (the message ending up inside ``details``)."""
+    """True when the body is already the envelope, so neither producer wraps it
+    twice."""
     return (
         isinstance(body.get("error"), str)
         and isinstance(body.get("code"), str)
@@ -78,16 +41,8 @@ def _is_envelope(body):
 
 
 def error_envelope_exception_handler(exc, context):
-    """``REST_FRAMEWORK["EXCEPTION_HANDLER"]``: envelop DRF exception
-    responses at the source.
-
-    Runs inside the view's dispatch, BEFORE Django renders the response, so
-    the envelope is what the renderer emits and the client's bytes carry it
-    — a middleware rewrite after the fact is already too late for the wire.
-    Only responses DRF's own handler produced are reshaped; non-API
-    exceptions still propagate as 500s. The status-family label comes from
-    the shared ``_envelope`` helper, so the shape cannot drift from the
-    middleware's."""
+    """``REST_FRAMEWORK["EXCEPTION_HANDLER"]``: envelop DRF errors before
+    render. Only DRF-produced responses are reshaped; others stay 500s."""
     response = drf_exception_handler(exc, context)
     if response is None:
         return None
@@ -98,9 +53,8 @@ def error_envelope_exception_handler(exc, context):
 
 
 def _envelope(body, status_code):
-    """Wrap one recognised error payload in the uniform shape. Everything
-    that is not the message itself (field errors, scalar context such as
-    ``minimum_order_amount``) moves into ``details``."""
+    """Wrap one recognised error payload; non-message context moves into
+    ``details``."""
     if isinstance(body.get("error"), str):
         message = body["error"]
     elif isinstance(body.get("detail"), str):
@@ -120,8 +74,7 @@ def _envelope(body, status_code):
 
 
 def _json_dict_body(response):
-    """The response's JSON-object payload, or None when the body is not one
-    (HTML error pages, rendered responses without a dict payload)."""
+    """The response's JSON-object payload, or None when the body is not one."""
     data = getattr(response, "data", None)
     if data is None:
         if "application/json" not in (response.get("Content-Type") or ""):
@@ -134,12 +87,8 @@ def _json_dict_body(response):
 
 
 class ErrorEnvelopeMiddleware:
-    """Rewrite every recognised JSON error body into the uniform envelope.
-
-    Owns only what the exception handler cannot see: the ad-hoc
-    ``Response({"error": ...})`` returns that raise no exception. For every
-    other body it is a no-op — in particular it recognises an envelope the
-    handler already produced and leaves it byte-identical."""
+    """Rewrite ad-hoc JSON error bodies the handler cannot see; an existing
+    envelope passes through untouched."""
 
     def __init__(self, get_response):
         self.get_response = get_response
@@ -154,16 +103,13 @@ class ErrorEnvelopeMiddleware:
         if body is None or not _is_error_payload(body) or _is_envelope(body):
             return response
         enveloped = _envelope(body, response.status_code)
-        # Django's base handler rendered the response before this chain ran,
-        # so the client's bytes are response.content: rewriting .data alone
-        # would leave the wire with the raw body. Compact separators match
-        # DRF's JSONRenderer so the wire shape is uniform across both
-        # producers (handler-rendered and middleware-rewritten).
+        # Django rendered before this chain ran, so the wire is
+        # ``response.content``; rewriting .data alone would leave it raw.
+        # Compact separators match DRF's JSONRenderer.
         response.content = json.dumps(
             enveloped, cls=JSONEncoder, separators=(",", ":")
         ).encode(response.charset or "utf-8")
         if getattr(response, "data", None) is not None:
-            # Keep the DRF payload in step with the wire for in-process
-            # readers of .data; the bytes above remain the client's truth.
+            # Keep the DRF payload in step for in-process readers of .data.
             response.data = enveloped
         return response

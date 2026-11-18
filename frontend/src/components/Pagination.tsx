@@ -25,13 +25,8 @@ function pageWindow(current: number, total: number): (number | "gap")[] {
 }
 
 /**
- * §7.5 / §4: `h-9 min-w-9` (36×36) passes WCAG 2.2's 24px 2.5.8 floor but is
- * below this system's own 44px touch convention, so the control sits at
- * `h-11 min-w-11` — the same class the order-history pager already uses.
- * §4 words the bump as "below `lg`"; it is applied unconditionally here
- * because the `lg:` size variants are not in the production stylesheet and an
- * a11y repair must not emit new utilities. 44px clears §4's 32px desktop
- * floor either way.
+ * 44px touch target applied unconditionally: the `lg:` size variants are not
+ * in the production stylesheet, so an a11y fix must not emit new utilities.
  */
 const pageLinkClass =
   "flex h-11 min-w-11 items-center justify-center px-2 text-sm transition-colors hover:text-bronze";

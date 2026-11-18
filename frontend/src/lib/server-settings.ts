@@ -18,10 +18,8 @@ export const fallbackContact: ContactSettings = {
 };
 
 /**
- * Contact channels, in priority order:
- *   Django admin (Site settings) → build-time env (site.ts) → hidden.
- * Fetched server-side with a 60s cache; if the backend is unreachable the
- * env defaults keep the footer rendering.
+ * Priority: Django admin, then build-time env, then hidden. Server-fetched
+ * with a 60s cache; if the backend is unreachable the env defaults render.
  */
 export async function getContactSettings(): Promise<ContactSettings> {
   try {

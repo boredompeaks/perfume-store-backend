@@ -3,7 +3,7 @@ import { apiFetch } from "./api";
 export type RegisterResult = {
   message: string;
   user: { id: number; username: string; email: string };
-  /** D-04b: present when the guest basket was carried into the new account. */
+  /** Present when the guest basket was carried into the new account. */
   cart_id?: number;
 };
 

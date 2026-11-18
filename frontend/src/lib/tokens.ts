@@ -2,13 +2,9 @@ import { API_BASE } from "./config";
 import { csrfTokenFromCookie } from "./api";
 
 /**
- * Refresh-token storage contract (SPEC-17-02, R-17.12): the refresh token
- * never enters JS-readable storage — the backend sets it as an HttpOnly
- * cookie scoped to /api/ and reads it back on refresh/logout. Only the
- * short-lived access token is held here, in memory. "aurel.session" is a
- * NON-SECRET boolean hint that a refresh cookie may exist; it gates the
- * boot-time refresh probe so anonymous page loads don't burn the 'auth'
- * throttle budget. It must never hold a token.
+ * The refresh token is an HttpOnly cookie and never enters JS-readable
+ * storage; only the short-lived access token lives here in memory.
+ * "aurel.session" is a non-secret hint that gates the boot refresh probe.
  */
 const SESSION_HINT_KEY = "aurel.session";
 
@@ -63,12 +59,8 @@ export function refreshAccessToken(): Promise<string | null> {
 
 async function doRefresh(): Promise<string | null> {
   try {
-    // No token in the body: the backend reads its own HttpOnly cookie and
-    // answers with the new access token (rotation re-sets the cookie
-    // server-side). The auth-throttled endpoint also bounds this call.
-    // The CSRF header rides along (SPEC-17-03): a browser that built a
-    // guest cart sends its sessionid cookie on this POST too, so the
-    // backend's CSRF gate applies to it exactly like any other mutation.
+    // No token in the body: the backend reads its own HttpOnly cookie. The
+    // CSRF header rides along because a guest session cookie may exist too.
     const headers: Record<string, string> = {
       "Content-Type": "application/json",
     };
@@ -81,8 +73,8 @@ async function doRefresh(): Promise<string | null> {
       body: JSON.stringify({}),
     });
     if (!res.ok) {
-      // The server rejected the session (dead/expired cookie): the hint is
-      // a lie now — clear it. Transient network failures keep state.
+      // The server rejected the session: the hint is stale. Transient
+      // network failures keep state.
       clearTokens();
       return null;
     }
@@ -96,7 +88,7 @@ async function doRefresh(): Promise<string | null> {
   }
 }
 
-/** The JWT payload carries only user_id — the backend has no /me endpoint yet. */
+/** The JWT carries only user_id; there is no /me endpoint. */
 export function decodeJwtUserId(token: string): number | null {
   try {
     const part = token.split(".")[1];
