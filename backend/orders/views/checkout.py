@@ -39,7 +39,7 @@ from ..state import TRIGGER_ORDER_CREATE
 logger = logging.getLogger(__name__)
 
 
-class CouponUsageUnavailable(Exception):
+class _CouponUsageUnavailable(Exception):
     """No coupon usage slot remains for the order being created."""
 
     def __init__(self):
@@ -537,7 +537,7 @@ def _reserve_coupon(coupon, order):
         held_by_other_orders >= locked_coupon.usage_limit
         or locked_coupon.used_count >= locked_coupon.usage_limit
     ):
-        raise CouponUsageUnavailable
+        raise _CouponUsageUnavailable
 
 
 def _collapse_onto_duplicate(duplicate, idempotency_key, user):
@@ -1035,10 +1035,16 @@ def _create_order_atomically(
 
             _record_order_trail(user, order, cart_items, coupon, shipping)
 
-    except (ShippingUnavailable, CouponUsageUnavailable) as exc:
-        # The transaction rolled back whole: 400 with the reason, never a 500,
-        # never a silent free shipment and never a provider intent for a coupon
-        # whose reservation was refused.
+    except ShippingUnavailable as exc:
+        # The transaction rolled back whole: 400 with the reason, never a 500 and
+        # never a silent free shipment.
+        return Response(
+            {"error": str(exc)},
+            status=status.HTTP_400_BAD_REQUEST,
+        )
+    except _CouponUsageUnavailable as exc:
+        # The order row is the reservation and it rolled back with the block, so
+        # the loser is refused before any provider intent exists.
         return Response(
             {"error": str(exc)},
             status=status.HTTP_400_BAD_REQUEST,
