@@ -4455,8 +4455,6 @@ class CouponUsageReservationRaceTests(TransactionTestCase):
     PostgreSQL is the engine that can prove the Coupon lock serialises them.
     """
 
-    reset_sequences = True
-
     @staticmethod
     def _checkout(client, coupon):
         return client.post(
