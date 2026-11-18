@@ -18,11 +18,8 @@ import {
 } from "./sentry";
 
 /**
- * P1-3/GH-81: reporting must not be silenced by a local per-tab cap during
- * exactly the spike it is meant to reveal. The denylist is still proved here
- * (with the offline seam injected), and the absence of a counter is pinned by
- * driving identical events through the guard. Telemetry must never be able to
- * break the page it measures.
+ * No local per-tab cap (it would silence the spike it should reveal); the
+ * denylist and fail-closed guard are proved here.
  */
 
 beforeEach(() => {

@@ -1,18 +1,3 @@
-"""RBAC foundation tests (spec 6.12): staff role groups sync idempotently.
-
-``common.roles`` is the source of truth for the seven staff roles (the six
-operational ones plus the superadmin tier of spec 1.1 lines 142-146); the
-``common`` bootstrap data migration calls ``sync_role_groups`` during
-``migrate``. These tests pin that the sync is safe to re-run: exactly the
-stable-named role groups exist, and a deleted group is re-created rather
-than silently missing from a half-bootstrapped database.
-
-They also pin the capability permission layer built on the roles map:
-allow/deny per role, the full role->capability matrix against
-``CAPABILITY_ROLES``, and that the legacy ``IsAdminUserOrReadOnly``
-contract is untouched by the group-based layer.
-"""
-
 from django.contrib.auth.models import AnonymousUser, Group, User
 from django.core.exceptions import PermissionDenied as DjangoPermissionDenied
 from django.http import HttpResponse
@@ -48,7 +33,6 @@ from common.roles import (
 
 
 def _named_permission(capability):
-    """Resolve the named class for a capability, pinning the naming rule."""
     name = "Has" + "".join(part.capitalize() for part in capability.split("."))
     return getattr(common.permissions, name)
 
@@ -60,10 +44,7 @@ class StaffRoleGroupSyncTests(TestCase):
         sync_role_groups()
         sync_role_groups()
 
-        # Literal spelling, not set(STAFF_ROLES): the sync creates groups
-        # FROM that tuple, so a renamed constant agrees with itself here while
-        # every deployed database keeps the old group. The names are the
-        # contract; the tuple is the code that must match them.
+        # Literal spelling, not set(STAFF_ROLES): the sync creates groups FROM that tuple, so a renamed constant agrees with itself here while deployed databases keep the old group.
         self.assertEqual(
             set(Group.objects.values_list("name", flat=True)),
             {
@@ -91,15 +72,7 @@ class StaffRoleGroupSyncTests(TestCase):
 
 @tag("rbac")
 class StaffRoleWireLiteralTests(SimpleTestCase):
-    """The group names are deployed data, not Python-only labels.
-
-    A rename of any ``ROLE_*`` constant is invisible to every test that builds
-    its expected value from that same constant: ``sync_role_groups`` creates
-    the new name and the assertion compares against the new name. Existing
-    installations keep the old group, so the rename silently orphans the role
-    membership that grants staff access. These literals are the spelling the
-    deployed database already holds.
-    """
+    """The group names are deployed data: a rename of a ROLE_* constant is invisible to a test that derives its expectation from that constant."""
 
     def test_staff_role_names_are_the_deployed_literals(self):
         self.assertEqual(
@@ -123,17 +96,13 @@ class StaffRoleWireLiteralTests(SimpleTestCase):
 
 
 class CapabilityPermissionMatrixTests(TestCase):
-    """Allow/deny for every capability x {anonymous, customer, 6 roles}."""
-
     def setUp(self):
         groups = sync_role_groups()
         self.role_users = {}
         for role in STAFF_ROLES:
-            # No usable password needed: these checks never authenticate.
             user = User.objects.create_user(username=f"role-{role}")
             user.groups.add(groups[role])
             self.role_users[role] = user
-        # Authenticated but role-less: a plain customer must gain nothing.
         self.customer = User.objects.create_user(username="rbac-customer")
         self.factory = APIRequestFactory()
 
@@ -169,29 +138,19 @@ class CapabilityPermissionMatrixTests(TestCase):
                         self._assert_denied(permission, user)
 
     def test_unknown_capability_and_anonymous_roles_deny_by_default(self):
-        # An identifier missing from the map must never open access, and an
-        # anonymous user resolves to the empty role set.
         self.assertFalse(
             user_has_capability(self.role_users[ROLE_ADMIN], "orders.demolish")
         )
         self.assertEqual(get_user_roles(AnonymousUser()), frozenset())
 
     def test_no_user_at_all_resolves_to_no_roles(self):
-        # Not even AnonymousUser: callers may pass None outright, and the
-        # guard must answer the empty set rather than raise AttributeError
-        # reaching through None (AnonymousUser is truthy and exercises the
-        # other side of the same guard, so it cannot pin this branch).
         self.assertEqual(get_user_roles(None), frozenset())
 
     def test_unpinned_base_capability_permission_denies_even_admin(self):
-        # capability=None base class: denying is the default, so a subclass
-        # that forgets to pin a capability can never unlock a view.
         self._assert_denied(CapabilityPermission(), self.role_users[ROLE_ADMIN])
 
 
 class CapabilityPermissionClassContractTests(TestCase):
-    """The named permission classes stay in lockstep with CAPABILITY_ROLES."""
-
     def test_every_capability_has_exactly_one_named_class(self):
         expected_names = {
             "Has"
@@ -204,7 +163,6 @@ class CapabilityPermissionClassContractTests(TestCase):
                 self.assertTrue(issubclass(permission_class, CapabilityPermission))
                 self.assertEqual(permission_class.capability, capability)
 
-        # No capability-pinned classes beyond the map either.
         pinned = {
             cls.capability
             for cls in vars(common.permissions).values()
@@ -222,8 +180,6 @@ class CapabilityPermissionClassContractTests(TestCase):
 
 
 class IsAdminUserOrReadOnlyRegressionTests(TestCase):
-    """The legacy is_staff gate is untouched by the roles-based layer."""
-
     def setUp(self):
         self.permission = IsAdminUserOrReadOnly()
         self.staff = User.objects.create_user(username="legacy-staff", is_staff=True)
@@ -258,8 +214,6 @@ class IsAdminUserOrReadOnlyRegressionTests(TestCase):
                     self.assertEqual(
                         str(ctx.exception), "Administrator access is required."
                     )
-                # The legacy staff flag still grants writes with no role
-                # groups at all — the new layer adds to it, not replaces it.
                 self.assertTrue(
                     self.permission.has_permission(
                         self._request(method, self.staff), None
@@ -268,12 +222,6 @@ class IsAdminUserOrReadOnlyRegressionTests(TestCase):
 
 
 class HasProductsWriteOrReadOnlyUnitTests(TestCase):
-    """Unit contract for the method-aware capability gate (SPEC-6-03c).
-
-    The product views mix public catalogue reads with staff writes, so the
-    gate rides the ``IsAdminUserOrReadOnly`` seam with a pinned
-    ``write_capability`` instead of the blanket ``is_staff`` flag."""
-
     def setUp(self):
         groups = sync_role_groups()
         self.catalogue = User.objects.create_user(username="gate-catalogue")
@@ -291,10 +239,6 @@ class HasProductsWriteOrReadOnlyUnitTests(TestCase):
         self.assertEqual(HasProductsWriteOrReadOnly.write_capability, "products.write")
 
     def test_factory_builds_a_seam_subclass_not_a_capability_permission(self):
-        # Subclasses the legacy seam and keys on ``write_capability`` — a
-        # different attribute from CapabilityPermission's ``capability`` — so
-        # the named-class drift scan in CapabilityPermissionClassContractTests
-        # cannot mistake it for a plain capability class.
         factory_class = capability_or_read_only("products.write")
         self.assertTrue(issubclass(factory_class, IsAdminUserOrReadOnly))
         self.assertFalse(issubclass(factory_class, CapabilityPermission))
@@ -327,24 +271,8 @@ class HasProductsWriteOrReadOnlyUnitTests(TestCase):
 
 
 class AdminChromeCapabilityDecoratorTests(TestCase):
-    """SPEC-20-6b: the admin-chrome decorators demand staff membership too.
-
-    ``capability_required`` / ``capability_required_any`` are the plain-Django
-    twins of the DRF capability classes, applied to the session views in the
-    admin area (``/admin/search/``, ``/admin/dashboard/``,
-    ``/admin/audit-log/``). Holding a capability used to be sufficient on its
-    own, so an authenticated non-staff account carrying a role group reached
-    those pages — including a 200 global search that listed orders and linked
-    to live change forms — while the very changelists those links pointed at
-    bounced it to the login (Django's admin views are ``staff_member_required``).
-    The admin area therefore requires ``is_staff`` in addition to the
-    capability, mirroring ``staff_member_required``; the capability layer and
-    the superuser bypass are unchanged."""
-
     def setUp(self):
         groups = sync_role_groups()
-        # Same role group, opposite staff flag: the only variable between the
-        # admitted and the refused caller is ``is_staff``.
         self.staff_capable = User.objects.create_user(
             username="chrome-staff", is_staff=True
         )
@@ -354,8 +282,6 @@ class AdminChromeCapabilityDecoratorTests(TestCase):
         self.staff_roleless = User.objects.create_user(
             username="chrome-roleless", is_staff=True
         )
-        # None leaves an unusable password: nothing here authenticates, and it
-        # keeps the fixture off the slow production hasher.
         self.superuser = User.objects.create_superuser(
             "chrome-root", "chrome-root@example.com", None
         )
@@ -367,7 +293,6 @@ class AdminChromeCapabilityDecoratorTests(TestCase):
         request.user = user
         return view(request)
 
-    # Both decorators, so neither can regress behind the other's pins.
     def _both_decorators(self):
         return (
             ("capability_required", capability_required, ("orders.read",)),
@@ -386,10 +311,6 @@ class AdminChromeCapabilityDecoratorTests(TestCase):
                 self.assertEqual(res.content, b"chrome ok")
 
     def test_non_staff_capability_holder_is_denied(self):
-        # Precondition: the capability is genuinely held, so the refusal can
-        # only be the staff gate. (Unreachable through the product UI — a
-        # non-staff account cannot be given roles — but the admin area must not
-        # depend on that invariant holding at the database level.)
         self.assertTrue(user_has_capability(self.nonstaff_capable, "orders.read"))
         for name, decorator, capabilities in self._both_decorators():
             with self.subTest(decorator=name):
@@ -397,8 +318,6 @@ class AdminChromeCapabilityDecoratorTests(TestCase):
                     self._call(decorator, *capabilities, user=self.nonstaff_capable)
 
     def test_staff_without_the_capability_is_still_denied(self):
-        """The capability layer is untouched: staff membership alone opens
-        nothing, which is what SPEC-17-10 closed on the dashboard."""
         for name, decorator, capabilities in self._both_decorators():
             with self.subTest(decorator=name):
                 with self.assertRaises(DjangoPermissionDenied):
@@ -419,24 +338,12 @@ class AdminChromeCapabilityDecoratorTests(TestCase):
 
 
 class PrivilegeEscalationGuardTests(TestCase):
-    """Spec 6.12 line 2261 + spec 1.1 line 146: who may grant what.
-
-    No role-assignment API surface exists yet (SPEC-6-05); until it does the
-    guard lives at the capability layer. The matrix tests derive their
-    expectations FROM the map, so they cannot catch a widened map — these
-    pins can: the staff/settings capabilities are held by the two privilege
-    TIERS and by no operational role, so every future assignment surface
-    built on ``HasStaffManage`` / ``HasSettingsManage`` is tier-only by
-    construction, and ``platform.configure`` — the one capability ``admin``
-    deliberately lacks — is what separates the top tier from Admin."""
-
     PRIVILEGED_TIERS = frozenset({ROLE_ADMIN, ROLE_SUPERADMIN})
 
     def test_sensitive_capabilities_are_held_by_the_two_tiers_only(self):
         for capability in ("staff.manage", "settings.manage"):
             with self.subTest(capability=capability):
                 self.assertEqual(CAPABILITY_ROLES[capability], self.PRIVILEGED_TIERS)
-                # The operational five gain nothing from the tier above them.
                 self.assertEqual(
                     CAPABILITY_ROLES[capability] - self.PRIVILEGED_TIERS,
                     frozenset(),

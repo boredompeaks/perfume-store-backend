@@ -1,12 +1,3 @@
-"""SPEC-D-06: role-tied staff onboarding, derived from the live admin registry.
-
-The page is only useful if it cannot drift from the code it documents. These
-pins therefore do not merely check that a capability string appears: they MUTATE
-a registered ModelAdmin's ``capability_map`` and require the page to follow, in
-both directions (add a capability, remove it). A hand-maintained list could pass
-the static assertions and fail that pair.
-"""
-
 import re
 from types import SimpleNamespace
 
@@ -103,8 +94,6 @@ class AdminOnboardingContentTests(TestCase):
 
         self.assertIn("platform.configure", root)
         self.assertIn("staff.manage", root)
-        # The top tier is not admin-plus-everything: it holds no operational
-        # capability at all.
         self.assertNotIn("orders.fulfill", root)
 
     def test_the_current_users_capabilities_are_highlighted(self):
@@ -137,8 +126,6 @@ class AdminOnboardingContentTests(TestCase):
             before = role_section(
                 self.client.get(ONBOARDING).content.decode(), "finance"
             )
-            # Finance holds reports.read but not shipments.read, so the
-            # shipments changelist is not on its page today.
             self.assertNotIn('href="/admin/shipping/shipment/"', before)
 
             model_admin.capability_map = {**original, "view": "reports.read"}

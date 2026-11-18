@@ -24,13 +24,8 @@ from django.contrib.admin.apps import AdminConfig
 class MFAAdminSite(AdminSite):
     @property
     def login_form(self):
-        # Lazy import, deliberately not an attribute set in __init__: this
-        # module loads as an AppConfig before the app registry is ready,
-        # and accounts.admin imports models. The site instance itself is
-        # built lazily post-setup, but the first access to admin.site is
-        # accounts.admin's own `admin.site.unregister(User)` — resolving
-        # the form only when the login view actually needs it is the one
-        # ordering that can never re-enter a half-initialized module.
+        # Lazy import: this module loads as an AppConfig before the app registry is
+        # ready, and accounts.admin imports models.
         from accounts.admin import MFAAdminAuthenticationForm
 
         return MFAAdminAuthenticationForm
@@ -42,14 +37,10 @@ class MFAAdminSite(AdminSite):
 
     def login(self, request, extra_context=None):
         response = super().login(request, extra_context)
-        # The R-17.9 block ("multi-factor authentication is mandatory...")
-        # arrives as a NON-field error on the bound form, so the template
-        # keys its enrollment notice off this flag instead of matching the
-        # message text. AdminSite.login returns an unrendered
-        # TemplateResponse, so setting the flag here still reaches the page.
+        # The mandatory-MFA block arrives as a NON-field form error, so the template
+        # keys off this flag rather than matching message text.
         context = getattr(response, "context_data", None)
         if context is None:
-            # An already-authenticated visit is redirected, not rendered.
             return response
         from accounts.models import MFA_ENROLLMENT_REQUIRED
 

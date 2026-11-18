@@ -23,18 +23,13 @@ type Opts = {
   /** Next server-fetch caching (ISR) for server-component data calls. */
   revalidate?: number;
   /**
-   * Per-request extra headers (e.g. `Idempotency-Key` on checkout, spec 5.4).
-   * Merged BEFORE the built-ins below, so a caller can never override
-   * Content-Type, Authorization or X-CSRFToken through this knob - it exists
-   * for protocol headers, not credentials.
+   * Merged before the built-ins, so callers cannot override Content-Type,
+   * Authorization or X-CSRFToken — for protocol headers, not credentials.
    */
   headers?: Record<string, string>;
   /**
-   * HTTP status of a SUCCESSFUL response (errors still reject as ApiError,
-   * and a 401-refresh cycle reports the status of the response that finally
-   * succeeded). For surfaces that answer the same body at two 2xx codes —
-   * restock opt-in is 201 created / 200 already-registered — the parsed
-   * body alone cannot tell them apart.
+   * Status of a successful response. Needed when two 2xx codes share a body
+   * shape (restock: 201 created vs 200 already-registered).
    */
   onStatus?: (status: number) => void;
 };
@@ -42,14 +37,10 @@ type Opts = {
 const MUTATION_METHODS = new Set(["POST", "PATCH", "PUT", "DELETE"]);
 
 /**
- * CSRF pair (SPEC-17-03, R-17.18): the backend issues the `csrftoken`
- * cookie on the cart GET (the header's boot call) and its
- * SessionCartCSRFAuthentication gate requires the matching `X-CSRFToken`
- * header on unsafe methods for every request that rides the session
- * cookie — including guest carts, whose identity IS the cookie. The token
- * is replayed from the cookie (double-submit), so mutations below attach
- * the header whenever the cookie exists; GETs never need it. Exported for
- * the token refresh call in tokens.ts, which bypasses apiFetch.
+ * Double-submit CSRF: the backend requires `X-CSRFToken` matching the
+ * `csrftoken` cookie on unsafe methods, including guest carts whose identity
+ * is the cookie. The token is replayed from the cookie. Exported for the
+ * refresh call in tokens.ts, which bypasses apiFetch.
  */
 export function csrfTokenFromCookie(): string | null {
   if (typeof document === "undefined") return null;
@@ -58,11 +49,8 @@ export function csrfTokenFromCookie(): string | null {
 }
 
 /**
- * Normalizes DRF error shapes:
- * {error: string, code: string, details: {...}} (SPEC-9-03 envelope)
- * | {error: string} | {detail: string} | {field: [msgs], …} | {password: [msgs]}
- * Envelope `details` content is promoted: arrays become fieldErrors, scalars
- * become extras (e.g. minimum_order_amount). Legacy flat shapes still parse.
+ * Normalize DRF shapes: the SPEC-9-03 envelope (details promoted to field
+ * errors/extras) plus legacy flat `{error}`/`{detail}`/field arrays.
  */
 function parseErrorBody(
   body: unknown,
@@ -118,10 +106,7 @@ function parseErrorBody(
   return { message: fallback };
 }
 
-/**
- * Every request sends credentials: 'include' — the cart is a Django session
- * cookie and checkout is broken without it (see PLAN.md §1).
- */
+/** `credentials: include` is mandatory: the guest cart is a session cookie. */
 export async function apiFetch<T>(
   path: string,
   opts: Opts = {},

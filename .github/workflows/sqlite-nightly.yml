@@ -1,38 +1,21 @@
-# Nightly SQLite leg (P1-4 policy change: PostgreSQL is the AUTHORITATIVE CI
-# engine; SQLite is measured here, nightly, and never per PR).
+# Nightly SQLite leg: PostgreSQL is the AUTHORITATIVE CI engine (backend-tests.yml);
+# SQLite is measured here, nightly, never per PR.
 #
-# Three deliberate properties:
-#
-#  1. NEVER A GATE, same as mutation-weekly.yml. Triggers are schedule +
-#     workflow_dispatch only: there is no pull_request trigger and no push
-#     trigger, so this workflow cannot block a PR and cannot be what turns a
-#     commit red on the branches that matter. It reports; the PostgreSQL job in
-#     backend-tests.yml judges. Scheduled runs execute the repository's DEFAULT
-#     branch (`feat/add-frontend`), i.e. what is actually released, and
-#     workflow_dispatch can run any branch on demand.
-#
-#  2. It is the SERIAL reference. The PostgreSQL job runs `--parallel 4` with
-#     combined coverage and guards against partial data with a statement-count
-#     invariant (baseline 14005). This leg runs the same suite SERIALLY on the
-#     other engine, so the baseline has a second, independent measurement
-#     tonight and every night -- a number that only one job can produce is a
-#     number nobody can check.
-#
-#  3. It asserts the engine it measured. config/settings.py falls back to SQLite
-#     silently when DATABASE_URL is unset, which is the INTENT here, but an
-#     inherited or newly-added DATABASE_URL would silently turn this into a
-#     duplicate PostgreSQL run under a SQLite name -- so the engine is asserted
-#     rather than assumed, exactly as the PostgreSQL job asserts its own.
+# Never a gate: schedule + workflow_dispatch only, so it cannot block a PR. It
+# is the SERIAL reference for the parallel PostgreSQL job's statement baseline,
+# and it ASSERTS its engine because settings.py falls back to SQLite silently
+# when DATABASE_URL is unset - an inherited URL would make this a duplicate
+# PostgreSQL run under a SQLite name.
 name: sqlite-nightly
 
 on:
   schedule:
-    # 03:41 UTC daily. Off the hour, and off doc-claims-nightly's 03:17, so the
-    # two crons do not queue behind each other on a busy runner pool.
+    # 03:41 UTC: off the hour and off doc-claims-nightly's 03:17, so the two
+    # crons do not queue behind each other.
     - cron: "41 3 * * *"
   workflow_dispatch:
 
-# Least privilege: the suite only needs to read the checkout.
+# The suite only needs to read the checkout.
 permissions:
   contents: read
 
@@ -47,11 +30,8 @@ jobs:
       run:
         working-directory: backend
     services:
-      # The live-Redis half of the THROTTLE-CACHE pins skips loudly when
-      # REDIS_URL is undeclared, which is how a bare SQLite run behaves: the
-      # cache alias falls back to LocMem. Declaring the service + REDIS_URL is
-      # what makes this leg run the SAME suite shape the PostgreSQL job
-      # certifies (0 skips) instead of a quieter subset of it.
+      # The live-Redis THROTTLE-CACHE pins skip when REDIS_URL is undeclared,
+      # so declaring it runs the same 0-skip suite shape PostgreSQL certifies.
       redis:
         image: redis:7-alpine
         ports:
@@ -62,15 +42,13 @@ jobs:
           --health-timeout 5s
           --health-retries 10
     env:
-      # Same hermetic shape as backend-tests.yml: CI never reads a real .env,
-      # and the dummy Razorpay values prove the suite never depends on live
-      # credentials (V-01 containment).
+      # Hermetic, as in backend-tests.yml: no real .env, and dummy Razorpay
+      # values so the suite never needs live credentials.
       DJANGO_DEBUG: "true"
       RAZORPAY_KEY_ID: rzp_test_CI_DUMMY
       RAZORPAY_KEY_SECRET: ci-dummy-secret
       REDIS_URL: redis://localhost:6379/0
-      # DATABASE_URL is deliberately ABSENT: it is the switch that selects
-      # PostgreSQL, and this leg exists to measure the other engine.
+      # DATABASE_URL deliberately ABSENT: it selects PostgreSQL.
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
@@ -80,17 +58,13 @@ jobs:
           cache: pip
           cache-dependency-path: backend/requirements.lock
 
-      # requirements.lock is the compiled, hash-pinned resolution of
-      # requirements.in and the same install source every other job here uses;
-      # a second install path would let this leg disagree with the gate about
-      # what the suite runs against.
+      # requirements.lock is the hash-pinned resolution every job installs
+      # from; a second install path would let this leg disagree with the gate.
       - name: Install pinned dependencies from the lock
         run: pip install -r requirements.lock
 
-      # settings.py falls back to SQLite without complaint when DATABASE_URL is
-      # unset or malformed, so "the nightly ran" would otherwise not mean
-      # "SQLite ran" -- and an inherited PostgreSQL URL would make this a
-      # duplicate of the gate under a different name.
+      # settings.py falls back to SQLite silently, so "the nightly ran" must
+      # not be mistaken for "SQLite ran".
       - name: Assert the engine is SQLite
         run: |
           set -euo pipefail
@@ -101,16 +75,12 @@ jobs:
             exit 1
           fi
 
-      # Serial on purpose (see the header): no --parallel, so no tblib shim and
-      # no coverage combine step are needed, and the statement total this leg
-      # reports is directly comparable to the parallel job's combined total.
-      #
-      # `pipefail` is set so THIS step carries the runner's own exit status: a
-      # bare `| tee` would report tee's 0 and a failing suite would read as a
-      # green nightly. The two steps below run `if: always()` so a red night
-      # still publishes its coverage numbers -- the diagnostic is the point of
-      # a nightly -- and they cannot turn the red green: the step is already
-      # red before they run.
+      # Serial on purpose: no --parallel means no tblib shim or coverage combine,
+      # and the total is directly comparable to the parallel job's combined one.
+      # `pipefail` makes THIS step carry the runner's status - a bare `| tee`
+      # would report tee's 0 and a failing suite would read green. The two steps
+      # below run `if: always()` so a red night still publishes diagnostics, and
+      # they cannot turn it green (it is already red).
       - name: Full SQLite suite (serial, coverage)
         run: |
           set -euo pipefail
@@ -120,21 +90,17 @@ jobs:
         if: always()
         run: python -m coverage report --fail-under=90
 
-      # The same partial-data guard the PostgreSQL job runs, on the SERIAL leg:
-      # 14005 statements is the reference both engines measured (Windows serial
-      # 99.84% and CI Linux serial 99.83% both reported 14005), and 2468 is the
-      # runner's own certified count. Shrank = red, grew = notice, unparseable =
-      # red; the nightly is the second, independent reader of a number the gate
-      # only ever checks against itself.
+      # Same partial-data guard as the PostgreSQL job, on the serial leg:
+      # 14005 statements is the reference both engines measured, 2468 the
+      # certified test count. Shrank = red, grew = notice, unparseable = red.
       - name: Partial-data invariant (statements + test count)
         if: always()
         run: |
           set -euo pipefail
           statements_baseline=14005
           tests_baseline=2468
-          # `|| true` inside the substitutions: an unreadable report or a missing
-          # summary line must reach the explicit "could not parse" branch below
-          # with its own message, not abort the step silently at the assignment.
+          # `|| true` so an unreadable report reaches the explicit "could not
+          # parse" branch with its own message instead of aborting silently.
           statements="$( (python -m coverage report || true) | awk '$1=="TOTAL"{print $2; exit}')"
           tests="$( (grep -E '^Ran [0-9]+ tests' sqlite-suite.log || true) | tail -1 | awk '{print $2}')"
           echo "sqlite statements=${statements:-<unparsed>} (baseline ${statements_baseline})"

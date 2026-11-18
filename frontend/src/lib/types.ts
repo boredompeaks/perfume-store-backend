@@ -1,18 +1,12 @@
-/**
- * One note in a pyramid tier. `name` is the material; `detail` is an optional
- * one-line provenance copy the server may publish beside it.
- */
+/** One note in a pyramid tier, with optional provenance copy. */
 export type OlfactoryNote = {
   name: string;
   detail?: string;
 };
 
 /**
- * Structured olfactory pyramid (§12-G10, BACKEND_REQUESTS.md "Structured
- * olfactory notes on Product"). GET /api/products/{slug}/ does not publish
- * this yet; the field is optional by design so the PDP can render the
- * pyramid section only when the server supplies tiers and never parse or
- * invent notes from the free-text `description` (§5.2 item 5, P5).
+ * Optional by design: GET does not publish tiers yet, and the PDP must never
+ * invent them from the free-text description.
  */
 export type ProductNotes = {
   top?: OlfactoryNote[];
@@ -25,16 +19,15 @@ export type Product = {
   name: string;
   slug: string;
   description: string;
-  /** "1234.00" — format for display with formatINR; never do money math client-side. */
+  /** Decimal string: format for display, never do money math client-side. */
   price: string;
-  /** Volume in ml. */
   size: number;
   stock: number;
   category: string;
-  /** Relative /media/… path or null — resolve with mediaUrl(). */
+  /** Relative /media/ path or null; resolve with mediaUrl(). */
   image: string | null;
   created_at: string;
-  /** Absent from the API today — see ProductNotes; drives the pyramid section. */
+  /** Absent from the API today; drives the optional pyramid section. */
   notes?: ProductNotes;
 };
 
@@ -47,7 +40,7 @@ export type CartItem = {
 
 export type Cart = {
   id: number;
-  /** Exposed by the backend (V-09) — deliberately ignored by the frontend. */
+  /** Exposed by the backend but deliberately ignored by the frontend. */
   session_id: string;
   items: CartItem[];
   created_at: string;
@@ -81,7 +74,7 @@ export type OrderStatus =
 
 export type Order = {
   id: number;
-  /** Customer-facing reference (ORD-YYYY-XXXXXXXX); tracking keys on this. */
+  /** Customer-facing reference; tracking keys on this. */
   order_number: string;
   user: number;
   full_name: string;
@@ -91,7 +84,6 @@ export type Order = {
   state: string;
   pincode: string;
   status: OrderStatus;
-  /** Coupon code string or null. */
   coupon: string | null;
   discount_amount: string;
   total_amount: string;

@@ -1,12 +1,3 @@
-"""Shipping methods, rates and the cost they add at checkout (SPEC-1-B05).
-
-Covers the three surfaces this feature owns: the rate table and its pricing
-rules, the storefront estimate, and the checkout cost application - including
-the three properties the task is graded on: a client-supplied amount is
-ignored, the guest and account paths price identically, and the cost is
-applied inside the checkout's atomic block.
-"""
-
 from decimal import Decimal
 from importlib import import_module
 from io import StringIO
@@ -57,12 +48,7 @@ def rate(shipping_method, amount="49.00", region="", postal_code_prefix=""):
 
 
 def quote_amount(region="Maharashtra", postal_code="400001", **kwargs):
-    """The priced amount for a destination, or None if nothing answers it.
-
-    None covers both "no shipping configured" and "no rate serves this
-    destination": the SELECTION tests only care that no rate answered, and
-    which of the two refusals applies is pinned by ``NoMatchingRateTests``.
-    """
+    """The priced amount for a destination, or None if nothing answers it; None covers both "no shipping configured" and "no rate serves this destination"."""
     try:
         quote = quote_shipping(
             region=region,
@@ -75,19 +61,8 @@ def quote_amount(region="Maharashtra", postal_code="400001", **kwargs):
     return None if quote is None else quote.amount
 
 
-# ==================================
-# Pricing: which rate answers a destination
-# ==================================
-
-
 class RateSelectionTests(ApiTestCase):
-    """Which rate a destination resolves to, and why that one.
-
-    No rate is created in setUp: every test adds exactly the rates it is
-    about, so an assertion that a destination has NO answer is an assertion
-    about the table under test rather than about a wildcard that happens to
-    be lying around.
-    """
+    """No rate is created in setUp: every test adds exactly the rates it is about, so an assertion that a destination has NO answer is about the table under test."""
 
     def setUp(self):
         self.standard = method()
@@ -119,8 +94,8 @@ class RateSelectionTests(ApiTestCase):
         self.assertIsNone(quote_amount(postal_code="400002"))
 
     def test_the_narrower_rate_wins_even_when_it_is_the_pricier_one(self):
-        # Specificity beats price inside a method: a regional rate exists to
-        # override the national one, in either direction.
+        # Specificity beats price inside a method: a regional rate exists to override the national
+        # one, in either direction.
         rate(self.standard, "99.00")
         rate(self.standard, "9.00", region="Maharashtra", postal_code_prefix="4")
         self.assertEqual(
@@ -141,25 +116,19 @@ class RateSelectionTests(ApiTestCase):
         self.assertIsNone(quote_amount())
 
     def test_the_cheapest_of_two_equally_specific_rates_wins(self):
-        # Two rates of the same specificity that both reach the destination -
-        # a region-wide one and a postal-band one - so neither overrides the
-        # other and price has to decide.
         rate(self.standard, "79.00", region="Maharashtra")
         rate(self.standard, "29.00", postal_code_prefix="400")
         self.assertEqual(quote_amount(), Decimal("29.00"))
 
     def test_an_unpriced_preference_picks_the_cheapest_method_not_the_narrowest(self):
-        # Across methods, price decides: an unsolicited customer must not be
-        # handed the expensive option because a store happens to price it
-        # only for their region.
         rate(self.standard, "49.00")
         express = method("express", name="Express")
         rate(express, "249.00", region="Maharashtra")
         self.assertEqual(quote_amount(), Decimal("49.00"))
 
     def test_an_equal_amount_resolves_the_same_way_on_every_call(self):
-        # The rank's last key is the method code, so the winner cannot depend
-        # on the database's freedom to return rows in any order.
+        # The rank's last key is the method code, so the winner cannot depend on the database's freedom
+        # to return rows in any order.
         other = method("aaa-express", name="AAA Express")
         rate(other, "99.00")
         rate(self.standard, "99.00")
@@ -199,8 +168,6 @@ class RateSelectionTests(ApiTestCase):
 
 
 class NoMatchingRateTests(ApiTestCase):
-    """The loud-failure branch, and the one silent zero that is not one."""
-
     def test_a_destination_nothing_serves_is_refused_not_free(self):
         standard = method()
         rate(standard, "99.00", region="Maharashtra")
@@ -223,8 +190,6 @@ class NoMatchingRateTests(ApiTestCase):
         self.assertIn("not available", str(ctx.exception))
 
     def test_a_store_with_no_shipping_configured_prices_nothing_at_all(self):
-        # The deliberate third answer: shipping was never switched on. It is
-        # not a rate of zero standing in for "we could not price this".
         self.assertIsNone(quote_amount())
 
     def test_only_a_retired_method_is_still_an_unconfigured_store(self):
@@ -233,9 +198,6 @@ class NoMatchingRateTests(ApiTestCase):
         self.assertIsNone(quote_amount())
 
     def test_an_unconfigured_store_still_refuses_a_named_method(self):
-        # Three distinct answers, never two answers for one fact: with nothing
-        # configured, naming a method is still a refusal rather than a
-        # silently free shipment.
         with self.assertRaises(ShippingUnavailable):
             quote_shipping(
                 region="Maharashtra",
@@ -246,8 +208,6 @@ class NoMatchingRateTests(ApiTestCase):
 
 
 class FreeShippingRuleTests(ApiTestCase):
-    """Spec 6.9 line 2005: the env-driven free-shipping threshold."""
-
     def setUp(self):
         self.standard = method()
         rate(self.standard, "49.00")
@@ -291,14 +251,7 @@ class FreeShippingRuleTests(ApiTestCase):
         self.assertEqual(self.quote_for("0.01").amount, Decimal("0.00"))
 
 
-# ==================================
-# The estimate endpoint (spec 9.1)
-# ==================================
-
-
 class ShippingEstimateTests(ApiTestCase):
-    """GET /store/shipping/estimate - anonymous, priced server-side."""
-
     def setUp(self):
         self.standard = method()
         rate(self.standard, "99.00")
@@ -343,13 +296,11 @@ class ShippingEstimateTests(ApiTestCase):
         self.assertEqual(res.data["currency"], "INR")
 
     def test_the_amounts_are_decimal_strings_not_json_numbers(self):
-        # A JSON number is a double in the browser: the price must arrive as a
-        # string so no client-side float can round it.
+        # A JSON number is a double in the browser: the price must arrive as a string so no client-side
+        # float can round it.
         res = self.estimate()
-        # A loop over an empty/missing option list would prove nothing, and
-        # neither would ``str(Decimal(amount)) == amount``: that round-trip
-        # accepts "1E+2", "99" and "99.0000", so it pins "canonicalizes as a
-        # Decimal", not the two-decimal wire spelling this test claims.
+        # Neither an empty option list nor str(Decimal(amount)) == amount would prove it: that round-trip
+        # accepts "1E+2", "99" and "99.0000", so it pins canonical Decimal, not the two-decimal wire spelling.
         self.assertEqual(res.status_code, 200, res.data)
         options = res.data["options"]
         self.assertEqual(len(options), 3)
@@ -365,8 +316,6 @@ class ShippingEstimateTests(ApiTestCase):
     def test_the_estimate_never_carries_a_row_id(self):
         res = self.estimate()
         options = res.data["options"]
-        # Without this, a broken estimate that returns no options passes the
-        # loop below vacuously - the test would report green on zero rows.
         self.assertEqual(len(options), 3)
         for option in options:
             with self.subTest(method=option["method"]):
@@ -376,7 +325,6 @@ class ShippingEstimateTests(ApiTestCase):
                 )
 
     def test_an_authenticated_caller_sees_the_same_prices(self):
-        # Parity on the read side too: the price cannot depend on who asks.
         self.make_user("buyer")
         _, token = self.api_login("buyer")
         other = self.fresh_client()
@@ -395,18 +343,12 @@ class ShippingEstimateTests(ApiTestCase):
         self.assertEqual(legacy.data, self.estimate().data)
 
     def test_a_destination_nothing_serves_is_refused(self):
-        # Narrow every rate to the region this storefront does serve, so the
-        # Kerala address below genuinely has no rate rather than falling back
-        # to the national wildcard.
         ShippingRate.objects.update(region="Maharashtra")
         res = self.estimate(state="Kerala", pincode="695001")
         self.assertEqual(res.status_code, 400, res.data)
         self.assertIn("not available for this destination", res.data["error"])
 
     def test_a_method_that_cannot_reach_the_destination_is_simply_absent(self):
-        # Partial serviceability: express is priced for one region only, so a
-        # destination outside it drops out of the list instead of refusing the
-        # whole request.
         self.express.rates.update(region="Karnataka")
         res = self.estimate()
         self.assertEqual(res.status_code, 200, res.data)
@@ -435,15 +377,7 @@ class ShippingEstimateTests(ApiTestCase):
         self.assertEqual(res.data["options"], [])
 
 
-# ==================================
-# Checkout: the cost applied to the order
-# ==================================
-
-
 class CheckoutShippingCostTests(ApiTestCase):
-    """What checkout charges, and what it records (the account path; the guest
-    path is priced by the same view and pinned for parity below)."""
-
     def setUp(self):
         self.product = self.make_product(price="999.99")
         self.standard = method()
@@ -481,8 +415,6 @@ class CheckoutShippingCostTests(ApiTestCase):
         self.assertEqual(order.shipping_amount, Decimal("249.00"))
 
     def test_an_unnamed_method_is_chosen_by_the_server(self):
-        # Two serviceable methods and no preference: the server picks, and
-        # records which one, rather than leaving the order unpriced.
         express = method("express", name="Express")
         rate(express, "249.00")
         self.seed_session_cart([(self.product, 1)])
@@ -536,7 +468,6 @@ class CheckoutShippingCostTests(ApiTestCase):
         res = self.checkout(coupon_code="SAVE10")
         self.assertEqual(res.status_code, 201, res.data)
         order = Order.objects.get()
-        # 999.99 - 99.999 -> HALF_EVEN 100.00, then + 49.00.
         self.assertEqual(order.discount_amount, Decimal("100.00"))
         self.assertEqual(order.total_amount, Decimal("948.99"))
 
@@ -552,8 +483,6 @@ class CheckoutShippingCostTests(ApiTestCase):
 
     @override_settings(SHIPPING_FREE_THRESHOLD=Decimal("900.00"))
     def test_the_threshold_compares_the_discounted_merchandise_total(self):
-        # The cart total alone would ship this order free; the rule reads what
-        # the customer pays for goods, so the coupon brings the charge back.
         self.make_coupon(
             code="SAVE10",
             discount_type="percentage",
@@ -569,10 +498,7 @@ class CheckoutShippingCostTests(ApiTestCase):
         self.assertEqual(order.total_amount, Decimal("948.99"))
 
     def test_a_free_shipping_coupon_waives_the_charge_but_keeps_the_method(self):
-        """A free-shipping coupon zeroes the delivery charge while still
-        recording WHICH method was quoted -- the zero-charge-with-a-method
-        shape, distinct from the no-shipping-configured zero below. The
-        merchandise is untouched: no discount, full subtotal."""
+        """A free-shipping coupon zeroes the delivery charge while still recording WHICH method was quoted -- distinct from the no-shipping-configured zero."""
         self.make_coupon(code="FREESHIP", discount_type="free_shipping")
         self.seed_session_cart([(self.product, 1)])
         res = self.checkout(coupon_code="FREESHIP")
@@ -586,9 +512,6 @@ class CheckoutShippingCostTests(ApiTestCase):
         self.assertEqual(res.data["shipping_amount"], "0.00")
 
     def test_a_free_shipping_coupon_does_not_make_a_destination_serviceable(self):
-        """Free shipping waives the CHARGE, not the serviceability: an
-        unserviceable destination is refused and nothing is written, exactly
-        as it would be without the coupon."""
         self.make_coupon(code="FREESHIP", discount_type="free_shipping")
         ShippingRate.objects.update(region="Karnataka")
         self.seed_session_cart([(self.product, 1)])
@@ -608,8 +531,6 @@ class CheckoutShippingCostTests(ApiTestCase):
         self.assertEqual(detail["total_amount"], str(Order.objects.get().total_amount))
 
     def test_the_price_is_the_gateway_charge_and_the_refund_ceiling(self):
-        # The money paths read total_amount, so the delivery charge is charged
-        # and refundable without either of them learning about shipping.
         self.seed_session_cart([(self.product, 1)])
         self.checkout()
         order = Order.objects.get()
@@ -628,8 +549,6 @@ class CheckoutShippingCostTests(ApiTestCase):
 
 
 class ClientSuppliedAmountTests(ApiTestCase):
-    """The security property: no client amount reaches the total."""
-
     def setUp(self):
         self.product = self.make_product(price="999.99")
         self.standard = method()
@@ -661,11 +580,8 @@ class ClientSuppliedAmountTests(ApiTestCase):
             )
         ):
             with self.subTest(forged=forged):
-                # D-04a: one account owns ONE cart, so a "fresh client" does
-                # not get a fresh basket — the account cart is emptied
-                # explicitly, and each shape gets a distinct destination so
-                # the owner-scoped duplicate guard cannot collapse a repeat
-                # onto the first order.
+                # D-04a: one account owns ONE cart, so a fresh client does not get a fresh basket; empty the
+                # account cart explicitly, and give each shape a distinct destination so dedup cannot collapse a repeat.
                 client = self.fresh_client()
                 client.credentials(HTTP_AUTHORIZATION=f"Bearer {self.token}")
                 self.seed_session_cart([], client=client)
@@ -687,14 +603,7 @@ class ClientSuppliedAmountTests(ApiTestCase):
 
 
 class CheckoutPricingParityTests(ApiTestCase):
-    """Two ACCOUNT checkouts of the same cart price identically.
-
-    The guest half of this parity died with TIER1-GUEST-DEADEND (guests are
-    refused at the door, so no guest order exists to compare against). What
-    stays pinned is the property the guest half was really protecting: the
-    price is a function of the cart, the destination and the server's rates
-    -- never of WHICH caller submits it.
-    """
+    """The price is a function of the cart, the destination and the server's rates -- never of WHICH caller submits it."""
 
     def setUp(self):
         self.product = self.make_product(price="499.50")
@@ -704,7 +613,6 @@ class CheckoutPricingParityTests(ApiTestCase):
         rate(self.express, "249.00", region="Maharashtra")
 
     def checkout_as(self, username, quantity=2, **payload_overrides):
-        """A named buyer's checkout of the seeded cart; returns the order."""
         self.make_user(username)
         _, token = self.api_login(username)
         client = self.fresh_client()
@@ -725,9 +633,6 @@ class CheckoutPricingParityTests(ApiTestCase):
         self.assertEqual(first.shipping_amount, second.shipping_amount)
         self.assertEqual(first.shipping_method, second.shipping_method)
         self.assertEqual(first.total_amount, second.total_amount)
-        # 499.50 x 2 = 999.00, plus the 49.00 national standard: express's
-        # 249.00 rate is region-specific but no preference was expressed, and
-        # price - not specificity - decides across methods.
         self.assertEqual(first.shipping_amount, Decimal("49.00"))
         self.assertEqual(first.total_amount, Decimal("1048.00"))
 
@@ -753,24 +658,19 @@ class CheckoutPricingParityTests(ApiTestCase):
             self.assertEqual(res.status_code, 400, res.data)
             bodies.append(res.data["error"])
 
-        # Same destination, same rates, same refusal for either caller.
         self.assertEqual(bodies[0], bodies[1])
         self.assertEqual(Order.objects.count(), 0)
 
 
 class DecimalPrecisionTests(ApiTestCase):
-    """A rate a float cannot represent must not be able to corrupt the total."""
-
     def setUp(self):
         self.make_user("buyer")
         _, token = self.api_login("buyer")
         self.auth(token)
 
     def test_a_float_hostile_rate_produces_an_exact_decimal_total(self):
-        # 0.10 + 0.20 is 0.30000000000000004 in binary floating point. Every
-        # amount on this path is a Decimal, so the strings the client reads and
-        # the amount the order stores are both exact - a float in the chain
-        # would show the drift in both.
+        # 0.10 + 0.20 is 0.30000000000000004 in binary floating point; every amount on this path is a
+        # Decimal, so the client strings and the stored amount stay exact.
         product = self.make_product(name="Penny", price="0.10")
         standard = method()
         rate(standard, "0.20")
@@ -798,8 +698,6 @@ class DecimalPrecisionTests(ApiTestCase):
 
 
 class ShippingCostAtomicityTests(ApiTestCase):
-    """The cost is priced and written inside the checkout's atomic block."""
-
     def setUp(self):
         self.product = self.make_product(price="999.99")
         self.standard = method()
@@ -810,11 +708,8 @@ class ShippingCostAtomicityTests(ApiTestCase):
 
     def test_the_price_is_resolved_inside_the_atomic_block(self):
         observed = {}
-        # The spy has to replace the binding `create_order` actually resolves,
-        # and that callee reads it from the checkout module's own globals. The
-        # split moved the callee out of the single `orders.views` module, so
-        # rebinding the name on the package facade would leave the view reading
-        # its own untouched binding and the spy would never be called.
+        # The spy has to replace the binding create_order actually resolves, in the checkout module's own
+        # globals; rebinding the name on the package facade would leave the view reading its own binding.
         from orders.views import checkout as checkout_views
 
         real_quote = checkout_views.quote_shipping
@@ -833,10 +728,8 @@ class ShippingCostAtomicityTests(ApiTestCase):
         self.assertTrue(observed["lock_requested"])
 
     def test_the_lock_reaches_the_query_and_only_when_asked_for(self):
-        # select_for_update is a no-op on SQLite (it emits no FOR UPDATE), so
-        # the flag is asserted on the Query that is actually evaluated rather
-        # than on SQL text the test backend cannot produce. Without it a staff
-        # edit could commit between reading the rate and writing the order.
+        # select_for_update is a no-op on SQLite (it emits no FOR UPDATE), so the flag is asserted on the
+        # Query actually evaluated; without it a staff edit could commit between reading the rate and writing the order.
         from unittest.mock import patch
 
         from django.db.models.query import QuerySet
@@ -864,11 +757,8 @@ class ShippingCostAtomicityTests(ApiTestCase):
 
     def test_a_failure_after_pricing_rolls_the_charge_back_with_the_order(self):
         self.seed_session_cart([(self.product, 1)])
-        # The audit hook is the last writer in the atomic block, so failing it
-        # proves everything before it - the priced order row included - is
-        # rolled back rather than committed without its trail. The assertion is
-        # on the ORDER_CREATED event specifically: the login in setUp wrote an
-        # audit row of its own, and it must have survived.
+        # The audit hook is the last writer in the atomic block, so failing it proves everything before it
+        # rolled back; the login's own audit row in setUp must have survived.
         self.client.raise_request_exception = False
         original = AuditEvent.record
         AuditEvent.record = staticmethod(_explode)
@@ -893,9 +783,6 @@ class ShippingCostAtomicityTests(ApiTestCase):
         AuditEvent.record = staticmethod(_explode)
         self.addCleanup(setattr, AuditEvent, "record", original)
         self.assertEqual(self.checkout().status_code, 500)
-        # The number is minted inside the same rolled-back block, so the next
-        # real checkout is the first one - a refused checkout must not leave a
-        # gap in a customer-facing sequence.
         AuditEvent.record = original
         res = self.checkout()
         self.assertEqual(res.status_code, 201, res.data)
@@ -907,22 +794,7 @@ def _explode(*args, **kwargs):
     raise RuntimeError("audit sink is down")
 
 
-# ==================================
-# Replay: the delivery option and the dedup agreement
-# ==================================
-
-
 class ReplayAgreementTests(ApiTestCase):
-    """A replay must not reach another order's price, and vice versa.
-
-    The anonymous ``guest_post`` this class used died with
-    TIER1-GUEST-DEADEND; the agreement property it exercised is retargeted
-    at the ACCOUNT path, where the keyless dedup guard still requires
-    whole-purchase agreement and SPEC-9-01's keyed collapse still returns
-    the ORIGINAL order -- and its persisted price -- whatever the replay
-    posts.
-    """
-
     def setUp(self):
         self.product = self.make_product(price="999.99")
         self.standard = method()
@@ -943,10 +815,7 @@ class ReplayAgreementTests(ApiTestCase):
         )
 
     def test_a_keyed_replay_naming_a_different_method_cannot_reprice(self):
-        """SPEC-9-01 for an account caller: the keyed replay collapses
-        REGARDLESS of payload drift, so the different-method submission
-        gets the ORIGINAL order and its original price back -- never a
-        reprice, never a second order."""
+        """For an account caller, a keyed replay collapses REGARDLESS of payload drift, so the different-method submission gets the ORIGINAL order and price."""
         first = self.buyer_post(shipping_method="standard")
         self.assertEqual(first.status_code, 201, first.data)
         replay = self.buyer_post(shipping_method="express")
@@ -999,8 +868,6 @@ class ReplayAgreementTests(ApiTestCase):
         self.assertEqual(replay.data["id"], first.data["id"])
 
     def test_the_keyless_double_click_still_collapses_with_shipping(self):
-        # The accidental-duplicate window must survive: two identical
-        # submissions are still one order, not two payable ones.
         first = self.client.post(
             "/api/orders/checkout/",
             self.checkout_payload(shipping_method="standard"),
@@ -1017,8 +884,6 @@ class ReplayAgreementTests(ApiTestCase):
         self.assertEqual(Order.objects.count(), 1)
 
     def test_the_keyed_replay_of_an_unserviceable_destination_still_collapses(self):
-        # Pricing runs after the collapse guards, so a rate retired between the
-        # two submissions cannot turn a retry into a refusal.
         first = self.buyer_post(shipping_method="standard")
         self.assertEqual(first.status_code, 201, first.data)
         ShippingRate.objects.update(is_active=False)
@@ -1027,14 +892,7 @@ class ReplayAgreementTests(ApiTestCase):
         self.assertEqual(replay.data["id"], first.data["id"])
 
 
-# ==================================
-# The admin seam
-# ==================================
-
-
 class ShippingAdminCapabilityTests(ApiTestCase):
-    """shipping.manage is money authority: finance and admin only."""
-
     def setUp(self):
         groups = sync_role_groups()
         self.users = {}
@@ -1105,9 +963,6 @@ class ShippingAdminCapabilityTests(ApiTestCase):
             self.client.get("/admin/shipping/shippingprovider/").status_code,
             403,
         )
-        # The provider surface is the same single RBAC gate as its siblings: a
-        # role holding no capability gets none of the four model permissions,
-        # not merely a hidden changelist.
         provider_admin = admin.site._registry[ShippingProvider]
         request = _request_for(operator)
         self.assertFalse(provider_admin.has_view_permission(request))
@@ -1204,8 +1059,6 @@ class ShippingAdminCapabilityTests(ApiTestCase):
         )
         self.standard.delete()
         order.refresh_from_db()
-        # The amount is the money record: retiring the option it was priced
-        # with must leave both the charge and the total exactly as they were.
         self.assertIsNone(order.shipping_method)
         self.assertEqual(order.shipping_amount, Decimal("49.00"))
         self.assertEqual(order.total_amount, Decimal("1048.99"))
@@ -1213,13 +1066,6 @@ class ShippingAdminCapabilityTests(ApiTestCase):
 
 
 class ShippingProviderModelTests(ApiTestCase):
-    """[SPEC-B-01] The ShippingProvider model's own contract.
-
-    BUG-3: the model shipped with zero tests referencing it, so its ``__str__``
-    was the one uncovered statement. These pin creation, the unique slug, the
-    default flag, the ordering and the field shape the migration declares.
-    """
-
     def test_a_provider_reads_as_its_name(self):
         provider = ShippingProvider.objects.create(name="Delhivery", code="delhivery")
         self.assertEqual(str(provider), "Delhivery")
@@ -1299,14 +1145,7 @@ def _request_for(user):
     return request
 
 
-# ==================================
-# The environment-driven rule
-# ==================================
-
-
 class ShippingThresholdSettingTests(ApiTestCase):
-    """SHIPPING_FREE_THRESHOLD is env config, never a literal in code."""
-
     def test_the_rule_is_off_when_the_environment_says_nothing(self):
         from django.conf import settings
 
@@ -1338,13 +1177,8 @@ class ShippingThresholdSettingTests(ApiTestCase):
         with _env({"SHIPPING_FREE_THRESHOLD": "   "}):
             self.assertIsNone(_env_money("SHIPPING_FREE_THRESHOLD"))
 
-    # The non-finite family. ``Decimal("NaN").quantize()`` returns a QUIET NaN
-    # WITHOUT raising, so these values used to sail through the parse and then
-    # raise InvalidOperation on the comparison - i.e. SHIPPING_FREE_THRESHOLD=NaN
-    # crashed the process at settings import, which is the exact failure this
-    # function exists to prevent. Every one must resolve to the SAME safe
-    # answer as any other unusable input: the rule stays off, so every
-    # shipment is still charged.
+    # Decimal("NaN").quantize() returns a QUIET NaN without raising, so these values can sail
+    # through the parse and crash at settings import; every one must resolve to the same safe answer.
     def test_a_nan_threshold_leaves_the_rule_off(self):
         with _env({"SHIPPING_FREE_THRESHOLD": "NaN"}):
             self.assertIsNone(_env_money("SHIPPING_FREE_THRESHOLD"))
@@ -1365,9 +1199,6 @@ class ShippingThresholdSettingTests(ApiTestCase):
         with _env({"SHIPPING_FREE_THRESHOLD": "sNaN"}):
             self.assertIsNone(_env_money("SHIPPING_FREE_THRESHOLD"))
 
-    # A threshold no order could ever reach, and one this store could not even
-    # store: both are typos, and the safe reading of a typo is the one that
-    # keeps charging.
     def test_a_threshold_past_the_largest_storable_amount_leaves_the_rule_off(
         self,
     ):
@@ -1379,8 +1210,7 @@ class ShippingThresholdSettingTests(ApiTestCase):
             self.assertIsNone(_env_money("SHIPPING_FREE_THRESHOLD"))
 
     def test_the_largest_storable_threshold_is_still_honoured(self):
-        # The boundary the guard above draws: 99999999.99 is the biggest
-        # amount any money column here holds, so it is a legal threshold.
+        # 99999999.99 is the biggest amount any money column here holds, so it is a legal threshold.
         with _env({"SHIPPING_FREE_THRESHOLD": "99999999.99"}):
             self.assertEqual(
                 _env_money("SHIPPING_FREE_THRESHOLD"),
@@ -1388,8 +1218,6 @@ class ShippingThresholdSettingTests(ApiTestCase):
             )
 
     def test_no_unusable_value_is_ever_answered_with_an_unorderable_amount(self):
-        # The property, not the spelling: whatever goes in, what comes out is
-        # either None or a value that can be compared and stored.
         for raw in (
             "NaN",
             "nan",
@@ -1412,15 +1240,8 @@ class ShippingThresholdSettingTests(ApiTestCase):
                     self.assertLessEqual(value, Decimal("99999999.99"))
 
 
-# ==================================
-# The delivery option a historical order names
-# ==================================
-
-
 class ShippingMethodDeletionTests(ApiTestCase):
-    """Deleting a delivery option must not erase it from the orders that
-    used it (spec 8.3 line 2497: "Orders must retain what was actually
-    purchased"; line 2485: "Use explicit deletion/archival policies")."""
+    """Deleting a delivery option must not erase it from the orders that used it: orders retain what was actually purchased."""
 
     def setUp(self):
         self.product = self.make_product(price="999.99")
@@ -1436,8 +1257,6 @@ class ShippingMethodDeletionTests(ApiTestCase):
         self.assertEqual(res.status_code, 201, res.data)
         order = Order.objects.get()
         self.assertEqual(order.shipping_method_code, "standard")
-        # While the row lives, the live link and the snapshot agree - the
-        # snapshot is redundant until it is not.
         self.assertEqual(order.shipping_method, self.standard)
         self.assertEqual(res.data["shipping_method_code"], "standard")
 
@@ -1446,12 +1265,8 @@ class ShippingMethodDeletionTests(ApiTestCase):
         self.assertEqual(self.checkout().status_code, 201)
         self.standard.delete()
         order = Order.objects.get()
-        # The shipped SET_NULL semantics are untouched: the live link is gone.
         self.assertIsNone(order.shipping_method)
-        # ... and the money is untouched.
         self.assertEqual(order.shipping_amount, Decimal("49.00"))
-        # ... but the order still names the option it was actually charged
-        # for, so the record of what was purchased survives the row.
         self.assertEqual(order.shipping_method_code, "standard")
 
     def test_the_order_body_still_names_the_option_after_the_row_is_deleted(self):
@@ -1467,11 +1282,6 @@ class ShippingMethodDeletionTests(ApiTestCase):
 
     @override_settings(SHIPPING_FREE_THRESHOLD=Decimal("999.00"))
     def test_a_deleted_option_is_tellable_apart_from_never_configured(self):
-        # The exact confusion the snapshot ends. The free-shipping rule makes
-        # this the SHARPEST version of it: both orders then read
-        # `shipping_method: null` AND a 0.00 delivery charge, so the live link
-        # and the money say nothing at all about which delivery option was
-        # bought. The snapshot is the only thing left that can.
         self.seed_session_cart([(self.product, 1)])
         self.assertEqual(self.checkout().status_code, 201)
         priced = Order.objects.get()
@@ -1482,17 +1292,13 @@ class ShippingMethodDeletionTests(ApiTestCase):
         unconfigured = Order.objects.exclude(pk=priced.pk).get()
         priced.refresh_from_db()
 
-        # Indistinguishable on the shipped fields...
         self.assertIsNone(priced.shipping_method)
         self.assertIsNone(unconfigured.shipping_method)
         self.assertEqual(priced.shipping_amount, unconfigured.shipping_amount)
-        # ... and told apart by the label, which is the point.
         self.assertEqual(priced.shipping_method_code, "standard")
         self.assertEqual(unconfigured.shipping_method_code, "")
 
     def test_deactivation_keeps_the_order_and_the_label_intact(self):
-        # The documented retirement path, which must remain the cheap one:
-        # no deletion, so nothing is ever at risk of being lost.
         self.seed_session_cart([(self.product, 1)])
         self.assertEqual(self.checkout().status_code, 201)
         self.standard.is_active = False
@@ -1511,15 +1317,7 @@ class ShippingMethodDeletionTests(ApiTestCase):
         self.assertEqual(res.data["shipping_method_code"], "")
 
 
-# ==================================
-# The unconfigured-store signal
-# ==================================
-
-
 class UnconfiguredShippingSignalTests(ApiTestCase):
-    """A real zero charge is correct; a store that never learns about it is
-    not. Three signals, none of which changes what is charged."""
-
     def setUp(self):
         self.product = self.make_product(price="999.99")
         self.make_user("buyer")
@@ -1529,7 +1327,6 @@ class UnconfiguredShippingSignalTests(ApiTestCase):
     def test_a_free_shipment_because_nothing_is_configured_is_logged_a_warning(
         self,
     ):
-        # No method at all, so this order is priced at shipping_amount 0.00.
         self.seed_session_cart([(self.product, 1)])
         with self.assertLogs("orders.views", level="WARNING") as captured:
             res = self.checkout()
@@ -1545,8 +1342,7 @@ class UnconfiguredShippingSignalTests(ApiTestCase):
         self.assertIn("seed_shipping_methods", captured.output[0])
 
     def test_a_charged_shipment_logs_no_such_warning(self):
-        # The signal must be about the silent zero only, or it is noise the
-        # merchant learns to ignore.
+        # The signal must be about the silent zero only, or it is noise the merchant learns to ignore.
         standard = method()
         rate(standard, "49.00")
         self.seed_session_cart([(self.product, 1)])
@@ -1556,8 +1352,6 @@ class UnconfiguredShippingSignalTests(ApiTestCase):
         self.assertEqual(Order.objects.get().shipping_amount, Decimal("49.00"))
 
     def test_a_refused_destination_logs_no_such_warning(self):
-        # The refusal path returns no quote but is NOT the silent zero: it
-        # rejects the order, so there is no revenue to warn anyone about.
         standard = method()
         rate(standard, "49.00", region="Karnataka")
         self.seed_session_cart([(self.product, 1)])
@@ -1579,9 +1373,8 @@ class UnconfiguredShippingSignalTests(ApiTestCase):
         self.assertTrue(get_health()["checks"]["shipping_configured"])
 
     def test_unconfigured_shipping_does_not_make_the_probe_degraded(self):
-        # A store that has not configured shipping yet is a pre-launch state,
-        # not an outage: gating the probe's status would turn a fresh
-        # deployment into a 503 and mail the staff mailbox on every poll.
+        # A store that has not configured shipping yet is a pre-launch state, not an outage: gating the
+        # probe's status would turn a fresh deployment into a 503.
         from ops.services import get_health
 
         health = get_health()
@@ -1590,15 +1383,8 @@ class UnconfiguredShippingSignalTests(ApiTestCase):
         self.assertEqual(self.client.get("/health/").status_code, 200)
 
 
-# ==================================
-# Seeding a store that has no shipping
-# ==================================
-
-
 class SeedShippingMethodsCommandTests(ApiTestCase):
-    """`manage.py seed_shipping_methods` - the documented end of the silent
-    zero. Deliberate operator action: no import-time or migration-time
-    side effect can put a made-up price in a database."""
+    """Deliberate operator action: no import-time or migration-time side effect can put a made-up price in a database."""
 
     def setUp(self):
         self.product = self.make_product(price="999.99")
@@ -1625,8 +1411,8 @@ class SeedShippingMethodsCommandTests(ApiTestCase):
         )
         self.assertEqual(ShippingRate.objects.count(), 2)
         for shipping_rate in ShippingRate.objects.all():
-            # A geography wildcard, which is how a national rate is expressed
-            # in this schema: empty region and empty prefix match everywhere.
+            # A geography wildcard, which is how a national rate is expressed in this schema: empty region and
+            # empty prefix match everywhere.
             self.assertEqual(shipping_rate.region, "")
             self.assertEqual(shipping_rate.postal_code_prefix, "")
             self.assertEqual(shipping_rate.is_active, True)
@@ -1672,8 +1458,6 @@ class SeedShippingMethodsCommandTests(ApiTestCase):
         self.assertEqual(standard.name, "Ground")
         self.assertFalse(standard.is_active)
         self.assertEqual(standard.rates.get().amount, Decimal("77.00"))
-        # The express method was still created: a partially configured store
-        # is completed, not skipped.
         self.assertTrue(ShippingMethod.objects.filter(code="express").exists())
 
     def test_a_dry_run_writes_nothing_and_says_what_it_would_do(self):
@@ -1689,8 +1473,6 @@ class SeedShippingMethodsCommandTests(ApiTestCase):
         self.assertEqual(ShippingRate.objects.count(), 2)
 
     def test_an_unusable_amount_is_refused_and_writes_nothing(self):
-        # Unlike an env default, a bad flag here would store a bad PRICE, so
-        # it must stop the operator rather than be quietly defaulted.
         for value in ("NaN", "Infinity", "-1", "abc"):
             with self.subTest(value=value):
                 with self.assertRaises(CommandError):
@@ -1699,8 +1481,6 @@ class SeedShippingMethodsCommandTests(ApiTestCase):
                 self.assertEqual(ShippingRate.objects.count(), 0)
 
     def test_a_seeded_store_charges_for_delivery_end_to_end(self):
-        # The whole point of the command: the silent zero is gone, and the
-        # order now records a real charge with a real method.
         self.seed()
         self.make_user("buyer")
         _, token = self.api_login("buyer")

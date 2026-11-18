@@ -3,10 +3,8 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { TemplateFeatureFlags } from "./template.config";
 
 /**
- * White-label manifest contract (U-W1-T1): defaults are today's Maison Aurel
- * values, NEXT_PUBLIC_* env wins over them, feature flags are booleans with
- * `reviews` off, and `site` re-derives from the manifest with the exact flat
- * key set every existing import compiles against.
+ * Manifest contract: defaults, NEXT_PUBLIC_* precedence, boolean flags and the
+ * flat `site` key set every import compiles against.
  */
 const ENV_KEYS = [
   "NEXT_PUBLIC_SITE_NAME",
@@ -22,8 +20,7 @@ const ENV_KEYS = [
 
 beforeEach(() => {
   vi.resetModules();
-  // Pin every override to empty so a developer's .env.local cannot leak into
-  // the default-value assertions (env() treats blank as unset).
+  // Blank env counts as unset, so a developer's .env.local cannot leak in.
   for (const key of ENV_KEYS) {
     vi.stubEnv(key, "");
   }
@@ -97,8 +94,7 @@ describe("templateConfig defaults (Maison Aurel)", () => {
   it("feature flags stay boolean-typed in the manifest", async () => {
     const { templateConfig } = await import("./template.config");
 
-    // Compile-time guard (enforced by `next build`/tsc): a non-boolean flag
-    // would fail the annotation below even if this test never ran.
+    // Compile-time guard: a non-boolean flag fails the annotation under tsc.
     const flags: TemplateFeatureFlags = templateConfig.featureFlags;
     expect(typeof flags.guestCheckout).toBe("boolean");
     expect(typeof flags.reviews).toBe("boolean");
@@ -106,10 +102,8 @@ describe("templateConfig defaults (Maison Aurel)", () => {
 });
 
 /**
- * Manifest → component contract (U-W3-T5): Header, MenuOverlay and Footer
- * render these lists, so a shape regression (empty group, missing label or
- * href) breaks rendered navigation, not just a type. The mobile menu derives
- * from `footer.shop`, so it is covered by the same assertions.
+ * A shape regression in these lists breaks rendered navigation; the mobile
+ * menu derives from `footer.shop`, so it is covered too.
  */
 describe("nav/footer lists drive component rendering", () => {
   const groups = (config: {

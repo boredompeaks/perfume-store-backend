@@ -12,7 +12,7 @@ describe("toJsonLdScriptContent (script-context escaping for JSON-LD)", () => {
     const serialized = toJsonLdScriptContent(payload);
     expect(serialized.toLowerCase()).not.toContain("</script>");
     expect(serialized).not.toContain("<script");
-    // JSON semantics are unchanged: the escape decodes back to the source.
+    // The escape decodes back to the source.
     expect(parse(serialized)).toEqual(payload);
   });
 
@@ -41,9 +41,7 @@ describe("toJsonLdScriptContent (script-context escaping for JSON-LD)", () => {
   });
 
   it("pins the homepage Organization payload: hostile site strings emit no script-terminating markup", () => {
-    // Mirrors src/app/page.tsx's Organization JSON-LD shape (name/url/
-    // description) — the homepage is the second ld+json sink and must get
-    // the same escaping guarantee as the product page.
+    // Homepage is the second ld+json sink and needs the same guarantee.
     const organizationJsonLd = {
       "@context": "https://schema.org",
       "@type": "Organization",
@@ -54,7 +52,7 @@ describe("toJsonLdScriptContent (script-context escaping for JSON-LD)", () => {
     const serialized = toJsonLdScriptContent(organizationJsonLd);
     expect(serialized.toLowerCase()).not.toContain("</script>");
     expect(serialized).not.toContain("<script");
-    // JSON semantics are unchanged: the escape decodes back to the source.
+    // The escape decodes back to the source.
     expect(parse(serialized)).toEqual(organizationJsonLd);
   });
 

@@ -1,75 +1,19 @@
-"""The orders view layer, split by domain.
-
-This package is the SAME public surface the former single-file `orders/views.py`
-exposed: every name that module bound at module level is re-exported here, so
-`from orders.views import X` keeps working for the urlconf, for `cart.views`,
-and for the test suite unchanged. The bodies themselves were not rewritten -
-they moved verbatim into the six domain modules below.
-
-WHAT MOVED WHERE:
-
-* `checkout` - order creation (account-only since TIER1-GUEST-DEADEND: an
-  anonymous submission is refused uniformly), the two collapse guards, the
-  guest order read, and the coupon preview.
-* `payment`  - the gateway intent and the verify that confirms money.
-* `refund`   - the staff refund seam and the customer's refund request.
-* `return`   - the customer's returns family (create, list, detail).
-* `order`    - the customer's own order history and detail.
-* `admin`    - the staff order seam (unscoped list/detail, fulfil, cancel).
-
-The cross-module edges are deliberately few and one-way: `admin` borrows the
-page-size contract from `order`, `refund` borrows the idempotency-key header
-names from `checkout`, and `return` borrows the shared query-param name from
-`order`. Nothing imports back, so there is no cycle to reason about.
-
-`__all__` is declared rather than left implicit, and it is the reason this file
-needs no per-name "re-exported" noqa: the names below are this package's
-published surface, not unused imports. Three groups are in it that are not view
-code, each for a stated reason:
-
-* the two module objects (`razorpay`, `timezone`) that the test suite patches
-  THROUGH this package - e.g. the Razorpay client faked at
-  `orders.views.razorpay.Client`, and the clock frozen at
-  `orders.views.timezone.now`. Patching an attribute on the real module object
-  reaches every importer, so re-exporting the object keeps those patch targets
-  resolving without any of them knowing about the split. (`notifications` is
-  bound the same way for the same reason; `secrets` left this list with the
-  guest-token mint it served - TIER1-GUEST-DEADEND - and nothing patches
-  `orders.views.secrets`.)
-* three names from `orders.state`, so the suite's identity pins
-  (`orders_views.ALLOWED_TRANSITIONS is order_state.ALLOWED_TRANSITIONS` and
-  its two siblings) compare the one object rather than a copy.
-* the private helpers, which the suite imports directly.
-
-ONE NAME FROM THE OLD MODULE IS DELIBERATELY ABSENT: `logger`. The old file
-bound one module-level logger; after the split the records are emitted by six
-module-level loggers, one per domain module, named for the module that emitted
-them. Re-exporting any single one here would publish a logger that never logs,
-which is worse than its absence - a reader would reasonably assume records
-arrived under this name. Nothing imports or patches `orders.views.logger`
-(checked across the tree), and `assertLogs("orders.views")` still captures every
-domain record because a child logger propagates to its ancestors' handlers.
+"""The orders view layer, split by domain. Every name the former single-file
+``orders/views.py`` published is re-exported here, so ``from orders.views import
+X`` keeps working for the urlconf, ``cart.views`` and the test suite.
 """
 
-# Module objects the suite patches through this package's own attribute path.
-
-# `return` is a Python KEYWORD, so `from .return import x` is a SyntaxError and
-# that module is unreachable by ordinary import syntax however it is named. The
-# file keeps the ratified name `return.py`; it is simply bound through importlib
-# instead. Every name bound from it below is the one a normal
-# `from .return import` would have produced - same objects, same identity - and a
-# patch target that spells the path as a string
-# ("orders.views.return._return_window_days") still resolves, because mock and
-# importlib both reach the module by name.
+# ``return`` is a Python keyword, so the module is bound through importlib;
+# every name below is the object a normal ``from .return import`` would give.
 from importlib import import_module as _import_module
 
+# Module objects the suite patches through this package's own attribute path.
 import razorpay
 from django.utils import timezone
 
 from common import notifications
 
-# Identity-pinned against orders.state by the suite; re-exported so the pin
-# compares the one object.
+# Identity-pinned against orders.state by the suite.
 from ..state import ADMIN_FULFILMENT_NEXT, ALLOWED_TRANSITIONS, transition_allowed
 from .admin import (
     _may_fulfil,
@@ -147,13 +91,11 @@ __all__ = [
     "notifications",
     "razorpay",
     "timezone",
-    # admin
     "_may_fulfil",
     "admin_order_cancel",
     "admin_order_detail",
     "admin_order_fulfill",
     "admin_order_list",
-    # checkout
     "GUEST_TOKEN_HEADER",
     "GUEST_TOKEN_MAX_LENGTH",
     "IDEMPOTENCY_KEY_HEADER",
@@ -178,20 +120,16 @@ __all__ = [
     "create_order",
     "guest_order_detail",
     "validate_redeemable_coupon",
-    # order
     "HISTORY_PAGE_SIZE_QUERY_PARAM",
     "_history_page_size",
     "order_detail",
     "order_list",
-    # payment
     "PAYMENT_INTENT_ATTEMPTS",
     "create_payment",
     "verify_payment",
-    # refund
     "_refund_payload",
     "admin_order_refund",
     "refund_request",
-    # return
     "RETURN_REFUSAL_BODY_KEY",
     "RETURN_REFUSAL_ERRORS",
     "RETURN_REFUSAL_NOT_ELIGIBLE",

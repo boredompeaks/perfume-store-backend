@@ -1,13 +1,7 @@
 /**
- * Script-context escaping for JSON-LD payloads [SPEC-17-06, R-17.17].
- *
- * JSON.stringify output is NOT safe to embed inside a <script> tag:
- * a literal "</script>" (or "<!--", or the line separators U+2028/2029)
- * inside any string value can close the element early or break JS
- * parsing, letting staff-controlled product text execute markup in the
- * page. Escaping these characters as \uXXXX keeps the JSON semantically
- * identical (JSON.parse decodes the escapes back to the same string) but
- * makes it impossible for the payload to terminate the script element.
+ * JSON.stringify output is unsafe inside `<script>`: a literal `</script>`,
+ * `<!--` or U+2028/2029 can close the element or break parsing. Escaping them
+ * as \uXXXX keeps the JSON semantically identical.
  */
 const SCRIPT_CONTEXT_ESCAPES: Record<string, string> = {
   "<": "\\u003c",

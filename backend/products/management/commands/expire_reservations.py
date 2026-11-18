@@ -1,20 +1,9 @@
-"""Scheduled stale-reservation reconciliation (SPEC-12-03, [R-12.9]).
+"""Scheduled sweep marking lapsed ACTIVE stock reservations EXPIRED.
 
-§12.1 step 7: "A scheduled reconciliation process identifies stale
-reservations." This command is that process: every hold still ACTIVE whose
-``expires_at`` has lapsed is marked EXPIRED (the model's transition map
-assigns step 7 to EXPIRED; RELEASED is step 6's in-flow vocabulary, owned
-by the SPEC-12-02 checkout/admin writers), and each affected product lands
-one StockMovement ledger row — [R-12.9] makes the ledger row the
-requirement, not a bare status flip.
-
-Coordination (documented in .env.example): the cadence must run well
-inside RESERVATION_TTL, and the TTL must exceed the payment-provider
-checkout-session window. The sweep reclaims the reservation book only —
-payment truth (webhook/timeout reconciliation, SPEC-1-06/SPEC-1-18) is
-never touched, and a late verify of a swept checkout still proceeds on
-verify_payment's re-checked stock (SPEC-12-02 deliberately made a lapsed
-TTL a non-gate for conversion).
+Sweeps the reservation book only: payment truth is untouched and a late
+verify still proceeds on verify_payment's re-checked stock, so the cadence
+must run well inside RESERVATION_TTL, which must exceed the
+checkout-session window.
 """
 
 from django.core.management.base import BaseCommand
@@ -35,9 +24,8 @@ class Command(BaseCommand):
     )
 
     def handle(self, *args, **options):
-        # No return value: call_command treats a non-None handle() result
-        # as output text; the operator-visible count is the stdout summary
-        # (silent under --verbosity 0, as cron wants).
+        # Returns None: call_command would print a non-None handle() result
+        # as output text; the stdout summary is the operator-visible count.
         released = self._expire_stale(timezone.now())
         if options.get("verbosity", 1) >= 1:
             self.stdout.write(
@@ -47,16 +35,11 @@ class Command(BaseCommand):
     def _expire_stale(self, now):
         """Flip active+lapsed holds to EXPIRED and land the ledger rows.
 
-        Locking: each product row is locked before its flip so the
-        movement's ``stock_after`` gates on the real on-hand (conventions:
-        stock-adjacent flows lock what they read) and product locks are
-        taken in ascending-pk order — the same order verify_payment uses —
-        ruling out lock-order inversion with a concurrent verify. The flip
-        itself is an atomic conditional UPDATE re-checking status AND
-        expiry at UPDATE time: a hold re-armed by a checkout retry (fresh
-        TTL, the _mint_order_reservations IntegrityError path) or released
-        by a concurrent writer no longer matches, so it is skipped —
-        never resurrected, never double-released.
+        Locks products in ascending-pk order (matching verify_payment, so no
+        lock-order inversion) and re-checks status AND expiry in the
+        conditional UPDATE: a hold re-armed or released concurrently no
+        longer matches, so it is skipped rather than resurrected or
+        double-released.
         """
         stale = list(
             StockReservation.objects.filter(
@@ -88,13 +71,12 @@ class Command(BaseCommand):
 
     @staticmethod
     def _record_release(product, rows):
-        """One ledger row per affected product (the [6.5.17] idiom's
-        fields, with delta 0 BY DESIGN): a hold never left on-hand stock —
-        it gated available-to-sell only, and the SALE decrement belongs to
-        verify_payment's conversion — so the row records reserved units
-        returning to the pool, with ``stock_after`` gated on the locked
-        on-hand and no actor (the sweep is a system action, like the SALE
-        row)."""
+        """One ledger row per affected product, with delta 0 by design.
+
+        A hold never left on-hand stock — it gated available-to-sell only —
+        so the row records units returning to the pool, gated on the locked
+        on-hand, with no actor because the sweep is a system action.
+        """
         refs = ", ".join(f"#{row['order_id']}" for row in rows)
         units = sum(row["quantity"] for row in rows)
         StockMovement.objects.create(

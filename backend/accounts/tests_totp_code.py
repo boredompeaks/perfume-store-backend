@@ -1,11 +1,3 @@
-"""``manage.py totp_code``: the local test helper for the MFA login walk.
-
-Pins the command against the RFC 6238 SHA-1 vector at Unix time 59 (the
-6-digit code is hand-written, never recomputed from ``common.totp``), proves
-the printed code verifies through the production replay guard, and holds the
-exposure line: no secret, and a clear refusal when there is no active factor.
-"""
-
 import re
 from io import StringIO
 from unittest import mock

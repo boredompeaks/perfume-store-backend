@@ -77,7 +77,7 @@ describe("trackShipments", () => {
   });
 
   it("keeps the backend's guest-token length cap pinned", () => {
-    // shipping/views.py GUEST_TOKEN_MAX_LENGTH — drift here is a contract bug.
+    // Must match shipping/views.py GUEST_TOKEN_MAX_LENGTH.
     expect(GUEST_TOKEN_MAX_LENGTH).toBe(64);
   });
 

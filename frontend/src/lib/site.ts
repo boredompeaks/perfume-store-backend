@@ -1,8 +1,6 @@
 /**
- * Flat brand + contact view of the white-label manifest in template.config.ts.
- * The export name and key shape are a public contract — every import of
- * `site` must keep compiling untouched — so derive, don't restructure here.
- * Env changes require a rebuild (next build).
+ * Flat view of the white-label manifest; the export name and key shape are a
+ * public contract, so derive rather than restructure. Env is baked at build.
  */
 import { templateConfig } from "./template.config";
 
@@ -15,15 +13,14 @@ export const site = {
   /** Customer support inbox (also the SMTP sender address). */
   supportEmail: templateConfig.contact.supportEmail,
 
-  /** Display phone number (e.g. "+91 98765 43210"). Empty = hidden in UI. */
+  /** Empty hides the channel in the UI. */
   supportPhone: templateConfig.contact.supportPhone,
 
-  /** WhatsApp number in international digits, no "+" (e.g. "919876543210"). Empty = hidden. */
+  /** International digits, no "+"; empty hides. */
   whatsappNumber: templateConfig.contact.whatsappNumber,
 
-  /** Pre-filled message for the WhatsApp deep link. */
   whatsappMessage: templateConfig.contact.whatsappMessage,
 
-  /** Full profile URL (e.g. "https://instagram.com/maisonaurel"). Empty = hidden. */
+  /** Empty hides the channel in the UI. */
   instagramUrl: templateConfig.contact.instagramUrl,
 } as const;

@@ -1,15 +1,3 @@
-"""SPEC-7-01: append-only business-event audit trail ([R-7.20] + S1[1.22]).
-
-- Order lifecycle (created, paid), payment verify outcomes (intent,
-  verified, and every failure branch), and authentication events each land
-  an ``AuditEvent`` row through the real endpoints.
-- Every hook writes inside the same ``transaction.atomic()`` block as the
-  side effect it records: when the trail cannot be written, the effect
-  rolls back with it (pinned with an injected audit-write failure).
-- Rows are append-only: updates and deletes raise at the model level, and
-  events outlive the order/user rows they describe (``SET_NULL`` FKs).
-"""
-
 from unittest.mock import patch
 
 from django.contrib.auth.models import AnonymousUser, User
@@ -23,8 +11,6 @@ from products.models import StockMovement
 
 
 class AuditEventModelTests(ApiTestCase):
-    """Model-level contract: category derivation and the append-only guards."""
-
     def test_record_derives_category_and_stores_payload(self):
         event = AuditEvent.record(
             AuditEvent.EventType.AUTH_REGISTERED,
@@ -39,8 +25,6 @@ class AuditEventModelTests(ApiTestCase):
         )
 
     def test_record_rejects_unknown_prefix(self):
-        # An unprefixed/unknown identifier must fail loudly, not write a
-        # row no category query will ever find.
         with self.assertRaises(ValueError):
             AuditEvent.record("bogus.event")
 
@@ -65,8 +49,6 @@ class AuditEventModelTests(ApiTestCase):
         self.assertTrue(AuditEvent.objects.filter(pk=event.pk).exists())
 
     def test_events_outlive_deleted_order_and_actor(self):
-        """SET_NULL on both FKs: the trail survives the rows it describes,
-        with the identifying values preserved in detail."""
         self.make_user("buyer")
         _, token = self.api_login()
         product = self.make_product(stock=10)
@@ -89,8 +71,6 @@ class AuditEventModelTests(ApiTestCase):
 
 
 class OrderPaymentTrailTests(ApiTestCase):
-    """order/payment events through the real checkout and payment endpoints."""
-
     def setUp(self):
         self.user = self.make_user("buyer")
         _, self.token = self.api_login()
@@ -130,15 +110,11 @@ class OrderPaymentTrailTests(ApiTestCase):
         self.assertIsNone(event.detail["coupon"])
 
     def test_checkout_rolls_back_together_with_trail(self):
-        """The hook writes inside the checkout's atomic block: an audit
-        failure aborts the order too — no phantom trail, no orphan order."""
         self.seed_session_cart([(self.product, 2)])
         self.client.raise_request_exception = False
         with patch.object(AuditEvent, "record", side_effect=RuntimeError("down")):
             res = self.checkout()
         self.assertEqual(res.status_code, 500)
-        # The only surviving row is setUp's successful login event: the
-        # order and its trail row rolled back together.
         self.assertEqual(AuditEvent.objects.count(), 1)
         self.assertFalse(
             AuditEvent.objects.filter(
@@ -151,7 +127,6 @@ class OrderPaymentTrailTests(ApiTestCase):
         order_id = self._checkout()
         self.razorpay_mock()
         self._start_payment(order_id)
-        # The reuse path persists nothing, so it emits nothing.
         self._start_payment(order_id)
         events = AuditEvent.objects.filter(
             event_type=AuditEvent.EventType.PAYMENT_INITIATED
@@ -179,9 +154,6 @@ class OrderPaymentTrailTests(ApiTestCase):
         self.assertEqual(paid.detail["total_amount"], "999.98")
 
     def test_verify_rolls_back_together_with_trail(self):
-        """An audit failure in the verify transaction undoes stock, coupon,
-        order state and cart cleanup as well — effect and trail never
-        disagree."""
         order_id = self._checkout()
         self.razorpay_mock()
         self._start_payment(order_id)
@@ -201,9 +173,6 @@ class OrderPaymentTrailTests(ApiTestCase):
         order = Order.objects.get(pk=order_id)
         self.assertEqual(order.status, "pending")
         self.assertIsNone(order.razorpay_payment_id)
-        # auth.login (setUp), order.created and payment.initiated survive;
-        # the verify's trail rows rolled back with the stock, coupon, order
-        # state and cart cleanup.
         self.assertEqual(AuditEvent.objects.count(), 3)
         self.assertEqual(StockMovement.objects.count(), 0)
 
@@ -217,7 +186,6 @@ class OrderPaymentTrailTests(ApiTestCase):
         event = AuditEvent.objects.get(
             event_type=AuditEvent.EventType.PAYMENT_SIGNATURE_REJECTED
         )
-        # The gateway references are unproven, so no order FK is set.
         self.assertIsNone(event.order)
         self.assertEqual(event.detail["razorpay_payment_id"], "pay_TEST0001")
         self.assertEqual(Order.objects.get(pk=order_id).status, "pending")
@@ -278,8 +246,6 @@ class OrderPaymentTrailTests(ApiTestCase):
         order_id = self._checkout()
         self.razorpay_mock()
         self._start_payment(order_id)
-        # Another buyer drains the stock between checkout and verify; the
-        # lock-protected backstop refuses the sale and the trail keeps it.
         self.product.refresh_from_db()
         self.product.stock = 0
         self.product.save(update_fields=["stock"])
@@ -315,8 +281,6 @@ class OrderPaymentTrailTests(ApiTestCase):
 
 
 class AuthTrailTests(ApiTestCase):
-    """auth events through the real registration, login and recovery flows."""
-
     def test_register_writes_registration_event(self):
         self.register_and_verify(username="audited-buyer")
         event = AuditEvent.objects.get(event_type=AuditEvent.EventType.AUTH_REGISTERED)
@@ -341,7 +305,6 @@ class AuthTrailTests(ApiTestCase):
             format="json",
         )
         self.assertEqual(res.status_code, 401)
-        # A malformed body (400) is also a rejected attempt, not a success.
         res = self.client.post(
             "/api/accounts/login/", {"username": "buyer"}, format="json"
         )
@@ -369,9 +332,7 @@ class AuthTrailTests(ApiTestCase):
 
     @staticmethod
     def _throttle_auth_at_3_per_min():
-        # DRF snapshots DEFAULT_THROTTLE_RATES into the throttle class at
-        # import, so the rate is pinned on the class directly: the assertion
-        # cannot drift with a deployment's THROTTLE_AUTH_RATE setting.
+        # DRF snapshots DEFAULT_THROTTLE_RATES into the throttle class at import, so the rate is pinned on the class.
         return patch.object(
             ScopedRateThrottle,
             "THROTTLE_RATES",
@@ -384,8 +345,6 @@ class AuthTrailTests(ApiTestCase):
         )
 
     def test_throttled_login_writes_no_event(self):
-        """A 429 refusal is the rate limit doing its job before the view
-        runs — an auth attempt that never happened writes nothing."""
         self.make_user("buyer")
         with self._throttle_auth_at_3_per_min():
             for _ in range(3):
@@ -420,7 +379,6 @@ class AuthTrailTests(ApiTestCase):
         )
         self.assertEqual(event.actor, user)
 
-        # Re-verifying an already-active account is a no-op: no event.
         uid, token = extract_link_params(mail.outbox[0].body, "verify-email")
         res = self.client.post(
             "/api/accounts/verify-email/",

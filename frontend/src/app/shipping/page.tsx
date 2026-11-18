@@ -7,28 +7,8 @@ export const metadata: Metadata = {
   title: "Shipping",
 };
 
-/**
- * /shipping — editorial policy spread (D1 design override of §5.7's
- * LegalShell composition; screens: maison_ther_politique_de_livraison).
- * The typography system the screens establish: bronze eyebrow, serif
- * display h1, revision line, then a right-hand FACT MATRIX carrying the
- * two scannable windows at the top, because those are the only things a
- * customer opens this page to find. Below the hairline seam: a plain
- * anchor index (the W8-T3 no-JS ToC pattern, distinct nav name) beside
- * measure-limited prose, sections ruled apart by hairlines.
- *
- * The windows render from `shippingPolicy` (policies.ts, the A-12.D.2
- * single source) in BOTH the fact matrix and the dispatch sentence —
- * neither number is typed here (policies.test.ts pins the source).
- * Content stays the shipped truth: India courier network, charges
- * included, no transcribed screen windows (the screen's French
- * per-region delays have no backend source and are not restated).
- *
- * Motion: none. Zero accent moments (P2's wrong-when clause, §5.7): a
- * legal page that animates is a legal page nobody trusts. The bottom
- * block keeps LegalShell's support + cross-link duties in the screen's
- * two-column form. Server component; no client island.
- */
+// Windows render from shippingPolicy (policies.ts) in both the fact matrix and
+// the prose — never typed here. No motion and no client island.
 
 const sections = [
   {
@@ -100,7 +80,6 @@ const sections = [
 export default function ShippingPage() {
   return (
     <div className="mx-auto w-full max-w-5xl px-4 py-16 sm:px-6">
-      {/* Header band: left title spread, right fact matrix (screen header). */}
       <header className="flex flex-col gap-8 border-b border-hairline pb-10 lg:flex-row lg:items-end lg:justify-between">
         <div className="max-w-2xl">
           <p className="text-eyebrow uppercase text-bronze">
@@ -134,9 +113,8 @@ export default function ShippingPage() {
       </header>
 
       <div className="grid gap-10 pt-10 lg:grid-cols-[200px_1fr] lg:gap-x-8">
-        {/* Plain in-page anchor index: no scroll spy, no observer (the
-            W8-T3 LegalProse pattern; hidden on phones where a list this
-            short is worse than none). */}
+        {/* Plain anchor index, no scroll spy; hidden on phones where the
+            list is too short to earn its space. */}
         <nav
           aria-label="Shipping sections"
           className="hidden text-small text-ink-secondary md:block lg:sticky lg:top-24 lg:self-start"
@@ -158,7 +136,6 @@ export default function ShippingPage() {
           </ol>
         </nav>
 
-        {/* Measure-limited prose, hairline-ruled sections (screen). */}
         <div className="min-w-0 max-w-(--measure) space-y-10">
           {sections.map((section, i) => (
             <div key={section.id}>
@@ -184,7 +161,6 @@ export default function ShippingPage() {
         </div>
       </div>
 
-      {/* Support + cross-links, the screen's bottom band in English. */}
       <div className="mt-16 border-t border-hairline pt-6">
         <div className="flex flex-col gap-6 sm:flex-row sm:items-baseline sm:justify-between">
           <div>

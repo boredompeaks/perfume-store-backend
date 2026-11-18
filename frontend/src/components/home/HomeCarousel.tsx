@@ -7,39 +7,9 @@ import { formatINR } from "@/lib/money";
 import type { Product } from "@/lib/types";
 
 /**
- * §5.1 §2 rebuilt against the D1 screen
- * (`media/designs/maison_ther_catalogue_accueil_carousel_edition/`): the
- * "New arrivals" editorial carousel. The spec text described a 4-up grid;
- * the screen ships one plate at a time with a counter, two square controls
- * and four progress bars, and design owns layout (owner D1).
- *
- * Data (P5): the server already fetched the newest products by
- * `ordering=-created_at` and hands them over as props — no client fetch, no
- * second products endpoint, no placeholder slide. Fewer than four results
- * render as themselves: the counter, the progress bars and the slide count
- * are all derived from `products.length`, so nothing ever claims a slide
- * that does not exist.
- *
- * Motion (P3, ui-motion): the slide change is the ONE thing that moves in
- * this component, and only because the customer asked for it — manual
- * advance only, no timer, no autoplay, no scroll listener, no effect at all.
- * The track transition reads the `track` intent tokens
- * (`--motion-track-dur` + `--motion-ease-track`, §2.4.1's carousel row)
- * behind Tailwind's `motion-safe:` variant, so `prefers-reduced-motion:
- * reduce` never sees a transition to shorten: the transform simply lands on
- * its new value. Colour-only state changes (controls, progress bars) ride
- * the `state` token, which §2.4 reduces to 0ms under reduce. Nothing here
- * is above the hero, so nothing here can delay LCP (§10).
- *
- * ARIA: the region/slide/counter pattern from `.claude/rules/components.md`
- * (states table + keyboard-first inclusive design): `role="region"` labelled
- * by the section heading, `aria-roledescription="carousel"`, each slide a
- * `role="group"` labelled "n of total", a polite live region announcing the
- * current slide, `aria-label="Previous slide"` / `"Next slide"` on the two
- * controls, `aria-current` on the active progress bar, and ArrowLeft /
- * ArrowRight while focus is inside the region. Inactive slides are
- * `aria-hidden` and their only focusable child is taken out of the tab
- * order, so a keyboard user can never land on a plate they cannot see.
+ * Server passes the newest products; slides, counter and bars all derive from
+ * `products.length`, so nothing ever claims a slide that does not exist.
+ * Manual advance only: no timer, no autoplay, no scroll listener.
  */
 export default function HomeCarousel({ products }: { products: Product[] }) {
   const headingId = useId();
@@ -60,9 +30,7 @@ export default function HomeCarousel({ products }: { products: Product[] }) {
   };
 
   const pad = (n: number) => String(n).padStart(2, "0");
-  // Shared-component contract (P5): no slides, no carousel. The page omits
-  // the section before it ever gets here; this guard keeps a future caller
-  // from rendering a live region that reads "Slide 1 of 0".
+  // No slides, no carousel: a future caller must not render "Slide 1 of 0".
   if (products.length === 0) return null;
   const current = products[index];
 

@@ -3,10 +3,8 @@ import { ApiError } from "./api";
 import { applyCartCoupon, deleteCartItem, removeCartCoupon } from "./cart-api";
 
 /**
- * D-04a/D-04b: cart calls must carry the access token when one exists so the
- * backend resolves the ACCOUNT cart. Without it the post-login refetch keeps
- * reading the guest cart (which the login merge has already emptied/adopted)
- * and the merged basket never renders.
+ * With a token the backend resolves the account cart; without it a post-login
+ * refetch would keep reading the merged-away guest cart.
  */
 const storage = new Map<string, string>();
 
@@ -46,8 +44,7 @@ beforeEach(() => {
   });
 });
 
-// The bearer tests below stub `fetch` per test; clearing it here keeps the
-// two suites independent no matter which one a filtered run starts with.
+// Clearing fetch keeps the suites independent under filtered runs.
 afterEach(() => {
   vi.unstubAllGlobals();
 });
@@ -183,8 +180,7 @@ describe("deleteCartItem — the cart line removal path", () => {
 
     const result = await deleteCartItem(7);
 
-    // The re-render path CartLineItem relies on: the mutated cart body, so
-    // no follow-up GET is needed after a line disappears.
+    // Mutated cart body is returned so no follow-up GET is needed.
     expect(result.items).toHaveLength(1);
     const [url, init] = fetchMock.mock.calls[0];
     expect(String(url)).toContain("/api/cart/7/");

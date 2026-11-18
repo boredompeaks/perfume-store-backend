@@ -6,18 +6,13 @@ from products.models import products
 
 
 class Cart(models.Model):
-    # D-04a: a cart belongs to an ACCOUNT once the customer signs in, and to
-    # the browser session before that. Both keys are nullable because exactly
-    # one of them is set on any live cart: a guest cart is keyed by session,
-    # a signed-in cart by user. A session cart that is adopted into an
-    # account CLEARS session_id, so the same browser cookie can never resolve
-    # back to somebody's account cart after logout (resolve_cart's anonymous
-    # branch looks the session key up unchanged). unique=True still holds on
-    # the session key; both engines allow repeated NULLs.
+    # A cart belongs to an account once the customer signs in, else to the
+    # browser session; exactly one key is set. An adopted cart clears session_id,
+    # so the cookie can never resolve back to the account cart after logout.
     session_id = models.CharField(max_length=100, unique=True, null=True, blank=True)
 
-    # D-04a: the account owner. CASCADE because deleting an account must not
-    # leave a cart addressable by its old user id. Nullable is the guest half.
+    # Nullable for guest carts; CASCADE so deleting an account leaves no
+    # addressable cart.
     user = models.ForeignKey(
         settings.AUTH_USER_MODEL,
         on_delete=models.CASCADE,
@@ -26,12 +21,9 @@ class Cart(models.Model):
         related_name="carts",
     )
 
-    # R-9.3.5/R-9.3.6: the applied coupon is persistent cart state, not a
-    # per-request payload -- it survives across requests so checkout can
-    # pick it up when the payload posts no explicit code (and re-validate
-    # it through its pre-existing coupon path). SET_NULL: deleting a coupon
-    # drops it from carts instead of stranding them on a dangling FK; the
-    # invalidated-coupon case is handled by checkout re-validation.
+    # The applied coupon is persistent cart state, so checkout can pick it up
+    # when the payload posts no code; checkout re-validates it. SET_NULL drops
+    # it from carts instead of stranding them on a dangling FK.
     coupon = models.ForeignKey(
         "orders.Coupon",
         on_delete=models.SET_NULL,
@@ -40,15 +32,9 @@ class Cart(models.Model):
         related_name="+",
     )
 
-    # TIER1-WEBHOOK-CART: the Order this cart checked out into, bound at
-    # order creation (orders.views.checkout.create_order) so a later capture
-    # - browser verify or a much-later gateway webhook, which has no session
-    # cookie - can find this cart and empty it (the clear lives in
-    # orders.inventory.commit_order_sale). Nullable: a browsing or abandoned
-    # cart has no order yet. OneToOne: one checkout submission snapshots one
-    # cart into one order. SET_NULL: deleting an order (admin cleanup, test
-    # teardown) must never cascade-destroy cart rows - the link exists for
-    # capture-time cleanup, not for the cart's existence.
+    # The order this cart checked out into, bound at order creation so a later
+    # capture (even a gateway webhook with no session cookie) can find and empty
+    # it. OneToOne, SET_NULL: deleting an order must never destroy cart rows.
     order = models.OneToOneField(
         "orders.Order",
         on_delete=models.SET_NULL,
@@ -66,11 +52,9 @@ class Cart(models.Model):
 
     class Meta:
         constraints = [
-            # D-04a: one active cart per account. PARTIAL on purpose — guest
-            # carts all carry user=NULL and must stay unlimited, while two
-            # account carts for one user would fork the customer's basket
-            # between requests (resolve_cart's get_or_create would race onto
-            # whichever row the DB returned first).
+            # One active cart per account. Partial on purpose: guest carts all
+            # carry NULL and must stay unlimited, while two account carts would
+            # fork the basket between requests.
             models.UniqueConstraint(
                 fields=["user"],
                 condition=Q(user__isnull=False),

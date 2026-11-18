@@ -15,11 +15,7 @@ import {
 } from "@/lib/filters";
 import { inputClass } from "@/lib/ui";
 
-/**
- * Real backend orderings only (lib/filters.ts ORDERINGS) — the screen's
- * "Formulation density" option has no API behind it and is not shipped (P5).
- * The first three labels follow the screen; name order is the API's own extra.
- */
+/** Backend-supported orderings only; "Formulation density" has no API. */
 const sortOptions: { value: Ordering; label: string }[] = [
   { value: "-created_at", label: "Chronological release" },
   { value: "price", label: "Price: Low to high" },
@@ -29,32 +25,8 @@ const sortOptions: { value: Ordering; label: string }[] = [
 ];
 
 /**
- * §5.2 Motion: the result-count line cross-fades on `--motion-state` when a
- * filter resolves — and never on arrival. §3's motion table (the "Home - hero
- * eyebrow + headline + sub" row) calls that hero "the only entrance animation
- * on the site", and §3.3/STITCH adds "no element enters on scroll, no card
- * staggers" for exactly this page — so a count that faded on first paint would
- * be a second entrance, above the fold, while the LCP image is still loading
- * (§10.1: nothing above the fold animates in).
- *
- * The arrival baseline is a ref kept across re-renders: SSR and the hydration
- * render are always plain, and only a customer-caused `?search=`/price/sort
- * resolve (a client-side navigation, which re-renders this island in place)
- * flips the line into the fading wrapper. The `key` is the params string so
- * the same fade replays on every resolve — including the resolve that CLEARS
- * the filters, where the params return to the arrival value: a `changed` flag
- * (once left, always fading) covers that, where comparing against the arrival
- * string alone would drop the cross-fade on "Clear all filters". The flag only
- * ever flips false → true, so a speculative render React discards cannot
- * un-set it.
- *
- * The wrapper is keyed, never the arrival state, so when the Suspense child
- * streams in and re-renders this island with the SAME params, React reuses the
- * div and the 200ms fade is not restarted mid-flight.
- *
- * Exported from this module — not its own file — so the /products task stays
- * inside its five-file budget; this is already the page's client island and
- * home does not import it.
+ * Fades only after a client-caused param change, never on arrival: nothing
+ * above the fold may animate in. The ref keeps SSR/hydration plain.
  */
 export function CountFade({ children }: { children: ReactNode }) {
   const params = useSearchParams().toString();
@@ -70,16 +42,9 @@ export function CountFade({ children }: { children: ReactNode }) {
 }
 
 /**
- * Sort control (U-W11-T5). The screen renders a native `<select>`; xias
- * AGENTS.md is a non-negotiable against those ("Never a native `<select>`… Use
- * a button trigger with an ARIA listbox or combobox"), so the screen's VISUAL
- * treatment (label + field + chevron via inner padding) is rebuilt as the
- * select-only combobox pattern: the trigger shows the current value, the panel
- * is `role="listbox"` with `role="option"` rows, focus is a roving `-1` moved
- * onto the active option, and the full keyboard set (arrows, Home/End,
- * Enter/Space, Escape, outside-pointer dismiss) is wired here. Selection still
- * commits through the caller's `update()`, so the ordering param behaviour is
- * untouched.
+ * Native `<select>` is banned in this codebase, so this is the screen's look
+ * rebuilt as an ARIA listbox with roving focus and full keyboard support.
+ * Selection still commits through the caller's `update()`.
  */
 function SortControl({
   ordering,
@@ -105,8 +70,7 @@ function SortControl({
     if (open) optionRefs.current[activeIndex]?.focus();
   }, [open, activeIndex]);
 
-  // Dismiss on a pointer-down outside the control; focus stays where it was
-  // (the pointer already expressed intent — yanking focus would surprise).
+  // Outside pointer-down dismisses; focus is not yanked from where it was.
   useEffect(() => {
     if (!open) return;
     const onPointerDown = (event: PointerEvent) => {
@@ -192,8 +156,7 @@ function SortControl({
           className={`${inputClass} flex cursor-pointer items-center pr-9 text-left`}
         >
           {selected.label}
-          {/* Chevron drawn with currentColor, placed by the trigger's inner
-              padding (AGENTS.md) — never the select's UA widget. */}
+          {/* Chevron drawn with currentColor, never the select's UA widget. */}
           <svg
             aria-hidden="true"
             focusable="false"
@@ -241,12 +204,9 @@ function SortControl({
 }
 
 /**
- * Client filter bar writing to the URL (shareable, noindex when narrowed).
- * Search is debounced 400ms; price filters apply on Apply; any change resets
- * the page param. Category renders as a removable chip only — the backend has
- * no categories endpoint (BACKEND_REQUESTS), so there is no picker to render.
- * Layout follows the /products screen (U-W11-T5): a hairline rule above, then
- * search left, min/max + Apply middle, sort right; the row wraps at xs.
+ * Writes filters to the URL so results are shareable; any change resets the
+ * page param. Category is a removable chip only, since the backend has no
+ * categories endpoint.
  */
 export default function FilterBar() {
   const router = useRouter();
@@ -292,9 +252,7 @@ export default function FilterBar() {
 
   return (
     <div className="mt-8 border-t border-hairline pt-4">
-      {/* Screen arrangement (U-W11-T5): one row at md+ — search left, price +
-          Apply middle, sort right — wrapping at xs where the search takes its
-          own full-width row. */}
+      {/* Screen arrangement: one row at md+, wrapping at xs. */}
       <div className="flex flex-wrap items-center gap-3 md:flex-nowrap">
         <div className="w-full min-w-0 md:w-80 lg:w-96">
           <label htmlFor="product-search" className="sr-only">
@@ -356,7 +314,6 @@ export default function FilterBar() {
         </div>
       </div>
 
-      {/* §0 CHANGE-2: a failure is never the accent colour. */}
       {priceError && (
         <p role="alert" className="mt-2 text-sm text-danger">
           {priceError}
@@ -366,10 +323,6 @@ export default function FilterBar() {
       {category && (
         <div className="mt-3 flex items-center gap-2 text-sm">
           <span className="text-ink-secondary">Category:</span>
-          {/* §2.1.5 E2: the chip's border is its only boundary, and hairline
-              is 1.23:1 — a control boundary is `--color-field-border`
-              (3.90:1 on the paper this chip sits on; 4.10:1 is the
-              on-surface figure and is not this backdrop). */}
           <button
             type="button"
             onClick={() => update({ category: null })}

@@ -1,15 +1,7 @@
-"""Shipping serializers (SPEC-1-B05 [R-1.07], SPEC-1-B06 [R-1.08]).
+"""Shipping serializers for the public estimate and the tracking read.
 
-One serializer for the one public shipping response a customer can get
-(B05): a priced delivery option for a destination. The rate table itself is
-staff configuration and is managed through the RBAC admin seam
-(shipping/admin.py), not through a customer-facing write API - a client that
-could post its own rates would be the SPEC-1-B04 P1 in a new place.
-
-The amount rides as a decimal STRING (DRF's default for DecimalField), never
-as a JSON number: a JSON number is a double in every browser, and a shipping
-price that changes in the last paisa on the way to the screen is a money bug
-with no trace in the backend.
+The rate table is staff configuration with no customer-facing write API, and
+the amount rides as a decimal string so a JSON double cannot change the price.
 """
 
 from rest_framework import serializers
@@ -20,11 +12,8 @@ from .models import Shipment, ShipmentEvent
 class ShippingOptionSerializer(serializers.Serializer):
     """One delivery option priced for one destination.
 
-    Read-only by construction: a plain Serializer with no create/update
-    methods, so nothing here can be posted back to be trusted. The response
-    names are mapped onto the quote's own fields so the client contract says
-    ``method`` (an identifier, the only thing a client may ever choose) while
-    the quote keeps the explicit ``method_code`` / ``method_name`` names.
+    Read-only by construction; the response name ``method`` maps onto the
+    quote's ``method_code`` so clients only ever choose an identifier.
     """
 
     method = serializers.SlugField(source="method_code")
@@ -37,13 +26,10 @@ class ShippingOptionSerializer(serializers.Serializer):
 
 
 class ShipmentEventSerializer(serializers.ModelSerializer):
-    """[R-1.08] One customer-visible step of a tracking trail.
+    """One customer-visible step of a tracking trail.
 
-    Two fields, and that is the whole contract. Spec 6.9 line 2027 requires
-    the customer tracking page to expose neither internal carrier credentials
-    nor warehouse notes, so the source names are mapped onto customer names
-    and ``actor`` (a staff account) is not among them: an operator's username
-    is not something a customer needs to see a parcel move.
+    Two fields only: warehouse notes and the staff actor are deliberately
+    absent from the customer contract.
     """
 
     status = serializers.CharField(source="to_status")
@@ -55,29 +41,11 @@ class ShipmentEventSerializer(serializers.ModelSerializer):
 
 
 class ShipmentTrackingSerializer(serializers.ModelSerializer):
-    """[R-1.08] What a customer is shown about ONE parcel.
+    """What a customer is shown about one parcel.
 
-    Everything here is customer-appropriate by spec 6.9 line 2027, and the
-    omissions are the point rather than an oversight: there is no delivery
-    address, no recipient name, no order total and no money, and
-    ``internal_note`` is not on the list. The only order field carried is the
-    reference the caller already supplied.
-
-    One parcel, not one order: the view serializes this ``many=True`` under a
-    ``shipments`` key so a split shipment (spec 6.9 line 2021) reports all of
-    its parcels. Every field below is a fact about the parcel being serialized,
-    which is why hoisting any of them to the envelope would have changed what
-    the body says.
-
-    [SPEC-B-02] ``provider`` (its slug code) and ``tracking_url`` are the
-    customer-appropriate half of the provider link: the storefront renders the
-    link it is handed and the customer follows it on the provider's own site.
-    The provider's template and its active flag are not exposed - the rendered
-    URL is the customer's whole use for them.
-
-    Every field is read-only, which is the structural half of "a client can
-    never post a tracking number": a ModelSerializer is writable by default,
-    so this one says so explicitly rather than relying on the view being GET.
+    Customer-appropriate by spec: no address, recipient, money or
+    ``internal_note``; the provider exposes only its code and rendered link.
+    Every field is read-only, so a client can never post a tracking number.
     """
 
     order_number = serializers.CharField(source="order.order_number", read_only=True)
@@ -88,15 +56,9 @@ class ShipmentTrackingSerializer(serializers.ModelSerializer):
     def get_provider(self, obj):
         """The provider's slug code, or ``None`` when the parcel is unlinked.
 
-        A code, not the row id: ``ShippingOptionSerializer`` already names a
-        delivery method by its slug, and an id here would be a second, staler
-        identifier for the same idea. The provider's own columns (its template,
-        its active flag) are staff configuration and stay out of the customer
-        body - ``tracking_url`` below is the customer's whole use for them.
-
         A method field rather than ``source="provider.code"`` because DRF
-        resolves a dotted source eagerly and would raise ``AttributeError`` on
-        the None an unlinked parcel legitimately holds.
+        resolves a dotted source eagerly and would raise on the legitimate
+        ``None``.
         """
         return obj.provider.code if obj.provider_id else None
 

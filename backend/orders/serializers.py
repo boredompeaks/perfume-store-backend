@@ -9,11 +9,8 @@ def money_string(value):
     """Render a money ``Decimal`` as the 2-dp string the JSON wire carries.
 
     DRF's JSON renderer encodes a bare ``Decimal`` as a float, dropping the
-    trailing zero (``1234.50`` -> ``1234.5``) and handing downstream code a
-    binary amount to round. Every money value in a response therefore leaves
-    through this one formatter, so the wire shape is a string at the same
-    2-dp precision the ``DecimalField`` stores -- while the stored column
-    itself stays a ``Decimal``.
+    trailing zero, so every money value leaves through this one formatter while
+    the stored column stays a ``Decimal``.
     """
     return f"{quantize_money(value):f}"
 
@@ -47,9 +44,6 @@ class OrderItemSerializer(serializers.ModelSerializer):
             "price",
             "quantity",
             "subtotal",
-            # [R-8.11] Denomination of price/subtotal — the label rides the
-            # money wherever the money is exposed. Read-only: currency is
-            # minted at creation from store config, never client-chosen.
             "currency",
         ]
 
@@ -66,33 +60,22 @@ class OrderItemSerializer(serializers.ModelSerializer):
 
 
 class OrderSerializer(serializers.ModelSerializer):
-    """[R-8.5] Identifier-exposure strategy: the sequential ``id`` stays the
-    internal key -- it remains the URL/admin primary key and no URL changes.
-    ``order_number`` (ORD-YYYY-XXXXXXXX, spec 8.3) is the read-only
-    customer-facing reference, surfaced at checkout and on every order read.
-    Guest checkout (SPEC-1-B04) keys on ``order_number`` + the order's own
-    ``guest_token``; the pk never leaves server-side routing.
+    """The order read projection: the sequential ``id`` stays the internal key
+    while ``order_number`` is the customer-facing reference.
 
-    ``guest_email`` rides the read because the staff surfaces answer "who is
-    this order for" and a guest order has no ``user`` to answer with. The
-    token itself is deliberately NOT a serializer field: it is the guest's
-    credential, so it is returned exactly once, in the checkout response
-    that minted it (views._checkout_response), and never by a list,
-    detail or admin read.
+    The guest token is deliberately not a field: it is the guest's credential,
+    returned exactly once in the checkout response that minted it, never by a
+    list, detail or admin read.
     """
 
     items = OrderItemSerializer(many=True, read_only=True)
     coupon = serializers.StringRelatedField(read_only=True)
-    # [R-1.07] SPEC-1-B05: the delivery option by its client-facing CODE, so
-    # the storefront can echo the option it priced and never learns a row id.
-    # Read-only like the money it rides with: checkout prices the option and
-    # stores the amount, and no client may set either afterwards.
+    # The option by its client-facing code, so the storefront never learns a row
+    # id; read-only like the money it rides with.
     shipping_method = serializers.SlugRelatedField(
         slug_field="code",
         read_only=True,
     )
-    # [R-9.3.24] The order's money columns as the 2-dp strings the wire
-    # carries; the stored Decimals are untouched.
     discount_amount = MoneyField()
     total_amount = MoneyField()
     shipping_amount = MoneyField()
@@ -104,10 +87,7 @@ class OrderSerializer(serializers.ModelSerializer):
             "id",
             "order_number",
             "user",
-            # [R-1.13] The guest's own address, so a guest order names a
-            # customer on the staff reads that a customer order gets. Read
-            # only like `user`: identity is settled at checkout, never
-            # client-chosen afterwards. Empty string on an account order.
+            # Identity is settled at checkout; empty on an account order.
             "guest_email",
             "full_name",
             "phone",
@@ -116,43 +96,25 @@ class OrderSerializer(serializers.ModelSerializer):
             "state",
             "pincode",
             "status",
-            # [R-10.1] The explicit lifecycle dimensions (spec 10.2) ride
-            # every order read beside the legacy ``status`` they mirror.
-            # Read-only like status itself: dimensions are machine-maintained.
+            # Lifecycle dimensions beside the legacy ``status``; read-only.
             "payment_status",
             "fulfilment_status",
-            # [R-10.2] SPEC-10-04: how the order intends to pay rides every
-            # order read beside the dimensions. Read-only: the marker is
-            # machine-maintained (checkout's COD input is a checkout-
-            # section row; nothing client-writable today).
             "payment_method",
             "coupon",
             "discount_amount",
             "total_amount",
-            # [R-1.07] SPEC-1-B05: what this order was charged to deliver it.
-            # The amount is the money record (it stays exactly as priced even
-            # if the method is retired later); the method is the label, and it
-            # is null on an order priced when the store had no shipping
-            # configured - which is a real zero charge, never a missing one.
+            # The amount is the money record and stays as priced even if the
+            # method is retired; null method means a real zero charge.
             "shipping_method",
             "shipping_amount",
-            # [R-8.13] The frozen delivery-option label. It rides every order
-            # read so a hard-deleted ShippingMethod does not make a historical
-            # order unreadable: `shipping_method` goes null, this keeps naming
-            # the option the customer bought, and it is empty on an order
-            # priced while no shipping was configured - so the two stay
-            # tellable apart. Read-only like the amount it was priced with.
+            # Frozen label: a hard-deleted ShippingMethod nulls the method but
+            # this still names what the customer bought.
             "shipping_method_code",
-            # [R-8.11] The denomination of total_amount/discount_amount is
-            # exposed beside them (checkout, dedup replay, and order reads
-            # all serialize through here). Read-only like the money itself.
             "currency",
             "items",
             "created_at",
             "updated_at",
-            # [R-8.16] The business-event timeline rides every order read
-            # (checkout, dedup replay, list/detail). Read-only like the
-            # events themselves: a client can never claim an event happened.
+            # Read-only: a client can never claim an event happened.
             "paid_at",
             "fulfilled_at",
             "shipped_at",
@@ -190,11 +152,10 @@ class OrderSerializer(serializers.ModelSerializer):
 
 
 class CouponPreviewSerializer(serializers.Serializer):
-    """[R-9.3.24] The public coupon preview body.
+    """The public coupon preview body.
 
-    The view computes the figures as ``Decimal``; this projection is what
-    turns them into the 2-dp strings on the wire, so the preview and the
-    checkout order cannot disagree about how money is spelled.
+    Projects the view's ``Decimal`` figures to the wire's 2-dp strings, so the
+    preview and the checkout order cannot spell money differently.
     """
 
     coupon = serializers.CharField(read_only=True)
@@ -204,41 +165,12 @@ class CouponPreviewSerializer(serializers.Serializer):
 
 
 class ReturnRequestSerializer(serializers.ModelSerializer):
-    """[R-1.16] SPEC-1-B07b: ONE customer-facing projection of a return request.
+    """The single customer-facing projection of a return request (list, detail,
+    and create confirmation).
 
-    This is the single representation every customer-facing returns read
-    carries (list, detail, and the create confirmation SPEC-1-B07a already
-    returns). SPEC-1-B07a built its confirmation body inline as a deliberate
-    interim shape and left ownership of the real serializer to this task; the
-    create view now drives it through this class, so there is ONE customer
-    body to keep in step rather than two.
-
-    THE OMISSIONS ARE THE CONTRACT, and they mirror B06's
-    ``ShipmentTrackingSerializer`` (read that class's docstring for the same
-    reasoning):
-
-    * the ``order`` FOREIGN KEY is not exposed. Ownership is read off the order
-      (``order__user``), so the pk is a server-side routing key only. The
-      customer-facing handle is ``order_number``, the read-only reference
-      ``OrderSerializer`` already treats as the customer-facing identifier
-      ([R-8.5]).
-    * no money rides this projection: no ``total_amount``, no
-      ``payment_status``, no ``refundable_remaining``, no ``currency``.
-      SPEC-1-B07a's guarantee - a return request moves no money and the money
-      fields belong to the refund seam (SPEC-1-05) - is exactly why none of
-      them is here. A return row carries none of them to begin with, and this
-      serializer deliberately does NOT reach through the relation to pull them
-      off the order.
-    * ``internal_note`` and anything else staff-only is not a field on this
-      serializer. ``ReturnRequest`` has no such column today, and the customer
-      reason the customer IS entitled to see is ``reason_code`` +
-      ``reason_note`` (the reason they typed). There is no staff annotation
-      surface on this row to leak.
-
-    Every field is ``read_only``: a ``ModelSerializer`` is writable by default,
-    so this says so explicitly rather than trusting the view to be GET-only.
-    That makes "a client can never write a status or a reason" a structural
-    property of the projection, not a per-view promise.
+    The order FK, money fields and staff-only columns are deliberately omitted,
+    and every field is read-only, so ownership stays server-side and a client
+    can never write a status or reason.
     """
 
     order_number = serializers.CharField(source="order.order_number", read_only=True)
@@ -258,30 +190,12 @@ class ReturnRequestSerializer(serializers.ModelSerializer):
 
 
 class RefundRequestSerializer(serializers.ModelSerializer):
-    """[SPEC-E-01] The one customer-facing projection of a refund request,
-    used both to validate the POST body and to render the 201.
+    """The customer-facing refund-request projection, used both to validate the
+    POST body and to render the 201.
 
-    Explicit fields, never ``'__all__'`` (conventions.md): the model gains
-    columns in E-02 and later, and a projection that follows the table
-    automatically would publish whatever those tasks add. The fields below are
-    the ones a customer's own request needs.
-
-    THE OMISSIONS ARE THE CONTRACT:
-
-    * ``decided_by`` is not exposed. It is a staff account id, useful on the
-      E-02 review surface, not to the customer who filed the ask.
-    * ``order``/``requester`` are read-only server-side facts: the order is
-      the URL's subject and the requester is ``request.user`` (the view binds
-      both), so a client can never file a request against another order or on
-      another customer's behalf.
-    * ``status``/``decided_at``/``created_at`` are read-only: the decision
-      belongs to E-02, and the timestamps are machine-maintained.
-
-    ``items`` is a ListField rather than the inferred JSONField so a body of
-    the wrong shape is a field error (400) instead of unvalidated JSON. Every
-    id is checked against the addressed order; an empty list means the whole
-    order. Duplicates are collapsed while preserving first-seen order so a
-    later approval cannot count one line twice.
+    Explicit fields, never ``'__all__'``, with ``order``/``requester``/``status``
+    read-only server-side facts; ``items`` is a ListField so a malformed body is
+    a 400 rather than unvalidated JSON.
     """
 
     order_number = serializers.CharField(source="order.order_number", read_only=True)

@@ -1,12 +1,5 @@
 #!/usr/bin/env bash
-# SPEC-T1 deliverable: security regression smoke, families 1-10.
-#
-# Fast anonymous-only subset of the red-team catalog (T1-report.md), meant to
-# re-run after every future release: each check asserts an invariant that
-# survived the live attack run, so a regression turns this script red before
-# anyone re-attacks. Families 1-5 are T1a's original subset (kept intact);
-# families 6-10 are T1b's additions (auth/MFA, input-validation, oracles,
-# notifications, and the cross-family regression checks).
+# Anonymous-only security regression smoke over the red-team catalog families.
 #
 # Usage: scripts/security_smoke.sh [base-url]
 #   base-url defaults to the live UAT API (test mode; no real money anywhere).
@@ -20,8 +13,8 @@ trap 'rm -rf "$TMP"' EXIT
 CHECKS=0
 FAILS=0
 
-# req METHOD PATH [BODY_FILE] [Hdr...] -> prints status code, body in
-# $LAST_BODY, response headers in $LAST_HDRS. No BODY_FILE = no body sent.
+# req METHOD PATH [BODY_FILE] [Hdr...] -> status code on stdout, body in
+# $LAST_BODY, headers in $LAST_HDRS.
 req() {
   local method="$1" path="$2" body=""
   if [ "$#" -ge 3 ]; then body="$3"; shift 3; else shift 2; fi
@@ -42,7 +35,6 @@ req() {
 pass() { CHECKS=$((CHECKS + 1)); echo "PASS  $1"; }
 fail() { CHECKS=$((CHECKS + 1)); FAILS=$((FAILS + 1)); echo "FAIL  $1"; }
 
-# status_in "desc" "a b c"  -> pass when $LAST_STATUS is one of a b c
 status_in() {
   local desc="$1" allowed="$2" a
   for a in $allowed; do
@@ -59,9 +51,7 @@ status_ge4() {
   esac
 }
 
-# status_not5xx "desc" -> pass when the answer is not a server error
-# (2xx or 4xx are both fine: the invariant under test is "no 5xx", the
-# exact class is per-endpoint).
+# The invariant is "no 5xx": 2xx and 4xx are both acceptable here.
 status_not5xx() {
   local desc="$1"
   case "$LAST_STATUS" in
@@ -71,7 +61,7 @@ status_not5xx() {
   esac
 }
 
-same_body() { # desc other_file
+same_body() {
   if cmp -s "$LAST_BODY" "$2"; then pass "$1 (byte-identical)"; else
     fail "$1: bodies differ ($(head -c 120 "$LAST_BODY") vs $(head -c 120 "$2"))"
   fi
@@ -79,7 +69,6 @@ same_body() { # desc other_file
 
 echo "== security smoke (families 1-10) against $BASE"
 
-# --- Family 1: forged webhook deliveries must never be accepted -------------
 printf '%s' '{"event":"payment.captured","payload":{"x":"y"}}' >"$TMP/wh.json"
 req POST /api/v1/webhooks/razorpay/ "$TMP/wh.json"
 status_ge4 "F1 unsigned webhook refused"
@@ -91,7 +80,6 @@ status_ge4 "F1 truncated signature refused"
 req POST /api/v1/webhooks/razorpay/ "$TMP/wh.json" "X-Razorpay-Signature: none"
 status_ge4 "F1 alg-confusion signature refused"
 
-# verify / payment / refund seams refuse anonymous callers before any logic
 printf '%s' '{"razorpay_order_id":"order_smoke","razorpay_payment_id":"pay_smoke","razorpay_signature":"deadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef"}' >"$TMP/verify.json"
 req POST /api/v1/store/orders/payment/verify/ "$TMP/verify.json"
 status_in "F1 anonymous verify refused" "401"
@@ -101,7 +89,6 @@ status_in "F1 anonymous payment intent refused" "401"
 req POST /api/v1/admin/orders/1/refund/ "$TMP/pay.json"
 status_in "F1 anonymous refund refused" "401 403"
 
-# --- Family 2: inventory mutations refuse anonymous callers ------------------
 printf '%s' '{"delta":-99}' >"$TMP/adj.json"
 req POST /api/v1/store/products/inventory/adjustments/ "$TMP/adj.json"
 status_in "F2 inventory adjust refused" "401 403"
@@ -111,7 +98,6 @@ status_in "F2 product create refused" "401 403"
 req GET /admin/
 status_in "F2 admin changelist gated to login" "302"
 
-# --- Family 3: no cartless coupon oracle ------------------------------------
 printf '%s' '{"code":"NOSUCH99"}' >"$TMP/c1.json"
 req POST /api/v1/store/orders/apply-coupon/ "$TMP/c1.json"
 status_ge4 "F3 cartless preview refused (absent code A)"
@@ -121,7 +107,6 @@ req POST /api/v1/store/orders/apply-coupon/ "$TMP/c2.json"
 status_ge4 "F3 cartless preview refused (absent code B)"
 same_body "F3 cartless oracle uniform across codes" "$TMP/coupon_a"
 
-# --- Family 4: guest deadend + session material -----------------------------
 printf '%s' '{"full_name":"Smoke","phone":"9999999999","address":"1 S St","city":"C","state":"S","pincode":"123456","guest_email":"s@example.com"}' >"$TMP/g1.json"
 req POST /api/v1/store/orders/checkout/ "$TMP/g1.json"
 status_in "F4 guest checkout refused" "403"
@@ -133,7 +118,6 @@ printf '%s' '{"bad"' >"$TMP/g3.json"
 req POST /api/v1/store/orders/checkout/ "$TMP/g3.json"
 same_body "F4 refusal uniform for malformed JSON" "$TMP/refusal"
 
-# session cookie never echoes into a payload (POST-F1 regression)
 req GET /api/v1/store/cart/
 status_in "F4 cart session endpoint healthy" "200"
 SESSION_VALUE="$(awk 'tolower($1) ~ /^set-cookie:/ {print $0}' "$LAST_HDRS" \
@@ -146,11 +130,9 @@ else
   fail "F4 sessionid value echoed inside a response body"
 fi
 
-# session-riding POST without Origin/CSRF must be refused (403)
 req POST /api/v1/store/orders/checkout/ "$TMP/g1.json" "Cookie: sessionid=forged-not-a-real-session"
 status_in "F4 sessioned POST without CSRF material refused" "403 401"
 
-# --- Family 5: RBAC + delist uniformity -------------------------------------
 for p in /api/v1/admin/orders/ /api/v1/admin/orders/1/ /api/admin/orders/ \
          /api/v1/admin/audit-log/ /api/v1/admin/health/; do
   req GET "$p"
@@ -175,7 +157,6 @@ same_body "F5 nonexistent slugs byte-identical" "$TMP/prod404"
 req GET /api/products/zz-smoke-absent-one/
 same_body "F5 legacy mount byte-identical to v1" "$TMP/prod404"
 
-# --- Family 6: auth/MFA refusals + refresh cookie contract ----------------
 printf '%s' '{}' >"$TMP/e.json"
 req POST /api/v1/account/logout/ "$TMP/e.json"
 status_in "F6 anonymous logout refused" "401"
@@ -192,7 +173,6 @@ else
   pass "F6 refresh probe carries no refresh_token Set-Cookie"
 fi
 
-# --- Family 7: input validation ------------------------------------------
 req GET "/api/v1/store/products/?search=%27%20OR%20%271%27%3D%271"
 status_not5xx "F7 SQLi search tautology stays out of 5xx"
 if grep -qiE 'syntax error|SQLSTATE' "$LAST_BODY"; then
@@ -201,10 +181,8 @@ fi
 req GET "/api/v1/store/products/?ordering=%28CASE%20WHEN%20%281%3D1%29%20THEN%20price%20ELSE%20id%20END%29"
 status_not5xx "F7 SQLi ordering injection stays out of 5xx"
 
-# Deep-nesting bomb against a JSON-parsing door: the contract this checks
-# is that it never authenticates and never leaks a traceback. The exact
-# 4xx-vs-5xx handling is report finding F7-B1 (500 today); once that is
-# fixed this check must stay green either way.
+# The contract is that the bomb never authenticates and never leaks a
+# traceback; the exact 4xx-vs-5xx handling is deliberately not asserted.
 OPEN=$(printf '%.0s[' $(seq 1 2500))
 CLOSE=$(printf '%.0s]' $(seq 1 2500))
 printf '%s' "${OPEN}1${CLOSE}" >"$TMP/nest.json"
@@ -225,7 +203,6 @@ else
   fail "F7 XSS probe: status $LAST_STATUS or content-type not JSON"
 fi
 
-# Polyglot image with a path-traversal filename, anonymous multipart.
 printf 'GIF89a<script>alert(1)</script>' >"$TMP/p.gif"
 poly_code=$(curl -sS --max-time 25 -X POST -H "User-Agent: $UA" \
   -F 'name=smoke-poly' -F 'price=1.00' \
@@ -244,7 +221,6 @@ else
   fail "F7 admin login reflected the raw payload (status $LAST_STATUS)"
 fi
 
-# --- Family 8: oracles / info leaks ---------------------------------------
 req GET /health/
 if grep -Fq '"database"' "$LAST_BODY" && ! grep -Fq 'pending_orders' "$LAST_BODY" \
   && ! grep -Fq 'low_stock' "$LAST_BODY"; then
@@ -284,7 +260,6 @@ else
   pass "F8 poisoned X-Forwarded-Host never reaches a Location header"
 fi
 
-# --- Family 9: notifications / outbox --------------------------------------
 printf '%s' '{"uid":"smoke-forged","token":"smoke-forged"}' >"$TMP/confirm.json"
 req POST /api/v1/account/password-reset/confirm/ "$TMP/confirm.json"
 status_in "F9 forged reset confirmation refused at token gate" "400"

@@ -1,17 +1,3 @@
-"""P1-2/GH-81: error reporting with a noise denylist, not a local quota.
-
-The guard is a filter, not a ceiling. These pins drive it directly, so the
-denylist is provable without waiting minutes or needing a transport. Two tests
-use the REAL SDK but an injected ``Transport`` instance: a configured tracker
-sends nothing over a socket in this suite, and identical events are no longer
-collapsed by a local dedupe window - the reason this guard exists at all.
-
-The guard must also be boring under failure. A malformed event degrades to a
-local warning and drops the event; it never raises inside ``before_send`` and
-never reports its own failure through the SDK, because that would be the
-recursion it exists to prevent.
-"""
-
 import logging
 import os
 import types
@@ -31,8 +17,6 @@ FAKE_DSN = "https://not-a-real-key@o0.ingest.us.example.invalid/0"
 
 
 class RecordingLog:
-    """Minimal logger stand-in: the guard only ever calls ``warning``."""
-
     def __init__(self):
         self.warnings = []
 
@@ -52,7 +36,6 @@ def exception_hint(exc_type=ValueError, message="boom"):
 
 
 def stub_sdk(record):
-    """A ``sentry_sdk`` package tree whose ``init`` only records its kwargs."""
     integrations = types.ModuleType("sentry_sdk.integrations")
     django_integration = types.ModuleType("sentry_sdk.integrations.django")
     logging_integration = types.ModuleType("sentry_sdk.integrations.logging")
@@ -234,8 +217,6 @@ class DenylistTests(SimpleTestCase):
         )
 
     def test_a_serialised_event_is_denied_by_type_name(self):
-        # No hint, only the event's own exception value: the name branch is
-        # what keeps a denylisted error from slipping through.
         guard = self.build()
         self.assertIsNone(guard({"exception": {"values": [{"type": "Http404"}]}}))
 
@@ -278,14 +259,11 @@ class DenylistTests(SimpleTestCase):
 
 
 class NoLocalCeilingTests(SimpleTestCase):
-    """The spike behaviour this ticket restores: nothing is dropped by count."""
-
     def test_repeated_identical_events_are_all_reported(self):
         guard = build_before_send(log=RecordingLog())
         for _ in range(60):
             event = exception_event(ValueError, "same")
             self.assertIs(guard(event, exception_hint(ValueError, "same")), event)
-        # 60 is above the removed 10/minute and 50/tab defaults on purpose.
         self.assertIsNotNone(guard(exception_event(ValueError, "same")))
 
 
@@ -345,8 +323,6 @@ class GuardRobustnessTests(SimpleTestCase):
 
 
 class SampleRateValidationTests(SimpleTestCase):
-    """A bad env value must not become "keep everything" or "drop everything"."""
-
     def init_with_rate(self, rate):
         calls = []
         log = RecordingLog()
@@ -369,8 +345,6 @@ class SampleRateValidationTests(SimpleTestCase):
 
 
 class RealSdkTransportTests(SimpleTestCase):
-    """With the real SDK, an injected transport is the only sink."""
-
     def setUp(self):
         import sentry_sdk
         from sentry_sdk.transport import Transport
@@ -411,8 +385,6 @@ class RealSdkTransportTests(SimpleTestCase):
             except ValueError:
                 self.sentry_sdk.capture_exception()
             self.sentry_sdk.flush(timeout=5)
-        # Both identical events are reported: the removed dedupe window must
-        # not hide a repeated error from Sentry.
         self.assertEqual(len(self.transport.envelopes), 2)
 
     def test_a_denylisted_exception_does_not_reach_the_transport(self):

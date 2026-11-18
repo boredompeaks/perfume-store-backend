@@ -4,18 +4,12 @@ from .views import (
     apply_coupon,
     create_order,
     create_payment,
-    # The guest's own order, keyed on the token minted by the pre-refusal
-    # checkout path rather than on a session (TIER1-GUEST-DEADEND mints no
-    # new ones; rows that carry one still answer here).
+    # The guest's own order, keyed on a token rather than a session.
     guest_order_detail,
     order_detail,
     order_list,
     refund_request,
     return_request_detail,
-    # [R-1.16] SPEC-1-B07a/B07b: the customer's returns family - POST creates
-    # one, GET lists the caller's own, and the keyed route reads one. The body
-    # of the create names the order, so it is a POST against the family root
-    # rather than a keyed detail route.
     return_requests,
     verify_payment,
 )
@@ -23,23 +17,16 @@ from .views import (
 urlpatterns = [
     path("", order_list, name="order-list"),
     path("<int:order_id>/", order_detail, name="order-detail"),
-    # [SPEC-E-01] A customer's refund request against one of their
-    # own orders. It sits in the order family (the order is the subject) and
-    # is mounted under BOTH families by config/urls.py because this urlconf is
-    # included under store/orders/ and api/orders/. The view owns the uniform
-    # 404 for a foreign order, so no second route or lookup is needed here.
+    # Mounted under both the store/ and api/ families by config/urls.py; the
+    # view owns the uniform 404 for a foreign order.
     path(
         "<int:order_id>/refund-request/",
         refund_request,
         name="refund-request",
     ),
     path("checkout/", create_order, name="create-order"),
-    # [R-1.13] Guest order read, two shapes of the same view: the token alone
-    # (it is globally unique, so it identifies the order) and the token plus
-    # the customer-facing order number as an extra cross-check. Both take the
-    # token in the X-Guest-Order-Token header, never in the path or query.
-    # Declared after the int route above, which cannot match "guest" anyway,
-    # so the two never compete.
+    # Guest reads take the globally unique token in the X-Guest-Order-Token
+    # header, never the path or query; the number is only an extra cross-check.
     path("guest/", guest_order_detail, name="guest-order-detail"),
     path(
         "guest/<str:order_number>/",
@@ -49,18 +36,9 @@ urlpatterns = [
     path("apply-coupon/", apply_coupon, name="apply-coupon"),
     path("payment/", create_payment, name="create-payment"),
     path("payment/verify/", verify_payment, name="verify-payment"),
-    # [R-1.16] SPEC-1-B07a/B07b: the customer's returns family (spec 4 line 1083,
-    # under the account's `/account/returns` page of line 1045). Declared after
-    # the `<int:order_id>` route above, which cannot match a non-integer, so
-    # the two never compete. Mounted in both families by config/urls.py because
-    # this urlconf is already included under store/orders/ and api/orders/.
-    #
-    # ONE view for the family root, not one per method: Django resolves the
-    # FIRST matching pattern, so two patterns on "returns/" would leave the
-    # second permanently unreachable - a listing that answers 405 forever. The
-    # view dispatches on the request method instead, which is also what keeps
-    # B07a's POST contract intact and unmodified behind a GET the storefront
-    # needs. The detail route is a separate pattern one level deeper.
+    # One view for the family root: two patterns on "returns/" would leave the
+    # second permanently unreachable (a listing that answers 405 forever), so
+    # the view dispatches on the request method instead.
     path("returns/", return_requests, name="return-requests"),
     path(
         "returns/<int:return_request_id>/",

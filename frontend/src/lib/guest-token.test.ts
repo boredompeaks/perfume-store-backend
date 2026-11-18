@@ -9,18 +9,13 @@ import {
 } from "./guest-token";
 
 /**
- * The credential-storage contract for the guest order token (spec A-9's
- * `guest-token.test.ts`, G1 decided: sessionStorage, tab-scoped). These tests
- * pin the storage RULE, not the backend flow: round trip, blank rejection,
- * the explicit-logout clear, and the two never-rules (never logged, never a
- * URL surface) as source guards that bite when the module grows one.
+ * Storage rules only: round trip, blank rejection, explicit-logout clear, and
+ * the never-logged / never-a-URL source guards.
  */
 
 /**
- * Deliberately fake AND deliberately low-entropy: a random-looking
- * credential literal here trips the generic high-entropy secret detector
- * even as a test fixture (GitGuardian incident 38246359), while the
- * assertions only need a stable non-blank value to round-trip.
+ * Low-entropy on purpose: a random-looking fixture trips the high-entropy
+ * secret detector even in tests.
  */
 const TOKEN = "test-guest-token-fixture";
 
@@ -76,7 +71,7 @@ describe("guest-token storage (sessionStorage, G1)", () => {
   });
 
   it("degrades to no-token without a window (SSR / storage-less)", () => {
-    // node test environment: no `window` — every accessor must no-op.
+    // No `window`: every accessor must no-op.
     expect(getGuestToken()).toBeNull();
     expect(() => setGuestToken(TOKEN)).not.toThrow();
     expect(() => clearGuestToken()).not.toThrow();

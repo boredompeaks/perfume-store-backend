@@ -19,8 +19,7 @@ describe("enrollment steps (SPEC-20-13 reach)", () => {
     const req = enrollmentSetupRequest(CREDS);
     expect(req.path).toBe(MFA_SETUP_PATH);
     expect(req.method).toBe("POST");
-    // Username trimmed, password byte-exact; no token is involved because a
-    // never-enrolled account cannot hold one.
+    // Username trimmed, password byte-exact; no token exists yet.
     expect(req.body).toEqual({
       username: "boss",
       password: "S3cure-Passphrase!",
@@ -49,8 +48,7 @@ describe("enrollment steps (SPEC-20-13 reach)", () => {
   });
 
   it("a confirmation without a code still sends the key (server refuses it)", () => {
-    // Fail-fast lives in the form; the request shape stays complete so the
-    // server is the single authority on whether a code is usable.
+    // Fail-fast lives in the form; the server is the authority on codes.
     expect(enrollmentConfirmRequest(CREDS, "").body.code).toBe("");
   });
 });
@@ -73,8 +71,7 @@ describe("code normalisation", () => {
 
 describe("sign-in doors (SPEC-20-10)", () => {
   it("each surface posts to its own endpoint", () => {
-    // The staff door is the one that enforces the TOTP factor; the customer
-    // door is the one whose serializer has no totp field at all.
+    // Staff enforces TOTP; the customer serializer has no totp field.
     expect(loginEndpoint("staff")).toBe("/api/accounts/login/");
     expect(loginEndpoint("customer")).toBe("/api/accounts/storefront/login/");
     expect(loginEndpoint("customer")).not.toBe(loginEndpoint("staff"));
@@ -85,8 +82,7 @@ describe("sign-in doors (SPEC-20-10)", () => {
       username: "boss",
       password: "S3cure-Passphrase!",
     });
-    // Even if a caller hands one over, the storefront body cannot grow the
-    // field: the form has no input for it and the server ignores it.
+    // The customer body cannot grow the field even if a caller passes one.
     expect(buildLoginBody("customer", CREDS, "123456")).not.toHaveProperty(
       "totp",
     );
@@ -110,9 +106,7 @@ describe("enrollment QR (SPEC-20-9)", () => {
   });
 
   it("falls back to the manual setup key for anything else", () => {
-    // The setup key beside the QR always works, so an absent or unexpected
-    // artifact degrades to typing a secret instead of a dead step — and a
-    // foreign scheme never reaches an <img src>.
+    // The manual key always works; foreign schemes never reach <img src>.
     expect(qrImageSource({ qr_data_uri: null })).toBeNull();
     expect(qrImageSource({})).toBeNull();
     expect(
@@ -127,8 +121,7 @@ describe("enrollment QR (SPEC-20-9)", () => {
   });
 
   it("the manual fallback is not the QR: both are needed", () => {
-    // Guard against a future refactor replacing the manual entry with the
-    // picture (or vice versa) — SPEC-20-9 requires both.
+    // Both the manual entry and the QR are required.
     expect(SETUP.secret).not.toBe(SETUP.otpauth_uri);
     expect(qrImageSource(SETUP)).not.toContain(SETUP.secret);
   });

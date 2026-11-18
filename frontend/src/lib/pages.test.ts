@@ -8,8 +8,7 @@ import {
 } from "./pages";
 import { site } from "./site";
 
-// Every static `page.tsx` under src/app (dynamic segments like /products/[slug]
-// and /orders/[id] are excluded — they resolve slugs/ids at request time).
+// Static pages only; dynamic segments resolve slugs/ids at request time.
 const STATIC_PAGE_PATHS = [
   "/",
   "/admin",
@@ -34,8 +33,7 @@ const STATIC_PAGE_PATHS = [
   "/verify-email",
 ];
 
-// The exact disallow list shipped in robots.ts before the registry refactor.
-// Kept here as the behavioral baseline the registry must reproduce.
+// Baseline the registry must reproduce.
 const LEGACY_ROBOTS_DISALLOW = [
   "/admin",
   "/cart",
@@ -50,22 +48,14 @@ const LEGACY_ROBOTS_DISALLOW = [
   "/forgot-password",
 ];
 
-// Deliberate registry additions on top of the legacy baseline, each citing the
-// spec row that ordered it. Any OTHER divergence from the baseline is a drift
-// bug and fails the parity test below.
+// Deliberate additions on top of the baseline; any other divergence is drift.
 const SPEC_DISALLOW_ADDITIONS = [
-  // §8 line 2019: /track-order is a per-customer-secret surface — noindex,
-  // robots-disallow, and excluded from the sitemap (§5.6, §8 line 2054).
+  // Credential-gated, noindex, disallowed and out of the sitemap.
   "/track-order",
-  // §8 lines 2020-2023: /staff/login and /staff/mfa/enroll are role-gated and
-  // unlinked from the nav — discoverable only through a login-error link —
-  // so they must be disallowed (page metadata already says noindex,nofollow)
-  // and, being noindex, must stay out of the sitemap.
+  // Role-gated and unlinked, so disallowed and noindexed.
   "/staff/login",
   "/staff/mfa/enroll",
-  // §8 line 2020 also names the /staff group prefix itself. It is not a route
-  // (no page.tsx — it always 404s), so it rides in as a group prefix from
-  // disallowedPaths() rather than as a registry entry.
+  // No `page.tsx`, so it is a group prefix emitted by disallowedPaths().
   "/staff",
 ];
 
@@ -139,9 +129,7 @@ describe("publicIndexablePaths", () => {
     }
   });
 
-  // The sitemap's static half is `pages.filter(indexable)` verbatim (sitemap.ts),
-  // so pinning this set pins both the sitemap's static entries and — via the
-  // no-overlap test above — robots.txt's complement.
+  // Pins the sitemap's static entries and, via no-overlap, robots' complement.
   it("is exactly the indexable set §8.1 names (sitemap/robots parity)", () => {
     expect([...publicIndexablePaths()].sort()).toEqual(
       [
@@ -180,9 +168,9 @@ describe("§8.1 metadata generation layer (pageMetadata / pageRobots)", () => {
       absolute: `${site.name} — ${site.tagline}`,
     });
     expect(md.alternates?.canonical).toBe("/");
-    // Indexable pages emit no robots meta — absence means index, follow.
+    // Indexable pages emit no robots meta; absence means index, follow.
     expect(md.robots).toBeUndefined();
-    // §8.1: indexable rows keep the root layout's site-default OG/Twitter.
+    // Indexable rows keep the root layout's default OG/Twitter.
     expect(md.openGraph).toBeUndefined();
     expect(md.twitter).toBeUndefined();
   });

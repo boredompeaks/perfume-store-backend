@@ -1,12 +1,3 @@
-"""Accounts unit tests - docs/test-gaps.md items 1-14.
-
-Covers registration validation, email verification, enumeration-safe
-recovery flows, and the V-05 password policy: registration and password
-reset both run Django's ``validate_password`` (conventions.md), so a
-password the shared validators reject fails both paths in the same
-field-error shape.
-"""
-
 import os
 import time
 import unittest
@@ -52,7 +43,6 @@ def make_inactive_user(username="pending", email=None):
 
 @tag("accounts")
 class RegisterSerializerTests(ApiTestCase):
-    # 1. valid data creates inactive user -------------------------------------------------
     def test_valid_data_creates_inactive_user(self):
         serializer = RegisterSerializer(
             data={
@@ -68,11 +58,9 @@ class RegisterSerializerTests(ApiTestCase):
         self.assertFalse(user.is_active)
         self.assertEqual(user.username, "newuser")
         self.assertEqual(user.email, "new@example.com")
-        # password stored as a hash, never plaintext
         self.assertNotEqual(user.password, "S3cure-Passphrase!")
         self.assertTrue(user.check_password("S3cure-Passphrase!"))
 
-    # 2. duplicate username (iexact) rejected ---------------------------------------------
     def test_duplicate_username_case_insensitive_rejected(self):
         User.objects.create_user("alice", "alice@example.com", "S3cure-Passphrase!")
         for candidate in ("alice", "ALICE", "Alice"):
@@ -88,7 +76,6 @@ class RegisterSerializerTests(ApiTestCase):
 
         self.assertEqual(User.objects.filter(username__iexact="alice").count(), 1)
 
-    # 3. duplicate email (iexact) rejected --------------------------------------------------
     def test_duplicate_email_case_insensitive_rejected(self):
         User.objects.create_user("alice", "alice@example.com", "S3cure-Passphrase!")
         for candidate in ("alice@example.com", "ALICE@EXAMPLE.COM"):
@@ -114,7 +101,6 @@ class RegisterSerializerTests(ApiTestCase):
         self.assertFalse(serializer.is_valid())
         self.assertIn("email", serializer.errors)
 
-    # 4. password < 8 rejected ----------------------------------------------------------------
     def test_short_password_rejected(self):
         serializer = RegisterSerializer(
             data={
@@ -141,10 +127,7 @@ class RegisterSerializerTests(ApiTestCase):
 
     @unittest.expectedFailure
     def test_registration_gap_missing_email_currently_accepted(self):
-        """Registration validation gap: `User.email` is blank=True, so DRF
-        treats email as optional and an account with an empty address can be
-        created (it can then never complete verification). Flip when the
-        serializer marks email required."""
+        """User.email is blank=True, so DRF treats it as optional and creates an account that can never verify."""
         serializer = RegisterSerializer(
             data={"username": "noemail", "password": "S3cure-Passphrase!"}
         )
@@ -161,9 +144,6 @@ class RegisterSerializerTests(ApiTestCase):
             format="json",
         )
         self.assertEqual(res.status_code, 201, res.data)
-        # Q-S3: the numeric id is gone from the register response — an
-        # auto-incrementing account id handed to an anonymous caller leaks
-        # sign-up ordering, so the pinned shape no longer carries one.
         self.assertEqual(
             res.data["user"],
             {
@@ -174,11 +154,7 @@ class RegisterSerializerTests(ApiTestCase):
         self.assertNotIn("password", res.data["user"])
         self.assertNotIn("id", res.data["user"])
 
-    # 5. V-05: registration runs the same validate_password policy as reset --------------
     def test_v05_registration_rejects_common_password(self):
-        """V-05: `password`-style passwords clear the length validator but
-        fail CommonPasswordValidator now that RegisterSerializer runs
-        validate_password — the same policy the reset path enforces."""
         res = self.client.post(
             "/api/accounts/register/",
             {
@@ -193,8 +169,6 @@ class RegisterSerializerTests(ApiTestCase):
         self.assertIn("common", " ".join(res.data["details"]["password"]).lower())
 
     def test_v05_registration_rejects_numeric_only_password(self):
-        """V-05 companion: all-numeric passwords are rejected by
-        NumericPasswordValidator through the shared policy."""
         res = self.client.post(
             "/api/accounts/register/",
             {
@@ -209,12 +183,9 @@ class RegisterSerializerTests(ApiTestCase):
         self.assertIn("numeric", " ".join(res.data["details"]["password"]).lower())
 
     def test_password_similar_to_submitted_attributes_rejected(self):
-        """User-aware parity with reset: the similarity validator runs against
-        the username/email being registered (transient user), not against
-        nothing."""
         cases = {
-            ("hannelore", "hannelore@example.com"): "hannelorepass",  # ~ username
-            ("seafoam", "seafoam@example.com"): "seafoam@example.com",  # == email
+            ("hannelore", "hannelore@example.com"): "hannelorepass",
+            ("seafoam", "seafoam@example.com"): "seafoam@example.com",
         }
         for (username, email), password in cases.items():
             with self.subTest(username=username):
@@ -228,11 +199,6 @@ class RegisterSerializerTests(ApiTestCase):
                 )
 
     def test_policy_errors_match_reset_path_shape_and_block_creation(self):
-        """Parity + uniform-shape contract (conventions.md): registration and
-        reset-confirm both answer 400 with a list of validator messages under
-        the `password` key — the shape the frontend's fieldErrors renderer
-        consumes for both forms. A rejected password must also create no user
-        row and send no verification email."""
         res = self.client.post(
             "/api/accounts/register/",
             {
@@ -272,7 +238,6 @@ class RegisterSerializerTests(ApiTestCase):
 
 @tag("accounts")
 class RegisterViewTests(ApiTestCase):
-    # 6. SMTP failure -> 503, account still created (F-28) ---------------------------------
     def test_smtp_failure_returns_503_and_account_still_created(self):
         with mock.patch(
             "accounts.views._send_verification_email",
@@ -312,7 +277,6 @@ class RegisterViewTests(ApiTestCase):
 
 @tag("accounts")
 class VerifyEmailTests(ApiTestCase):
-    # 7. valid token activates user -----------------------------------------------------------
     def test_valid_token_activates_user(self):
         user = make_inactive_user("activateme")
 
@@ -330,7 +294,6 @@ class VerifyEmailTests(ApiTestCase):
         user.refresh_from_db()
         self.assertTrue(user.is_active)
 
-        # idempotent: verifying an already-active account still succeeds
         res = self.client.post(
             "/api/accounts/verify-email/",
             {
@@ -341,7 +304,6 @@ class VerifyEmailTests(ApiTestCase):
         )
         self.assertEqual(res.status_code, 200, res.data)
 
-    # 8. invalid/expired token -> 400 ------------------------------------------------------------
     def test_invalid_token_rejected(self):
         user = make_inactive_user("paranoid")
 
@@ -362,7 +324,6 @@ class VerifyEmailTests(ApiTestCase):
         self.assertFalse(user.is_active)
 
     def test_token_from_another_user_rejected(self):
-        """Security: a token minted for user B must never activate user A."""
         user_a = make_inactive_user("usera", "a@example.com")
         user_b = make_inactive_user("userb", "b@example.com")
         token_b = default_token_generator.make_token(user_b)
@@ -386,7 +347,6 @@ class VerifyEmailTests(ApiTestCase):
 
 @tag("accounts")
 class ResendVerificationTests(ApiTestCase):
-    # 9. unknown email -> uniform 200 (no enumeration) -------------------------------------
     def test_unknown_email_uniform_response_no_email_sent(self):
         res = self.client.post(
             "/api/accounts/resend-verification/",
@@ -451,7 +411,6 @@ class ResendVerificationTests(ApiTestCase):
 
 @tag("accounts")
 class ForgotUsernameTests(ApiTestCase):
-    # 10. unknown email -> uniform 200 ---------------------------------------------------------
     def test_unknown_email_uniform_response(self):
         res = self.client.post(
             "/api/accounts/forgot-username/",
@@ -491,7 +450,6 @@ class ForgotUsernameTests(ApiTestCase):
 
 @tag("accounts")
 class PasswordResetTests(ApiTestCase):
-    # 11. request: inactive-only filter ------------------------------------------------------------
     def test_inactive_account_gets_no_reset_email(self):
         make_inactive_user("frozen", "frozen@example.com")
         res = self.client.post(
@@ -516,7 +474,6 @@ class PasswordResetTests(ApiTestCase):
         self.assertTrue(default_token_generator.check_token(user, token))
 
     def test_uniform_response_regardless_of_account_state(self):
-        """Enumeration safety: identical body for known and unknown emails."""
         known = self.client.post(
             "/api/accounts/password-reset/",
             {"email": "ghost@example.com"},
@@ -544,7 +501,6 @@ class PasswordResetTests(ApiTestCase):
         self.assertEqual(res.status_code, 503, res.data)
         self.assertEqual(len(mail.outbox), 0)
 
-    # 12. confirm: weak password -> 400 with validator messages --------------------------------
     def test_weak_password_rejected_with_validator_messages(self):
         user = self.make_user("weakreset")
         payload = {
@@ -590,7 +546,6 @@ class PasswordResetTests(ApiTestCase):
         user.refresh_from_db()
         self.assertTrue(user.check_password("S3cure-Passphrase!"))
 
-    # 13. confirm: valid -> password changed, old token invalidated ----------------------------
     def test_valid_confirm_changes_password_and_invalidates_token(self):
         user = self.make_user("changer")
         uid = _encoded_user_id(user)
@@ -606,7 +561,6 @@ class PasswordResetTests(ApiTestCase):
         self.assertTrue(user.check_password("N3w-Passphrase-99"))
         self.assertFalse(user.check_password("S3cure-Passphrase!"))
 
-        # token is single-use: hashed into the old password, now invalid
         self.assertFalse(default_token_generator.check_token(user, token))
         res = self.client.post(
             "/api/accounts/password-reset/confirm/",
@@ -620,7 +574,6 @@ class PasswordResetTests(ApiTestCase):
 
 @tag("accounts")
 class UsernameAvailableTests(ApiTestCase):
-    # 14. <3 chars / taken / free ---------------------------------------------------------------
     def test_too_short_username_reports_unavailable(self):
         for candidate in ("", "a", "ab", "  x  "):
             with self.subTest(candidate=candidate):
@@ -657,23 +610,8 @@ class UsernameAvailableTests(ApiTestCase):
 
 @tag("accounts")
 class AccessChallengeTests(ApiTestCase):
-    """Q-S3 [F3 ACCESS GATE]: the signed-challenge hook on register and
-    username-available.
-
-    The zero-config default (no ``ACCOUNT_CHALLENGE_SECRET``) must admit
-    both endpoints with no challenge parameter — the deploy contract every
-    other test here leans on implicitly. With a secret configured the gate
-    refuses everything that is not a fresh token minted under it, and every
-    refusal is the same 403 body, so the refusal itself distinguishes
-    nothing.
-    """
-
     SECRET = "q-s3-challenge-secret"
-    # Hand-written literals, deliberately NOT imported from accounts.views:
-    # the mint half (an owner-side edge gate, possibly not Django) and the
-    # validate half must agree character-for-character, so the test signs
-    # with its own copy — a one-sided change on either side then fails here
-    # instead of travelling silently with an import.
+    # The token format is signed with a local copy: the mint and validate halves must agree character-for-character.
     SALT = "accounts.access-challenge"
     VALUE = "accounts-access"
     REFUSAL = "Access challenge required."
@@ -683,10 +621,7 @@ class AccessChallengeTests(ApiTestCase):
         payload = value or self.VALUE
         if not age:
             return signer.sign(payload)
-        # TimestampSigner stamps time.time() at mint; backdate the stamp so
-        # unsign() inside the view sees a token older than max_age. The
-        # reference time is read BEFORE the patch installs, and the patch
-        # only ever touches the stamp, never the assertion clock.
+        # Backdate the signer's stamp so unsign() sees a token older than max_age; the reference time is read before the patch.
         past = time.time() - age
         with mock.patch("django.core.signing.time.time", return_value=past):
             return signer.sign(payload)
@@ -706,9 +641,6 @@ class AccessChallengeTests(ApiTestCase):
         return self.client.get("/api/accounts/username-available/", params)
 
     def test_zero_config_default_requires_no_challenge(self):
-        """The unset-secret default, pinned: no challenge parameter on
-        either endpoint, both answering normally — and the shipped defaults
-        for both knobs are the documented ones."""
         self.assertEqual(settings.ACCOUNT_CHALLENGE_SECRET, "")
         self.assertEqual(settings.ACCOUNT_CHALLENGE_MAX_AGE, 300)
         res = self._register()
@@ -725,9 +657,7 @@ class AccessChallengeTests(ApiTestCase):
             self.assertEqual(res.status_code, 403, res.data)
             self.assertEqual(res.data["error"], self.REFUSAL)
             self.assertEqual(res.data["code"], "permission_denied")
-        # One refusal body across both endpoints: the gate names nothing.
         self.assertEqual(refused_register.data, refused_probe.data)
-        # And it fired before any side effect: no account, no mail.
         self.assertFalse(User.objects.filter(username="gateuser").exists())
         self.assertEqual(len(mail.outbox), 0)
 
@@ -741,8 +671,6 @@ class AccessChallengeTests(ApiTestCase):
         self.assertFalse(probe.data["available"])
 
     def test_challenge_rides_the_query_string_too(self):
-        """The edge gate may append the token to the URL instead of editing
-        the body; both carriers are part of the contract."""
         token = self._mint()
         with override_settings(ACCOUNT_CHALLENGE_SECRET=self.SECRET):
             res = self.client.post(
@@ -769,9 +697,7 @@ class AccessChallengeTests(ApiTestCase):
         with override_settings(ACCOUNT_CHALLENGE_SECRET=self.SECRET):
             for label, token in cases.items():
                 with self.subTest(case=label):
-                    # Six cases against the default five-per-minute budget:
-                    # clear so each lands first in its own window, or the
-                    # throttle would (correctly) refuse the sixth itself.
+                    # Six cases against the 5/min budget: clear the throttle between them so each lands first in its own window.
                     cache.clear()
                     res = self._register(challenge=token)
                     self.assertEqual(res.status_code, 403, res.data)
@@ -779,7 +705,7 @@ class AccessChallengeTests(ApiTestCase):
                     self.assertFalse(User.objects.filter(username="gateuser").exists())
 
     def test_stale_challenge_is_refused(self):
-        stale = self._mint(age=10_000)  # well past the 300s default window
+        stale = self._mint(age=10_000)
         with override_settings(ACCOUNT_CHALLENGE_SECRET=self.SECRET):
             res = self._register(challenge=stale)
         self.assertEqual(res.status_code, 403, res.data)
@@ -794,8 +720,6 @@ class AccessChallengeTests(ApiTestCase):
         self.assertEqual(res.status_code, 201, res.data)
 
     def test_the_throttle_budget_still_gates_before_the_challenge(self):
-        """A refused attempt consumes its scope budget like any other
-        request, so token-guessing is bounded by the rate as well."""
         rates = dict(api_settings.DEFAULT_THROTTLE_RATES)
         rates["register"] = "1/min"
         with override_settings(ACCOUNT_CHALLENGE_SECRET=self.SECRET):
@@ -809,18 +733,6 @@ class AccessChallengeTests(ApiTestCase):
 
 @tag("accounts")
 class AuthThrottleTests(ApiTestCase):
-    """Conventions: every public mutating endpoint gets a throttle scope.
-    Q-S3: register and the username-available GET oracle left the shared
-    'auth' budget for their own dedicated scopes — each default TIGHTER than
-    that shared budget, so a probe burst or a registration spam burst can no
-    longer drain the login budget or vice versa (V-04: credential stuffing,
-    registration spam, cheap username enumeration). Login and the other
-    identity flows stay on 'auth'; verify-email, password-reset-confirm and
-    token refresh join that budget, while the email-sending recovery flows
-    keep the tighter dedicated 'recovery' scope — each accepted request
-    sends an email, so the budget *is* the mail-bomb bound. Non-429 bodies
-    stay uniform."""
-
     def _register(self, username):
         return self.client.post(
             "/api/accounts/register/",
@@ -833,9 +745,6 @@ class AuthThrottleTests(ApiTestCase):
         )
 
     def test_auth_scope_and_rate_are_configured(self):
-        """Q-S3: the two enumeration surfaces ride dedicated scopes whose
-        defaults are tighter than the shared 'auth' budget they left; login
-        and friends are unmoved on 'auth'."""
         self.assertEqual(register.view_class.throttle_scope, "register")
         self.assertEqual(username_available.view_class.throttle_scope, "username-probe")
         self.assertEqual(LoginView.throttle_scope, "auth")
@@ -844,8 +753,6 @@ class AuthThrottleTests(ApiTestCase):
         self.assertEqual(api_settings.DEFAULT_THROTTLE_RATES["register"], "5/min")
         self.assertEqual(api_settings.DEFAULT_THROTTLE_RATES["username-probe"], "5/min")
 
-        # The tightening itself, not just the presence of keys: each default
-        # must allow strictly fewer requests per minute than 'auth' does.
         def per_minute(rate):
             count, period = rate.split("/")
             self.assertEqual(period, "min")
@@ -860,11 +767,6 @@ class AuthThrottleTests(ApiTestCase):
                 )
 
     def test_all_account_urlpatterns_declare_throttle_scopes(self):
-        """Wiring guard over the real URLConf: every account route —
-        including the GET existence oracle and the JWT refresh route —
-        must declare a scope, so a future endpoint cannot ship
-        unthrottled silently. Q-S3: the two enumeration surfaces name
-        their dedicated scopes rather than the shared budget."""
         expected = {
             "verify-email": "auth",
             "resend-verification": "recovery",
@@ -874,31 +776,21 @@ class AuthThrottleTests(ApiTestCase):
             "username-available": "username-probe",
             "register": "register",
             "login": "auth",
-            # SPEC-20-10: the customer door rides the same credential
-            # budget as the staff door it was split off from.
             "storefront-login": "auth",
             "token-refresh": "auth",
             "logout": "auth",
-            # SPEC-17-05: the MFA enrollment surface rides the same 'auth'
-            # budget as the other identity flows (setup/confirm/disable
-            # accept codes, status bounds enabled-state probing).
             "mfa-status": "auth",
             "mfa-setup": "auth",
             "mfa-confirm": "auth",
             "mfa-disable": "auth",
-            # SPEC-20-8: the "trust this device" opt-in spends a TOTP code
-            # like its siblings, so it rides the same 'auth' budget.
             "mfa-trust": "auth",
-            # SPEC-9-T4 [R-9.2.20]: saved-address CRUD is authenticated and
-            # mutating, so both rows ride the 'auth' budget.
             "address-list": "auth",
             "address-detail": "auth",
         }
         found = {}
         for pattern in account_urlpatterns:
             callback = pattern.callback
-            # A plain DRF view exposes ``view_class``; a ViewSet's as_view()
-            # exposes ``cls``. Both shapes must satisfy the same guard.
+            # A plain DRF view exposes ``view_class``; a ViewSet's as_view() exposes ``cls``.
             view_class = getattr(callback, "view_class", None) or getattr(
                 callback, "cls", None
             )
@@ -909,9 +801,6 @@ class AuthThrottleTests(ApiTestCase):
         self.assertIn("recovery", api_settings.DEFAULT_THROTTLE_RATES)
 
     def test_register_rate_limit_engages(self):
-        """A second registration inside a 1/min 'register' budget is 429'd
-        and creates no account. DRF binds THROTTLE_RATES at import, so the
-        rate is patched on the throttle class rather than via override_settings."""
         rates = dict(api_settings.DEFAULT_THROTTLE_RATES)
         rates["register"] = "1/min"
         with mock.patch.object(ScopedRateThrottle, "THROTTLE_RATES", rates):
@@ -922,10 +811,6 @@ class AuthThrottleTests(ApiTestCase):
         self.assertFalse(User.objects.filter(username="second").exists())
 
     def test_login_rate_limit_engages(self):
-        """The third login attempt inside a 2/min budget is 429'd — the
-        credential-stuffing bound. Success responses stay the pinned
-        TokenObtainPairView contract (access in the body; the refresh token
-        rides the HttpOnly cookie since SPEC-17-02 [R-17.12])."""
         self.make_user("ratelimited")
         rates = dict(api_settings.DEFAULT_THROTTLE_RATES)
         rates["auth"] = "2/min"
@@ -953,9 +838,6 @@ class AuthThrottleTests(ApiTestCase):
         self.assertEqual(throttled.status_code, 429, throttled.data)
 
     def test_verify_email_rate_limit_engages(self):
-        """A second verify inside a 1/min 'auth' budget is 429'd — before
-        scoping it answered an idempotent 200, giving token replay an
-        unbounded probe budget."""
         user = make_inactive_user("verifyrate")
         payload = {
             "uid": _encoded_user_id(user),
@@ -976,8 +858,6 @@ class AuthThrottleTests(ApiTestCase):
         self.assertEqual(throttled.status_code, 429, throttled.data)
 
     def test_password_reset_confirm_rate_limit_engages(self):
-        """The second confirm inside a 1/min 'auth' budget is 429'd; the
-        one in-budget confirm still changes the password."""
         user = self.make_user("confirmrate")
         payload = {
             "uid": _encoded_user_id(user),
@@ -1000,9 +880,6 @@ class AuthThrottleTests(ApiTestCase):
         self.assertTrue(user.check_password("N3w-Passphrase-77"))
 
     def test_token_refresh_rate_limit_engages(self):
-        """The second refresh inside a 1/min 'auth' budget is 429'd,
-        bounding refresh-token brute forcing; the in-budget contract is
-        unchanged (an access token is issued)."""
         user = self.make_user("refreshrate")
         refresh = RefreshToken.for_user(user)
         rates = dict(api_settings.DEFAULT_THROTTLE_RATES)
@@ -1020,9 +897,6 @@ class AuthThrottleTests(ApiTestCase):
         self.assertEqual(throttled.status_code, 429, throttled.data)
 
     def test_username_available_rate_limit_engages(self):
-        """The GET existence oracle is throttled too (ScopedRateThrottle
-        has no safe-method exemption): the second username probe inside a
-        1/min 'username-probe' budget is 429'd, capping cheap enumeration."""
         rates = dict(api_settings.DEFAULT_THROTTLE_RATES)
         rates["username-probe"] = "1/min"
         with mock.patch.object(ScopedRateThrottle, "THROTTLE_RATES", rates):
@@ -1038,8 +912,6 @@ class AuthThrottleTests(ApiTestCase):
         self.assertEqual(throttled.status_code, 429, throttled.data)
 
     def test_resend_verification_rate_limit_engages(self):
-        """The second resend inside a 1/min 'recovery' budget is 429'd and
-        sends nothing further — the per-IP mail-bomb bound."""
         make_inactive_user("resendrate")
         rates = dict(api_settings.DEFAULT_THROTTLE_RATES)
         rates["recovery"] = "1/min"
@@ -1058,11 +930,9 @@ class AuthThrottleTests(ApiTestCase):
         self.assertEqual(first.status_code, 200, first.data)
         self.assertEqual(len(mail.outbox), 1)
         self.assertEqual(throttled.status_code, 429, throttled.data)
-        self.assertEqual(len(mail.outbox), 1)  # throttled request triggers no send
+        self.assertEqual(len(mail.outbox), 1)
 
     def test_forgot_username_rate_limit_engages(self):
-        """One username email per 'recovery' budget: the in-budget request
-        sends exactly one mail, the throttled replay adds none."""
         self.make_user("usernamerate")
         rates = dict(api_settings.DEFAULT_THROTTLE_RATES)
         rates["recovery"] = "1/min"
@@ -1081,12 +951,9 @@ class AuthThrottleTests(ApiTestCase):
         self.assertEqual(first.status_code, 200, first.data)
         self.assertIn("Your username is: usernamerate", mail.outbox[0].body)
         self.assertEqual(throttled.status_code, 429, throttled.data)
-        self.assertEqual(len(mail.outbox), 1)  # throttled request triggers no send
+        self.assertEqual(len(mail.outbox), 1)
 
     def test_password_reset_rate_limit_engages(self):
-        """One reset email per 'recovery' budget — and the throttled
-        replay stays 429'd for an unknown address too, so the limiter
-        itself cannot be used to differentially probe accounts."""
         self.make_user("resetrate")
         rates = dict(api_settings.DEFAULT_THROTTLE_RATES)
         rates["recovery"] = "1/min"
@@ -1105,12 +972,9 @@ class AuthThrottleTests(ApiTestCase):
         self.assertEqual(first.status_code, 200, first.data)
         self.assertEqual(len(mail.outbox), 1)
         self.assertEqual(throttled.status_code, 429, throttled.data)
-        self.assertEqual(len(mail.outbox), 1)  # throttled request triggers no send
+        self.assertEqual(len(mail.outbox), 1)
 
     def test_recovery_throttling_preserves_uniform_bodies(self):
-        """Throttling must not alter the non-429 contract of the uniform
-        anonymous recovery flows: known or unknown email alike, every
-        in-budget request still answers the exact pinned 200 body."""
         self.make_user("uniformrate")
         rates = dict(api_settings.DEFAULT_THROTTLE_RATES)
         rates["recovery"] = "3/min"
@@ -1160,21 +1024,12 @@ class AuthThrottleTests(ApiTestCase):
                 )
             },
         )
-        # only the known-address reset probe sent mail — the ghost probes
-        # sent none, and throttling added no extra bodies or sends
         self.assertEqual(len(mail.outbox), 1)
         self.assertEqual(mail.outbox[0].to, ["uniformrate@example.com"])
 
 
 @tag("accounts")
 class JwtLifecycleConfigTests(SimpleTestCase):
-    """SPEC-17-01 [R-17.5]: the JWT lifecycle is explicitly configured, not
-    library-defaulted. Rotation + blacklist-after-rotation are mandatory
-    (a non-rotating refresh token is a long-lived bearer credential), the
-    blacklist app is installed, and both lifetimes are env-driven with the
-    documented defaults. The env-override path is pinned separately in
-    tests/test_settings_security.py (subprocess, clean environment)."""
-
     def test_blacklist_app_is_installed(self):
         self.assertIn(
             "rest_framework_simplejwt.token_blacklist", settings.INSTALLED_APPS
@@ -1196,11 +1051,6 @@ class JwtLifecycleConfigTests(SimpleTestCase):
 
 @tag("accounts")
 class LogoutTests(ApiTestCase):
-    """SPEC-17-01 [R-17.8] Secure logout: POST /api/accounts/logout/ with a
-    valid access token blacklists the presented refresh token, so the
-    session cannot outlive the logout — a stolen refresh token cannot mint
-    new access tokens afterwards."""
-
     def _auth_access(self, username):
         user = self.make_user(username)
         refresh = RefreshToken.for_user(user)
@@ -1242,16 +1092,7 @@ class LogoutTests(ApiTestCase):
 
 @tag("accounts")
 class RefreshRotationTests(ApiTestCase):
-    """SPEC-17-01 [R-17.5]: ROTATE_REFRESH_TOKENS + BLACKLIST_AFTER_ROTATION —
-    every refresh mints a new refresh token in the response and the
-    presented one is blacklisted, so a replayed refresh token is dead on
-    arrival while the legitimate client keeps a fresh pair."""
-
     def test_refresh_rotates_and_blacklists_the_presented_token(self):
-        """SPEC-17-01 semantics re-pinned by SPEC-17-02: a body-presented
-        refresh token still rotates + blacklists (non-browser API clients),
-        but the rotated token now rides the HttpOnly cookie instead of the
-        response body."""
         user = self.make_user("rotator")
         original = RefreshToken.for_user(user)
         res = self.client.post(
@@ -1275,11 +1116,6 @@ class RefreshRotationTests(ApiTestCase):
 
 @tag("accounts")
 class SessionInvalidationOnPasswordResetTests(ApiTestCase):
-    """SPEC-17-01 [R-17.10] Session invalidation after critical account
-    changes: confirming a password reset blacklists every outstanding
-    refresh token issued to the account (all concurrent sessions die with
-    it), while other accounts' sessions are untouched."""
-
     def _confirm_reset(self, user, password="N3w-Passphrase-77"):
         return self.client.post(
             "/api/accounts/password-reset/confirm/",
@@ -1330,25 +1166,15 @@ COOKIE_NAME = settings.JWT_REFRESH_COOKIE_NAME
 
 @tag("accounts")
 class RefreshCookieConfigTests(SimpleTestCase):
-    """SPEC-17-02 [R-17.12]: the refresh-token cookie contract is explicit,
-    not library-defaulted. Name/Path/SameSite are env-driven settings; Secure
-    follows DEBUG (V-02 fails closed), HttpOnly is unconditional — browser
-    JS must never be able to read the refresh token (spec §17.1)."""
-
     def test_cookie_settings_have_documented_defaults(self):
         self.assertEqual(COOKIE_NAME, "refresh_token")
-        # Path covers both mounts of accounts/urls.py: legacy /api/accounts/
-        # and the v1 namespace /api/v1/account/.
+        # Covers both mounts: legacy /api/accounts/ and the v1 namespace /api/v1/account/.
         self.assertEqual(settings.JWT_REFRESH_COOKIE_PATH, "/api/")
         self.assertEqual(settings.JWT_REFRESH_COOKIE_SAMESITE, "Lax")
 
 
 @tag("accounts")
 class RefreshCookieTests(ApiTestCase):
-    """SPEC-17-02 [R-17.12]: the refresh token leaves the JSON body (and
-    localStorage) and rides an HttpOnly backend-set cookie. Login sets it,
-    refresh re-sets it on rotation, logout blacklists it and clears it."""
-
     def _login(self, username="cookiebuyer", password="S3cure-Passphrase!"):
         self.make_user(username, password=password)
         res = self.client.post(
@@ -1356,9 +1182,6 @@ class RefreshCookieTests(ApiTestCase):
             {"username": username, "password": password},
             format="json",
         )
-        # Logout requires an authenticated caller; the login response's
-        # access token (kept memory-only per R-17.12) doubles as the
-        # fixture's auth header.
         self.auth(res.data["access"])
         return res
 
@@ -1366,16 +1189,12 @@ class RefreshCookieTests(ApiTestCase):
         res = self._login()
         self.assertEqual(res.status_code, 200, res.data)
         self.assertIn("access", res.data)
-        # The body is the leak surface: a refresh token returned as JSON is
-        # readable by any injected script, exactly what R-17.12 forbids.
         self.assertNotIn("refresh", res.data)
         cookie = res.cookies[COOKIE_NAME]
         self.assertTrue(cookie["httponly"])
         self.assertTrue(cookie["secure"], "tests run with DEBUG=False")
         self.assertEqual(cookie["samesite"], "Lax")
         self.assertEqual(cookie["path"], settings.JWT_REFRESH_COOKIE_PATH)
-        # Cookie lifetime is synced to the refresh-token lifetime, so the
-        # browser never carries a cookie older than the token it holds.
         self.assertEqual(
             cookie["max-age"],
             int(settings.SIMPLE_JWT["REFRESH_TOKEN_LIFETIME"].total_seconds()),
@@ -1396,13 +1215,8 @@ class RefreshCookieTests(ApiTestCase):
         self.assertNotIn("refresh", res.data)
         rotated = self.client.cookies[COOKIE_NAME].value
         self.assertNotEqual(rotated, original)
-        # The fresh cookie keeps the session alive end-to-end (empty body:
-        # the backend must find the token in its own cookie).
         next = self.client.post("/api/accounts/token/refresh/", {}, format="json")
         self.assertEqual(next.status_code, 200, next.data)
-        # Rotation interplay [R-17.5]: the presented cookie token dies even
-        # though it never appeared in a request body; the rejection also
-        # sweeps the now-stale cookie (401's Set-Cookie wins the jar).
         replay = self.client.post(
             "/api/accounts/token/refresh/", {"refresh": original}, format="json"
         )
@@ -1444,24 +1258,12 @@ class RefreshCookieTests(ApiTestCase):
 
 @tag("accounts")
 class RefreshBodyWindowConfigTests(SimpleTestCase):
-    """SPEC-Q-P1 (F7 backend half): the dual-accept window for the legacy
-    body-borne refresh token is configuration, not a code path - a flag, an
-    anchor and a duration, all env-driven, with the generous default (open,
-    90 days past the cutover anchor) that keeps Q-F3's frontend migration
-    from bricking an already-logged-in browser. The literals below are the
-    shipped defaults pinned on purpose: changing them is a deployment
-    decision and must move this test in the same commit."""
-
     def test_window_defaults_are_open_and_generous(self):
         self.assertTrue(settings.JWT_REFRESH_BODY_ACCEPT_ENABLED)
         self.assertEqual(settings.JWT_REFRESH_BODY_ACCEPT_START, date(2026, 10, 15))
         self.assertEqual(settings.JWT_REFRESH_BODY_ACCEPT_DAYS, 90)
 
     def test_window_anchor_env_parsing_is_fail_safe(self):
-        # All three readings of the anchor knob: absent -> default, valid
-        # ISO date -> parsed, malformed -> default rather than a boot crash
-        # (a typo must never take the deployment down, and must not silently
-        # close the window early either - the default is the generous one).
         with mock.patch.dict(os.environ, {}, clear=False):
             os.environ.pop("TEST_REFRESH_ANCHOR", None)
             self.assertEqual(
@@ -1480,8 +1282,6 @@ class RefreshBodyWindowConfigTests(SimpleTestCase):
             )
 
     def test_window_knobs_are_documented_in_env_example(self):
-        # The knobs exist only as long as a deployer can find them; the
-        # example file is where every env-driven key in this repo is named.
         with open(".env.example", encoding="utf-8") as handle:
             example = handle.read()
         for key in (
@@ -1494,16 +1294,6 @@ class RefreshBodyWindowConfigTests(SimpleTestCase):
 
 @tag("accounts")
 class RefreshDualAcceptAndOriginTests(ApiTestCase):
-    """SPEC-Q-P1 (F7 backend half) on /api/accounts/token/refresh/ (the route
-    spec section 9.2's /auth/refresh row maps to, mounted under /api/accounts/
-    and /api/v1/account/): the rotated refresh token leaves ONLY as the
-    HttpOnly+Secure+SameSite cookie, a cross-origin POST is refused by an
-    explicit Origin gate (SameSite=Lax alone does not cover same-site sibling
-    hosts, and DRF's csrf_exempt dispatch means Django's middleware never
-    checks Origin here), and the legacy body carrier is accepted only while
-    the env-gated dual-accept window is open - closed, it is refused by name
-    while the cookie path keeps working, so no logged-in browser is bricked."""
-
     REFRESH = "/api/accounts/token/refresh/"
 
     def _login(self, username="seambuyer"):
@@ -1517,35 +1307,21 @@ class RefreshDualAcceptAndOriginTests(ApiTestCase):
         return res
 
     def _legacy_refresh(self, username="legacybuyer"):
-        """A refresh token exactly as the pre-Q-F3 client presents it: body
-        only, no cookie in the jar - this is the carrier the window exists
-        to keep alive."""
         user = self.make_user(username)
         return str(RefreshToken.for_user(user))
-
-    # ------------------------------------------------------------------
-    # issuance: cookie only, never the body
-    # ------------------------------------------------------------------
 
     def test_refresh_issues_the_token_only_as_an_httponly_secure_cookie(self):
         self._login()
         original = self.client.cookies[COOKIE_NAME].value
         res = self.client.post(self.REFRESH, {}, format="json")
         self.assertEqual(res.status_code, 200, res.data)
-        # The body is the leak surface: a refresh token in JSON is readable
-        # by any injected script - R-17.12 forbids it on every response.
         self.assertNotIn("refresh", res.data)
         cookie = res.cookies[COOKIE_NAME]
         self.assertTrue(cookie["httponly"])
         self.assertTrue(cookie["secure"], "tests run with DEBUG=False")
         self.assertEqual(cookie["samesite"], "Lax")
         self.assertEqual(cookie["path"], settings.JWT_REFRESH_COOKIE_PATH)
-        # Rotation really re-set it rather than passing the old value on.
         self.assertNotEqual(cookie.value, original)
-
-    # ------------------------------------------------------------------
-    # Origin/CSRF gate
-    # ------------------------------------------------------------------
 
     def test_cross_origin_refresh_is_rejected_and_the_cookie_survives(self):
         self._login("originbuyer")
@@ -1560,15 +1336,11 @@ class RefreshDualAcceptAndOriginTests(ApiTestCase):
             )
         self.assertEqual(res.status_code, 403, res.data)
         self.assertNotIn("access", res.data)
-        # An attacker's probe must not sweep the victim's live cookie...
         self.assertEqual(self.client.cookies[COOKIE_NAME].value, original)
-        # ...and must never reach the rotation transaction's row lock.
         lock.assert_not_called()
 
     def test_origin_gate_wins_over_the_window_gate(self):
-        # Window closed + foreign origin must answer 403 (the origin verdict),
-        # not 400 (the window verdict) and not 200: the cross-site caller is
-        # refused before any carrier question is asked.
+        # A foreign origin gets 403 (the origin verdict) before the carrier question is asked (400).
         token = self._legacy_refresh("evilbody")
         with override_settings(JWT_REFRESH_BODY_ACCEPT_ENABLED=False):
             res = self.client.post(
@@ -1598,15 +1370,8 @@ class RefreshDualAcceptAndOriginTests(ApiTestCase):
         )
         self.assertEqual(trusted.status_code, 200, trusted.data)
 
-    # ------------------------------------------------------------------
-    # dual-accept window
-    # ------------------------------------------------------------------
-
     def test_legacy_body_token_is_accepted_while_the_window_is_open(self):
         token = self._legacy_refresh()
-        # No Origin header either: a non-browser client presents the legacy
-        # carrier and makes no cross-site claim - both facts stay accepted
-        # while the window is open (the default posture).
         res = self.client.post(self.REFRESH, {"refresh": token}, format="json")
         self.assertEqual(res.status_code, 200, res.data)
         self.assertIn("access", res.data)
@@ -1614,10 +1379,7 @@ class RefreshDualAcceptAndOriginTests(ApiTestCase):
         self.assertTrue(self.client.cookies[COOKIE_NAME]["httponly"])
 
     def test_non_json_body_is_not_the_cookie_surface(self):
-        # A JSON list body is not a dict, and the cookie merge has never
-        # applied to a non-dict carrier (pre-Q-P1 behaviour, kept - the
-        # browser surface this seam defines is a JSON object), so the
-        # serializer's own validation answers it without a refill.
+        # The cookie merge has never applied to a non-dict carrier, so a list body goes straight to serializer validation.
         self._login("listbody")
         res = self.client.post(self.REFRESH, ["not-a-dict"], format="json")
         self.assertEqual(res.status_code, 400, res.data)
@@ -1629,8 +1391,6 @@ class RefreshDualAcceptAndOriginTests(ApiTestCase):
             res = self.client.post(self.REFRESH, {"refresh": token}, format="json")
         self.assertEqual(res.status_code, 400, res.data)
         self.assertNotIn("access", res.data)
-        # The refusal is NAMED for the legacy client, under this API's usual
-        # validation envelope - not the generic "field is required".
         self.assertIn("refresh", res.data["details"])
         self.assertIn(
             "Legacy body refresh tokens are no longer accepted.",
@@ -1648,9 +1408,6 @@ class RefreshDualAcceptAndOriginTests(ApiTestCase):
         self.assertNotIn("access", res.data)
 
     def test_cookie_refresh_still_works_when_the_body_window_is_closed(self):
-        # The window retires the BODY carrier only. A browser that already
-        # holds the HttpOnly cookie refreshes exactly as before - this is
-        # the no-bricking guarantee the generous default protects.
         self._login("cookieafterclose")
         with override_settings(JWT_REFRESH_BODY_ACCEPT_ENABLED=False):
             res = self.client.post(self.REFRESH, {}, format="json")
@@ -1659,9 +1416,6 @@ class RefreshDualAcceptAndOriginTests(ApiTestCase):
         self.assertNotIn("refresh", res.data)
 
     def test_closed_window_prefers_the_cookie_over_a_stray_body_token(self):
-        # A transitional client may send both carriers. Once the window is
-        # shut the cookie is authoritative: a stale body token must not fail
-        # a request that carried a perfectly good cookie.
         self._login("bothcarriers")
         with override_settings(JWT_REFRESH_BODY_ACCEPT_ENABLED=False):
             res = self.client.post(
@@ -1670,16 +1424,8 @@ class RefreshDualAcceptAndOriginTests(ApiTestCase):
         self.assertEqual(res.status_code, 200, res.data)
         self.assertIn("access", res.data)
 
-    # ------------------------------------------------------------------
-    # rotation mutation gate
-    # ------------------------------------------------------------------
-
     def test_successful_refresh_locks_the_presented_token_row(self):
-        # Rotation mutates the blacklist tables; simplejwt's check-then-
-        # blacklist is not atomic on its own, so the OutstandingToken row of
-        # the presented token is locked FOR UPDATE inside the rotation's
-        # transaction - a concurrent replay of the same token serializes
-        # behind the rotation and dies blacklisted instead of double-spending.
+        # simplejwt's check-then-blacklist is not atomic, so the presented token's OutstandingToken row is locked FOR UPDATE; a concurrent replay then dies blacklisted.
         self._login("lockbuyer")
         real_lock = OutstandingToken.objects.select_for_update
         with mock.patch(
@@ -1691,20 +1437,8 @@ class RefreshDualAcceptAndOriginTests(ApiTestCase):
         lock.assert_called_once()
 
 
-# ---------------------------------------------------------------------------
-# SPEC-9-T4 [R-9.2.20]: owner-scoped saved addresses
-# ---------------------------------------------------------------------------
-
-
 @tag("accounts")
 class AddressApiTests(ApiTestCase):
-    """Saved-address CRUD scoped to the authenticated owner.
-
-    Every request goes through the real JWT login, so the 401, the owner
-    filter and the uniform 404 are exercised on the same surface the
-    storefront uses; no test bypasses the viewset's queryset.
-    """
-
     LIST = "/api/v1/account/addresses/"
     LEGACY_LIST = "/api/accounts/addresses/"
 
@@ -1736,8 +1470,6 @@ class AddressApiTests(ApiTestCase):
         )
 
     def errors(self, res):
-        # SPEC-9-03 envelopes every DRF exception; the field errors the
-        # caller acts on live under "details", not at the top level.
         return res.data.get("details", res.data)
 
     def test_anonymous_requests_are_401(self):
@@ -1789,7 +1521,6 @@ class AddressApiTests(ApiTestCase):
             intruder.patch(detail, {"city": "Pune"}, format="json").status_code, 404
         )
         self.assertEqual(intruder.delete(detail).status_code, 404)
-        # The owner's row survived the attempted tampering untouched.
         row = Address.objects.get(pk=pk)
         self.assertEqual(row.user, self.user)
         self.assertEqual(row.city, "Mumbai")

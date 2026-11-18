@@ -89,7 +89,7 @@ describe("ShipmentTracking", () => {
 
       expect(html).not.toContain("<a ");
       expect(html).not.toContain("javascript:");
-      // The parcel itself still renders; only the link is withheld.
+      // The parcel renders; only the link is withheld.
       expect(html).toContain("BD123456");
     }
   });

@@ -2,9 +2,7 @@ import { fileURLToPath } from "node:url";
 import { defineConfig } from "vitest/config";
 
 export default defineConfig({
-  // The app resolves every module through `@/…` (tsconfig `paths`). Vitest
-  // does not read that map, so component specs would fail to import the very
-  // component under test without the same alias.
+  // Vitest does not read tsconfig `paths`, so specs need the same `@` alias.
   resolve: {
     alias: {
       "@": fileURLToPath(new URL("./src", import.meta.url)),
@@ -12,8 +10,7 @@ export default defineConfig({
   },
   test: {
     environment: "node",
-    // Both extensions: a *.test.tsx component spec would otherwise be
-    // silently dropped from the run, which reads as "no tests exist".
+    // Both extensions, or *.test.tsx specs silently vanish from the run.
     include: ["src/**/*.test.{ts,tsx}"],
   },
 });
