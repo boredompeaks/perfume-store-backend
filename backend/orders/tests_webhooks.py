@@ -554,10 +554,11 @@ class CaptureReconciliationTests(WebhookTestCase):
     def test_the_outbox_row_is_written_inside_the_capture_transaction(self):
         """Rollback-together: the outbox row is written inside the capture transaction, so it disappears with it."""
         order = self.make_pending_order()
+        body = self.capture_event(order)
 
         with self.assertRaises(RuntimeError):
             with transaction.atomic():
-                self.deliver(self.capture_event(order))
+                self.deliver(body)
                 self.assertEqual(
                     NotificationOutbox.objects.filter(
                         event_type=AuditEvent.EventType.ORDER_PAID
