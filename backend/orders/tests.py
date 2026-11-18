@@ -7,6 +7,7 @@ from datetime import timedelta
 from decimal import Decimal
 from unittest import mock
 
+from django.apps import apps
 from django.conf import settings
 from django.contrib.auth.models import User
 from django.core import mail
@@ -4574,9 +4575,9 @@ class MaintenanceModeTests(OrderTestBase):
     before any write, keeps read surfaces up, and is read fresh per request."""
 
     def _set_maintenance(self, active):
-        from ops.models import SiteSettings
-
-        row = SiteSettings.load()
+        # Same app-registry read as the gate: this test module sits in the
+        # orders layer, which may not import ops.
+        row = apps.get_model("ops", "SiteSettings").load()
         row.maintenance_mode = active
         row.save()
         return row
