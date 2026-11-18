@@ -1,15 +1,20 @@
 import os
+from decimal import Decimal
 from unittest.mock import patch
 
+from django.core import mail
 from django.test import SimpleTestCase
 
 import config.settings as config_settings
+from common import notifications
 from common.models import AuditEvent
 from common.testing import (
     TEST_RAZORPAY_KEY_ID,
     TEST_RAZORPAY_KEY_SECRET,
     ApiTestCase,
 )
+from orders.models import Order
+from orders.views import checkout as checkout_views
 
 
 class LogLevelEnvTests(SimpleTestCase):
@@ -225,6 +230,97 @@ class VerifyPaymentLogTests(ApiTestCase):
 
 
 class NoSecretsInLogTests(ApiTestCase):
+    def _make_order(self, **overrides):
+        fields = {
+            "full_name": "Log Buyer",
+            "phone": "9876543210",
+            "address": "12 Rose Lane",
+            "city": "Mumbai",
+            "state": "Maharashtra",
+            "pincode": "400001",
+            "discount_amount": Decimal("0.00"),
+            "shipping_amount": Decimal("0.00"),
+            "total_amount": Decimal("499.99"),
+        }
+        fields.update(overrides)
+        return Order.objects.create(**fields)
+
+    def test_no_recipient_address_in_email_or_checkout_logs(self):
+        user = self.make_user("logbuyer")
+        order = self._make_order(user=user)
+
+        with self.assertLogs("common.notifications", level="INFO") as logs:
+            notifications.dispatch(AuditEvent.EventType.ORDER_PAID, {"order": order})
+
+        self.assertEqual(len(mail.outbox), 1)
+        self.assertEqual(mail.outbox[0].to, [user.email])
+        output = "\n".join(logs.output)
+        self.assertIn("email sent", output)
+        self.assertNotIn(user.email, output)
+        self.assertIn(str(order.id), output)
+
+        # The guest branch of customer_name is the email, and the guest
+        # checkout door is refused, so the replay helper is driven directly.
+        guest_email = "guest-leak@example.com"
+        guest_order = self._make_order(
+            user=None,
+            guest_email=guest_email,
+            guest_token="logs-baseline-guest-token",
+        )
+        with self.assertLogs("orders.views.checkout", level="INFO") as logs:
+            response = checkout_views._collapse_onto_duplicate(guest_order, None, user)
+
+        self.assertEqual(response.status_code, 200)
+        output = "\n".join(logs.output)
+        self.assertIn("Checkout dedup", output)
+        self.assertNotIn(guest_email, output)
+        self.assertIn(str(guest_order.id), output)
+
+    def test_no_username_in_checkout_replay_or_shipping_warning(self):
+        user = self.make_user("loggingbaseline")
+        _, token = self.api_login(user.username)
+        self.auth(token)
+        product = self.make_product(stock=10)
+        self.seed_session_cart([(product, 2)])
+
+        first = self.checkout()
+        self.assertEqual(first.status_code, 201, first.data)
+        order_id = first.data["id"]
+
+        with self.assertLogs("orders.views", level="INFO") as logs:
+            replay = self.checkout()
+
+        self.assertEqual(replay.status_code, 200, replay.data)
+        output = "\n".join(logs.output)
+        self.assertIn("Checkout dedup", output)
+        self.assertNotIn(user.username, output)
+        self.assertIn(str(order_id), output)
+
+        with self.assertLogs("orders.views", level="INFO") as logs:
+            keyed = self.client.post(
+                "/api/orders/checkout/",
+                self.checkout_payload(),
+                format="json",
+                HTTP_IDEMPOTENCY_KEY="logging-baseline-key",
+            )
+
+        self.assertEqual(keyed.status_code, 200, keyed.data)
+        output = "\n".join(logs.output)
+        self.assertIn("Checkout idempotency", output)
+        self.assertNotIn(user.username, output)
+        self.assertIn(str(order_id), output)
+
+        # No ShippingMethod exists in a clean test database, so this checkout
+        # takes the silent-zero warning branch; the pk is its correlation key.
+        with self.assertLogs("orders.views", level="WARNING") as logs:
+            priced = self.checkout(city="Pune")
+
+        self.assertEqual(priced.status_code, 201, priced.data)
+        output = "\n".join(logs.output)
+        self.assertIn("NO shipping charge", output)
+        self.assertNotIn(user.username, output)
+        self.assertIn(str(user.pk), output)
+
     def test_signature_failure_output_has_no_razorpay_credentials(self):
         self.make_user("buyer")
         self.api_login()
