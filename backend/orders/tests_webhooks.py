@@ -98,16 +98,50 @@ class WebhookTestCase(ApiTestCase):
             "contains": ["payment"],
             "payload": {
                 "payment": {
-                    "entity": "payment",
-                    "id": payment_id,
-                    "amount": amount_minor,
-                    "currency": "INR",
-                    "order_id": order.razorpay_order_id,
-                    "captured": True,
-                    "status": "captured",
+                    "entity": {
+                        "entity": "payment",
+                        "id": payment_id,
+                        "amount": amount_minor,
+                        "currency": "INR",
+                        "order_id": order.razorpay_order_id,
+                        "captured": True,
+                        "status": "captured",
+                    }
                 }
             },
         }
+
+    def capture_event_both_readers(
+        self,
+        order,
+        payment_id="pay_TEST9",
+        amount_minor=120050,
+        currency="INR",
+    ):
+        """A capture body both the pre-fix and the fixed reader can bind.
+
+        The pre-fix reader takes ``payload.payment`` as the payment; the fixed
+        reader takes ``payload.payment.entity``. Mirror the entity's fields one
+        level up so the currency decision, not the envelope fix, is what each
+        side observes.
+        """
+        body = self.capture_event(
+            order, payment_id=payment_id, amount_minor=amount_minor
+        )
+        entity = body["payload"]["payment"]["entity"]
+        if currency is None:
+            entity.pop("currency", None)
+        else:
+            entity["currency"] = currency
+            body["payload"]["payment"]["currency"] = currency
+        body["payload"]["payment"].update(
+            {
+                "id": entity["id"],
+                "amount": entity["amount"],
+                "order_id": entity["order_id"],
+            }
+        )
+        return body
 
     def hold_stock(self, order, quantity=1, status=StockReservation.Status.ACTIVE):
         return StockReservation.objects.create(
@@ -207,7 +241,7 @@ class SignatureVerificationTests(WebhookTestCase):
         order = self.make_pending_order()
         body = self.capture_event(order)
         signature = self.sign(json.dumps(body).encode("utf-8"))
-        body["payload"]["payment"]["amount"] = 1
+        body["payload"]["payment"]["entity"]["amount"] = 1
 
         response = self.deliver(body, signature=signature)
 
@@ -366,7 +400,7 @@ class CaptureReconciliationTests(WebhookTestCase):
         # a payment: it is kept, with no order to attach, and moves nothing.
         order = self.make_pending_order()
         body = self.capture_event(order)
-        body["payload"]["payment"]["order_id"] = "order_NOT_OURS"
+        body["payload"]["payment"]["entity"]["order_id"] = "order_NOT_OURS"
 
         response = self.deliver(body, event_id="evt_TEST0009")
 
@@ -442,7 +476,10 @@ class CaptureReconciliationTests(WebhookTestCase):
         for index, payment in enumerate(cases):
             with self.subTest(index=index):
                 response = self.deliver(
-                    {"event": "payment.captured", "payload": {"payment": payment}},
+                    {
+                        "event": "payment.captured",
+                        "payload": {"payment": {"entity": payment}},
+                    },
                     event_id=f"evt_MALFORMED{index}",
                 )
                 self.assertEqual(response.status_code, 200)
@@ -559,6 +596,103 @@ class CaptureReconciliationTests(WebhookTestCase):
         paid = AuditEvent.objects.get(event_type=AuditEvent.EventType.ORDER_PAID)
         self.assertEqual(paid.order, order)
         self.assertEqual(paid.detail["total_amount"], "1200.50")
+
+    def test_real_envelope_capture_applies_and_binds_the_payment(self):
+        # The provider's delivery wraps the payment in payload.payment.entity;
+        # the flat payload.payment shape is not a delivery it sends.
+        order = self.make_pending_order()
+
+        response = self.deliver(self.capture_event(order))
+
+        self.assertEqual(response.status_code, 200)
+        event = PaymentEvent.objects.get()
+        self.assertEqual(event.outcome, PaymentEvent.Outcome.APPLIED)
+        self.assertEqual(event.order, order)
+        self.assertEqual(event.amount, Decimal("1200.50"))
+        order.refresh_from_db()
+        self.assertEqual(order.payment_status, "captured")
+        self.assertEqual(order.razorpay_payment_id, "pay_TEST9")
+
+    def test_flat_payload_shape_is_no_longer_accepted(self):
+        order = self.make_pending_order()
+        flat = {
+            "entity": "event",
+            "event": "payment.captured",
+            "payload": {
+                "payment": {
+                    "entity": "payment",
+                    "id": "pay_TEST9",
+                    "amount": 120050,
+                    "currency": "INR",
+                    "order_id": order.razorpay_order_id,
+                }
+            },
+        }
+
+        response = self.deliver(flat)
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(
+            PaymentEvent.objects.get().outcome, PaymentEvent.Outcome.REFUSED
+        )
+        order.refresh_from_db()
+        self.assertEqual(order.payment_status, "pending")
+        self.assertIsNone(order.razorpay_payment_id)
+        self.assertIsNone(order.paid_at)
+
+    def test_capture_in_a_different_currency_is_recorded_and_refused(self):
+        # AUD-008: the same numeric amount in another currency is not this
+        # order's money. The body is readable by the pre-fix and fixed parsers,
+        # so base applies the USD capture and head must refuse it.
+        order = self.make_pending_order()
+        order.currency = "INR"
+        order.save(update_fields=["currency"])
+        body = self.capture_event_both_readers(order, currency="USD")
+
+        response = self.deliver(body)
+
+        self.assertEqual(response.status_code, 200)
+        event = PaymentEvent.objects.get()
+        self.assertEqual(event.outcome, PaymentEvent.Outcome.REFUSED)
+        self.assertEqual(event.amount, Decimal("1200.50"))
+        order.refresh_from_db()
+        self.assertEqual(order.currency, "INR")
+        self.assertEqual(order.payment_status, "pending")
+        self.assertIsNone(order.razorpay_payment_id)
+        self.assertIsNone(order.paid_at)
+
+    def test_capture_with_an_unusable_currency_is_recorded_and_refused(self):
+        # Missing or blank on either side cannot be reconciled; a blank order
+        # currency would otherwise compare equal to a blank capture currency.
+        cases = [
+            ("missing capture currency", None, "INR"),
+            ("blank capture currency", "", "INR"),
+            ("missing order currency", "INR", ""),
+        ]
+
+        for index, (label, currency, order_currency) in enumerate(cases):
+            with self.subTest(label=label):
+                order = self.make_pending_order(
+                    gateway_order=f"order_CURRENCY{index}",
+                    username=f"currency-{index}",
+                )
+                order.currency = order_currency
+                order.save(update_fields=["currency"])
+                body = self.capture_event_both_readers(
+                    order,
+                    payment_id=f"pay_CURRENCY{index}",
+                    currency=currency,
+                )
+
+                response = self.deliver(body, event_id=f"evt_CURRENCY{index}")
+
+                self.assertEqual(response.status_code, 200)
+                event = PaymentEvent.objects.get(event_id=f"evt_CURRENCY{index}")
+                self.assertEqual(event.outcome, PaymentEvent.Outcome.REFUSED)
+                order.refresh_from_db()
+                self.assertEqual(order.payment_status, "pending")
+                self.assertIsNone(order.razorpay_payment_id)
+                self.assertIsNone(order.paid_at)
 
 
 class WebhookSaleCommitTests(WebhookTestCase):
@@ -746,10 +880,12 @@ class RefundEventTests(WebhookTestCase):
                 "event": "payment.refunded",
                 "payload": {
                     "refund": {
-                        "id": "rfnd_TEST1",
-                        "payment_id": "pay_TEST9",
-                        "amount": 120050,
-                        "status": "processed",
+                        "entity": {
+                            "id": "rfnd_TEST1",
+                            "payment_id": "pay_TEST9",
+                            "amount": 120050,
+                            "status": "processed",
+                        }
                     }
                 },
             }
@@ -766,6 +902,35 @@ class RefundEventTests(WebhookTestCase):
         self.assertEqual(order.payment_status, "captured")
         self.assertIsNone(order.refunded_at)
 
+    def test_real_envelope_refund_echo_binds_the_payment(self):
+        order = self.make_pending_order(gateway_payment="pay_TEST9")
+
+        response = self.deliver(
+            {
+                "entity": "event",
+                "event": "payment.refunded",
+                "payload": {
+                    "refund": {
+                        "entity": {
+                            "id": "rfnd_REAL1",
+                            "payment_id": "pay_TEST9",
+                            "amount": 120050,
+                            "status": "processed",
+                        }
+                    }
+                },
+            },
+            event_id="evt_REFUND_REAL",
+        )
+
+        self.assertEqual(response.status_code, 200)
+        event = PaymentEvent.objects.get()
+        self.assertEqual(event.outcome, PaymentEvent.Outcome.RECORDED)
+        self.assertEqual(event.order, order)
+        self.assertEqual(event.gateway_payment_id, "pay_TEST9")
+        self.assertEqual(event.amount, Decimal("1200.50"))
+        self.assertFalse(Refund.objects.exists())
+
     def test_provider_spelling_of_a_settled_refund_is_also_recorded(self):
         order = self.make_pending_order(gateway_payment="pay_TEST9")
 
@@ -774,9 +939,11 @@ class RefundEventTests(WebhookTestCase):
                 "event": "refund.processed",
                 "payload": {
                     "refund": {
-                        "id": "rfnd_TEST2",
-                        "payment_id": "pay_TEST9",
-                        "amount": 5000,
+                        "entity": {
+                            "id": "rfnd_TEST2",
+                            "payment_id": "pay_TEST9",
+                            "amount": 5000,
+                        }
                     }
                 },
             },
@@ -793,7 +960,10 @@ class RefundEventTests(WebhookTestCase):
 
     def test_refund_event_without_a_payment_reference_is_recorded_bare(self):
         response = self.deliver(
-            {"event": "payment.refunded", "payload": {"refund": {"id": "rfnd_X"}}},
+            {
+                "event": "payment.refunded",
+                "payload": {"refund": {"entity": {"id": "rfnd_X"}}},
+            },
             event_id="evt_REFUND3",
         )
 
@@ -884,7 +1054,9 @@ class MalformedDeliveryTests(WebhookTestCase):
         response = self.deliver(
             {
                 "event": "payment.refunded",
-                "payload": {"refund": {"id": "rfnd_X", "payment_id": oversized}},
+                "payload": {
+                    "refund": {"entity": {"id": "rfnd_X", "payment_id": oversized}}
+                },
             },
             event_id="evt_REFUND_BIG",
         )

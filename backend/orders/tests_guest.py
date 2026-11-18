@@ -770,13 +770,15 @@ class GuestOrderNullUserPathTests(GuestOrderRowTestBase):
             "contains": ["payment"],
             "payload": {
                 "payment": {
-                    "entity": "payment",
-                    "id": "pay_GUEST1",
-                    "amount": amount_minor,
-                    "currency": "INR",
-                    "order_id": order.razorpay_order_id,
-                    "captured": True,
-                    "status": "captured",
+                    "entity": {
+                        "entity": "payment",
+                        "id": "pay_GUEST1",
+                        "amount": amount_minor,
+                        "currency": "INR",
+                        "order_id": order.razorpay_order_id,
+                        "captured": True,
+                        "status": "captured",
+                    }
                 }
             },
         }

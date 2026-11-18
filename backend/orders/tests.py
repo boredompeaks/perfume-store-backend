@@ -4205,13 +4205,15 @@ class CartOrderCaptureClearTests(OrderTestBase):
             "contains": ["payment"],
             "payload": {
                 "payment": {
-                    "entity": "payment",
-                    "id": "pay_CARTCLEAR",
-                    "amount": 100000,
-                    "currency": "INR",
-                    "order_id": "order_CARTCLEAR",
-                    "captured": True,
-                    "status": "captured",
+                    "entity": {
+                        "entity": "payment",
+                        "id": "pay_CARTCLEAR",
+                        "amount": 100000,
+                        "currency": "INR",
+                        "order_id": "order_CARTCLEAR",
+                        "captured": True,
+                        "status": "captured",
+                    }
                 }
             },
         }
