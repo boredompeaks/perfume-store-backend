@@ -427,6 +427,55 @@ environment-only - repo-root `.env` / your platform's secret store, never the
 repository. It is the one string in this section a scanner may flag; it belongs
 in `.env`, and the committed `.env.example` shows it commented out.
 
+#### The status surface: two booleans, never the values
+
+`GET /api/v1/admin/health/` (behind `reports.read`) reports both silent-off
+channels beside the other checks, as booleans only:
+
+| Check | True when | Why it exists |
+| --- | --- | --- |
+| `alert_recipients_configured` | `ALERT_RECIPIENTS` parses to at least one address | every `ops.alerts.notify_*` returns `False` without a recipient, and nothing else said so |
+| `error_tracking_enabled` | the SDK accepted `SENTRY_DSN` at boot | an unset or refused DSN leaves the tracker inert; this is the truthful boot-time state, not merely "a DSN string exists" |
+
+Neither check carries an address, a DSN or any part of one. They are computed
+from the same gate the senders use (`ops.alerts._recipients()` and
+`settings.ERROR_TRACKING_ENABLED`), so the status cannot disagree with the
+behaviour it describes. They are **not** part of `status`: an unconfigured
+channel is a pre-launch gap, not an outage, and a 503 would page staff on every
+poll. The public `/health/` body is filtered by a whitelist and does not carry
+them.
+
+#### The probe: `manage.py sentry_send_probe`
+
+The email half has `email_send_probe`; this is its error-event twin. It reads
+`settings.SENTRY_DSN`, prints only deployment facts (environment, release,
+sample rates, "configured"), and sends exactly one handled-exception event
+through the same `common.sentry.init_sentry` the boot uses. Dry run by default:
+
+```bash
+# 1. the plan, and the default: NOTHING is sent
+docker compose run --rm -T backend python manage.py sentry_send_probe
+
+# 2. emit exactly one probe event
+docker compose run --rm -T backend python manage.py sentry_send_probe --send
+```
+
+Operator procedure when either channel is off:
+
+1. Set `SENTRY_DSN` (the project ingest DSN) and `ALERT_RECIPIENTS` (your own
+   staff mailboxes, comma-separated) in the deploy host's environment, then
+   restart the backend so `ERROR_TRACKING_ENABLED` is resolved at boot.
+2. Re-read `GET /api/v1/admin/health/`: both booleans must be `true`. For the
+   mail half, then run `email_send_probe --send` (above) and confirm arrival.
+3. Run `sentry_send_probe --send`, then confirm the probe event in the Sentry
+   project's Issues stream. "Accepted by the SDK transport" is not delivery -
+   check the project, exactly as the email probe asks you to check the inbox.
+
+Refusals are clean, non-zero and never echo the secret: an empty `SENTRY_DSN`
+names the key, a refused DSN names the SDK, and a transport that raises names
+the exception class only. None of them prints a traceback or the DSN; the
+command cannot print a value it never formats.
+
 ### Uptime: `/health/` and the container healthcheck (SPEC-22-04, R-22.12)
 
 `/health/` is public, cheap, and answers **503** while the database is
@@ -802,6 +851,17 @@ migration traceback), and one real checkout path still works. If the release
 also touched **data**, the rollback is not finished until
 `docs/runbook-incident-recovery.md` §4 passes - money, stock and coupon
 counters reconciled against the gateway.
+
+**Alert and error-channel changes roll back as code only.** The status flags
+(`alert_recipients_configured`, `error_tracking_enabled`) and
+`sentry_send_probe` add no migration, write no row and change no alert or
+reporting semantics: the probe emits one event. Rolling the code back leaves
+`SENTRY_DSN` and `ALERT_RECIPIENTS` exactly as they are, and the older image
+keeps delivering (or keeps staying silent) on the same configuration. If the
+rollback also unsets either key, the new status surface is the honest signal:
+both booleans flip to `false`, which is the documented disabled state, not an
+outage. Re-run `email_send_probe --send` and `sentry_send_probe --send` against
+the restored image before declaring the rollback complete.
 
 ## WAF ruleset for the front door (SPEC-22-06, R-22.16)
 

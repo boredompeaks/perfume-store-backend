@@ -31,6 +31,17 @@ TINY_PNG = base64.b64decode(
     "YPhfDwAChwGA60e6kgAAAABJRU5ErkJggg=="
 )
 
+# The staff health payload's exact check set; extended, never loosened.
+STAFF_HEALTH_CHECKS = {
+    "database",
+    "media_writable",
+    "shipping_configured",
+    "smtp_configured",
+    "razorpay_mode",
+    "alert_recipients_configured",
+    "error_tracking_enabled",
+}
+
 
 @tag("ops")
 class HealthEndpointTests(ApiTestCase):
@@ -148,13 +159,7 @@ class StaffHealthEndpointTests(ApiTestCase):
                 self.assertEqual(data["status"], "ok")
                 self.assertEqual(
                     set(data["checks"]),
-                    {
-                        "database",
-                        "media_writable",
-                        "shipping_configured",
-                        "smtp_configured",
-                        "razorpay_mode",
-                    },
+                    STAFF_HEALTH_CHECKS,
                 )
                 for key in (
                     "pending_orders",
@@ -166,6 +171,28 @@ class StaffHealthEndpointTests(ApiTestCase):
                 ):
                     with self.subTest(moved=key):
                         self.assertIn(key, data)
+
+    def test_health_detail_reports_both_flags_as_booleans_only(self):
+        # T-20261118-010: the retest needs a boolean surface for the two
+        # channels that fail closed; values (DSN, addresses) stay out of it.
+        client = self.fresh_client()
+        client.force_authenticate(self._role_user("config-reader", ROLE_FINANCE))
+        with override_settings(
+            ALERT_RECIPIENTS="ops@example.test,oncall@example.test",
+            ERROR_TRACKING_ENABLED=True,
+        ):
+            res = client.get(self.URL)
+        self.assertEqual(res.status_code, 200, res.data)
+        checks = res.data["checks"]
+        self.assertIn("alert_recipients_configured", checks)
+        self.assertIn("error_tracking_enabled", checks)
+        self.assertIsInstance(checks["alert_recipients_configured"], bool)
+        self.assertIsInstance(checks["error_tracking_enabled"], bool)
+        self.assertTrue(checks["alert_recipients_configured"])
+        self.assertTrue(checks["error_tracking_enabled"])
+        for leaked in ("ops@example.test", "oncall@example.test", "SENTRY_DSN"):
+            with self.subTest(leaked=leaked):
+                self.assertNotIn(leaked, str(res.data))
 
     def test_health_counts_pending_orders_and_carts(self):
         from cart.models import Cart
