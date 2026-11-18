@@ -38,6 +38,11 @@ from ..state import TRIGGER_ORDER_CREATE
 
 logger = logging.getLogger(__name__)
 
+
+class CouponUsageUnavailable(Exception):
+    """No coupon usage slot remains for the order being created."""
+
+
 # Cap mirrors the Order.idempotency_key column width, so an oversized value is a
 # 400 here instead of a database error at insert time.
 IDEMPOTENCY_KEY_HEADER = "Idempotency-Key"
@@ -496,6 +501,37 @@ def _resolve_checkout_coupon(body, cart, subtotal_amount):
         return None, Decimal("0.00"), None
 
     return _load_checkout_coupon(coupon_code, subtotal_amount)
+
+
+def _reserve_coupon(coupon, order):
+    """Hold one usage slot for ``order`` before it can reach capture.
+
+    # task: T-20261118-002
+    ``_load_checkout_coupon`` reads ``used_count`` without a lock, so two
+    submissions can both see the last slot free. The Coupon row is the
+    serialization point: lock it after the order row this transaction just
+    inserted (the writers' Order -> Coupon order) and count the orders that
+    still hold the coupon. Those rows ARE the reservations, so a rollback
+    releases the slot without restoring a counter, and ``used_count`` stays
+    the capture-time record of redemptions that the audit path reads.
+    """
+    Order.objects.select_for_update().get(pk=order.pk)
+    locked_coupon = Coupon.objects.select_for_update().get(pk=coupon.pk)
+
+    if locked_coupon.usage_limit is None:
+        return
+
+    held_by_other_orders = (
+        Order.objects.filter(coupon_id=locked_coupon.pk)
+        .exclude(pk=order.pk)
+        .exclude(status="cancelled")
+        .count()
+    )
+    if (
+        held_by_other_orders >= locked_coupon.usage_limit
+        or locked_coupon.used_count >= locked_coupon.usage_limit
+    ):
+        raise CouponUsageUnavailable
 
 
 def _collapse_onto_duplicate(duplicate, idempotency_key, user):
@@ -975,6 +1011,9 @@ def _create_order_atomically(
                 user, guest_email, body, coupon, discount_amount, shipping
             )
 
+            if coupon is not None:
+                _reserve_coupon(coupon, order)
+
             # Bind the cart to the order in the same transaction so the capture
             # path (even a later webhook with no session) can find and empty it.
             cart.order = order
@@ -996,6 +1035,13 @@ def _create_order_atomically(
         # never a silent free shipment.
         return Response(
             {"error": str(exc)},
+            status=status.HTTP_400_BAD_REQUEST,
+        )
+    except CouponUsageUnavailable:
+        # The order row is the reservation and it rolled back with the block, so
+        # the loser is refused before any provider intent exists.
+        return Response(
+            {"error": "This coupon has reached its usage limit"},
             status=status.HTTP_400_BAD_REQUEST,
         )
 

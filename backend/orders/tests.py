@@ -2,6 +2,7 @@ import hashlib
 import hmac
 import json
 import os
+import threading
 from datetime import timedelta
 from decimal import Decimal
 from unittest import mock
@@ -15,6 +16,7 @@ from django.db import IntegrityError, connection
 from django.test import SimpleTestCase, TransactionTestCase, override_settings, tag
 from django.utils import timezone
 from rest_framework.settings import api_settings
+from rest_framework.test import APIClient
 from rest_framework.throttling import ScopedRateThrottle
 
 from cart.models import Cart, CartItem
@@ -4339,3 +4341,230 @@ class ProductFreeShippingCheckoutTests(ApiTestCase):
         self.assertEqual(res.status_code, 400, res.data)
         self.assertIn("Shipping is not available", res.data["error"])
         self.assertFalse(Order.objects.filter(user=self.buyer).exists())
+
+
+@tag("orders")
+class CouponUsageReservationTests(OrderTestBase):
+    """The last usage slot is reserved by the order that holds it, before capture."""
+
+    def _separate_buyer(self, username):
+        user = self.make_user(username)
+        client = self.fresh_client()
+        self.api_login(username, client=client)
+        cart = Cart.objects.create(user=user)
+        CartItem.objects.create(cart=cart, product=self.product, quantity=2)
+        return user, client
+
+    def _capture(self, client, order, payment_id):
+        paid = client.post(
+            "/api/orders/payment/", {"order_id": order.id}, format="json"
+        )
+        self.assertEqual(paid.status_code, 200, paid.data)
+        order.refresh_from_db()
+        verified = client.post(
+            "/api/orders/payment/verify/",
+            {
+                "order_id": order.id,
+                "razorpay_order_id": order.razorpay_order_id,
+                "razorpay_payment_id": payment_id,
+                "razorpay_signature": "sig",
+            },
+            format="json",
+        )
+        self.assertEqual(verified.status_code, 200, verified.data)
+        order.refresh_from_db()
+
+    def test_two_checkouts_on_the_last_slot_leave_one_discounted_order(self):
+        coupon = self.make_coupon(code="ONCE", discount_value="10", usage_limit=1)
+        winner = self.create_order(coupon=coupon)
+
+        loser, loser_client = self._separate_buyer("coupon-loser")
+        second = loser_client.post(
+            "/api/orders/checkout/",
+            self.checkout_payload(coupon_code="ONCE"),
+            format="json",
+        )
+        self.assertEqual(second.status_code, 400, second.data)
+        self.assertEqual(
+            second.data["error"], "This coupon has reached its usage limit"
+        )
+        self.assertFalse(Order.objects.filter(user=loser).exists())
+
+        self.razorpay_mock(order_id="order_ONCE")
+        self._capture(self.client, winner, "pay_ONCE")
+
+        coupon.refresh_from_db()
+        self.assertEqual(winner.discount_amount, Decimal("100.00"))
+        self.assertEqual(winner.status, "confirmed")
+        self.assertEqual(winner.payment_status, "captured")
+        self.assertEqual(Order.objects.filter(coupon=coupon).count(), 1)
+        self.assertEqual(coupon.used_count, 1)
+        self.assertLessEqual(coupon.used_count, coupon.usage_limit)
+
+    def test_the_loser_is_refused_before_any_provider_intent(self):
+        coupon = self.make_coupon(code="ONCE2", discount_value="10", usage_limit=1)
+        self.create_order(coupon=coupon)
+
+        loser, loser_client = self._separate_buyer("coupon-loser-2")
+        with mock.patch("orders.views.razorpay.Client") as gateway:
+            second = loser_client.post(
+                "/api/orders/checkout/",
+                self.checkout_payload(coupon_code="ONCE2"),
+                format="json",
+            )
+            gateway.assert_not_called()
+
+        self.assertEqual(second.status_code, 400, second.data)
+        self.assertEqual(
+            second.data["error"], "This coupon has reached its usage limit"
+        )
+        self.assertFalse(Order.objects.filter(user=loser).exists())
+        self.assertEqual(PaymentEvent.objects.count(), 0)
+        coupon.refresh_from_db()
+        self.assertEqual(coupon.used_count, 0)
+
+    def test_the_loser_never_produces_an_over_limit_audit_row(self):
+        coupon = self.make_coupon(code="ONCE-AUDIT", discount_value="10", usage_limit=1)
+        first = self.create_order(coupon=coupon)
+        _loser, loser_client = self._separate_buyer("coupon-loser-audit")
+        second = loser_client.post(
+            "/api/orders/checkout/",
+            self.checkout_payload(coupon_code="ONCE-AUDIT"),
+            format="json",
+        )
+        self.assertEqual(second.status_code, 400, second.data)
+
+        self.razorpay_mock(order_id="order_AUDIT")
+        self._capture(self.client, first, "pay_AUDIT")
+
+        coupon.refresh_from_db()
+        self.assertEqual(Order.objects.filter(coupon=coupon).count(), 1)
+        self.assertEqual(coupon.used_count, 1)
+        self.assertFalse(
+            AuditEvent.objects.filter(
+                event_type=AuditEvent.EventType.PAYMENT_COUPON_OVER_LIMIT
+            ).exists()
+        )
+
+
+@tag("orders")
+class CouponUsageReservationRaceTests(TransactionTestCase):
+    """The same last-slot race with real threads, repeated on PostgreSQL.
+
+    SQLite has no row locks, so there the two submissions run in sequence;
+    PostgreSQL is the engine that can prove the Coupon lock serialises them.
+    """
+
+    reset_sequences = True
+
+    @staticmethod
+    def _checkout(client, coupon):
+        return client.post(
+            "/api/orders/checkout/",
+            {
+                "full_name": "Race Buyer",
+                "phone": "9876543210",
+                "address": "12 Rose Lane",
+                "city": "Mumbai",
+                "state": "Maharashtra",
+                "pincode": "400001",
+                "coupon_code": coupon.code,
+            },
+            format="json",
+        )
+
+    @staticmethod
+    def _race_buyer(index):
+        user = User.objects.create(username=f"coupon-race-{index}")
+        client = APIClient()
+        client.force_authenticate(user=user)
+        cart = Cart.objects.create(user=user)
+        return user, client, cart
+
+    def _run_pair(self, buyers, coupon):
+        if connection.vendor != "postgresql":
+            return [
+                (
+                    response.status_code,
+                    dict(response.data),
+                )
+                for response in (self._checkout(buyer[1], coupon) for buyer in buyers)
+            ]
+
+        barrier = threading.Barrier(len(buyers))
+        results = []
+        results_lock = threading.Lock()
+
+        def attempt(buyer):
+            client = buyer[1]
+            try:
+                barrier.wait(timeout=10)
+                response = self._checkout(client, coupon)
+                entry = (response.status_code, dict(response.data))
+            except Exception as exc:
+                entry = ("error", repr(exc))
+            finally:
+                connection.close()
+            with results_lock:
+                results.append(entry)
+
+        threads = [threading.Thread(target=attempt, args=(buyer,)) for buyer in buyers]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join(timeout=20)
+        self.assertFalse(
+            [thread for thread in threads if thread.is_alive()],
+            "a concurrent checkout thread hung",
+        )
+        return [entry for entry in results]
+
+    def test_a_usage_limit_of_one_never_oversells_under_concurrency(self):
+        cache.clear()
+        product = products.objects.create(
+            name="Race Rose",
+            description="A fragrance raced by two buyers.",
+            price=Decimal("500.00"),
+            size=50,
+            stock=10,
+            category="Floral",
+        )
+
+        for iteration in range(20):
+            coupon = Coupon.objects.create(
+                code=f"RACE{iteration:02d}",
+                discount_type="percentage",
+                discount_value=Decimal("10"),
+                minimum_order_amount=Decimal("0"),
+                active=True,
+                valid_from=timezone.now() - timedelta(days=1),
+                valid_until=timezone.now() + timedelta(days=1),
+                usage_limit=1,
+                used_count=0,
+            )
+            buyers = [
+                self._race_buyer(f"{iteration}-a"),
+                self._race_buyer(f"{iteration}-b"),
+            ]
+            for _user, _client, cart in buyers:
+                CartItem.objects.create(cart=cart, product=product, quantity=2)
+
+            results = self._run_pair(buyers, coupon)
+            statuses = sorted(result[0] for result in results)
+            self.assertEqual(
+                statuses,
+                [201, 400],
+                f"iteration {iteration}: expected one order and one refusal, got {results}",
+            )
+            refusal = next(result[1] for result in results if result[0] == 400)
+            self.assertEqual(
+                refusal["error"], "This coupon has reached its usage limit"
+            )
+            self.assertEqual(
+                Order.objects.filter(coupon=coupon).count(),
+                1,
+                f"iteration {iteration}: the usage limit was oversold",
+            )
+            coupon.refresh_from_db()
+            self.assertEqual(coupon.used_count, 0)
+            self.assertLessEqual(coupon.used_count, coupon.usage_limit)
