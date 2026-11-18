@@ -18,7 +18,12 @@ from ..models import Order, Refund, RefundRequest
 
 # Same issuance core as the admin action: only transport lives here, so the two
 # surfaces cannot drift.
-from ..refunds import RefundGatewayError, RefundRefused, issue_refund
+from ..refunds import (
+    RefundGatewayError,
+    RefundGatewayRefused,
+    RefundRefused,
+    issue_refund,
+)
 from ..serializers import RefundRequestSerializer
 
 # The refundable money set is the machine's own answer, never a literal.
@@ -114,6 +119,16 @@ def admin_order_refund(request, order_id):
         )
     except RefundRefused as exc:
         return Response({"error": exc.message}, status=REFUSAL_STATUS[exc.code])
+    except RefundGatewayRefused:
+        # T-20261118-005 (AUD-025): a definitive provider refusal is a
+        # client-actionable rejection, not a gateway fault. The core has already
+        # recorded the attempt FAILED with its reservation released, so the row
+        # stays retryable in place; provider detail stays in the core log and
+        # the caller gets the fact only.
+        return Response(
+            {"error": "The payment gateway refused this refund"},
+            status=status.HTTP_409_CONFLICT,
+        )
     except RefundGatewayError:
         # Provider detail stays in the core's log; the caller gets the fact
         # only.

@@ -572,7 +572,7 @@ class GatewayFailureTests(RefundTestBase):
 
         res = self.refund(order, amount="300.00")
 
-        self.assertEqual(res.status_code, 502, res.data)
+        self.assertEqual(res.status_code, 409, res.data)
         # The attempt is durable and honest: one FAILED row, its reservation
         # released, the payment dimension untouched, no timestamp stamped.
         refund = Refund.objects.get()
@@ -658,7 +658,7 @@ class RefundFailureTaxonomyTests(RefundTestBase):
 
         res = self.refund(order, amount="300.00")
 
-        self.assertEqual(res.status_code, 502, res.data)
+        self.assertEqual(res.status_code, 409, res.data)
         refund = Refund.objects.get()
         self.assertEqual(refund.status, Refund.Status.FAILED)
         self.assertEqual(refund.failure_code, Refund.FailureCode.PROVIDER_REFUSED)
@@ -794,7 +794,7 @@ class RefundTwoPhaseTests(RefundTestBase):
 
     These drive the shared writer directly, so what is observed is the
     writer's lifecycle rather than a transport shape; the endpoint's own
-    201/502 responses are pinned by the classes around this one.
+    201/409/502 responses are pinned by the classes around this one.
     """
 
     def test_a_gateway_failure_leaves_exactly_one_pending_row_and_raises(self):
@@ -1064,7 +1064,7 @@ class RefundReplayTests(RefundTestBase):
             format="json",
             HTTP_IDEMPOTENCY_KEY="retry-in-place",
         )
-        self.assertEqual(first.status_code, 502, first.data)
+        self.assertEqual(first.status_code, 409, first.data)
         failed = Refund.objects.get()
         failed_pk = failed.pk
         self.assertEqual(failed.status, Refund.Status.FAILED)
@@ -1104,7 +1104,7 @@ class RefundReplayTests(RefundTestBase):
             format="json",
             HTTP_IDEMPOTENCY_KEY="different-amount",
         )
-        self.assertEqual(first.status_code, 502, first.data)
+        self.assertEqual(first.status_code, 409, first.data)
 
         second = self.client.post(
             self.REFUND_PATH.format(order_id=order.id),
