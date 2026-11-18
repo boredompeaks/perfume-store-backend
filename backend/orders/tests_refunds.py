@@ -666,6 +666,35 @@ class RefundFailureTaxonomyTests(RefundTestBase):
         order.refresh_from_db()
         self.assertEqual(order.refundable_remaining, Decimal("900.00"))
 
+    def test_the_refusal_log_record_formats_with_every_logged_field(self):
+        order = self.captured_order()
+        client = self.gateway()
+        client.refund.create.side_effect = razorpay.errors.BadRequestError(
+            "provider refused"
+        )
+
+        try:
+            with self.assertLogs("orders.refunds", level="WARNING") as captured:
+                res = self.refund(order, amount="300.00")
+        except TypeError:
+            self.fail("refund failure log raised TypeError")
+
+        # getMessage() is what a logging handler eventually calls; the base
+        # tree's three-placeholder/four-argument call raises here.
+        record = captured.records[0]
+        try:
+            message = record.getMessage()
+        except TypeError:
+            self.fail("refund failure log raised TypeError")
+
+        self.assertEqual(res.status_code, 409, res.data)
+        refund = Refund.objects.get()
+        self.assertIn("refund gateway refusal", message.lower())
+        self.assertIn(f"refund {refund.pk}", message)
+        self.assertIn(f"order {order.id}", message)
+        self.assertIn("300.00", message)
+        self.assertIn("BadRequestError", message)
+
     def test_a_transport_timeout_is_ambiguous_and_holds_the_reservation(self):
         order = self.captured_order()
         client = self.gateway()
