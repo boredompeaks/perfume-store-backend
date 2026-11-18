@@ -4566,3 +4566,132 @@ class CouponUsageReservationRaceTests(TransactionTestCase):
             coupon.refresh_from_db()
             self.assertEqual(coupon.used_count, 0)
             self.assertLessEqual(coupon.used_count, coupon.usage_limit)
+
+
+@tag("orders")
+class MaintenanceModeTests(OrderTestBase):
+    """AUD-012: the operator maintenance flag closes the two order write doors
+    before any write, keeps read surfaces up, and is read fresh per request."""
+
+    def _set_maintenance(self, active):
+        from ops.models import SiteSettings
+
+        row = SiteSettings.load()
+        row.maintenance_mode = active
+        row.save()
+        return row
+
+    def test_checkout_is_refused_under_maintenance_and_writes_nothing(self):
+        coupon = self.make_coupon(code="MAINT", usage_limit=1)
+        self._set_maintenance(True)
+        before = {
+            "orders": Order.objects.count(),
+            "items": OrderItem.objects.count(),
+            "reservations": StockReservation.objects.count(),
+            "created": AuditEvent.objects.filter(
+                event_type=AuditEvent.EventType.ORDER_CREATED
+            ).count(),
+            "stock": self.product.stock,
+            "coupon_used": coupon.used_count,
+        }
+
+        res = self.checkout(coupon_code="MAINT")
+
+        self.assertEqual(res.status_code, 503, res.data)
+        self.assertEqual(Order.objects.count(), before["orders"])
+        self.assertEqual(OrderItem.objects.count(), before["items"])
+        self.assertEqual(StockReservation.objects.count(), before["reservations"])
+        self.assertEqual(
+            AuditEvent.objects.filter(
+                event_type=AuditEvent.EventType.ORDER_CREATED
+            ).count(),
+            before["created"],
+        )
+        self.product.refresh_from_db()
+        coupon.refresh_from_db()
+        self.assertEqual(self.product.stock, before["stock"])
+        self.assertEqual(coupon.used_count, before["coupon_used"])
+        self.assertIsNone(Cart.objects.get(user=self.buyer).order_id)
+
+    def test_create_payment_is_refused_under_maintenance_and_mints_no_intent(self):
+        gateway = self.razorpay_mock(order_id="order_MAINT")
+        order = self.create_order()
+        self._set_maintenance(True)
+
+        res = self.client.post(
+            "/api/orders/payment/", {"order_id": order.id}, format="json"
+        )
+
+        self.assertEqual(res.status_code, 503, res.data)
+        gateway.order.create.assert_not_called()
+        order.refresh_from_db()
+        self.assertIsNone(order.razorpay_order_id)
+        self.assertEqual(
+            AuditEvent.objects.filter(
+                order=order,
+                event_type=AuditEvent.EventType.PAYMENT_INITIATED,
+            ).count(),
+            0,
+        )
+
+    def test_maintenance_keeps_health_and_catalogue_reads_up(self):
+        self._set_maintenance(True)
+
+        health = self.client.get("/health/")
+        self.assertEqual(health.status_code, 200, health.content)
+        catalogue = self.client.get("/api/products/")
+        self.assertEqual(catalogue.status_code, 200, catalogue.content)
+        self.assertIn(
+            "Rose Aurum",
+            [row["name"] for row in catalogue.json()["results"]],
+        )
+
+        refused = self.checkout()
+        self.assertEqual(refused.status_code, 503, refused.data)
+
+    def test_clearing_the_flag_restores_checkout_without_a_restart(self):
+        self._set_maintenance(True)
+        refused = self.checkout()
+        self.assertEqual(refused.status_code, 503, refused.data)
+        self.assertEqual(Order.objects.count(), 0)
+
+        self._set_maintenance(False)
+        allowed = self.checkout()
+        self.assertEqual(allowed.status_code, 201, allowed.data)
+        self.assertEqual(Order.objects.count(), 1)
+
+    def test_the_refusal_is_byte_stable_across_callers_and_inputs(self):
+        self.razorpay_mock(order_id="order_MAINT_STABLE")
+        order = self.create_order()
+        other = self.make_user("maintenance-other")
+        other_client = self.fresh_client()
+        self.api_login("maintenance-other", client=other_client)
+        Cart.objects.create(user=other)
+        self._set_maintenance(True)
+
+        responses = (
+            self.client.post(
+                "/api/orders/checkout/", self.checkout_payload(), format="json"
+            ),
+            other_client.post(
+                "/api/orders/checkout/",
+                self.checkout_payload(full_name="Other Person", pincode="999999"),
+                format="json",
+            ),
+            self.client.post(
+                "/api/orders/payment/", {"order_id": order.id}, format="json"
+            ),
+            self.client.post(
+                "/api/orders/payment/", {"order_id": 999999}, format="json"
+            ),
+        )
+
+        expected = (
+            b'{"error":"The store is temporarily unavailable for maintenance.",'
+            b'"code":"server_error","details":{}}'
+        )
+        for response in responses:
+            self.assertEqual(response.status_code, 503, response.content)
+            self.assertEqual(response.content, expected)
+        self.assertNotIn(b"maintenance_mode", responses[0].content)
+        self.assertNotIn(b"SiteSettings", responses[0].content)

@@ -8,6 +8,7 @@ import secrets
 from datetime import timedelta
 from decimal import Decimal
 
+from django.apps import apps
 from django.conf import settings
 from django.contrib.auth.models import User
 from django.db import IntegrityError, transaction
@@ -37,6 +38,40 @@ from ..serializers import CouponPreviewSerializer, OrderSerializer, money_string
 from ..state import TRIGGER_ORDER_CREATE
 
 logger = logging.getLogger(__name__)
+
+
+def _maintenance_active():
+    """Whether the operator has put the store into maintenance.
+
+    # task: T-20261118-006
+    Read on every call, never cached, so clearing the flag takes effect on the
+    next request without a restart. The ops model is resolved through the app
+    registry because the layer graph admits ``ops -> orders`` but not the
+    reverse, and this read must not add a static edge. ``SiteSettings.load()``
+    is deliberately not used: its ``get_or_create`` writes the singleton on a
+    store that has never saved settings, and this gate runs before any write.
+    """
+    site_settings = apps.get_model("ops", "SiteSettings")
+    return bool(
+        site_settings.objects.filter(pk=1)
+        .values_list("maintenance_mode", flat=True)
+        .first()
+    )
+
+
+def _maintenance_refusal():
+    """The one refusal both write doors answer while maintenance is on.
+
+    Constant and input-independent: a caller cannot distinguish an existing
+    order from a missing one, or a valid submission from an invalid one,
+    through the maintenance response.
+    """
+    if not _maintenance_active():
+        return None
+    return Response(
+        {"error": "The store is temporarily unavailable for maintenance."},
+        status=status.HTTP_503_SERVICE_UNAVAILABLE,
+    )
 
 
 class _CouponUsageUnavailable(Exception):
@@ -898,6 +933,12 @@ def create_order(request):
     # refusal, before any input is read.
     if not request.user.is_authenticated:
         return _guest_checkout_refused()
+
+    # A closed store takes no orders: refuse before the body, the cart, or any
+    # row is read, so nothing can be written for this submission.
+    refusal = _maintenance_refusal()
+    if refusal is not None:
+        return refusal
 
     # Same key means the SAME submission; the atomic block dedupes on (user, key).
     # Blank means no key, since an empty value carries no submission identity.

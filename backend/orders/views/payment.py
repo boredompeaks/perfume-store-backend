@@ -35,6 +35,9 @@ from ..state import (
     payment_transition_allowed,
 )
 
+# Checkout owns the maintenance gate both write doors share.
+from .checkout import _maintenance_refusal
+
 logger = logging.getLogger(__name__)
 
 # The unique constraint on razorpay_order_id is the concurrency authority; the
@@ -53,6 +56,12 @@ def _object_body(data):
 @permission_classes([IsAuthenticated])
 @throttle_scope("payment")
 def create_payment(request):
+
+    # A closed store mints no gateway intent: refuse before the body or the
+    # order is read, so no caller can probe which orders exist.
+    refusal = _maintenance_refusal()
+    if refusal is not None:
+        return refusal
 
     body = _object_body(request.data)
 
