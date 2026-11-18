@@ -96,13 +96,13 @@ def _entity(body, name):
 
 
 def _currency_matches(order, captured_currency):
-    """True when the captured currency is present and equals the order's.
+    """True only when a present captured currency equals the order's.
 
-    A blank code on either side is refused: an empty string is not a currency,
-    and two blanks must never compare equal.
+    A blank code on either side never matches; ``None`` is the absent answer
+    so two blanks cannot compare equal.
     """
     if not captured_currency:
-        return False
+        return None
     return captured_currency == order.currency
 
 
