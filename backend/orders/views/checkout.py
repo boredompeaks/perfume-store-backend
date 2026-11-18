@@ -604,10 +604,12 @@ def _collapse_onto_duplicate(duplicate, idempotency_key, user):
         # Benign double-submit retry, so INFO: a WARNING here would
         # spam the log on every impatient re-click (same judgement
         # as verify_payment's already-processed skip).
+        # task: T-20261118-009
+        # Customer name is the guest email or the account username; the order
+        # pk already identifies the row this line is about.
         logger.info(
-            "Checkout dedup: order %s replayed for %s (identical pending submission)",
+            "Checkout dedup: order %s replayed (identical pending submission)",
             duplicate.id,
-            duplicate.customer_name,
         )
 
         # Scoped by `owner` above AND by `_same_purchase`, so this
@@ -675,10 +677,11 @@ def _replay_by_key(user, owner, idempotency_key):
         #
         # Benign keyed retry, so INFO: same judgement as the dedup
         # guard's collapse log above.
+        # task: T-20261118-009
+        # Same PII substitution as the keyless dedup log above.
         logger.info(
-            "Checkout idempotency: order %s replayed for %s (Idempotency-Key)",
+            "Checkout idempotency: order %s replayed (Idempotency-Key)",
             replay.id,
-            replay.customer_name,
         )
 
         return _checkout_response(replay, status.HTTP_200_OK)
@@ -764,11 +767,13 @@ def _price_delivery(user, body, cart_items, coupon, merchandise_total):
         # refusing the order is a different decision than this task
         # makes, and a store that has not configured shipping yet is
         # not broken. `shipping_amount` stays the honest 0.00.
+        # task: T-20261118-009
+        # The username is PII; the user pk keeps the account traceable.
         logger.warning(
-            "Checkout priced with NO shipping charge for %s: the store "
+            "Checkout priced with NO shipping charge for user=%s: the store "
             "has no active shipping method configured (seed one with "
             "`manage.py seed_shipping_methods` to start charging)",
-            user,
+            user.pk,
         )
     total_amount = quantize_money(merchandise_total + shipping_amount)
 

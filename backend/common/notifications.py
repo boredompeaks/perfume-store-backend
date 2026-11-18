@@ -25,11 +25,15 @@ from common.models import AuditEvent, NotificationOutbox
 logger = logging.getLogger("common.notifications")
 
 
-def send_email(template_name, context, subject, recipient):
+def send_email(template_name, context, subject, recipient, *, reference=None):
     """Render ``emails/<template_name>.txt`` and send it to one recipient.
 
     The single send path, with the sender always from settings. Raises on failure;
     ``dispatch`` wraps it for sends that must never break a transaction.
+
+    # task: T-20261118-009
+    ``reference`` is a non-PII correlation token (the order pk for order mail);
+    the recipient address itself must never reach the log.
     """
     message = render_to_string(f"emails/{template_name}.txt", context)
     send_mail(
@@ -39,7 +43,7 @@ def send_email(template_name, context, subject, recipient):
         [recipient],
         fail_silently=False,
     )
-    logger.info("email sent template=%s to=%s", template_name, recipient)
+    logger.info("email sent template=%s reference=%s", template_name, reference)
 
 
 def _notify_order_paid(context):
@@ -59,6 +63,8 @@ def _notify_order_paid(context):
         # The account email or the guest address captured at checkout; reading
         # ``order.user.email`` would raise on guest orders.
         order.recipient,
+        # task: T-20261118-009
+        reference=order.pk,
     )
 
 
