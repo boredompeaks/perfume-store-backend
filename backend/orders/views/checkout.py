@@ -42,6 +42,9 @@ logger = logging.getLogger(__name__)
 class CouponUsageUnavailable(Exception):
     """No coupon usage slot remains for the order being created."""
 
+    def __init__(self):
+        super().__init__("This coupon has reached its usage limit")
+
 
 # Cap mirrors the Order.idempotency_key column width, so an oversized value is a
 # 400 here instead of a database error at insert time.
@@ -515,6 +518,9 @@ def _reserve_coupon(coupon, order):
     releases the slot without restoring a counter, and ``used_count`` stays
     the capture-time record of redemptions that the audit path reads.
     """
+    if coupon is None:
+        return
+
     Order.objects.select_for_update().get(pk=order.pk)
     locked_coupon = Coupon.objects.select_for_update().get(pk=coupon.pk)
 
@@ -1011,8 +1017,7 @@ def _create_order_atomically(
                 user, guest_email, body, coupon, discount_amount, shipping
             )
 
-            if coupon is not None:
-                _reserve_coupon(coupon, order)
+            _reserve_coupon(coupon, order)
 
             # Bind the cart to the order in the same transaction so the capture
             # path (even a later webhook with no session) can find and empty it.
@@ -1030,18 +1035,12 @@ def _create_order_atomically(
 
             _record_order_trail(user, order, cart_items, coupon, shipping)
 
-    except ShippingUnavailable as exc:
-        # The transaction rolled back whole: 400 with the reason, never a 500 and
-        # never a silent free shipment.
+    except (ShippingUnavailable, CouponUsageUnavailable) as exc:
+        # The transaction rolled back whole: 400 with the reason, never a 500,
+        # never a silent free shipment and never a provider intent for a coupon
+        # whose reservation was refused.
         return Response(
             {"error": str(exc)},
-            status=status.HTTP_400_BAD_REQUEST,
-        )
-    except CouponUsageUnavailable:
-        # The order row is the reservation and it rolled back with the block, so
-        # the loser is refused before any provider intent exists.
-        return Response(
-            {"error": "This coupon has reached its usage limit"},
             status=status.HTTP_400_BAD_REQUEST,
         )
 
