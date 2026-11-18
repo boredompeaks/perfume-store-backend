@@ -120,7 +120,7 @@ def admin_order_refund(request, order_id):
     except RefundRefused as exc:
         return Response({"error": exc.message}, status=REFUSAL_STATUS[exc.code])
     except RefundGatewayRefused:
-        # T-20261118-005 (AUD-025): a definitive provider refusal is a
+        # T-20261118-007 (AUD-025): a definitive provider refusal is a
         # client-actionable rejection, not a gateway fault. The core has already
         # recorded the attempt FAILED with its reservation released, so the row
         # stays retryable in place; provider detail stays in the core log and
