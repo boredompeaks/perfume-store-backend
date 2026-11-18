@@ -83,10 +83,27 @@ def _store_money(amount_minor_units):
 
 
 def _entity(body, name):
-    """The event's named entity object, or ``{}`` when absent/not an object."""
-    entity = body.get("payload", {})
-    entity = entity.get(name) if isinstance(entity, dict) else None
-    return entity if isinstance(entity, dict) else {}
+    """The event's named entity object, or ``{}`` when absent/not an object.
+
+    The provider nests each named entity one level down: ``payload.<name>`` is
+    an envelope whose ``entity`` member is the object. Reading the envelope as
+    the entity leaves every real delivery without an id, amount or currency.
+    """
+    payload = body.get("payload", {})
+    envelope = payload.get(name) if isinstance(payload, dict) else None
+    entity = envelope.get("entity") if isinstance(envelope, dict) else None
+    return entity if isinstance(entity, dict) else {}  # task: T-20261118-001
+
+
+def _currency_matches(order, captured_currency):
+    """True only when a present captured currency equals the order's.
+
+    A blank code on either side never matches; ``None`` is the absent answer
+    so two blanks cannot compare equal.
+    """
+    if not captured_currency:
+        return None
+    return captured_currency == order.currency
 
 
 def _signature_matches(raw_body, provided):
@@ -143,6 +160,8 @@ def _apply_captured(event, body):
     gateway_payment_id = str(payment.get("id") or "")
     gateway_order_id = str(payment.get("order_id") or "")
     amount = _store_money(payment.get("amount"))
+    currency = payment.get("currency")
+    captured_currency = currency if isinstance(currency, str) else ""
     target_status = status_for_payment(PAYMENT_CAPTURED)
     # An oversized reference is refused like any other unbindable one, keeping
     # no reference rather than a truncated one.
@@ -224,6 +243,31 @@ def _apply_captured(event, body):
                     "event_id": event.event_id,
                     "claimed_razorpay_payment_id": gateway_payment_id,
                     "razorpay_payment_id": order.razorpay_payment_id,
+                },
+            )
+            return PaymentEvent.Outcome.REFUSED
+
+        # task: T-20261118-001
+        if not _currency_matches(order, captured_currency):
+            # The amount alone does not identify the money: the same numeric
+            # total in another currency is a different debt, and a missing
+            # code on either side cannot be reconciled. Refused like any other
+            # reference that does not name this order's money.
+            logger.warning(
+                "Payment webhook %s: captured currency %r does not match order "
+                "%s currency %r; nothing applied",
+                event.event_id,
+                captured_currency,
+                order.id,
+                order.currency,
+            )
+            AuditEvent.record(
+                AuditEvent.EventType.PAYMENT_REFERENCE_MISMATCH,
+                order=order,
+                detail={
+                    "event_id": event.event_id,
+                    "captured_currency": captured_currency,
+                    "order_currency": order.currency,
                 },
             )
             return PaymentEvent.Outcome.REFUSED

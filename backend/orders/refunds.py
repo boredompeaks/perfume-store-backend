@@ -596,12 +596,12 @@ def issue_refund(
         # and nothing about the provider's internals. The attempt's PENDING
         # row is deliberately left alone: it is what reconciliation reads.
         logger.warning(
-            "Refund gateway refusal for order %s (amount %s): %s",
-            order_id,
+            "Refund gateway refusal for refund %s (order %s, amount %s): %s",
             refund.pk,
+            order_id,
             amount,
             exc,
-        )
+        )  # task: T-20261118-008
         raise
     except RefundGatewayError as exc:
         # AMBIGUOUS: the call may have reached the provider and money may have

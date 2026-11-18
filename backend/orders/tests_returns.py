@@ -6,10 +6,12 @@ from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from unittest.mock import patch
 
+import razorpay
 from django import forms
 from django.conf import settings
-from django.contrib.admin.models import LogEntry
+from django.contrib.admin.models import ADDITION, LogEntry
 from django.contrib.auth.models import Group, User
+from django.contrib.contenttypes.models import ContentType
 from django.db import IntegrityError, transaction
 from django.forms import modelform_factory
 from django.test import override_settings, tag
@@ -623,6 +625,143 @@ class RefundSeamIntegrationTests(ReturnTestCase):
                 self.assertEqual(return_res.status_code, 409, return_res.data)
                 self.assertFalse(Refund.objects.exists())
                 self.assertFalse(order.return_requests.exists())
+
+
+class RefundProviderRefusalTests(ReturnTestCase):
+    """AUD-025: the provider's definitive "no" is a client-actionable 409, not
+    the 502 that means the gateway outcome is unknown."""
+
+    REFUND_PATH = "/api/admin/orders/{order_id}/refund/"
+    REFUSAL_BODY = {
+        "error": "The payment gateway refused this refund",
+        "code": "conflict",
+        "details": {},
+    }
+
+    def setUp(self):
+        super().setUp()
+        self.treasurer = role_user(ROLE_FINANCE, "returns-refusal-treasurer")
+        self.finance_client = self.fresh_client()
+        res, token = self.api_login(self.treasurer.username, client=self.finance_client)
+        self.assertEqual(res.status_code, 200, res.data)
+        self.assertTrue(token, res.data)
+        self.gateway = self.razorpay_mock()
+
+    def payable_order(self, order_number):
+        order = self._order(order_number, self.buyer, status="confirmed")
+        Order.objects.filter(pk=order.pk).update(
+            razorpay_order_id=f"order_{order_number}",
+            razorpay_payment_id=f"pay_{order_number}",
+        )
+        order.refresh_from_db()
+        return order
+
+    def refund(self, order, *, key, amount="300.00", reason="Damaged on arrival"):
+        return self.finance_client.post(
+            self.REFUND_PATH.format(order_id=order.id),
+            {"amount": amount, "reason": reason},
+            format="json",
+            HTTP_IDEMPOTENCY_KEY=key,
+        )
+
+    def refuse(self, message="payment does not exist"):
+        self.gateway.refund.create.side_effect = razorpay.errors.BadRequestError(
+            message
+        )
+
+    def test_a_provider_refusal_is_409_with_a_stable_body_carrying_no_provider_detail(
+        self,
+    ):
+        order = self.payable_order("RET-2026-001400")
+        self.refuse("secret-ish provider payload req_ABC123")
+
+        res = self.refund(order, key="refusal-body")
+
+        self.assertEqual(res.status_code, 409, res.data)
+        self.assertEqual(res.data, self.REFUSAL_BODY)
+        body = res.content.decode()
+        for leak in (
+            "secret-ish",
+            "req_ABC123",
+            "BadRequestError",
+            "Traceback",
+            "razorpay",
+        ):
+            with self.subTest(leak=leak):
+                self.assertNotIn(leak, body)
+
+    def test_a_refusal_leaves_a_recorded_failed_retryable_row_and_moves_no_money(
+        self,
+    ):
+        order = self.payable_order("RET-2026-001401")
+        self.refuse()
+
+        res = self.refund(order, key="refusal-state")
+
+        self.assertEqual(res.status_code, 409, res.data)
+        refund = Refund.objects.get(order=order)
+        self.assertEqual(refund.status, Refund.Status.FAILED)
+        self.assertEqual(refund.failure_code, Refund.FailureCode.PROVIDER_REFUSED)
+        self.assertIsNone(refund.reserved_until)
+        self.assertIsNone(refund.gateway_refund_id)
+        order.refresh_from_db()
+        self.assertEqual(order.payment_status, "captured")
+        self.assertIsNone(order.refunded_at)
+        self.assertEqual(order.refundable_remaining, Decimal("1200.00"))
+        entry = LogEntry.objects.get(
+            content_type=ContentType.objects.get_for_model(Refund)
+        )
+        self.assertEqual(entry.action_flag, ADDITION)
+        self.assertIn("refused", entry.change_message.lower())
+
+    def test_a_refused_attempt_is_retried_in_place_with_the_same_key(self):
+        order = self.payable_order("RET-2026-001402")
+        self.refuse()
+        first = self.refund(order, key="refusal-retry")
+        self.assertEqual(first.status_code, 409, first.data)
+        failed_pk = Refund.objects.get(order=order).pk
+
+        self.gateway.refund.create.side_effect = None
+        self.gateway.refund.create.return_value = {"id": "rfnd_REFUSAL_RETRY"}
+        second = self.refund(order, key="refusal-retry")
+
+        self.assertEqual(second.status_code, 201, second.data)
+        self.assertEqual(Refund.objects.count(), 1)
+        refund = Refund.objects.get()
+        self.assertEqual(refund.pk, failed_pk)
+        self.assertEqual(refund.status, Refund.Status.PROCESSED)
+        self.assertEqual(refund.gateway_refund_id, "rfnd_REFUSAL_RETRY")
+        order.refresh_from_db()
+        self.assertEqual(order.payment_status, "partially_refunded")
+        self.assertEqual(order.refundable_remaining, Decimal("900.00"))
+
+    def test_the_refusal_mapping_keeps_ambiguous_and_unexpected_faults_at_5xx(self):
+        order = self.payable_order("RET-2026-001403")
+        self.refuse()
+
+        refused = self.refund(order, key="refusal-not-swallowed")
+
+        # Red on base: a refusal is 502 there, the status the guards below
+        # reserve for a genuine fault.
+        self.assertEqual(refused.status_code, 409, refused.data)
+
+        ambiguous = self.payable_order("RET-2026-001404")
+        self.gateway.refund.create.side_effect = razorpay.errors.GatewayError(
+            "provider down"
+        )
+        unknown = self.refund(ambiguous, key="ambiguous-outcome")
+        self.assertEqual(unknown.status_code, 502, unknown.data)
+
+        unexpected = self.payable_order("RET-2026-001405")
+        self.finance_client.raise_request_exception = False
+        with patch(
+            "orders.views.refund.issue_refund",
+            side_effect=RuntimeError("ledger exploded"),
+        ):
+            faulted = self.refund(unexpected, key="unexpected-fault")
+
+        self.assertEqual(faulted.status_code, 500)
+        self.assertFalse(Refund.objects.filter(order=unexpected).exists())
 
 
 class MissShapeTests(ReturnTestCase):
