@@ -2,6 +2,8 @@ import os
 import time
 import unittest
 from datetime import date, timedelta
+from io import StringIO
+from pathlib import Path
 from unittest import mock
 
 from django.conf import settings
@@ -9,6 +11,7 @@ from django.contrib.auth.models import User
 from django.contrib.auth.tokens import default_token_generator
 from django.core import mail
 from django.core.cache import cache
+from django.core.management import call_command
 from django.core.signing import TimestampSigner
 from django.test import SimpleTestCase, override_settings, tag
 from django.utils.encoding import force_bytes
@@ -28,6 +31,7 @@ from accounts.views import (
     register,
     username_available,
 )
+from common.models import AuditEvent
 from common.testing import ApiTestCase, extract_link_params
 from config.settings import _env_iso_date
 
@@ -1026,6 +1030,162 @@ class AuthThrottleTests(ApiTestCase):
         )
         self.assertEqual(len(mail.outbox), 1)
         self.assertEqual(mail.outbox[0].to, ["uniformrate@example.com"])
+
+
+@tag("accounts")
+class ThrottledRefreshAuditTests(ApiTestCase):
+    """AUD-026 part 2: a 429 on the auth budget is recorded, bounded, and inert.
+
+    The audit row is a fact about a refusal, not a credential verdict: it must
+    never reuse ``auth.login_failed`` and must never change the 429 itself.
+    """
+
+    REFRESH = "/api/accounts/token/refresh/"
+    # Base emits exactly this body and header for the frozen-clock refusal;
+    # the audit side effect must not alter either.
+    THROTTLED_BODY = (
+        b'{"error":"Request was throttled. Expected available in 60 seconds.",'
+        b'"code":"throttled","details":{}}'
+    )
+
+    def _throttled_refreshes(self, refusals, budget="1/min"):
+        """One allowed refresh, then ``refusals`` refusals in one window."""
+        rates = dict(api_settings.DEFAULT_THROTTLE_RATES)
+        rates["auth"] = budget
+        user = self.make_user(f"throttled{refusals}")
+        refresh = RefreshToken.for_user(user)
+        with (
+            mock.patch.object(
+                ScopedRateThrottle, "timer", staticmethod(lambda: 1000.0)
+            ),
+            mock.patch.object(ScopedRateThrottle, "THROTTLE_RATES", rates),
+        ):
+            cache.clear()
+            first = self.client.post(
+                self.REFRESH, {"refresh": str(refresh)}, format="json"
+            )
+            self.assertEqual(first.status_code, 200, first.data)
+            return [
+                self.client.post(self.REFRESH, {"refresh": str(refresh)}, format="json")
+                for _ in range(refusals)
+            ]
+
+    def test_a_throttled_refresh_keeps_the_429_and_writes_one_redacted_row(self):
+        throttled = self._throttled_refreshes(1)[0]
+
+        self.assertEqual(throttled.status_code, 429, throttled.data)
+        self.assertEqual(throttled.content, self.THROTTLED_BODY)
+        self.assertEqual(throttled["Retry-After"], "60")
+
+        rows = AuditEvent.objects.filter(event_type="auth.throttled")
+        self.assertEqual(rows.count(), 1)
+        row = rows.get()
+        self.assertEqual(row.event_type, "auth.throttled")
+        self.assertEqual(row.category, AuditEvent.Category.AUTH)
+        self.assertEqual(row.detail, {"reason": "throttled", "scope": "auth"})
+        self.assertIsNone(row.actor_id)
+        self.assertIsNone(row.order_id)
+        self.assertEqual(
+            getattr(AuditEvent.EventType, "AUTH_THROTTLED", None), "auth.throttled"
+        )
+
+    def test_a_burst_in_one_window_writes_exactly_one_row_and_always_429s(self):
+        throttled = self._throttled_refreshes(5)
+
+        for response in throttled:
+            self.assertEqual(response.status_code, 429, response.data)
+            self.assertEqual(response.content, self.THROTTLED_BODY)
+        self.assertEqual(
+            AuditEvent.objects.filter(event_type="auth.throttled").count(), 1
+        )
+
+    def test_throttling_does_not_inflate_the_login_failure_metric(self):
+        self.make_user("metricuser")
+        rates = dict(api_settings.DEFAULT_THROTTLE_RATES)
+        rates["auth"] = "1/min"
+        with (
+            mock.patch.object(
+                ScopedRateThrottle, "timer", staticmethod(lambda: 1000.0)
+            ),
+            mock.patch.object(ScopedRateThrottle, "THROTTLE_RATES", rates),
+        ):
+            cache.clear()
+            failed = self.client.post(
+                "/api/accounts/login/",
+                {"username": "metricuser", "password": "wrong-pass"},
+                format="json",
+            )
+            self.assertEqual(failed.status_code, 401, failed.data)
+            self.assertEqual(
+                AuditEvent.objects.filter(
+                    event_type=AuditEvent.EventType.AUTH_LOGIN_FAILED
+                ).count(),
+                1,
+            )
+            refresh = RefreshToken.for_user(User.objects.get(username="metricuser"))
+            throttled = self.client.post(
+                self.REFRESH, {"refresh": str(refresh)}, format="json"
+            )
+
+        self.assertEqual(throttled.status_code, 429, throttled.data)
+        self.assertEqual(throttled.content, self.THROTTLED_BODY)
+        # The throttle refusal consumed the shared auth slot but is not a
+        # credential failure: the AUTH_LOGIN_FAILED count is unchanged.
+        self.assertEqual(
+            AuditEvent.objects.filter(
+                event_type=AuditEvent.EventType.AUTH_LOGIN_FAILED
+            ).count(),
+            1,
+        )
+        self.assertEqual(
+            AuditEvent.objects.filter(event_type="auth.throttled").count(), 1
+        )
+
+    def test_a_failing_audit_sink_still_answers_the_429(self):
+        attempts = []
+
+        def failing_record(*args, **kwargs):
+            attempts.append((args, kwargs))
+            raise RuntimeError("audit sink down")
+
+        with mock.patch.object(AuditEvent, "record", side_effect=failing_record):
+            throttled = self._throttled_refreshes(2)
+
+        self.assertEqual(len(attempts), 1)
+        for response in throttled:
+            self.assertEqual(response.status_code, 429, response.data)
+            self.assertEqual(response.content, self.THROTTLED_BODY)
+            self.assertEqual(response["Retry-After"], "60")
+        self.assertFalse(
+            AuditEvent.objects.filter(event_type="auth.throttled").exists()
+        )
+
+    def test_the_enum_and_the_generated_migration_are_the_only_schema_change(self):
+        self.assertEqual(
+            getattr(AuditEvent.EventType, "AUTH_THROTTLED", None), "auth.throttled"
+        )
+        migration = (
+            Path(settings.BASE_DIR)
+            / "common"
+            / "migrations"
+            / "0012_alter_auditevent_event_type.py"
+        )
+        self.assertTrue(migration.is_file(), migration)
+        body = migration.read_text(encoding="utf-8")
+        self.assertIn('("auth.throttled", "Authentication request throttled")', body)
+        output = StringIO()
+        try:
+            call_command(
+                "makemigrations",
+                "common",
+                "--check",
+                "--dry-run",
+                stdout=output,
+                stderr=output,
+            )
+        except SystemExit:
+            self.fail(f"common has ungenerated model changes: {output.getvalue()}")
+        self.assertIn("No changes detected", output.getvalue())
 
 
 @tag("accounts")
