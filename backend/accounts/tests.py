@@ -2,6 +2,7 @@ import os
 import time
 import unittest
 from datetime import date, timedelta
+from pathlib import Path
 from unittest import mock
 
 from django.conf import settings
@@ -30,6 +31,11 @@ from accounts.views import (
 )
 from common.testing import ApiTestCase, extract_link_params
 from config.settings import _env_iso_date
+
+# Anchor the deployment-contract fixture to the module, not the runner's cwd:
+# the canonical Django runner starts in backend/, while pytest starts at the
+# repo root. task: T-20261119-013
+ENV_EXAMPLE = Path(__file__).resolve().parent.parent / ".env.example"
 
 
 def make_inactive_user(username="pending", email=None):
@@ -1493,7 +1499,7 @@ class RefreshBodyWindowConfigTests(SimpleTestCase):
             )
 
     def test_window_knobs_are_documented_in_env_example(self):
-        with open(".env.example", encoding="utf-8") as handle:
+        with open(ENV_EXAMPLE, encoding="utf-8") as handle:
             example = handle.read()
         for key in (
             "JWT_REFRESH_BODY_ACCEPT_ENABLED",
