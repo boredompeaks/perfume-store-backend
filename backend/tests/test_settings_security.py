@@ -976,12 +976,7 @@ class TransportHardeningTests(SimpleTestCase):
         res = run_settings_import(
             {**self._BOOT_ENV, "SECURE_SSL_REDIRECT": "true"},
             snippet=(
-                "import config.settings as s; "
-                "print('DEBUG', s.DEBUG); "
-                "print('HSTS', s.SECURE_HSTS_SECONDS); "
-                "print('SUBD', s.SECURE_HSTS_INCLUDE_SUBDOMAINS); "
-                "print('PRELOAD', s.SECURE_HSTS_PRELOAD); "
-                "print('REDIRECT', s.SECURE_SSL_REDIRECT)"
+                "import config.settings as s; print('DEBUG', s.DEBUG); print('HSTS', s.SECURE_HSTS_SECONDS); print('SUBD', s.SECURE_HSTS_INCLUDE_SUBDOMAINS); print('PRELOAD', s.SECURE_HSTS_PRELOAD); print('REDIRECT', s.SECURE_SSL_REDIRECT)"
             ),
         )
         self.assertEqual(res.returncode, 0, res.stderr)
@@ -997,9 +992,7 @@ class TransportHardeningTests(SimpleTestCase):
         dev = run_settings_import(
             {"DJANGO_DEBUG": "true"},
             snippet=(
-                "import config.settings as s; "
-                "print('HSTS', s.SECURE_HSTS_SECONDS); "
-                "print('REDIRECT', s.SECURE_SSL_REDIRECT)"
+                "import config.settings as s; print('HSTS', s.SECURE_HSTS_SECONDS); print('REDIRECT', s.SECURE_SSL_REDIRECT)"
             ),
         )
         self.assertEqual(dev.returncode, 0, dev.stderr)
@@ -1181,8 +1174,6 @@ class TransportHardeningTests(SimpleTestCase):
         self.assertIn("CSRFSEC False", res.stdout)
 
     def test_malformed_hsts_seconds_falls_back_to_zero(self):
-        # The development default is 0; a non-debug boot falls back to a year
-        # (see test_non_debug_hsts_default_is_one_year).
         res = run_settings_import(
             {**_DEV_ENV, "SECURE_HSTS_SECONDS": "one-year"},
             snippet=(
@@ -1206,8 +1197,6 @@ class TransportHardeningTests(SimpleTestCase):
         leaked = {
             "SESSION_COOKIE_SECURE": "false",
             "CSRF_COOKIE_SECURE": "false",
-            # 0 would disable HSTS if a developer's .env could reach the boot;
-            # the hardened default must survive the leak.
             "SECURE_HSTS_SECONDS": "0",
         }
         for name, value in leaked.items():
