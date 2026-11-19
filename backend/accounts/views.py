@@ -446,7 +446,7 @@ def _probe_challenge_ttl():
     # A zero window disables the age check, not the single-use record, so the
     # replay key must outlive the token instead of expiring with it.
     max_age = settings.ACCOUNT_CHALLENGE_MAX_AGE
-    return max_age if max_age else None
+    return max_age if max_age > 0 else None
 
 
 def _enforce_probe_challenge(request):

@@ -843,6 +843,30 @@ class AccessChallengeTests(ApiTestCase):
         self.assertEqual(free_replay.status_code, 403, free_replay.data)
         self.assertEqual(replay.content, free_replay.content)
 
+    def test_probe_replay_guard_covers_the_below_one_age_family(self):
+        self.make_user("probe-taken")
+        for max_age in (-1, 0, 300):
+            replay_bodies = []
+            with override_settings(
+                ACCOUNT_CHALLENGE_SECRET=self.SECRET,
+                ACCOUNT_CHALLENGE_MAX_AGE=max_age,
+            ):
+                for username in ("probe-taken", "probe-free-name"):
+                    cache.clear()
+                    token = self._mint(age=1)
+                    first = self._probe(username, challenge=token)
+                    replay = self._probe(username, challenge=token)
+                    self.assertEqual(first.status_code, 200, first.data)
+                    self.assertEqual(replay.status_code, 403, replay.data)
+                    replay_bodies.append(replay.content)
+            self.assertEqual(replay_bodies[0], replay_bodies[1])
+        with override_settings(
+            ACCOUNT_CHALLENGE_SECRET=self.SECRET, ACCOUNT_CHALLENGE_MAX_AGE=300
+        ):
+            cache.clear()
+            expired = self._probe("probe-taken", challenge=self._mint(age=10_000))
+        self.assertEqual(expired.status_code, 403, expired.data)
+
     def test_probe_over_the_limit_returns_the_same_429_for_existing_and_free(self):
         self.make_user("probe-taken")
         rates = dict(api_settings.DEFAULT_THROTTLE_RATES)
