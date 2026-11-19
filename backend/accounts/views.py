@@ -53,6 +53,11 @@ from .serializers import (
     RegisterSerializer,
     StorefrontTokenObtainPairSerializer,
 )
+from .services import (
+    AccountAlreadyErased,
+    UnsafeErasureReason,
+    erase_account,
+)
 
 
 def _lock_user_addresses(user):
@@ -98,6 +103,153 @@ class AddressViewSet(viewsets.ModelViewSet):
                 serializer.save()
         else:
             serializer.save()
+
+
+# Self-service erasure and export (AUD-005). task: T-20261119-013
+#
+# Both routes read their subject from the authenticated request only; a body
+# or query value can name no other account, so a scoping mistake cannot become
+# a mass-erasure primitive. There is deliberately no bulk or staff variant.
+
+_ERASURE_REFUSED = "Account erasure refused."
+
+
+def _erasure_reason(request):
+    # The service validates the reason against the identity being removed.
+    # A non-object body or non-string reason means "no reason", never a 500
+    # from the validator's string operations.
+    payload = request.data if isinstance(request.data, dict) else {}
+    reason = payload.get("reason", "")
+    return reason if isinstance(reason, str) else ""
+
+
+class AccountEraseView(APIView):
+    """POST /api/accounts/account/erase/ — tombstone the CALLER in place.
+
+    ``IsAuthenticated`` plus ``request.user`` is the whole authorization
+    boundary: ``user``/``id`` fields in the body are ignored, and no query
+    parameter can redirect the operation. ``auth``-throttled at the project
+    default of 10/min (``THROTTLE_AUTH_RATE``), like the other account routes.
+
+    Responses: 200 when erased; 409 when the caller is already erased; 400 when
+    the service refuses the reason as identity-bearing. Both refusals carry the
+    same constant, non-identifying body.
+
+    The device row is deleted inside the same transaction as the service call:
+    a TOTP secret is a credential and must not outlive the erased identity. The
+    service is shared with staff tooling and is intentionally unchanged, so the
+    request surface owns this extra deletion.
+    """
+
+    permission_classes = [IsAuthenticated]
+    throttle_scope = "auth"
+
+    def post(self, request):
+        try:
+            with transaction.atomic():
+                erase_account(
+                    request.user,
+                    actor=request.user,
+                    reason=_erasure_reason(request),
+                )
+                TOTPDevice.objects.filter(user_id=request.user.pk).delete()
+        except AccountAlreadyErased:
+            return Response(
+                {"error": _ERASURE_REFUSED}, status=status.HTTP_409_CONFLICT
+            )
+        except UnsafeErasureReason:
+            return Response(
+                {"error": _ERASURE_REFUSED}, status=status.HTTP_400_BAD_REQUEST
+            )
+        return Response({"message": "Account erased."})
+
+
+def _export_order(order):
+    # Only the customer-facing reference and the caller's own rows: no Order
+    # pk, no gateway references, no staff actor/decider ids. Money stays a
+    # decimal string instead of a binary float.
+    return {
+        "order_number": order.order_number,
+        "status": order.status,
+        "payment_status": order.payment_status,
+        "fulfilment_status": order.fulfilment_status,
+        "full_name": order.full_name,
+        "phone": order.phone,
+        "address": order.address,
+        "city": order.city,
+        "state": order.state,
+        "pincode": order.pincode,
+        "currency": order.currency,
+        "discount_amount": str(order.discount_amount),
+        "shipping_amount": str(order.shipping_amount),
+        "total_amount": str(order.total_amount),
+        "created_at": order.created_at.isoformat(),
+        "items": [
+            {
+                "product_name": item.product_name,
+                "sku": item.sku,
+                "variant_name": item.variant_name,
+                "price": str(item.price),
+                "quantity": item.quantity,
+                "subtotal": str(item.subtotal),
+                "currency": item.currency,
+            }
+            for item in order.items.all()
+        ],
+        "refunds": [
+            {
+                "amount": str(refund.amount),
+                "kind": refund.kind,
+                "status": refund.status,
+                "created_at": refund.created_at.isoformat(),
+            }
+            for refund in order.refunds.all()
+        ],
+        "returns": [
+            {
+                "status": return_request.status,
+                "reason_code": return_request.reason_code,
+                "created_at": return_request.created_at.isoformat(),
+            }
+            for return_request in order.return_requests.all()
+        ],
+    }
+
+
+class AccountExportView(APIView):
+    """GET /api/accounts/account/export/ — the CALLER's own data only.
+
+    ``request.user`` scopes every query (profile, addresses, orders); no path
+    or query value can select another account's rows. The projection carries
+    no password hash, TOTP secret, token, staff flag or group membership, and
+    no other user's rows. ``auth``-throttled at 10/min like the rest of the
+    account API. Orders are read through the reverse relation, so this module
+    gains no accounts-to-orders import edge.
+    """
+
+    permission_classes = [IsAuthenticated]
+    throttle_scope = "auth"
+
+    def get(self, request):
+        user = request.user
+        orders = user.orders.prefetch_related(
+            "items", "refunds", "return_requests"
+        ).order_by("-created_at", "-id")
+        return Response(
+            {
+                # After erasure these are the tombstone values; the old
+                # identity is never re-read from anywhere.
+                "profile": {
+                    "username": user.username,
+                    "email": user.email,
+                    "first_name": user.first_name,
+                    "last_name": user.last_name,
+                    "date_joined": user.date_joined.isoformat(),
+                },
+                "addresses": AddressSerializer(user.addresses.all(), many=True).data,
+                "orders": [_export_order(order) for order in orders],
+            }
+        )
 
 
 class LoginView(TokenObtainPairView):

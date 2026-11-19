@@ -987,6 +987,8 @@ class AuthThrottleTests(ApiTestCase):
             "storefront-login": "auth",
             "token-refresh": "auth",
             "logout": "auth",
+            "account-erase": "auth",
+            "account-export": "auth",
             "mfa-status": "auth",
             "mfa-setup": "auth",
             "mfa-confirm": "auth",
