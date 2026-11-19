@@ -1048,36 +1048,50 @@ class ThrottledRefreshAuditTests(ApiTestCase):
         b'"code":"throttled","details":{}}'
     )
 
-    def _throttled_refreshes(self, refusals, budget="1/min"):
-        """One allowed refresh, then ``refusals`` refusals in one window."""
+    @staticmethod
+    def _frozen_clock():
+        return mock.patch.object(
+            ScopedRateThrottle, "timer", staticmethod(lambda: 1000.0)
+        )
+
+    @staticmethod
+    def _budget(rate):
         rates = dict(api_settings.DEFAULT_THROTTLE_RATES)
-        rates["auth"] = budget
+        rates["auth"] = rate
+        return mock.patch.object(ScopedRateThrottle, "THROTTLE_RATES", rates)
+
+    @staticmethod
+    def _throttled_rows():
+        return AuditEvent.objects.filter(event_type="auth.throttled")
+
+    @staticmethod
+    def _login_failures():
+        return AuditEvent.objects.filter(
+            event_type=AuditEvent.EventType.AUTH_LOGIN_FAILED
+        ).count()
+
+    def _refresh(self, refresh):
+        return self.client.post(self.REFRESH, {"refresh": str(refresh)}, format="json")
+
+    def _assert_throttled(self, response):
+        self.assertEqual(response.status_code, 429, response.data)
+        self.assertEqual(response.content, self.THROTTLED_BODY)
+        self.assertEqual(response["Retry-After"], "60")
+
+    def _throttled_refreshes(self, refusals, rate="1/min"):
+        """One allowed refresh, then ``refusals`` refusals in one window."""
         user = self.make_user(f"throttled{refusals}")
         refresh = RefreshToken.for_user(user)
-        with (
-            mock.patch.object(
-                ScopedRateThrottle, "timer", staticmethod(lambda: 1000.0)
-            ),
-            mock.patch.object(ScopedRateThrottle, "THROTTLE_RATES", rates),
-        ):
+        with self._frozen_clock(), self._budget(rate):
             cache.clear()
-            first = self.client.post(
-                self.REFRESH, {"refresh": str(refresh)}, format="json"
-            )
+            first = self._refresh(refresh)
             self.assertEqual(first.status_code, 200, first.data)
-            return [
-                self.client.post(self.REFRESH, {"refresh": str(refresh)}, format="json")
-                for _ in range(refusals)
-            ]
+            return [self._refresh(refresh) for _ in range(refusals)]
 
     def test_a_throttled_refresh_keeps_the_429_and_writes_one_redacted_row(self):
-        throttled = self._throttled_refreshes(1)[0]
+        self._assert_throttled(self._throttled_refreshes(1)[0])
 
-        self.assertEqual(throttled.status_code, 429, throttled.data)
-        self.assertEqual(throttled.content, self.THROTTLED_BODY)
-        self.assertEqual(throttled["Retry-After"], "60")
-
-        rows = AuditEvent.objects.filter(event_type="auth.throttled")
+        rows = self._throttled_rows()
         self.assertEqual(rows.count(), 1)
         row = rows.get()
         self.assertEqual(row.event_type, "auth.throttled")
@@ -1093,22 +1107,12 @@ class ThrottledRefreshAuditTests(ApiTestCase):
         throttled = self._throttled_refreshes(5)
 
         for response in throttled:
-            self.assertEqual(response.status_code, 429, response.data)
-            self.assertEqual(response.content, self.THROTTLED_BODY)
-        self.assertEqual(
-            AuditEvent.objects.filter(event_type="auth.throttled").count(), 1
-        )
+            self._assert_throttled(response)
+        self.assertEqual(self._throttled_rows().count(), 1)
 
     def test_throttling_does_not_inflate_the_login_failure_metric(self):
         self.make_user("metricuser")
-        rates = dict(api_settings.DEFAULT_THROTTLE_RATES)
-        rates["auth"] = "1/min"
-        with (
-            mock.patch.object(
-                ScopedRateThrottle, "timer", staticmethod(lambda: 1000.0)
-            ),
-            mock.patch.object(ScopedRateThrottle, "THROTTLE_RATES", rates),
-        ):
+        with self._frozen_clock(), self._budget("1/min"):
             cache.clear()
             failed = self.client.post(
                 "/api/accounts/login/",
@@ -1116,30 +1120,16 @@ class ThrottledRefreshAuditTests(ApiTestCase):
                 format="json",
             )
             self.assertEqual(failed.status_code, 401, failed.data)
-            self.assertEqual(
-                AuditEvent.objects.filter(
-                    event_type=AuditEvent.EventType.AUTH_LOGIN_FAILED
-                ).count(),
-                1,
-            )
-            refresh = RefreshToken.for_user(User.objects.get(username="metricuser"))
-            throttled = self.client.post(
-                self.REFRESH, {"refresh": str(refresh)}, format="json"
+            self.assertEqual(self._login_failures(), 1)
+            throttled = self._refresh(
+                RefreshToken.for_user(User.objects.get(username="metricuser"))
             )
 
-        self.assertEqual(throttled.status_code, 429, throttled.data)
-        self.assertEqual(throttled.content, self.THROTTLED_BODY)
+        self._assert_throttled(throttled)
         # The throttle refusal consumed the shared auth slot but is not a
         # credential failure: the AUTH_LOGIN_FAILED count is unchanged.
-        self.assertEqual(
-            AuditEvent.objects.filter(
-                event_type=AuditEvent.EventType.AUTH_LOGIN_FAILED
-            ).count(),
-            1,
-        )
-        self.assertEqual(
-            AuditEvent.objects.filter(event_type="auth.throttled").count(), 1
-        )
+        self.assertEqual(self._login_failures(), 1)
+        self.assertEqual(self._throttled_rows().count(), 1)
 
     def test_a_failing_audit_sink_still_answers_the_429(self):
         attempts = []
@@ -1153,12 +1143,8 @@ class ThrottledRefreshAuditTests(ApiTestCase):
 
         self.assertEqual(len(attempts), 1)
         for response in throttled:
-            self.assertEqual(response.status_code, 429, response.data)
-            self.assertEqual(response.content, self.THROTTLED_BODY)
-            self.assertEqual(response["Retry-After"], "60")
-        self.assertFalse(
-            AuditEvent.objects.filter(event_type="auth.throttled").exists()
-        )
+            self._assert_throttled(response)
+        self.assertFalse(self._throttled_rows().exists())
 
     def test_the_enum_and_the_generated_migration_are_the_only_schema_change(self):
         self.assertEqual(

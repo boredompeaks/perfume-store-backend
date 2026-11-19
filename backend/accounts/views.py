@@ -15,7 +15,7 @@ from django.utils.encoding import force_bytes, force_str
 from django.utils.http import urlsafe_base64_decode, urlsafe_base64_encode
 from rest_framework import status, viewsets
 from rest_framework.decorators import api_view, permission_classes, throttle_scope
-from rest_framework.exceptions import AuthenticationFailed, PermissionDenied, Throttled
+from rest_framework.exceptions import AuthenticationFailed, PermissionDenied
 from rest_framework.exceptions import ValidationError as DRFValidationError
 from rest_framework.permissions import AllowAny, BasePermission, IsAuthenticated
 from rest_framework.response import Response
@@ -349,11 +349,14 @@ class RefreshView(TokenRefreshView):
         response = super().handle_exception(exc)
         if response.status_code == 401:
             response = _clear_refresh_cookie(response)
-        elif isinstance(exc, Throttled):
-            # AUD-026: the refusal is a durable, bounded fact even though it is
-            # not a verdict on the token. task: T-20261119-011
-            _record_throttled_refusal(self.request, self)
         return response
+
+    def throttled(self, request, wait):
+        # AUD-026: the refusal is a durable, bounded fact even though it is not
+        # a verdict on the token. The audit sink cannot replace the 429.
+        # task: T-20261119-011
+        _record_throttled_refusal(request, self)
+        super().throttled(request, wait)
 
 
 class LogoutView(APIView):
