@@ -2,9 +2,13 @@
 
 Registered from ``ops.apps.OpsConfig.ready``. A production-shaped boot with
 neither an error-tracking DSN nor an alert recipient currently looks healthy;
-these Error-level checks make ``manage.py check`` (and every management command
-that validates the project) exit non-zero instead. Messages name the key and the
-runbook section only - never a DSN, a DSN fragment or a recipient address.
+these Error-level checks make ``manage.py check``, ``makemigrations`` and
+``migrate`` exit non-zero instead. Commands that filter checks by tag, notably
+``collectstatic`` (which runs only ``Tags.staticfiles``), do not evaluate these
+untagged checks and therefore do not abort. Messages name the key and the
+runbook section only - never a DSN, a DSN fragment or a recipient address. A
+host may deliberately bypass them with ``SILENCED_SYSTEM_CHECKS`` or
+``--skip-checks``; docs/deploy-runbook.md documents that decision.
 """
 
 from django.conf import settings

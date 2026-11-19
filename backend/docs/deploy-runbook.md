@@ -479,9 +479,8 @@ command cannot print a value it never formats.
 #### The deployment guard: `ops.E001` / `ops.E002`
 
 A production-shaped boot with a silent alert channel now **fails its system
-checks** instead of looking healthy: `manage.py check`, and every management
-command that validates the project (`migrate`, `collectstatic`, and the release
-script's `makemigrations --check`), exits non-zero with:
+checks** instead of looking healthy: `manage.py check`, the release script's
+`makemigrations --check`, and `migrate` exit non-zero with:
 
 | Check | Fires when | Message names |
 | --- | --- | --- |
@@ -492,13 +491,19 @@ The messages never carry a DSN, a DSN fragment or a recipient address; the
 guard reads recipients through the same `ops.alerts._recipients()` the senders
 use, so it cannot disagree with them.
 
+`collectstatic` is deliberately not in that list: Django runs it with only
+`Tags.staticfiles`, while these checks are untagged, so it does not evaluate
+them. The release still fails closed because `migrate` runs immediately before
+it and aborts on an unconfigured host.
+
 "Production-shaped" is exactly the app's existing boot signals: `DEBUG` is
 false **and** `DJANGO_ENV` is outside the `local`/`ci` allowlist (so `staging`
 and `production` both fail). A `DEBUG=true` boot, `local`, and `ci` are exempt,
 which is why local work, the test suite and CI (`DJANGO_DEBUG=true`) stay
 green. The image build is `DJANGO_ENV=ci` for the same reason. `release.sh` is
-already fail-closed here - no new workflow or Dockerfile step is needed; the
-release commands it runs invoke the checks.
+already fail-closed here - no new workflow or Dockerfile step is needed: its
+`makemigrations --check` and `migrate` steps run the full check set and abort
+before `collectstatic` and the restart.
 
 **What to do when the guard fires:** set `SENTRY_DSN` and/or
 `ALERT_RECIPIENTS` on the deploy host, restart the backend, re-read the two
