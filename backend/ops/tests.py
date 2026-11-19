@@ -1,14 +1,19 @@
 import base64
+import io
 import tempfile
 from datetime import timedelta
 from decimal import Decimal
 from pathlib import Path
 
+from django.apps import apps
 from django.conf import settings
 from django.contrib.auth.models import User
+from django.core.checks import run_checks
+from django.core.management import call_command
+from django.core.management.base import SystemCheckError
 from django.db import models
 from django.template import RequestContext, Template
-from django.test import override_settings, tag
+from django.test import TestCase, override_settings, tag
 from django.test.client import RequestFactory
 from django.utils import timezone
 
@@ -21,6 +26,7 @@ from common.roles import (
     ROLE_SUPPORT,
 )
 from common.testing import ApiTestCase
+from ops import alerts
 from ops.services import REVENUE_STATUSES, get_health, get_sales_series, get_stats
 
 TEST_PASSWORD = "S3cure-Passphrase!"
@@ -1166,3 +1172,115 @@ class DashboardCapabilityGateTests(ApiTestCase):
         )
         user.groups.add(Group.objects.get_or_create(name=role)[0])
         return user
+
+
+@tag("ops")
+class DeploymentAlertingCheckTests(TestCase):
+    """AUD-006 residual: a production-shaped boot with a silent alert channel must fail manage.py check, while local/ci/test boots stay green.
+
+    ``run_checks`` is used instead of importing ``ops.checks`` so this class also
+    runs against the base tree, where the check is not registered yet.
+    """
+
+    PRODUCTION = {"DJANGO_ENV": "production", "DEBUG": False}
+    FAKE_DSN = "https://not-a-real-key@o0.ingest.us.example.invalid/0"
+    FAKE_RECIPIENT = "ops@example.test"
+
+    def ops_messages(self):
+        return [
+            message
+            for message in run_checks(app_configs=[apps.get_app_config("ops")])
+            if (message.id or "").startswith("ops.")
+        ]
+
+    def ids(self):
+        return {message.id for message in self.ops_messages()}
+
+    def with_environment(self, **overrides):
+        return override_settings(
+            **{**self.PRODUCTION, **overrides},
+            SENTRY_DSN="",
+            ALERT_RECIPIENTS="",
+        )
+
+    def test_production_without_a_channel_emits_both_errors_and_echoes_no_values(
+        self,
+    ):
+        with self.with_environment():
+            messages = {message.id: message for message in self.ops_messages()}
+        self.assertEqual(set(messages), {"ops.E001", "ops.E002"})
+        self.assertIn("SENTRY_DSN", messages["ops.E001"].msg)
+        self.assertIn("deploy-runbook.md", messages["ops.E001"].msg)
+        self.assertIn("ALERT_RECIPIENTS", messages["ops.E002"].msg)
+        self.assertIn("deploy-runbook.md", messages["ops.E002"].msg)
+
+        # The error for the missing channel must not echo the other channel's
+        # configured value either.
+        with override_settings(
+            **self.PRODUCTION, SENTRY_DSN=self.FAKE_DSN, ALERT_RECIPIENTS=""
+        ):
+            recipients_error = {message.id: message for message in self.ops_messages()}[
+                "ops.E002"
+            ]
+        self.assertNotIn(self.FAKE_DSN, recipients_error.msg + recipients_error.hint)
+        with override_settings(
+            **self.PRODUCTION, SENTRY_DSN="", ALERT_RECIPIENTS=self.FAKE_RECIPIENT
+        ):
+            dsn_error = {message.id: message for message in self.ops_messages()}[
+                "ops.E001"
+            ]
+        self.assertNotIn(self.FAKE_RECIPIENT, dsn_error.msg + dsn_error.hint)
+
+    def test_production_with_both_channels_configured_emits_nothing(self):
+        # Control: the check is live, so the empty result below is the guard's
+        # silence, not a tree where the guard was never registered.
+        with self.with_environment():
+            self.assertIn("ops.E001", self.ids())
+        with override_settings(
+            **self.PRODUCTION,
+            SENTRY_DSN=self.FAKE_DSN,
+            ALERT_RECIPIENTS=f" {self.FAKE_RECIPIENT} ,",
+        ):
+            self.assertEqual(self.ops_messages(), [])
+
+    def test_dev_and_test_environments_do_not_emit_the_production_errors(self):
+        # Control: the same missing configuration is loud when production-shaped.
+        with self.with_environment():
+            self.assertTrue(self.ops_messages())
+        for environment in ("local", "ci"):
+            with (
+                self.subTest(environment=environment),
+                self.with_environment(DJANGO_ENV=environment),
+            ):
+                self.assertEqual(self.ops_messages(), [])
+        with self.with_environment(DEBUG=True):
+            self.assertEqual(self.ops_messages(), [])
+
+    def test_the_guard_uses_the_senders_recipient_parser(self):
+        with override_settings(
+            **self.PRODUCTION, SENTRY_DSN=self.FAKE_DSN, ALERT_RECIPIENTS=" , ,"
+        ):
+            self.assertEqual(alerts._recipients(), [])
+            self.assertIn("ops.E002", self.ids())
+        with override_settings(
+            **self.PRODUCTION,
+            SENTRY_DSN=self.FAKE_DSN,
+            ALERT_RECIPIENTS=f" {self.FAKE_RECIPIENT} ,",
+        ):
+            self.assertEqual(alerts._recipients(), [self.FAKE_RECIPIENT])
+            self.assertNotIn("ops.E002", self.ids())
+
+    def test_manage_py_check_exits_non_zero_for_an_unconfigured_production_boot(
+        self,
+    ):
+        with self.with_environment():
+            try:
+                call_command("check", stdout=io.StringIO(), stderr=io.StringIO())
+            except SystemCheckError as exc:
+                message = str(exc)
+            else:
+                self.fail(
+                    "manage.py check must fail for an unconfigured production boot"
+                )
+        self.assertIn("ops.E001", message)
+        self.assertIn("ops.E002", message)

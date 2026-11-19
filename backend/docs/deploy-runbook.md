@@ -476,6 +476,45 @@ names the key, a refused DSN names the SDK, and a transport that raises names
 the exception class only. None of them prints a traceback or the DSN; the
 command cannot print a value it never formats.
 
+#### The deployment guard: `ops.E001` / `ops.E002`
+
+A production-shaped boot with a silent alert channel now **fails its system
+checks** instead of looking healthy: `manage.py check`, and every management
+command that validates the project (`migrate`, `collectstatic`, and the release
+script's `makemigrations --check`), exits non-zero with:
+
+| Check | Fires when | Message names |
+| --- | --- | --- |
+| `ops.E001` | `SENTRY_DSN` is unset | `SENTRY_DSN` and "Error tracking and uptime" |
+| `ops.E002` | `ALERT_RECIPIENTS` parses to no addresses | `ALERT_RECIPIENTS` and "Email delivery verification" |
+
+The messages never carry a DSN, a DSN fragment or a recipient address; the
+guard reads recipients through the same `ops.alerts._recipients()` the senders
+use, so it cannot disagree with them.
+
+"Production-shaped" is exactly the app's existing boot signals: `DEBUG` is
+false **and** `DJANGO_ENV` is outside the `local`/`ci` allowlist (so `staging`
+and `production` both fail). A `DEBUG=true` boot, `local`, and `ci` are exempt,
+which is why local work, the test suite and CI (`DJANGO_DEBUG=true`) stay
+green. The image build is `DJANGO_ENV=ci` for the same reason. `release.sh` is
+already fail-closed here - no new workflow or Dockerfile step is needed; the
+release commands it runs invoke the checks.
+
+**What to do when the guard fires:** set `SENTRY_DSN` and/or
+`ALERT_RECIPIENTS` on the deploy host, restart the backend, re-read the two
+booleans on `GET /api/v1/admin/health/`, then run the probes above to confirm
+real delivery.
+
+**Deliberate bypass for a staging host:** make the choice visible, never fake a
+value. Django natively honours `SILENCED_SYSTEM_CHECKS = ["ops.E001",
+"ops.E002"]` in that host's settings module (use a staging-only module so the
+production settings keep both errors live). A genuinely ephemeral non-production
+host may declare `DJANGO_ENV=ci` instead; `DJANGO_DEBUG=true` also exempts the
+boot, but it is a development-only state and `check --deploy` will flag it.
+`manage.py <command> --skip-checks` is the one-command escape hatch - a bypass,
+not a fix. Never put a fake DSN or a placeholder recipient list in production
+to silence the guard.
+
 ### Uptime: `/health/` and the container healthcheck (SPEC-22-04, R-22.12)
 
 `/health/` is public, cheap, and answers **503** while the database is
