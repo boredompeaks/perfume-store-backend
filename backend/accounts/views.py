@@ -1,3 +1,4 @@
+import hashlib
 from datetime import timedelta
 
 from django.conf import settings
@@ -5,6 +6,7 @@ from django.contrib.auth import authenticate
 from django.contrib.auth.models import User
 from django.contrib.auth.password_validation import validate_password
 from django.contrib.auth.tokens import default_token_generator
+from django.core.cache import cache
 from django.core.exceptions import ValidationError
 from django.core.signing import BadSignature, TimestampSigner
 from django.db import transaction
@@ -399,6 +401,10 @@ def _send_verification_email(user):
 CHALLENGE_SALT = "accounts.access-challenge"
 CHALLENGE_VALUE = "accounts-access"
 CHALLENGE_REFUSAL = "Access challenge required."
+# The probe never discloses which of its two answers is true: one constant body
+# keeps status, fields and length identical for a taken and a free name.
+_PROBE_MESSAGE = "Username availability cannot be confirmed."
+_PROBE_REPLAY_PREFIX = "accounts.username-probe.challenge"
 
 
 def _enforce_access_challenge(request):
@@ -408,11 +414,12 @@ def _enforce_access_challenge(request):
     request must carry a ``TimestampSigner`` token minted with that secret and the
     ``CHALLENGE_SALT``/``CHALLENGE_VALUE`` domain, refused identically when
     missing, foreign, tampered or stale. It runs after DRF throttling, so token
-    guessing is bounded by the endpoint's budget too.
+    guessing is bounded by the endpoint's budget too. Returns the admitted token
+    so a caller can bind further state to it.
     """
     secret = settings.ACCOUNT_CHALLENGE_SECRET
     if not secret:
-        return
+        return None
     token = request.query_params.get("challenge")
     if token is None and isinstance(request.data, dict):
         token = request.data.get("challenge")
@@ -428,6 +435,33 @@ def _enforce_access_challenge(request):
         raise PermissionDenied(CHALLENGE_REFUSAL)
     if payload != CHALLENGE_VALUE:
         raise PermissionDenied(CHALLENGE_REFUSAL)
+    return token
+
+
+def _probe_challenge_ttl():
+    # A zero window disables the age check, not the single-use record, so the
+    # replay key must outlive the token instead of expiring with it.
+    max_age = settings.ACCOUNT_CHALLENGE_MAX_AGE
+    return max_age if max_age else None
+
+
+def _enforce_probe_challenge(request):
+    """Fail-closed challenge gate for the username probe.
+
+    Registration keeps the optional gate so a zero-config deployment can still
+    sign users up; the probe has no safe zero-config mode, so an unset secret
+    refuses every call instead of restoring the public oracle. A token admitted
+    here is single-use for the probe: the replay record is scoped to this
+    endpoint so the same token may still be spent on another endpoint that
+    shares the signed domain.
+    """
+    if not settings.ACCOUNT_CHALLENGE_SECRET:
+        raise PermissionDenied(CHALLENGE_REFUSAL)
+    token = _enforce_access_challenge(request)
+    digest = hashlib.sha256(token.encode()).hexdigest()
+    if cache.add(f"{_PROBE_REPLAY_PREFIX}.{digest}", 1, timeout=_probe_challenge_ttl()):
+        return
+    raise PermissionDenied(CHALLENGE_REFUSAL)
 
 
 @api_view(["POST"])
@@ -489,14 +523,16 @@ def register(request):
 @permission_classes([AllowAny])
 @throttle_scope("username-probe")
 def username_available(request):
-    """The public username-existence oracle.
+    """The username probe, now non-disclosing. task: T-20261119-008
 
-    The scope throttles GET too (ScopedRateThrottle has no safe-method
-    exemption), because without a rate limit the endpoint enables cheap username
-    enumeration. The signed-challenge hook refuses every probe once configured;
-    with the zero-config default it stays open but bounded by design.
+    A signed server challenge is required even though the route stays public
+    (the caller has no account yet); the 'username-probe' scope bounds volume
+    for callers holding one. Every valid-length input runs the same lookup and
+    receives the same body, so neither status, fields, query work nor latency
+    distinguishes a taken name from a free one; only registration answers
+    truthfully.
     """
-    _enforce_access_challenge(request)
+    _enforce_probe_challenge(request)
     username = request.query_params.get("username", "").strip()
 
     if len(username) < 3:
@@ -504,15 +540,9 @@ def username_available(request):
             {"available": False, "message": "Username must be at least 3 characters."}
         )
 
-    exists = User.objects.filter(username__iexact=username).exists()
-    return Response(
-        {
-            "available": not exists,
-            "message": "Username is available."
-            if not exists
-            else "This username is already taken.",
-        }
-    )
+    # The lookup runs for both inputs; a skipped query would time-differ.
+    User.objects.filter(username__iexact=username).exists()
+    return Response({"message": _PROBE_MESSAGE})
 
 
 # Token-carrying account mutations (no mail): the 'auth' budget and the entropy
