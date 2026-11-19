@@ -376,14 +376,13 @@ class SignatureRejectionAuditTests(WebhookTestCase):
             [response.status_code for response in responses], [400, 400, 400]
         )
         self.assertEqual(
-            len({json.dumps(response.data, sort_keys=True) for response in responses}),
+            len({json.dumps(response.data) for response in responses}),
             1,
         )
         self.assertEqual(self.assert_one_rejection().detail["event_id"], "evt_REPLAY01")
 
     def test_an_audit_sink_failure_cannot_change_the_400(self):
         order = self.make_pending_order()
-        self.client.raise_request_exception = False
 
         with patch.object(
             AuditEvent, "record", side_effect=RuntimeError("audit sink is down")
@@ -417,7 +416,7 @@ class SignatureRejectionAuditTests(WebhookTestCase):
         self.assertEqual(response.status_code, 400)
         event = self.assert_one_rejection()
         self.assertEqual(set(event.detail), {"reason", "event_id"})
-        serialized = json.dumps(event.detail, sort_keys=True)
+        serialized = json.dumps(event.detail)
         for forbidden in (
             signature,
             WEBHOOK_SECRET,
