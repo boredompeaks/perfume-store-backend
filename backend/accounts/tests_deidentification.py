@@ -501,7 +501,7 @@ class AccountErasureRouteTests(ApiTestCase):
         self.api_login("route-twice")
         first = self.client.post(self.ERASE, {}, format="json")
         self.assertEqual(200, first.status_code)
-        tombstone = self._snapshot(buyer.pk)
+        before = self._snapshot(buyer.pk)
 
         # Simulate a request that authenticated before the tombstone committed;
         # the service row lock is what turns it into the 409 refusal.
@@ -510,7 +510,8 @@ class AccountErasureRouteTests(ApiTestCase):
 
         self.assertEqual(409, second.status_code)
         self.assertEqual("Account erasure refused.", second.json()["error"])
-        self.assertEqual(tombstone, self._snapshot(buyer.pk))
+        after = self._snapshot(buyer.pk)
+        self.assertEqual(after, before)
         self.assertEqual(
             1, AuditEvent.objects.filter(event_type="auth.account_erased").count()
         )
