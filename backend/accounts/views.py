@@ -123,7 +123,14 @@ def _erasure_reason(request):
     return reason if isinstance(reason, str) else ""
 
 
-class AccountEraseView(APIView):
+class _SelfServiceAccountView(APIView):
+    """Shared auth and throttle posture for the self-service account routes."""
+
+    permission_classes = [IsAuthenticated]
+    throttle_scope = "auth"
+
+
+class AccountEraseView(_SelfServiceAccountView):
     """POST /api/accounts/account/erase/ — tombstone the CALLER in place.
 
     ``IsAuthenticated`` plus ``request.user`` is the whole authorization
@@ -140,9 +147,6 @@ class AccountEraseView(APIView):
     service is shared with staff tooling and is intentionally unchanged, so the
     request surface owns this extra deletion.
     """
-
-    permission_classes = [IsAuthenticated]
-    throttle_scope = "auth"
 
     def post(self, request):
         try:
@@ -216,7 +220,7 @@ def _export_order(order):
     }
 
 
-class AccountExportView(APIView):
+class AccountExportView(_SelfServiceAccountView):
     """GET /api/accounts/account/export/ — the CALLER's own data only.
 
     ``request.user`` scopes every query (profile, addresses, orders); no path
@@ -226,9 +230,6 @@ class AccountExportView(APIView):
     account API. Orders are read through the reverse relation, so this module
     gains no accounts-to-orders import edge.
     """
-
-    permission_classes = [IsAuthenticated]
-    throttle_scope = "auth"
 
     def get(self, request):
         user = request.user

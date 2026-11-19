@@ -12,6 +12,7 @@ import json
 from decimal import Decimal
 from unittest import mock
 
+from django.apps import apps
 from django.contrib.auth import get_user_model
 from django.db import DatabaseError, connection
 from django.test.utils import CaptureQueriesContext
@@ -25,15 +26,15 @@ from accounts.services import (
     erase_account,
 )
 from common.models import AuditEvent
-from common.testing import ApiTestCase
-from orders.models import (
-    Order,
-    OrderItem,
-    PaymentEvent,
-    Refund,
-    RefundRequest,
-    ReturnRequest,
-)
+from common.testing import TEST_TOTP_SECRET, ApiTestCase
+from orders.models import Order, PaymentEvent, Refund
+
+# The extra money models are read through the app registry: the layer map
+# admits orders -> accounts but not the reverse, so importing them statically
+# here would be a new cross-layer edge. task: T-20261119-013
+OrderItem = apps.get_model("orders", "OrderItem")
+RefundRequest = apps.get_model("orders", "RefundRequest")
+ReturnRequest = apps.get_model("orders", "ReturnRequest")
 
 User = get_user_model()
 
@@ -313,32 +314,93 @@ class AccountErasureRouteTests(ApiTestCase):
     ERASE = "/api/accounts/account/erase/"
     EXPORT = "/api/accounts/account/export/"
 
+    _ORDER_FIELDS = {
+        "full_name": "Route Probe",
+        "phone": "9876500301",
+        "address": "1 Route Row",
+        "city": "Mumbai",
+        "state": "Maharashtra",
+        "pincode": "400001",
+        "total_amount": Decimal("499.00"),
+        "payment_status": "captured",
+    }
+
+    _ADDRESS_FIELDS = {
+        "city": "Mumbai",
+        "state": "Maharashtra",
+        "postal_code": "400001",
+        "country": "India",
+        "phone": "9876500301",
+    }
+
     def _order_owned_by(self, user, order_number, payment_id="pay_ROUTE0001"):
         return Order.objects.create(
             user=user,
             order_number=order_number,
-            full_name="Route Probe",
-            phone="9876500301",
-            address="1 Route Row",
-            city="Mumbai",
-            state="Maharashtra",
-            pincode="400001",
-            total_amount=Decimal("499.00"),
-            payment_status="captured",
             razorpay_order_id=f"order_{payment_id}",
             razorpay_payment_id=payment_id,
+            **self._ORDER_FIELDS,
         )
 
     def _address_owned_by(self, user, label="Home", line1="12 Rose Lane"):
-        return Address.objects.create(
+        fields = {
+            "user": user,
+            "label": label,
+            "line1": line1,
+            **self._ADDRESS_FIELDS,
+        }
+        return Address.objects.create(**fields)
+
+    def _add_financial_rows(self, order, suffix):
+        OrderItem.objects.create(
+            order=order,
+            product_name="Rose Aurum",
+            price=Decimal("499.00"),
+            quantity=1,
+            subtotal=Decimal("499.00"),
+        )
+        Refund.objects.create(
+            order=order,
+            amount=Decimal("50.00"),
+            reason="partial refund",
+            kind=Refund.Kind.PARTIAL,
+            status=Refund.Status.PROCESSED,
+            idempotency_key=f"refund-{suffix}",
+            gateway_refund_id=f"rfnd_{suffix}",
+        )
+        RefundRequest.objects.create(
+            order=order, requester=order.user, reason="changed mind"
+        )
+        PaymentEvent.objects.create(
+            event_id=f"evt_{suffix}",
+            event_type="payment.captured",
+            order=order,
+            gateway_payment_id=f"pay_{suffix}",
+            amount=Decimal("499.00"),
+            payload={"id": f"evt_{suffix}"},
+            outcome=PaymentEvent.Outcome.APPLIED,
+        )
+        ReturnRequest.objects.create(
+            order=order,
+            reason_code=ReturnRequest.ReasonCode.DAMAGED,
+        )
+
+    def _enrolled_device(self, user):
+        return TOTPDevice.objects.create(
             user=user,
-            label=label,
-            line1=line1,
-            city="Mumbai",
-            state="Maharashtra",
-            postal_code="400001",
-            country="India",
-            phone="9876500301",
+            secret=TEST_TOTP_SECRET,
+            enabled=True,
+            confirmed_at=timezone.now(),
+        )
+
+    def _financial_counts(self, order):
+        return (
+            Order.objects.count(),
+            OrderItem.objects.count(),
+            Refund.objects.count(),
+            RefundRequest.objects.count(),
+            PaymentEvent.objects.count(),
+            Order.objects.get(pk=order.pk).user_id,
         )
 
     def _snapshot(self, pk):
@@ -350,12 +412,7 @@ class AccountErasureRouteTests(ApiTestCase):
         buyer = self.make_user("route-buyer", email="route-buyer@example.com")
         self._address_owned_by(buyer, label="Home")
         self._address_owned_by(buyer, label="Work")
-        TOTPDevice.objects.create(
-            user=buyer,
-            secret="GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ",
-            enabled=True,
-            confirmed_at=timezone.now(),
-        )
+        self._enrolled_device(buyer)
         self.api_login("route-buyer")
 
         response = self.client.post(self.ERASE, {}, format="json")
@@ -372,56 +429,14 @@ class AccountErasureRouteTests(ApiTestCase):
     def test_erasure_keeps_financial_rows(self):
         buyer = self.make_user("route-retain", email="route-retain@example.com")
         order = self._order_owned_by(buyer, "ORD-2026-000701")
-        OrderItem.objects.create(
-            order=order,
-            product_name="Rose Aurum",
-            price=Decimal("499.00"),
-            quantity=1,
-            subtotal=Decimal("499.00"),
-        )
-        Refund.objects.create(
-            order=order,
-            amount=Decimal("50.00"),
-            reason="partial refund",
-            kind=Refund.Kind.PARTIAL,
-            status=Refund.Status.PROCESSED,
-            gateway_refund_id="rfnd_ROUTE0001",
-        )
-        RefundRequest.objects.create(
-            order=order,
-            requester=buyer,
-            reason="changed mind",
-        )
-        PaymentEvent.objects.create(
-            event_id="evt_ROUTE0001",
-            event_type="payment.captured",
-            order=order,
-            gateway_payment_id="pay_ROUTE0001",
-            amount=Decimal("499.00"),
-            payload={"id": "evt_ROUTE0001"},
-            outcome=PaymentEvent.Outcome.APPLIED,
-        )
-        before = (
-            Order.objects.count(),
-            OrderItem.objects.count(),
-            Refund.objects.count(),
-            RefundRequest.objects.count(),
-            PaymentEvent.objects.count(),
-            Order.objects.get(pk=order.pk).user_id,
-        )
+        self._add_financial_rows(order, "ROUTE0001")
+        before = self._financial_counts(order)
         self.api_login("route-retain")
 
         response = self.client.post(self.ERASE, {}, format="json")
 
         self.assertEqual(200, response.status_code)
-        after = (
-            Order.objects.count(),
-            OrderItem.objects.count(),
-            Refund.objects.count(),
-            RefundRequest.objects.count(),
-            PaymentEvent.objects.count(),
-            Order.objects.get(pk=order.pk).user_id,
-        )
+        after = self._financial_counts(order)
         self.assertEqual(before, after)
         self.assertEqual(buyer.pk, after[-1])
 
@@ -566,33 +581,10 @@ class AccountErasureRouteTests(ApiTestCase):
 
     def test_export_excludes_secrets_and_other_users_rows(self):
         buyer = self.make_user("route-export", email="route-export@example.com")
-        device = TOTPDevice.objects.create(
-            user=buyer,
-            secret="MFRGGZDFMZTWQ2LKNNWG23TPOBYXE43U",
-            enabled=True,
-            confirmed_at=timezone.now(),
-        )
+        device = self._enrolled_device(buyer)
         own_address = self._address_owned_by(buyer, label="Own", line1="3 Own Ln")
         own_order = self._order_owned_by(buyer, "ORD-2026-000704", "pay_ROUTE0004")
-        OrderItem.objects.create(
-            order=own_order,
-            product_name="Rose Aurum",
-            price=Decimal("499.00"),
-            quantity=1,
-            subtotal=Decimal("499.00"),
-        )
-        Refund.objects.create(
-            order=own_order,
-            amount=Decimal("50.00"),
-            reason="partial refund",
-            kind=Refund.Kind.PARTIAL,
-            status=Refund.Status.PROCESSED,
-            gateway_refund_id="rfnd_ROUTE0004",
-        )
-        ReturnRequest.objects.create(
-            order=own_order,
-            reason_code=ReturnRequest.ReasonCode.DAMAGED,
-        )
+        self._add_financial_rows(own_order, "ROUTE0004")
         other = self.make_user(
             "route-export-other", email="route-export-other@example.com"
         )
