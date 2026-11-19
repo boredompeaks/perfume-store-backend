@@ -61,8 +61,14 @@ const csp = [
 // cross-origin script/frame and Sentry's ingest, which send no CORP header.
 // COOP allows the gateway's payment popups; CORP only stops other origins
 // embedding storefront responses.
+//
+// The CSP is report-only: Next prerenders most routes at build time, so a
+// per-request nonce cannot reach their inline scripts and an enforcing
+// script-src would block them. Enforce this exact policy once every route is
+// dynamically rendered and a per-request nonce is set in frontend/src/proxy.ts
+// (the location Next 16 discovers while appDir is src/app).
 const securityHeaders = [
-  { key: "Content-Security-Policy", value: csp },
+  { key: "Content-Security-Policy-Report-Only", value: csp },
   { key: "X-Content-Type-Options", value: "nosniff" },
   { key: "Referrer-Policy", value: "strict-origin-when-cross-origin" },
   { key: "X-Frame-Options", value: "DENY" },

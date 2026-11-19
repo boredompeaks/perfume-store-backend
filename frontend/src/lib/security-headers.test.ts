@@ -7,6 +7,8 @@ type SecurityConfig = {
   headers: () => Promise<{ headers: SecurityHeader[] }[]>;
 };
 
+const REPORT_ONLY = "Content-Security-Policy-Report-Only";
+
 async function securityHeaders(
   config = nextConfig as unknown as SecurityConfig,
 ): Promise<SecurityHeader[]> {
@@ -29,10 +31,14 @@ function directive(csp: string, name: string): string {
 
 describe("security headers", () => {
   it("test_csp_has_no_unsafe_inline_or_eval_and_keeps_required_origins", async () => {
-    const csp = headerValue(await securityHeaders(), "Content-Security-Policy");
+    const headers = await securityHeaders();
+    const csp = headerValue(headers, REPORT_ONLY);
     expect(csp).toBeDefined();
-    expect(csp).not.toContain("'unsafe-inline'");
-    expect(csp).not.toContain("'unsafe-eval'");
+    // Detection only: the enforcing header must not be emitted by Next while
+    // prerendered pages still carry inline scripts a nonce cannot cover.
+    expect(headerValue(headers, "Content-Security-Policy")).toBeUndefined();
+    expect(directive(csp!, "script-src")).not.toContain("'unsafe-inline'");
+    expect(directive(csp!, "script-src")).not.toContain("'unsafe-eval'");
     expect(directive(csp!, "script-src")).toContain(
       "https://checkout.razorpay.com",
     );
@@ -53,11 +59,15 @@ describe("security headers", () => {
       vi.resetModules();
       const config = (await import("../../next.config.mjs"))
         .default as unknown as SecurityConfig;
-      const sentryCsp = headerValue(
-        await securityHeaders(config),
-        "Content-Security-Policy",
+      const sentryHeaders = await securityHeaders(config);
+      const sentryCsp = headerValue(sentryHeaders, REPORT_ONLY);
+      expect(sentryCsp).toBeDefined();
+      expect(
+        headerValue(sentryHeaders, "Content-Security-Policy"),
+      ).toBeUndefined();
+      expect(directive(sentryCsp!, "script-src")).not.toContain(
+        "'unsafe-inline'",
       );
-      expect(sentryCsp).not.toContain("'unsafe-inline'");
       expect(directive(sentryCsp!, "connect-src")).toContain(
         "https://o1.ingest.sentry.io",
       );
@@ -74,8 +84,16 @@ describe("security headers", () => {
     expect(nextConfig.poweredByHeader).toBe(false);
   });
 
-  it("sends COOP and CORP and omits COEP for the gateway and Sentry", async () => {
+  it("keeps every non-CSP header enforced and omits COEP", async () => {
     const headers = await securityHeaders();
+    expect(headerValue(headers, "X-Content-Type-Options")).toBe("nosniff");
+    expect(headerValue(headers, "X-Frame-Options")).toBe("DENY");
+    expect(headerValue(headers, "Referrer-Policy")).toBe(
+      "strict-origin-when-cross-origin",
+    );
+    expect(headerValue(headers, "Permissions-Policy")).toBe(
+      "camera=(), microphone=(), geolocation=()",
+    );
     expect(headerValue(headers, "Cross-Origin-Opener-Policy")).toBe(
       "same-origin-allow-popups",
     );
