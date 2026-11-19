@@ -413,6 +413,7 @@ class AccountErasureRouteTests(ApiTestCase):
         self._address_owned_by(buyer, label="Home")
         self._address_owned_by(buyer, label="Work")
         self._enrolled_device(buyer)
+        self.assertIsNotNone(TOTPDevice.active_for(buyer))
         self.api_login("route-buyer")
 
         response = self.client.post(self.ERASE, {}, format="json")
