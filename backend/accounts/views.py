@@ -14,11 +14,17 @@ from django.utils import timezone
 from django.utils.encoding import force_bytes, force_str
 from django.utils.http import urlsafe_base64_decode, urlsafe_base64_encode
 from rest_framework import status, viewsets
-from rest_framework.decorators import api_view, permission_classes, throttle_scope
+from rest_framework.decorators import (
+    api_view,
+    permission_classes,
+    throttle_classes,
+    throttle_scope,
+)
 from rest_framework.exceptions import AuthenticationFailed, PermissionDenied
 from rest_framework.exceptions import ValidationError as DRFValidationError
 from rest_framework.permissions import AllowAny, BasePermission, IsAuthenticated
 from rest_framework.response import Response
+from rest_framework.throttling import ScopedRateThrottle, SimpleRateThrottle
 from rest_framework.views import APIView
 from rest_framework_simplejwt.exceptions import TokenError
 from rest_framework_simplejwt.settings import api_settings as jwt_api_settings
@@ -401,9 +407,9 @@ def _send_verification_email(user):
 CHALLENGE_SALT = "accounts.access-challenge"
 CHALLENGE_VALUE = "accounts-access"
 CHALLENGE_REFUSAL = "Access challenge required."
-# The probe never discloses which of its two answers is true: one constant body
-# keeps status, fields and length identical for a taken and a free name.
-_PROBE_MESSAGE = "Username availability cannot be confirmed."
+# A valid challenge earns the truthful boolean; the message stays constant so
+# the two outcomes differ in that value only, never in shape or length.
+_PROBE_MESSAGE = "Username availability checked."
 _PROBE_REPLAY_PREFIX = "accounts.username-probe.challenge"
 
 
@@ -465,6 +471,26 @@ def _enforce_probe_challenge(request):
     raise PermissionDenied(CHALLENGE_REFUSAL)
 
 
+class _UsernameProbeHardThrottle(SimpleRateThrottle):
+    """Tighter per-IP cap on top of the view's ``username-probe`` scope.
+
+    Challenge issuance lives outside this service (the owner-side edge gate
+    mints the signed token), so minting cannot be throttled here; 3/min bounds
+    the oracle's volume even when a caller holds a generous mint budget. The
+    scoped 5/min default still applies, so the effective probe budget is the
+    tighter 3/min.
+    """
+
+    scope = "username-probe-hard"
+    rate = "3/min"
+
+    def get_cache_key(self, request, view):
+        return self.cache_format % {
+            "scope": self.scope,
+            "ident": self.get_ident(request),
+        }
+
+
 @api_view(["POST"])
 # Public: the account does not exist yet, so there is no credential to present.
 @permission_classes([AllowAny])
@@ -523,15 +549,16 @@ def register(request):
 # Public: availability is asked before the account exists.
 @permission_classes([AllowAny])
 @throttle_scope("username-probe")
+@throttle_classes([ScopedRateThrottle, _UsernameProbeHardThrottle])
 def username_available(request):
-    """The username probe, now non-disclosing. task: T-20261119-008
+    """The username probe behind a server-issued challenge. task: T-20261119-008
 
-    A signed server challenge is required even though the route stays public
-    (the caller has no account yet); the 'username-probe' scope bounds volume
-    for callers holding one. Every valid-length input runs the same lookup and
-    receives the same body, so neither status, fields, query work nor latency
-    distinguishes a taken name from a free one; only registration answers
-    truthfully.
+    The route stays public because the caller has no account yet, but only a
+    fresh, unspent token earns the truthful boolean. The message and keys stay
+    constant on both outcomes, so the body differs in that value only. A
+    missing, foreign, stale or replayed token is refused identically, and an
+    unset secret fails closed. The 'username-probe' scope (5/min) plus a hard
+    3/min layer bound volume while issuance lives outside this service.
     """
     _enforce_probe_challenge(request)
     username = request.query_params.get("username", "").strip()
@@ -541,9 +568,9 @@ def username_available(request):
             {"available": False, "message": "Username must be at least 3 characters."}
         )
 
-    # The lookup runs for both inputs; a skipped query would time-differ.
-    User.objects.filter(username__iexact=username).exists()
-    return Response({"message": _PROBE_MESSAGE})
+    # One lookup feeds both answers; neither side short-circuits the work.
+    exists = User.objects.filter(username__iexact=username).exists()
+    return Response({"available": not exists, "message": _PROBE_MESSAGE})
 
 
 # Token-carrying account mutations (no mail): the 'auth' budget and the entropy

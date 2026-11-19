@@ -611,13 +611,16 @@ class UsernameAvailableTests(ApiTestCase):
             with self.subTest(candidate=candidate):
                 res = self._probe(candidate)
                 self.assertEqual(res.status_code, 200, res.data)
-                self.assertEqual(res.content, free.content)
+                self.assertEqual(set(res.data), set(free.data))
+                self.assertFalse(res.data["available"])
+                self.assertTrue(free.data["available"])
+                self.assertEqual(res.data["message"], free.data["message"])
 
     def test_free_username_reports_available(self):
         res = self._probe("freshname")
         self.assertEqual(res.status_code, 200, res.data)
-        self.assertNotIn("available", res.data)
-        self.assertIn("cannot be confirmed", res.data["message"])
+        self.assertTrue(res.data["available"])
+        self.assertEqual(set(res.data), {"available", "message"})
 
     def test_missing_query_param_reports_unavailable(self):
         res = self._probe("")
@@ -685,7 +688,7 @@ class AccessChallengeTests(ApiTestCase):
             probe = self._probe(challenge=token)
         self.assertEqual(res.status_code, 201, res.data)
         self.assertEqual(probe.status_code, 200, probe.data)
-        self.assertNotIn("available", probe.data)
+        self.assertFalse(probe.data["available"])
 
     def test_challenge_rides_the_query_string_too(self):
         token = self._mint()
@@ -766,8 +769,13 @@ class AccessChallengeTests(ApiTestCase):
             free = self._probe("probe-free-name", challenge=self._mint(age=2))
         self.assertEqual(taken.status_code, 200, taken.data)
         self.assertEqual(free.status_code, 200, free.data)
-        self.assertEqual(taken.content, free.content)
-        self.assertEqual(set(taken.data), {"message"})
+        self.assertEqual(set(taken.data), set(free.data))
+        self.assertEqual(set(taken.data), {"available", "message"})
+        self.assertIsInstance(taken.data["available"], bool)
+        self.assertIsInstance(free.data["available"], bool)
+        self.assertFalse(taken.data["available"])
+        self.assertTrue(free.data["available"])
+        self.assertEqual(taken.data["message"], free.data["message"])
 
     def test_probe_with_forged_expired_and_replayed_challenges_refuses_identically(
         self,
@@ -797,6 +805,8 @@ class AccessChallengeTests(ApiTestCase):
             live = self._mint(age=1)
             first = self._probe("probe-taken", challenge=live)
             replay = self._probe("probe-taken", challenge=live)
+            # A fresh window for the second pair: the hard cap is 3/min.
+            cache.clear()
             free_live = self._mint(age=2)
             first_free = self._probe("probe-free-name", challenge=free_live)
             free_replay = self._probe("probe-free-name", challenge=free_live)
@@ -818,11 +828,29 @@ class AccessChallengeTests(ApiTestCase):
         self.assertEqual(first.status_code, 200, first.data)
         self.assertEqual(replay.status_code, 403, replay.data)
 
+    def test_probe_answers_a_replayed_challenge_identically(self):
+        self.make_user("probe-taken")
+        with override_settings(ACCOUNT_CHALLENGE_SECRET=self.SECRET):
+            cache.clear()
+            taken_token = self._mint(age=1)
+            first = self._probe("probe-taken", challenge=taken_token)
+            replay = self._probe("probe-taken", challenge=taken_token)
+            # A fresh window for the second pair: the hard cap is 3/min.
+            cache.clear()
+            free_token = self._mint(age=2)
+            first_free = self._probe("probe-free-name", challenge=free_token)
+            free_replay = self._probe("probe-free-name", challenge=free_token)
+        self.assertEqual(first.status_code, 200, first.data)
+        self.assertEqual(first_free.status_code, 200, first_free.data)
+        self.assertEqual(replay.status_code, 403, replay.data)
+        self.assertEqual(free_replay.status_code, 403, free_replay.data)
+        self.assertEqual(replay.content, free_replay.content)
+
     def test_probe_over_the_limit_returns_the_same_429_for_existing_and_free(self):
         self.make_user("probe-taken")
         rates = dict(api_settings.DEFAULT_THROTTLE_RATES)
         rates["username-probe"] = "1/min"
-        allowed_bodies = []
+        allowed_messages = []
         throttled_bodies = []
         retry_after = []
         with override_settings(ACCOUNT_CHALLENGE_SECRET=self.SECRET):
@@ -844,13 +872,34 @@ class AccessChallengeTests(ApiTestCase):
                         )
                         self.assertEqual(allowed.status_code, 200, allowed.data)
                         self.assertEqual(throttled.status_code, 429, throttled.data)
-                        allowed_bodies.append(allowed.content)
+                        allowed_messages.append(allowed.data["message"])
                         throttled_bodies.append(throttled.content)
                         retry_after.append(throttled.headers.get("Retry-After"))
-        self.assertEqual(allowed_bodies[0], allowed_bodies[1])
+        self.assertEqual(allowed_messages[0], allowed_messages[1])
         self.assertEqual(throttled_bodies[0], throttled_bodies[1])
         self.assertIsNotNone(retry_after[0])
         self.assertEqual(retry_after[0], retry_after[1])
+
+    def test_probe_hard_cap_refuses_the_fourth_challenged_request(self):
+        self.make_user("probe-taken")
+        throttled_bodies = []
+        with override_settings(ACCOUNT_CHALLENGE_SECRET=self.SECRET):
+            for username, ages in (
+                ("probe-taken", (1, 2, 3, 4)),
+                ("probe-free-name", (5, 6, 7, 8)),
+            ):
+                cache.clear()
+                allowed = [
+                    self._probe(username, challenge=self._mint(age=age))
+                    for age in ages[:3]
+                ]
+                throttled = self._probe(username, challenge=self._mint(age=ages[3]))
+                self.assertEqual(
+                    [res.status_code for res in allowed], [200, 200, 200], allowed
+                )
+                self.assertEqual(throttled.status_code, 429, throttled.data)
+                throttled_bodies.append(throttled.content)
+        self.assertEqual(throttled_bodies[0], throttled_bodies[1])
 
     def test_probe_runs_the_same_lookup_for_existing_and_free(self):
         self.make_user("probe-taken")
@@ -863,7 +912,10 @@ class AccessChallengeTests(ApiTestCase):
                 free = self._probe("probe-free-name", challenge=self._mint(age=2))
         self.assertEqual(taken.status_code, 200, taken.data)
         self.assertEqual(free.status_code, 200, free.data)
-        self.assertEqual(taken.content, free.content)
+        self.assertEqual(set(taken.data), set(free.data))
+        self.assertFalse(taken.data["available"])
+        self.assertTrue(free.data["available"])
+        self.assertEqual(taken.data["message"], free.data["message"])
 
 
 @tag("accounts")
@@ -1044,7 +1096,7 @@ class AuthThrottleTests(ApiTestCase):
                 first = self._probe("probe1")
                 throttled = self._probe("probe2")
         self.assertEqual(first.status_code, 200, first.data)
-        self.assertNotIn("available", first.data)
+        self.assertTrue(first.data["available"])
         self.assertEqual(throttled.status_code, 429, throttled.data)
 
     def test_resend_verification_rate_limit_engages(self):
