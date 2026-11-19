@@ -296,15 +296,14 @@ def _record_throttled_refusal(request, view):
     it into a 5xx. task: T-20261119-011
     """
     try:
-        scope = getattr(view, "throttle_scope", None) or "auth"
+        # The only caller is RefreshView, whose throttle_scope is always set.
+        scope = view.throttle_scope
         throttle = ScopedRateThrottle()
         throttle.scope = scope
         actor_key = throttle.get_cache_key(request, view)
         if actor_key is None:
             return
         _, window = throttle.parse_rate(throttle.get_rate())
-        if not window:
-            window = 60
         if not cache.add(f"audit_{actor_key}", 1, window):
             return
         AuditEvent.record(
