@@ -660,7 +660,6 @@ class AccessChallengeTests(ApiTestCase):
     def test_zero_config_default_requires_no_challenge(self):
         self.assertEqual(settings.ACCOUNT_CHALLENGE_SECRET, "")
         self.assertEqual(settings.ACCOUNT_CHALLENGE_MAX_AGE, 300)
-        # Registration keeps its zero-config path; the probe fails closed.
         res = self._register()
         self.assertEqual(res.status_code, 201, res.data)
         probe = self._probe()
@@ -1032,20 +1031,20 @@ class AuthThrottleTests(ApiTestCase):
         self.assertIn("access", first.data)
         self.assertEqual(throttled.status_code, 429, throttled.data)
 
+    def _probe(self, username):
+        return self.client.get(
+            "/api/accounts/username-available/",
+            {"username": username, "challenge": mint_challenge()},
+        )
+
     def test_username_available_rate_limit_engages(self):
         rates = dict(api_settings.DEFAULT_THROTTLE_RATES)
         rates["username-probe"] = "1/min"
         with override_settings(ACCOUNT_CHALLENGE_SECRET=CHALLENGE_SECRET):
             with mock.patch.object(ScopedRateThrottle, "THROTTLE_RATES", rates):
                 cache.clear()
-                first = self.client.get(
-                    "/api/accounts/username-available/",
-                    {"username": "probe1", "challenge": mint_challenge()},
-                )
-                throttled = self.client.get(
-                    "/api/accounts/username-available/",
-                    {"username": "probe2", "challenge": mint_challenge()},
-                )
+                first = self._probe("probe1")
+                throttled = self._probe("probe2")
         self.assertEqual(first.status_code, 200, first.data)
         self.assertNotIn("available", first.data)
         self.assertEqual(throttled.status_code, 429, throttled.data)

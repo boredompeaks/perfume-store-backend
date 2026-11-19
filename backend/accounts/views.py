@@ -414,12 +414,11 @@ def _enforce_access_challenge(request):
     request must carry a ``TimestampSigner`` token minted with that secret and the
     ``CHALLENGE_SALT``/``CHALLENGE_VALUE`` domain, refused identically when
     missing, foreign, tampered or stale. It runs after DRF throttling, so token
-    guessing is bounded by the endpoint's budget too. Returns the admitted token
-    so a caller can bind further state to it.
+    guessing is bounded by the endpoint's budget too.
     """
     secret = settings.ACCOUNT_CHALLENGE_SECRET
     if not secret:
-        return None
+        return
     token = request.query_params.get("challenge")
     if token is None and isinstance(request.data, dict):
         token = request.data.get("challenge")
@@ -435,7 +434,6 @@ def _enforce_access_challenge(request):
         raise PermissionDenied(CHALLENGE_REFUSAL)
     if payload != CHALLENGE_VALUE:
         raise PermissionDenied(CHALLENGE_REFUSAL)
-    return token
 
 
 def _probe_challenge_ttl():
@@ -457,7 +455,10 @@ def _enforce_probe_challenge(request):
     """
     if not settings.ACCOUNT_CHALLENGE_SECRET:
         raise PermissionDenied(CHALLENGE_REFUSAL)
-    token = _enforce_access_challenge(request)
+    _enforce_access_challenge(request)
+    token = request.query_params.get("challenge")
+    if token is None and isinstance(request.data, dict):
+        token = request.data.get("challenge")
     digest = hashlib.sha256(token.encode()).hexdigest()
     if cache.add(f"{_PROBE_REPLAY_PREFIX}.{digest}", 1, timeout=_probe_challenge_ttl()):
         return
