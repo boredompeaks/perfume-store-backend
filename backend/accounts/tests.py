@@ -1032,10 +1032,8 @@ class AuthThrottleTests(ApiTestCase):
         self.assertEqual(throttled.status_code, 429, throttled.data)
 
     def _probe(self, username):
-        return self.client.get(
-            "/api/accounts/username-available/",
-            {"username": username, "challenge": mint_challenge()},
-        )
+        params = {"username": username, "challenge": mint_challenge()}
+        return self.client.get("/api/accounts/username-available/", params)
 
     def test_username_available_rate_limit_engages(self):
         rates = dict(api_settings.DEFAULT_THROTTLE_RATES)
