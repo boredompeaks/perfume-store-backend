@@ -609,8 +609,8 @@ class UsernameAvailableTests(ApiTestCase):
         for candidate in ("buyer", "BUYER", "Buyer"):
             with self.subTest(candidate=candidate):
                 res = self._probe(candidate)
-                self.assertEqual(res.status_code, 200, res.data)
                 self.assertFalse(res.data["available"])
+                self.assertEqual(res.status_code, 200, res.data)
                 self.assertIsInstance(res.data["message"], str)
 
     def test_free_username_reports_available(self):
@@ -838,8 +838,8 @@ class AccessChallengeTests(ApiTestCase):
             first_free = self._probe("probe-free-name", challenge=free_token)
             free_replay = self._probe("probe-free-name", challenge=free_token)
         self.assertEqual(first.status_code, 200, first.data)
-        self.assertEqual(first_free.status_code, 200, first_free.data)
         self.assertEqual(replay.status_code, 403, replay.data)
+        self.assertEqual(first_free.status_code, 200, first_free.data)
         self.assertEqual(free_replay.status_code, 403, free_replay.data)
         self.assertEqual(replay.content, free_replay.content)
 
