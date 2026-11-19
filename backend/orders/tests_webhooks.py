@@ -328,9 +328,18 @@ class SignatureRejectionAuditTests(WebhookTestCase):
             event_type=AuditEvent.EventType.PAYMENT_SIGNATURE_REJECTED
         )
 
+    def assert_one_rejection(self):
+        self.assertEqual(self.rejection_events().count(), 1)
+        return self.rejection_events().get()
+
     def test_unsigned_delivery_is_refused_and_writes_one_redacted_row(self):
         order = self.make_pending_order()
         payload = json.dumps(self.capture_event(order)).encode("utf-8")
+        expected_body = {
+            "error": "Invalid webhook signature",
+            "code": "validation_error",
+            "details": {},
+        }
 
         response = self.client.post(
             WEBHOOK_URL,
@@ -340,24 +349,9 @@ class SignatureRejectionAuditTests(WebhookTestCase):
         )
 
         self.assertEqual(response.status_code, 400)
-        self.assertEqual(
-            response.data,
-            {
-                "error": "Invalid webhook signature",
-                "code": "validation_error",
-                "details": {},
-            },
-        )
-        self.assertEqual(
-            json.loads(response.content),
-            {
-                "error": "Invalid webhook signature",
-                "code": "validation_error",
-                "details": {},
-            },
-        )
-        self.assertEqual(self.rejection_events().count(), 1)
-        event = self.rejection_events().get()
+        self.assertEqual(response.data, expected_body)
+        self.assertEqual(json.loads(response.content), expected_body)
+        event = self.assert_one_rejection()
         self.assertEqual(event.category, AuditEvent.Category.PAYMENT)
         self.assertEqual(
             event.detail,
@@ -385,10 +379,7 @@ class SignatureRejectionAuditTests(WebhookTestCase):
             len({json.dumps(response.data, sort_keys=True) for response in responses}),
             1,
         )
-        self.assertEqual(self.rejection_events().count(), 1)
-        self.assertEqual(
-            self.rejection_events().get().detail["event_id"], "evt_REPLAY01"
-        )
+        self.assertEqual(self.assert_one_rejection().detail["event_id"], "evt_REPLAY01")
 
     def test_an_audit_sink_failure_cannot_change_the_400(self):
         order = self.make_pending_order()
@@ -406,7 +397,6 @@ class SignatureRejectionAuditTests(WebhookTestCase):
 
         record.assert_called_once()
         self.assertEqual(response.status_code, 400)
-        self.assertLess(response.status_code, 500)
         self.assertEqual(self.rejection_events().count(), 0)
         self.assertNotIn("deadbeef", "\n".join(logs.output))
         self.assertNotIn(WEBHOOK_SECRET, "\n".join(logs.output))
@@ -425,8 +415,7 @@ class SignatureRejectionAuditTests(WebhookTestCase):
         response = self.deliver(body, event_id="evt_PRIVATE01", signature=signature)
 
         self.assertEqual(response.status_code, 400)
-        self.assertEqual(self.rejection_events().count(), 1)
-        event = self.rejection_events().get()
+        event = self.assert_one_rejection()
         self.assertEqual(set(event.detail), {"reason", "event_id"})
         serialized = json.dumps(event.detail, sort_keys=True)
         for forbidden in (
@@ -448,8 +437,7 @@ class SignatureRejectionAuditTests(WebhookTestCase):
         )
 
         self.assertEqual(response.status_code, 400)
-        self.assertEqual(self.rejection_events().count(), 1)
-        stored = self.rejection_events().get().detail["event_id"]
+        stored = self.assert_one_rejection().detail["event_id"]
         self.assertEqual(stored, "evt_" + "A" * 60)
         self.assertEqual(len(stored), 64)
 

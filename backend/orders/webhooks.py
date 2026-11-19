@@ -553,10 +553,8 @@ def razorpay_webhook(request):
 
     provided_signature = request.headers.get(WEBHOOK_SIGNATURE_HEADER)
     if not provided_signature or not _signature_matches(raw_body, provided_signature):
-        # One uniform 400 for "missing" and "wrong". The durable row is written
-        # before the answer, redacted to a fixed reason plus a truncated delivery
-        # id, so an operator can investigate after the request logs rotate
-        # without the caller choosing what enters the trail. task: T-20261119-010
+        # One uniform 400; the redacted row lands before the answer, never the
+        # caller's signature, body, or secret. task: T-20261119-010
         logger.warning(
             "Payment webhook rejected: %s header missing or invalid (event %s)",
             WEBHOOK_SIGNATURE_HEADER,
