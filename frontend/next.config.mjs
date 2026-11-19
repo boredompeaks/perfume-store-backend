@@ -28,7 +28,7 @@ try {
 } catch {
   sentryOrigin = null;
 }
-const scriptSrc = ["'self'", "'unsafe-inline'", "https://checkout.razorpay.com"];
+const scriptSrc = ["'self'", "https://checkout.razorpay.com"];
 const connectSrc = [
   "'self'",
   ...apiOrigins,
@@ -46,7 +46,7 @@ const imgSrc = [
 const csp = [
   "default-src 'self'",
   `script-src ${scriptSrc.join(" ")}`,
-  "style-src 'self' 'unsafe-inline'",
+  "style-src 'self'",
   "font-src 'self'",
   `img-src ${imgSrc.join(" ")}`,
   `connect-src ${connectSrc.join(" ")}`,
@@ -57,14 +57,21 @@ const csp = [
   "frame-ancestors 'none'",
   "upgrade-insecure-requests",
 ].join("; ");
+// COEP is deliberately absent: require-corp would block Razorpay's
+// cross-origin script/frame and Sentry's ingest, which send no CORP header.
+// COOP allows the gateway's payment popups; CORP only stops other origins
+// embedding storefront responses.
 const securityHeaders = [
   { key: "Content-Security-Policy", value: csp },
   { key: "X-Content-Type-Options", value: "nosniff" },
   { key: "Referrer-Policy", value: "strict-origin-when-cross-origin" },
   { key: "X-Frame-Options", value: "DENY" },
   { key: "Permissions-Policy", value: "camera=(), microphone=(), geolocation=()" },
+  { key: "Cross-Origin-Opener-Policy", value: "same-origin-allow-popups" },
+  { key: "Cross-Origin-Resource-Policy", value: "same-origin" },
 ];
 const nextConfig = {
+  poweredByHeader: false,
   async headers() { return [{ source: "/:path*", headers: securityHeaders }]; },
   images: {
     remotePatterns: apiOrigins.map((origin) => {
