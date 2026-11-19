@@ -45,9 +45,7 @@ describe("security headers", () => {
     expect(directive(csp!, "connect-src")).toContain(
       "https://lumberjack.razorpay.com",
     );
-  });
 
-  it("keeps the configured Sentry ingest origin in connect-src", async () => {
     const saved = process.env.NEXT_PUBLIC_SENTRY_DSN;
     process.env.NEXT_PUBLIC_SENTRY_DSN =
       "https://public@o1.ingest.sentry.io/42";
@@ -55,11 +53,12 @@ describe("security headers", () => {
       vi.resetModules();
       const config = (await import("../../next.config.mjs"))
         .default as unknown as SecurityConfig;
-      const csp = headerValue(
+      const sentryCsp = headerValue(
         await securityHeaders(config),
         "Content-Security-Policy",
       );
-      expect(directive(csp!, "connect-src")).toContain(
+      expect(sentryCsp).not.toContain("'unsafe-inline'");
+      expect(directive(sentryCsp!, "connect-src")).toContain(
         "https://o1.ingest.sentry.io",
       );
     } finally {
