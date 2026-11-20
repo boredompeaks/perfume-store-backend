@@ -320,6 +320,127 @@ class SignatureVerificationTests(WebhookTestCase):
         self.assertFalse(PaymentEvent.objects.exists())
 
 
+class SignatureRejectionAuditTests(WebhookTestCase):
+    """AUD-026: unsigned or invalid deliveries leave one redacted durable row."""
+
+    def rejection_events(self):
+        return AuditEvent.objects.filter(
+            event_type=AuditEvent.EventType.PAYMENT_SIGNATURE_REJECTED
+        )
+
+    def assert_one_rejection(self):
+        self.assertEqual(self.rejection_events().count(), 1)
+        return self.rejection_events().get()
+
+    def test_unsigned_delivery_is_refused_and_writes_one_redacted_row(self):
+        order = self.make_pending_order()
+        payload = json.dumps(self.capture_event(order)).encode("utf-8")
+        expected_body = {
+            "error": "Invalid webhook signature",
+            "code": "validation_error",
+            "details": {},
+        }
+
+        response = self.client.post(
+            WEBHOOK_URL,
+            data=payload,
+            content_type="application/json",
+            HTTP_X_RAZORPAY_EVENT_ID="evt_REJECT01",
+        )
+
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(response.data, expected_body)
+        self.assertEqual(json.loads(response.content), expected_body)
+        event = self.assert_one_rejection()
+        self.assertEqual(event.category, AuditEvent.Category.PAYMENT)
+        self.assertEqual(
+            event.detail,
+            {
+                "reason": "signature_missing_or_invalid",
+                "event_id": "evt_REJECT01",
+            },
+        )
+        self.assertIsNone(event.actor)
+        self.assertIsNone(event.order)
+
+    def test_replayed_unsigned_delivery_writes_one_row_and_every_answer_is_400(self):
+        order = self.make_pending_order()
+        body = self.capture_event(order)
+
+        responses = [
+            self.deliver(body, event_id="evt_REPLAY01", signature="deadbeef")
+            for _ in range(3)
+        ]
+
+        self.assertEqual(
+            [response.status_code for response in responses], [400, 400, 400]
+        )
+        self.assertEqual(
+            len({json.dumps(response.data) for response in responses}),
+            1,
+        )
+        self.assertEqual(self.assert_one_rejection().detail["event_id"], "evt_REPLAY01")
+
+    def test_an_audit_sink_failure_cannot_change_the_400(self):
+        order = self.make_pending_order()
+
+        with patch.object(
+            AuditEvent, "record", side_effect=RuntimeError("audit sink is down")
+        ) as record:
+            with self.assertLogs("orders.webhooks", level="ERROR") as logs:
+                response = self.deliver(
+                    self.capture_event(order),
+                    event_id="evt_SINKDOWN",
+                    signature="deadbeef",
+                )
+
+        record.assert_called_once()
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(self.rejection_events().count(), 0)
+        self.assertNotIn("deadbeef", "\n".join(logs.output))
+        self.assertNotIn(WEBHOOK_SECRET, "\n".join(logs.output))
+
+    def test_the_row_payload_carries_no_body_secret_signature_or_pii(self):
+        order = self.make_pending_order()
+        body = self.capture_event(order)
+        body["payload"]["payment"]["entity"]["notes"] = {
+            "email": "buyer@example.com",
+            "phone": "9876543210",
+            "address": "12 Rose Lane",
+            "marker": "SENTINEL-RAW-BODY-CONTENT",
+        }
+        signature = "deadbeef" * 8
+
+        response = self.deliver(body, event_id="evt_PRIVATE01", signature=signature)
+
+        self.assertEqual(response.status_code, 400)
+        event = self.assert_one_rejection()
+        self.assertEqual(set(event.detail), {"reason", "event_id"})
+        serialized = json.dumps(event.detail)
+        for forbidden in (
+            signature,
+            WEBHOOK_SECRET,
+            "SENTINEL-RAW-BODY-CONTENT",
+            "buyer@example.com",
+            "9876543210",
+            "12 Rose Lane",
+        ):
+            self.assertNotIn(forbidden, serialized)
+
+    def test_the_delivery_id_is_stripped_and_bounded_before_it_reaches_the_row(self):
+        order = self.make_pending_order()
+        event_id = "  evt_" + "A" * 200 + "  "
+
+        response = self.deliver(
+            self.capture_event(order), event_id=event_id, signature="deadbeef"
+        )
+
+        self.assertEqual(response.status_code, 400)
+        stored = self.assert_one_rejection().detail["event_id"]
+        self.assertEqual(stored, "evt_" + "A" * 60)
+        self.assertEqual(len(stored), 64)
+
+
 class ReplayProtectionTests(WebhookTestCase):
     def test_replayed_event_id_has_no_second_effect(self):
         order = self.make_pending_order()

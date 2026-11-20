@@ -1,3 +1,4 @@
+import logging
 from datetime import timedelta
 
 from django.conf import settings
@@ -5,6 +6,7 @@ from django.contrib.auth import authenticate
 from django.contrib.auth.models import User
 from django.contrib.auth.password_validation import validate_password
 from django.contrib.auth.tokens import default_token_generator
+from django.core.cache import cache
 from django.core.exceptions import ValidationError
 from django.core.signing import BadSignature, TimestampSigner
 from django.db import transaction
@@ -17,6 +19,7 @@ from rest_framework.exceptions import AuthenticationFailed, PermissionDenied
 from rest_framework.exceptions import ValidationError as DRFValidationError
 from rest_framework.permissions import AllowAny, BasePermission, IsAuthenticated
 from rest_framework.response import Response
+from rest_framework.throttling import ScopedRateThrottle
 from rest_framework.views import APIView
 from rest_framework_simplejwt.exceptions import TokenError
 from rest_framework_simplejwt.settings import api_settings as jwt_api_settings
@@ -45,6 +48,8 @@ from .serializers import (
     RegisterSerializer,
     StorefrontTokenObtainPairSerializer,
 )
+
+logger = logging.getLogger(__name__)
 
 
 def _lock_user_addresses(user):
@@ -279,6 +284,37 @@ def _lock_presented_refresh(raw):
         OutstandingToken.objects.select_for_update().filter(jti=jti).first()
 
 
+def _record_throttled_refusal(request, view):
+    """Write one bounded AUTH_THROTTLED row for an auth-scope 429.
+
+    The caller is unauthenticated, so the row holds a fixed reason and the
+    scope only -- no token, credential, username, email, or IP -- and never
+    AUTH_LOGIN_FAILED: a throttle refusal is not a credential failure and must
+    not inflate that metric. The throttle's own cache key names the actor, so
+    ``cache.add`` bounds the write to ONE row per actor key per window; the sink
+    is best-effort, because a failed write must neither change the 429 nor turn
+    it into a 5xx. task: T-20261119-011
+    """
+    try:
+        # The only caller is RefreshView, whose throttle_scope is always set.
+        scope = view.throttle_scope
+        throttle = ScopedRateThrottle()
+        throttle.scope = scope
+        actor_key = throttle.get_cache_key(request, view)
+        if actor_key is None:
+            return
+        _, window = throttle.parse_rate(throttle.get_rate())
+        if not cache.add(f"audit_{actor_key}", 1, window):
+            return
+        AuditEvent.record(
+            AuditEvent.EventType.AUTH_THROTTLED,
+            detail={"reason": "throttled", "scope": scope},
+        )
+    except Exception:
+        # The log line names no request value either: the 429 is the response.
+        logger.exception("Throttled auth refusal audit write failed")
+
+
 class RefreshView(TokenRefreshView):
     """JWT refresh behind the 'auth' throttle scope.
 
@@ -313,6 +349,13 @@ class RefreshView(TokenRefreshView):
         if response.status_code == 401:
             response = _clear_refresh_cookie(response)
         return response
+
+    def throttled(self, request, wait):
+        # AUD-026: the refusal is a durable, bounded fact even though it is not
+        # a verdict on the token. The audit sink cannot replace the 429.
+        # task: T-20261119-011
+        _record_throttled_refusal(request, self)
+        super().throttled(request, wait)
 
 
 class LogoutView(APIView):

@@ -96,13 +96,28 @@ def _shipping_configured() -> bool:
     return shipping_configured()
 
 
+def _alert_recipients_configured() -> bool:
+    """Reuse the alert gate itself so the reported status cannot disagree with the sends it describes (T-20261118-010)."""
+    from .alerts import _recipients
+
+    return bool(_recipients())
+
+
+def _channel_status_checks() -> dict:
+    """Boolean-only status for the two channels that fail closed; the retest needs to see them without their values ever leaving the process (T-20261118-010)."""
+    return {
+        "alert_recipients_configured": _alert_recipients_configured(),
+        "error_tracking_enabled": bool(settings.ERROR_TRACKING_ENABLED),
+    }
+
+
 def get_health() -> dict:
     """Cheap checks only — no network calls, safe to poll."""
     from cart.models import Cart
     from orders.models import Order
     from products.models import products
 
-    checks = {}
+    checks = _channel_status_checks()
     try:
         pending_orders = Order.objects.filter(status="pending").count()
         carts = Cart.objects.count()

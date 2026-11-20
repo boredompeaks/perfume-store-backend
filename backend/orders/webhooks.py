@@ -128,6 +128,43 @@ def _signature_matches(raw_body, provided):
     return hmac.compare_digest(expected.encode("ascii"), candidate)
 
 
+# The delivery id is attacker-controlled until the signature proves otherwise,
+# so only a bounded prefix reaches the trail.
+REJECTED_DELIVERY_ID_MAX_LENGTH = 64
+
+
+def _record_signature_rejection(request):
+    """Write the one redacted row for an unsigned or invalid-signature delivery.
+
+    The caller is unauthenticated, so the row holds a fixed reason and a
+    truncated delivery id only -- never the signature header, the raw body, the
+    secret, or a customer payload. A replay of the same delivery id is the same
+    denial, so an existing row is not duplicated. The sink is best-effort: this
+    path must answer 400 whether the trail is up or not. task: T-20261119-010
+    """
+    delivery_id = (request.headers.get(WEBHOOK_EVENT_ID_HEADER) or "").strip()
+    delivery_id = delivery_id[:REJECTED_DELIVERY_ID_MAX_LENGTH]
+    detail = {"reason": "signature_missing_or_invalid"}
+    if delivery_id:
+        detail["event_id"] = delivery_id
+    try:
+        if (
+            delivery_id
+            and AuditEvent.objects.filter(
+                event_type=AuditEvent.EventType.PAYMENT_SIGNATURE_REJECTED,
+                detail__event_id=delivery_id,
+            ).exists()
+        ):
+            return
+        AuditEvent.record(
+            AuditEvent.EventType.PAYMENT_SIGNATURE_REJECTED,
+            detail=detail,
+        )
+    except Exception:
+        # The log line names no header, body, or secret value either.
+        logger.exception("Payment webhook signature rejection audit write failed")
+
+
 def _fits(value, field_name):
     """True when ``value`` fits the ``PaymentEvent`` column it is written to.
 
@@ -516,14 +553,14 @@ def razorpay_webhook(request):
 
     provided_signature = request.headers.get(WEBHOOK_SIGNATURE_HEADER)
     if not provided_signature or not _signature_matches(raw_body, provided_signature):
-        # One uniform answer for "missing" and "wrong", and nothing recorded:
-        # an unauthenticated caller must not write rows into the financial
-        # trail.
+        # One uniform 400; the redacted row lands before the answer, never the
+        # caller's signature, body, or secret. task: T-20261119-010
         logger.warning(
             "Payment webhook rejected: %s header missing or invalid (event %s)",
             WEBHOOK_SIGNATURE_HEADER,
             request.headers.get(WEBHOOK_EVENT_ID_HEADER),
         )
+        _record_signature_rejection(request)
         return Response(
             {"error": "Invalid webhook signature"},
             status=status.HTTP_400_BAD_REQUEST,

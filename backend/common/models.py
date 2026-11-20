@@ -102,6 +102,7 @@ class AuditEvent(models.Model):
         AUTH_REGISTERED = "auth.registered", "Account registered"
         AUTH_LOGIN = "auth.login", "Login succeeded"
         AUTH_LOGIN_FAILED = "auth.login_failed", "Login failed"
+        AUTH_THROTTLED = "auth.throttled", "Authentication request throttled"
         AUTH_EMAIL_VERIFIED = "auth.email_verified", "Email verified"
         AUTH_PASSWORD_RESET = "auth.password_reset", "Password reset"
         CATALOGUE_CREATED = "catalogue.created", "Catalogue item created"

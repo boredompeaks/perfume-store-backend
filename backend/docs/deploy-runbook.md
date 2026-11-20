@@ -427,6 +427,99 @@ environment-only - repo-root `.env` / your platform's secret store, never the
 repository. It is the one string in this section a scanner may flag; it belongs
 in `.env`, and the committed `.env.example` shows it commented out.
 
+#### The status surface: two booleans, never the values
+
+`GET /api/v1/admin/health/` (behind `reports.read`) reports both silent-off
+channels beside the other checks, as booleans only:
+
+| Check | True when | Why it exists |
+| --- | --- | --- |
+| `alert_recipients_configured` | `ALERT_RECIPIENTS` parses to at least one address | every `ops.alerts.notify_*` returns `False` without a recipient, and nothing else said so |
+| `error_tracking_enabled` | the SDK accepted `SENTRY_DSN` at boot | an unset or refused DSN leaves the tracker inert; this is the truthful boot-time state, not merely "a DSN string exists" |
+
+Neither check carries an address, a DSN or any part of one. They are computed
+from the same gate the senders use (`ops.alerts._recipients()` and
+`settings.ERROR_TRACKING_ENABLED`), so the status cannot disagree with the
+behaviour it describes. They are **not** part of `status`: an unconfigured
+channel is a pre-launch gap, not an outage, and a 503 would page staff on every
+poll. The public `/health/` body is filtered by a whitelist and does not carry
+them.
+
+#### The probe: `manage.py sentry_send_probe`
+
+The email half has `email_send_probe`; this is its error-event twin. It reads
+`settings.SENTRY_DSN`, prints only deployment facts (environment, release,
+sample rates, "configured"), and sends exactly one handled-exception event
+through the same `common.sentry.init_sentry` the boot uses. Dry run by default:
+
+```bash
+# 1. the plan, and the default: NOTHING is sent
+docker compose run --rm -T backend python manage.py sentry_send_probe
+
+# 2. emit exactly one probe event
+docker compose run --rm -T backend python manage.py sentry_send_probe --send
+```
+
+Operator procedure when either channel is off:
+
+1. Set `SENTRY_DSN` (the project ingest DSN) and `ALERT_RECIPIENTS` (your own
+   staff mailboxes, comma-separated) in the deploy host's environment, then
+   restart the backend so `ERROR_TRACKING_ENABLED` is resolved at boot.
+2. Re-read `GET /api/v1/admin/health/`: both booleans must be `true`. For the
+   mail half, then run `email_send_probe --send` (above) and confirm arrival.
+3. Run `sentry_send_probe --send`, then confirm the probe event in the Sentry
+   project's Issues stream. "Accepted by the SDK transport" is not delivery -
+   check the project, exactly as the email probe asks you to check the inbox.
+
+Refusals are clean, non-zero and never echo the secret: an empty `SENTRY_DSN`
+names the key, a refused DSN names the SDK, and a transport that raises names
+the exception class only. None of them prints a traceback or the DSN; the
+command cannot print a value it never formats.
+
+#### The deployment guard: `ops.E001` / `ops.E002`
+
+A production-shaped boot with a silent alert channel now **fails its system
+checks** instead of looking healthy: `manage.py check`, the release script's
+`makemigrations --check`, and `migrate` exit non-zero with:
+
+| Check | Fires when | Message names |
+| --- | --- | --- |
+| `ops.E001` | `SENTRY_DSN` is unset | `SENTRY_DSN` and "Error tracking and uptime" |
+| `ops.E002` | `ALERT_RECIPIENTS` parses to no addresses | `ALERT_RECIPIENTS` and "Email delivery verification" |
+
+The messages never carry a DSN, a DSN fragment or a recipient address; the
+guard reads recipients through the same `ops.alerts._recipients()` the senders
+use, so it cannot disagree with them.
+
+`collectstatic` is deliberately not in that list: Django runs it with only
+`Tags.staticfiles`, while these checks are untagged, so it does not evaluate
+them. The release still fails closed because `migrate` runs immediately before
+it and aborts on an unconfigured host.
+
+"Production-shaped" is exactly the app's existing boot signals: `DEBUG` is
+false **and** `DJANGO_ENV` is outside the `local`/`ci` allowlist (so `staging`
+and `production` both fail). A `DEBUG=true` boot, `local`, and `ci` are exempt,
+which is why local work, the test suite and CI (`DJANGO_DEBUG=true`) stay
+green. The image build is `DJANGO_ENV=ci` for the same reason. `release.sh` is
+already fail-closed here - no new workflow or Dockerfile step is needed: its
+`makemigrations --check` and `migrate` steps run the full check set and abort
+before `collectstatic` and the restart.
+
+**What to do when the guard fires:** set `SENTRY_DSN` and/or
+`ALERT_RECIPIENTS` on the deploy host, restart the backend, re-read the two
+booleans on `GET /api/v1/admin/health/`, then run the probes above to confirm
+real delivery.
+
+**Deliberate bypass for a staging host:** make the choice visible, never fake a
+value. Django natively honours `SILENCED_SYSTEM_CHECKS = ["ops.E001",
+"ops.E002"]` in that host's settings module (use a staging-only module so the
+production settings keep both errors live). A genuinely ephemeral non-production
+host may declare `DJANGO_ENV=ci` instead; `DJANGO_DEBUG=true` also exempts the
+boot, but it is a development-only state and `check --deploy` will flag it.
+`manage.py <command> --skip-checks` is the one-command escape hatch - a bypass,
+not a fix. Never put a fake DSN or a placeholder recipient list in production
+to silence the guard.
+
 ### Uptime: `/health/` and the container healthcheck (SPEC-22-04, R-22.12)
 
 `/health/` is public, cheap, and answers **503** while the database is
@@ -802,6 +895,17 @@ migration traceback), and one real checkout path still works. If the release
 also touched **data**, the rollback is not finished until
 `docs/runbook-incident-recovery.md` §4 passes - money, stock and coupon
 counters reconciled against the gateway.
+
+**Alert and error-channel changes roll back as code only.** The status flags
+(`alert_recipients_configured`, `error_tracking_enabled`) and
+`sentry_send_probe` add no migration, write no row and change no alert or
+reporting semantics: the probe emits one event. Rolling the code back leaves
+`SENTRY_DSN` and `ALERT_RECIPIENTS` exactly as they are, and the older image
+keeps delivering (or keeps staying silent) on the same configuration. If the
+rollback also unsets either key, the new status surface is the honest signal:
+both booleans flip to `false`, which is the documented disabled state, not an
+outage. Re-run `email_send_probe --send` and `sentry_send_probe --send` against
+the restored image before declaring the rollback complete.
 
 ## WAF ruleset for the front door (SPEC-22-06, R-22.16)
 
