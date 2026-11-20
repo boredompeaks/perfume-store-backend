@@ -35,6 +35,11 @@ from common.models import AuditEvent
 from common.testing import ApiTestCase, extract_link_params
 from config.settings import _env_iso_date
 
+# Anchor the deployment-contract fixture to the module, not the runner's cwd:
+# the canonical Django runner starts in backend/, while pytest starts at the
+# repo root. task: T-20261119-013
+ENV_EXAMPLE = Path(__file__).resolve().parent.parent / ".env.example"
+
 
 def make_inactive_user(username="pending", email=None):
     email = email or f"{username}@example.com"
@@ -43,6 +48,18 @@ def make_inactive_user(username="pending", email=None):
     )
     serializer.is_valid(raise_exception=True)
     return serializer.save()
+
+
+CHALLENGE_SECRET = "q-s3-challenge-secret"
+CHALLENGE_SALT = "accounts.access-challenge"
+CHALLENGE_VALUE = "accounts-access"
+
+
+def mint_challenge():
+    """The signed access challenge the probe spends on first use."""
+    return TimestampSigner(key=CHALLENGE_SECRET, salt=CHALLENGE_SALT).sign(
+        CHALLENGE_VALUE
+    )
 
 
 @tag("accounts")
@@ -578,12 +595,20 @@ class PasswordResetTests(ApiTestCase):
 
 @tag("accounts")
 class UsernameAvailableTests(ApiTestCase):
+    def _probe(self, username):
+        with override_settings(ACCOUNT_CHALLENGE_SECRET=CHALLENGE_SECRET):
+            # These pins are not the replay test: reset the single-use record
+            # so successive same-second tokens each land on a fresh probe.
+            cache.clear()
+            return self.client.get(
+                "/api/accounts/username-available/",
+                {"username": username, "challenge": mint_challenge()},
+            )
+
     def test_too_short_username_reports_unavailable(self):
         for candidate in ("", "a", "ab", "  x  "):
             with self.subTest(candidate=candidate):
-                res = self.client.get(
-                    "/api/accounts/username-available/", {"username": candidate}
-                )
+                res = self._probe(candidate)
                 self.assertEqual(res.status_code, 200, res.data)
                 self.assertFalse(res.data["available"])
                 self.assertIn("at least 3 characters", res.data["message"])
@@ -592,22 +617,19 @@ class UsernameAvailableTests(ApiTestCase):
         self.make_user("buyer")
         for candidate in ("buyer", "BUYER", "Buyer"):
             with self.subTest(candidate=candidate):
-                res = self.client.get(
-                    "/api/accounts/username-available/", {"username": candidate}
-                )
+                res = self._probe(candidate)
                 self.assertFalse(res.data["available"])
-                self.assertIn("already taken", res.data["message"])
+                self.assertEqual(res.status_code, 200, res.data)
+                self.assertIsInstance(res.data["message"], str)
 
     def test_free_username_reports_available(self):
-        res = self.client.get(
-            "/api/accounts/username-available/", {"username": "freshname"}
-        )
+        res = self._probe("freshname")
         self.assertEqual(res.status_code, 200, res.data)
         self.assertTrue(res.data["available"])
-        self.assertIn("available", res.data["message"])
+        self.assertEqual(set(res.data), {"available", "message"})
 
     def test_missing_query_param_reports_unavailable(self):
-        res = self.client.get("/api/accounts/username-available/")
+        res = self._probe("")
         self.assertEqual(res.status_code, 200, res.data)
         self.assertFalse(res.data["available"])
 
@@ -650,8 +672,8 @@ class AccessChallengeTests(ApiTestCase):
         res = self._register()
         self.assertEqual(res.status_code, 201, res.data)
         probe = self._probe()
-        self.assertEqual(probe.status_code, 200, probe.data)
-        self.assertFalse(probe.data["available"])
+        self.assertEqual(probe.status_code, 403, probe.data)
+        self.assertEqual(probe.data["error"], self.REFUSAL)
 
     def test_missing_challenge_is_refused_identically_on_both_endpoints(self):
         with override_settings(ACCOUNT_CHALLENGE_SECRET=self.SECRET):
@@ -734,6 +756,197 @@ class AccessChallengeTests(ApiTestCase):
         self.assertEqual(first.status_code, 403, first.data)
         self.assertEqual(second.status_code, 429, second.data)
 
+    def test_probe_without_challenge_refuses_existing_and_free_identically(self):
+        # The zero-config default must close the probe, not reopen the oracle.
+        self.assertEqual(settings.ACCOUNT_CHALLENGE_SECRET, "")
+        self.make_user("probe-taken")
+        taken = self._probe("probe-taken")
+        free = self._probe("probe-free-name")
+        for res in (taken, free):
+            self.assertEqual(res.status_code, 403, res.data)
+            self.assertEqual(res.data["error"], self.REFUSAL)
+            self.assertEqual(res.data["code"], "permission_denied")
+        self.assertEqual(taken.content, free.content)
+
+    def test_probe_with_valid_challenge_answers_existing_and_free_identically(self):
+        self.make_user("probe-taken")
+        with override_settings(ACCOUNT_CHALLENGE_SECRET=self.SECRET):
+            taken = self._probe("probe-taken", challenge=self._mint(age=1))
+            free = self._probe("probe-free-name", challenge=self._mint(age=2))
+        self.assertEqual(taken.status_code, 200, taken.data)
+        self.assertEqual(free.status_code, 200, free.data)
+        self.assertEqual(taken.data.keys(), free.data.keys())
+        self.assertEqual(set(taken.data), {"available", "message"})
+        self.assertIsInstance(taken.data["available"], bool)
+        self.assertIsInstance(free.data["available"], bool)
+        self.assertFalse(taken.data["available"])
+        self.assertTrue(free.data["available"])
+        self.assertEqual(taken.data["message"], free.data["message"])
+
+    def test_probe_with_forged_expired_and_replayed_challenges_refuses_identically(
+        self,
+    ):
+        self.make_user("probe-taken")
+        forged = "forged-not-a-signed-token"
+        # Zero-config is the case base answers openly; the others prove the
+        # token checks and the per-probe single-use record.
+        with override_settings(ACCOUNT_CHALLENGE_SECRET=""):
+            taken = self._probe("probe-taken", challenge=forged)
+            free = self._probe("probe-free-name", challenge=forged)
+        self.assertEqual(taken.status_code, 403, taken.data)
+        self.assertEqual(free.status_code, 403, free.data)
+        self.assertEqual(taken.content, free.content)
+
+        stale = self._mint(age=10_000)
+        with override_settings(ACCOUNT_CHALLENGE_SECRET=self.SECRET):
+            cache.clear()
+            taken = self._probe("probe-taken", challenge=stale)
+            free = self._probe("probe-free-name", challenge=stale)
+        self.assertEqual(taken.status_code, 403, taken.data)
+        self.assertEqual(free.status_code, 403, free.data)
+        self.assertEqual(taken.content, free.content)
+
+        with override_settings(ACCOUNT_CHALLENGE_SECRET=self.SECRET):
+            cache.clear()
+            live = self._mint(age=1)
+            first = self._probe("probe-taken", challenge=live)
+            replay = self._probe("probe-taken", challenge=live)
+            # A fresh window for the second pair: the hard cap is 3/min.
+            cache.clear()
+            free_live = self._mint(age=2)
+            first_free = self._probe("probe-free-name", challenge=free_live)
+            free_replay = self._probe("probe-free-name", challenge=free_live)
+        self.assertEqual(first.status_code, 200, first.data)
+        self.assertEqual(first_free.status_code, 200, first_free.data)
+        self.assertEqual(replay.status_code, 403, replay.data)
+        self.assertEqual(free_replay.status_code, 403, free_replay.data)
+        self.assertEqual(replay.content, free_replay.content)
+
+        # A zero freshness window disables the age check only; the token is
+        # still single-use, so its replay record must not expire with it.
+        with override_settings(
+            ACCOUNT_CHALLENGE_SECRET=self.SECRET, ACCOUNT_CHALLENGE_MAX_AGE=0
+        ):
+            cache.clear()
+            old = self._mint(age=10_000)
+            first = self._probe("probe-taken", challenge=old)
+            replay = self._probe("probe-taken", challenge=old)
+        self.assertEqual(first.status_code, 200, first.data)
+        self.assertEqual(replay.status_code, 403, replay.data)
+
+    def test_probe_answers_a_replayed_challenge_identically(self):
+        self.make_user("probe-taken")
+        with override_settings(ACCOUNT_CHALLENGE_SECRET=self.SECRET):
+            cache.clear()
+            taken_token = self._mint(age=1)
+            first = self._probe("probe-taken", challenge=taken_token)
+            replay = self._probe("probe-taken", challenge=taken_token)
+            # A fresh window for the second pair: the hard cap is 3/min.
+            cache.clear()
+            free_token = self._mint(age=2)
+            first_free = self._probe("probe-free-name", challenge=free_token)
+            free_replay = self._probe("probe-free-name", challenge=free_token)
+        self.assertEqual(first.status_code, 200, first.data)
+        self.assertEqual(replay.status_code, 403, replay.data)
+        self.assertEqual(first_free.status_code, 200, first_free.data)
+        self.assertEqual(free_replay.status_code, 403, free_replay.data)
+        self.assertEqual(replay.content, free_replay.content)
+
+    def test_probe_replay_guard_covers_the_below_one_age_family(self):
+        self.make_user("probe-taken")
+        for max_age in (-1, 0, 300):
+            replay_bodies = []
+            with override_settings(
+                ACCOUNT_CHALLENGE_SECRET=self.SECRET,
+                ACCOUNT_CHALLENGE_MAX_AGE=max_age,
+            ):
+                for username in ("probe-taken", "probe-free-name"):
+                    cache.clear()
+                    token = self._mint(age=1)
+                    first = self._probe(username, challenge=token)
+                    replay = self._probe(username, challenge=token)
+                    self.assertEqual(first.status_code, 200, first.data)
+                    self.assertEqual(replay.status_code, 403, replay.data)
+                    replay_bodies.append(replay.content)
+            self.assertEqual(replay_bodies[0], replay_bodies[1])
+        with override_settings(
+            ACCOUNT_CHALLENGE_SECRET=self.SECRET, ACCOUNT_CHALLENGE_MAX_AGE=300
+        ):
+            cache.clear()
+            expired = self._probe("probe-taken", challenge=self._mint(age=10_000))
+        self.assertEqual(expired.status_code, 403, expired.data)
+
+    def test_probe_over_the_limit_returns_the_same_429_for_existing_and_free(self):
+        self.make_user("probe-taken")
+        rates = dict(api_settings.DEFAULT_THROTTLE_RATES)
+        rates["username-probe"] = "1/min"
+        allowed_messages = []
+        throttled_bodies = []
+        retry_after = []
+        with override_settings(ACCOUNT_CHALLENGE_SECRET=self.SECRET):
+            with mock.patch.object(ScopedRateThrottle, "THROTTLE_RATES", rates):
+                # Freeze the window so the two refusals cannot differ by a tick.
+                with mock.patch.object(
+                    ScopedRateThrottle, "timer", staticmethod(lambda: 1000.0)
+                ):
+                    for username, allowed_age, throttled_age in (
+                        ("probe-taken", 1, 2),
+                        ("probe-free-name", 3, 4),
+                    ):
+                        cache.clear()
+                        allowed = self._probe(
+                            username, challenge=self._mint(age=allowed_age)
+                        )
+                        throttled = self._probe(
+                            username, challenge=self._mint(age=throttled_age)
+                        )
+                        self.assertEqual(allowed.status_code, 200, allowed.data)
+                        self.assertEqual(throttled.status_code, 429, throttled.data)
+                        allowed_messages.append(allowed.data["message"])
+                        throttled_bodies.append(throttled.content)
+                        retry_after.append(throttled.headers.get("Retry-After"))
+        self.assertEqual(allowed_messages[0], allowed_messages[1])
+        self.assertEqual(throttled_bodies[0], throttled_bodies[1])
+        self.assertIsNotNone(retry_after[0])
+        self.assertEqual(retry_after[0], retry_after[1])
+
+    def test_probe_hard_cap_refuses_the_fourth_challenged_request(self):
+        self.make_user("probe-taken")
+        throttled_bodies = []
+        with override_settings(ACCOUNT_CHALLENGE_SECRET=self.SECRET):
+            for username, ages in (
+                ("probe-taken", (1, 2, 3, 4)),
+                ("probe-free-name", (5, 6, 7, 8)),
+            ):
+                cache.clear()
+                allowed = [
+                    self._probe(username, challenge=self._mint(age=age))
+                    for age in ages[:3]
+                ]
+                throttled = self._probe(username, challenge=self._mint(age=ages[3]))
+                self.assertEqual(
+                    [res.status_code for res in allowed], [200, 200, 200], allowed
+                )
+                self.assertEqual(throttled.status_code, 429, throttled.data)
+                throttled_bodies.append(throttled.content)
+        self.assertEqual(throttled_bodies[0], throttled_bodies[1])
+
+    def test_probe_runs_the_same_lookup_for_existing_and_free(self):
+        self.make_user("probe-taken")
+        with override_settings(ACCOUNT_CHALLENGE_SECRET=self.SECRET):
+            cache.clear()
+            with self.assertNumQueries(1):
+                taken = self._probe("probe-taken", challenge=self._mint(age=1))
+            cache.clear()
+            with self.assertNumQueries(1):
+                free = self._probe("probe-free-name", challenge=self._mint(age=2))
+        self.assertEqual(taken.status_code, 200, taken.data)
+        self.assertEqual(free.status_code, 200, free.data)
+        self.assertEqual(set(taken.data), set(free.data))
+        self.assertFalse(taken.data["available"])
+        self.assertTrue(free.data["available"])
+        self.assertEqual(taken.data["message"], free.data["message"])
+
 
 @tag("accounts")
 class AuthThrottleTests(ApiTestCase):
@@ -783,6 +996,8 @@ class AuthThrottleTests(ApiTestCase):
             "storefront-login": "auth",
             "token-refresh": "auth",
             "logout": "auth",
+            "account-erase": "auth",
+            "account-export": "auth",
             "mfa-status": "auth",
             "mfa-setup": "auth",
             "mfa-confirm": "auth",
@@ -900,17 +1115,18 @@ class AuthThrottleTests(ApiTestCase):
         self.assertIn("access", first.data)
         self.assertEqual(throttled.status_code, 429, throttled.data)
 
+    def _probe(self, username):
+        params = {"username": username, "challenge": mint_challenge()}
+        return self.client.get("/api/accounts/username-available/", params)
+
     def test_username_available_rate_limit_engages(self):
         rates = dict(api_settings.DEFAULT_THROTTLE_RATES)
         rates["username-probe"] = "1/min"
-        with mock.patch.object(ScopedRateThrottle, "THROTTLE_RATES", rates):
-            cache.clear()
-            first = self.client.get(
-                "/api/accounts/username-available/", {"username": "probe1"}
-            )
-            throttled = self.client.get(
-                "/api/accounts/username-available/", {"username": "probe2"}
-            )
+        with override_settings(ACCOUNT_CHALLENGE_SECRET=CHALLENGE_SECRET):
+            with mock.patch.object(ScopedRateThrottle, "THROTTLE_RATES", rates):
+                cache.clear()
+                first = self._probe("probe1")
+                throttled = self._probe("probe2")
         self.assertEqual(first.status_code, 200, first.data)
         self.assertTrue(first.data["available"])
         self.assertEqual(throttled.status_code, 429, throttled.data)
@@ -1428,7 +1644,7 @@ class RefreshBodyWindowConfigTests(SimpleTestCase):
             )
 
     def test_window_knobs_are_documented_in_env_example(self):
-        with open(".env.example", encoding="utf-8") as handle:
+        with open(ENV_EXAMPLE, encoding="utf-8") as handle:
             example = handle.read()
         for key in (
             "JWT_REFRESH_BODY_ACCEPT_ENABLED",

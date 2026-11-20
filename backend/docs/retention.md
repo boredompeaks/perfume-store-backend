@@ -26,7 +26,7 @@ why:
 | `User.username` | Account identity + login credential. Chosen over email as login key so the primary contact channel is not also the enumeration surface. | Life of account. Audit `detail.username` copies: see the [R-17.32] decision below. | Replaced with a unique tombstone (`erased-<pk>`) by `accounts.services.erase_account`; the row is retained (see erasure path below). |
 | `User.email` | Order correspondence, email verification, password reset, username reminder. The single contact channel; no marketing mail exists. | Life of account. | Replaced with a non-routable unique tombstone (`erased-<pk>@invalid`) by the same service (below). |
 | `User.password` | Authentication (PBKDF2 hash only; plaintext never stored or logged). | Life of account; rotated by every password reset. | Set unusable by the tombstone; only the hash ever existed. |
-| `TOTPDevice.secret` | Staff MFA second factor (SPEC-17-05, R-17.9). Staff-only; returned once at enrollment, never logged. | Life of enrollment; re-enrollment overwrites. | **Not deleted by erasure.** `accounts.services.erase_account` never deletes the account row, so the device row survives the tombstone; a tombstoned account cannot authenticate (inactive + unusable password), and the device row goes only if the account row is finally deleted (`CASCADE`). |
+| `TOTPDevice.secret` | Staff MFA second factor (SPEC-17-05, R-17.9). Staff-only; returned once at enrollment, never logged. | Life of enrollment; re-enrollment overwrites. | **Deleted by the self-service erasure route.** `POST /api/accounts/account/erase/` deletes the caller's `TOTPDevice` row inside the same transaction as the tombstone, so the credential secret does not outlive the erased identity. `accounts.services.erase_account` itself never deletes the account row (and is shared with staff tooling), so a direct service call that bypasses the route leaves the device row; a tombstoned account cannot authenticate (inactive + unusable password) and the row's `CASCADE` would run only on a final account-row deletion. |
 
 Not collected: legal name, date of birth, gender, profile photo,
 third-party identifiers, marketing preferences (no marketing surface
@@ -100,12 +100,14 @@ financial record.
 Reading of the ledger (section-19 note + section-06 row): **"R-19.36
 data-deletion request processing → SPEC-6-10 (customer data export/
 deletion workflow owner, S9/S17)"**. SPEC-6-10 is PENDING and owns the
-*operational* deletion workflow: the customer-facing request intake, the
-staff processing queue, and the export half of the access right.
+*operational* deletion workflow: the customer-facing request intake and
+the staff processing queue (the export half of the access right is now the
+self-service route below).
 
-This task therefore does **not** build a parallel request endpoint —
-that would duplicate 6-10's surface. What R-17.33 demands *today* is
-that a deletion right exists and is documented; both hold:
+The self-service routes below reuse that service; they do **not** build a
+parallel request workflow (no request-intake table, no staff queue, no
+second audit path). What R-17.33 demands *today* is that a deletion right
+exists and is documented; both hold:
 
 - **Existing erasure path (manual):** a customer writes to the support
   address (the storefront privacy page names it; staff contact settings
@@ -131,13 +133,14 @@ that a deletion right exists and is documented; both hold:
   - **What it does NOT touch**: the account row itself, `Order` and
     `OrderItem`, `Order.full_name`/`phone`/`address`/`city`/`state`/
     `pincode`, the gateway identifiers, `PaymentEvent`, `Refund`,
-    `TOTPDevice`, `Cart`/`CartItem`, and every audit row. The service
-    never calls `delete()` on the account, so no on-delete policy is
-    exercised and no cascade runs from that row. Orders are retained
-    unchanged because they are financial records: the order, its gateway
-    payment references, its `PaymentEvent` deliveries and its `Refund`
-    rows all outlive the login. An account with no orders is tombstoned
-    the same way.
+    `Cart`/`CartItem`, and every audit row. `TOTPDevice` is outside the
+    service's scope too; the self-service route deletes it separately in
+    the same transaction (register row above). The service never calls
+    `delete()` on the account, so no on-delete policy is exercised and no
+    cascade runs from that row. Orders are retained unchanged because they
+    are financial records: the order, its gateway payment references, its
+    `PaymentEvent` deliveries and its `Refund` rows all outlive the login.
+    An account with no orders is tombstoned the same way.
   - Orders outside the retention window may still be deleted as a
     separate order-retention operation; that is not the account-erasure
     mechanism and does not apply while an order is inside the window.
@@ -146,10 +149,31 @@ that a deletion right exists and is documented; both hold:
     service leaves the retained order's delivery fields untouched, and any
     later step must keep the financial columns reconcilable and only run
     once the legal window allows.
-- **SPEC-6-10's owed surface** (when it lands): a self-service request
-  endpoint (throttled, authenticated, uniform responses), a staff
-  processing queue, and the data-export half of the access right. This
-  document is the field register that workflow must operate against.
+- **Self-service routes (AUD-005):** the account holder can now exercise the
+  same two rights without a support round-trip.
+  - `POST /api/accounts/account/erase/` — `IsAuthenticated` only. The
+    subject is `request.user`, never a body or query value: `user`/`id`
+    fields are ignored, and there is no bulk or staff-target variant, so a
+    scoping mistake cannot erase another account. It is `auth`-throttled at
+    the project default of 10/min and keeps the account API's
+    authentication classes unchanged (JWT first; the session-CSRF gate
+    still applies to cookie-borne unsafe methods). Responses: 200 when the
+    tombstone commits; 409 when the caller is already erased; 400 when the
+    service refuses the reason as identity-bearing. Both refusals carry the
+    same constant, non-identifying body. The route deletes the caller's
+    `TOTPDevice` row in the same transaction as the service call (register
+    row above) and does not write a second audit entry.
+  - `GET /api/accounts/account/export/` — `IsAuthenticated` only, scoped to
+    `request.user`. It returns the caller's profile fields (after erasure,
+    the tombstones), the caller's addresses, the caller's orders with their
+    items, and refund/return summaries. It exposes no other user's rows, no
+    staff flags or group memberships, no password hash, no TOTP secret and
+    no token. It is `auth`-throttled at the same 10/min.
+- **SPEC-6-10's remaining owed surface** (when it lands): the operational
+  staff processing queue and request-intake workflow. The self-service
+  authentication/throttling/uniform-response posture and the export half
+  are now the routes above; this document remains the field register that
+  workflow must operate against.
 
 ## Copies outside production (SPEC-22-09, R-22.4)
 
