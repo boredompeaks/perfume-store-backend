@@ -1,6 +1,8 @@
 from django.urls import path
 
 from .views import (
+    AccountEraseView,
+    AccountExportView,
     AddressViewSet,
     LoginView,
     LogoutView,
@@ -34,6 +36,10 @@ urlpatterns = [
     path("storefront/login/", StorefrontLoginView.as_view(), name="storefront-login"),
     path("token/refresh/", RefreshView.as_view(), name="token-refresh"),
     path("logout/", LogoutView.as_view(), name="logout"),
+    # Self-service deletion/export rights (AUD-005). Both act on the
+    # authenticated caller only; there is no id-taking variant.
+    path("account/erase/", AccountEraseView.as_view(), name="account-erase"),
+    path("account/export/", AccountExportView.as_view(), name="account-export"),
     # TOTP enrollment for privileged roles. This urlconf is mounted at both
     # /api/accounts/ and /api/v1/account/; the login-block message names the former.
     path("mfa/status/", MFAStatusView.as_view(), name="mfa-status"),

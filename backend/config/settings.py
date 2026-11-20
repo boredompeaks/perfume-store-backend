@@ -21,6 +21,7 @@ from corsheaders.defaults import default_headers as _cors_default_headers
 from cryptography.fernet import Fernet
 from django.conf.locale import LANG_INFO
 from django.core.exceptions import ImproperlyConfigured
+from django.utils.csp import CSP
 from dotenv import load_dotenv
 
 # The repo's one money-rounding rule; common.money is pure decimal, so importing
@@ -153,6 +154,9 @@ MIDDLEWARE = [
     # the view and the unhandled-exception 500.
     "common.middleware.RequestIDMiddleware",
     "django.middleware.security.SecurityMiddleware",
+    # Above WhiteNoise, or static short-circuits would escape the policy. The
+    # nonce reaches admin templates through the csp context processor below.
+    "django.middleware.csp.ContentSecurityPolicyMiddleware",
     # Serves STATIC_ROOT from the app process so DEBUG=false still returns admin
     # assets; its documented slot is below SecurityMiddleware.
     "whitenoise.middleware.WhiteNoiseMiddleware",
@@ -180,6 +184,9 @@ TEMPLATES = [
                 "django.template.context_processors.request",
                 "django.contrib.auth.context_processors.auth",
                 "django.contrib.messages.context_processors.messages",
+                # Puts the request's CSP nonce in template context so admin
+                # script/style tags render the same nonce the middleware sends.
+                "django.template.context_processors.csp",
             ],
         },
     },
@@ -1153,12 +1160,38 @@ ERROR_TRACKING_ENABLED = _init_error_tracking(
 )
 
 
+# Browser headers on Django's own responses (admin + API). The storefront's
+# headers belong to Next; these are pinned explicitly because the Django
+# defaults are implicit and may move between releases.
+SECURE_CONTENT_TYPE_NOSNIFF = True
+X_FRAME_OPTIONS = "DENY"
+SECURE_REFERRER_POLICY = "strict-origin-when-cross-origin"
+
+# Admin templates are nonce-aware in Django 6.1, but the admin chrome carries
+# inline style attributes, which no nonce can cover; style-src-attr scopes that
+# one allowance while script-src and style elements stay nonce-only.
+SECURE_CSP = {
+    "default-src": [CSP.SELF],
+    "script-src": [CSP.SELF, CSP.NONCE],
+    "style-src": [CSP.SELF, CSP.NONCE],
+    "style-src-attr": [CSP.UNSAFE_INLINE],
+    "img-src": [CSP.SELF, "data:"],
+    "font-src": [CSP.SELF],
+    "connect-src": [CSP.SELF],
+    "object-src": [CSP.NONE],
+    "base-uri": [CSP.SELF],
+    "form-action": [CSP.SELF],
+    "frame-ancestors": [CSP.NONE],
+}
+
 # Transport/cookie hardening, all env-gated with development-safe defaults that
 # follow DEBUG.
 
-# 0 leaves HSTS unset, the safe default: enabling it on a plain-HTTP host locks
-# users out for the declared window.
-SECURE_HSTS_SECONDS = _env_int("SECURE_HSTS_SECONDS", 0)
+# A non-debug boot pins HTTPS for one year. A plain-HTTP host must set
+# SECURE_HSTS_SECONDS=0 (the development default) or browsers will refuse to
+# reach it without TLS. includeSubDomains/preload stay opt-in: each is a
+# separate promise and preload needs a submitted domain list.
+SECURE_HSTS_SECONDS = _env_int("SECURE_HSTS_SECONDS", 0 if DEBUG else 31536000)
 SECURE_HSTS_INCLUDE_SUBDOMAINS = _env_bool("SECURE_HSTS_INCLUDE_SUBDOMAINS", False)
 SECURE_HSTS_PRELOAD = _env_bool("SECURE_HSTS_PRELOAD", False)
 

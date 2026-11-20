@@ -1,3 +1,5 @@
+import hashlib
+import logging
 from datetime import timedelta
 
 from django.conf import settings
@@ -5,6 +7,7 @@ from django.contrib.auth import authenticate
 from django.contrib.auth.models import User
 from django.contrib.auth.password_validation import validate_password
 from django.contrib.auth.tokens import default_token_generator
+from django.core.cache import cache
 from django.core.exceptions import ValidationError
 from django.core.signing import BadSignature, TimestampSigner
 from django.db import transaction
@@ -12,11 +15,17 @@ from django.utils import timezone
 from django.utils.encoding import force_bytes, force_str
 from django.utils.http import urlsafe_base64_decode, urlsafe_base64_encode
 from rest_framework import status, viewsets
-from rest_framework.decorators import api_view, permission_classes, throttle_scope
+from rest_framework.decorators import (
+    api_view,
+    permission_classes,
+    throttle_classes,
+    throttle_scope,
+)
 from rest_framework.exceptions import AuthenticationFailed, PermissionDenied
 from rest_framework.exceptions import ValidationError as DRFValidationError
 from rest_framework.permissions import AllowAny, BasePermission, IsAuthenticated
 from rest_framework.response import Response
+from rest_framework.throttling import ScopedRateThrottle, SimpleRateThrottle
 from rest_framework.views import APIView
 from rest_framework_simplejwt.exceptions import TokenError
 from rest_framework_simplejwt.settings import api_settings as jwt_api_settings
@@ -45,6 +54,13 @@ from .serializers import (
     RegisterSerializer,
     StorefrontTokenObtainPairSerializer,
 )
+from .services import (
+    AccountAlreadyErased,
+    UnsafeErasureReason,
+    erase_account,
+)
+
+logger = logging.getLogger(__name__)
 
 
 def _lock_user_addresses(user):
@@ -90,6 +106,154 @@ class AddressViewSet(viewsets.ModelViewSet):
                 serializer.save()
         else:
             serializer.save()
+
+
+# Self-service erasure and export (AUD-005). task: T-20261119-013
+#
+# Both routes read their subject from the authenticated request only; a body
+# or query value can name no other account, so a scoping mistake cannot become
+# a mass-erasure primitive. There is deliberately no bulk or staff variant.
+
+_ERASURE_REFUSED = "Account erasure refused."
+
+
+def _erasure_reason(request):
+    # The service validates the reason against the identity being removed.
+    # A non-object body or non-string reason means "no reason", never a 500
+    # from the validator's string operations.
+    payload = request.data if isinstance(request.data, dict) else {}
+    reason = payload.get("reason", "")
+    return reason if isinstance(reason, str) else ""
+
+
+class _SelfServiceAccountView(APIView):
+    """Shared auth and throttle posture for the self-service account routes."""
+
+    permission_classes = [IsAuthenticated]
+    throttle_scope = "auth"
+
+
+class AccountEraseView(_SelfServiceAccountView):
+    """POST /api/accounts/account/erase/ — tombstone the CALLER in place.
+
+    ``IsAuthenticated`` plus ``request.user`` is the whole authorization
+    boundary: ``user``/``id`` fields in the body are ignored, and no query
+    parameter can redirect the operation. ``auth``-throttled at the project
+    default of 10/min (``THROTTLE_AUTH_RATE``), like the other account routes.
+
+    Responses: 200 when erased; 409 when the caller is already erased; 400 when
+    the service refuses the reason as identity-bearing. Both refusals carry the
+    same constant, non-identifying body.
+
+    The device row is deleted inside the same transaction as the service call:
+    a TOTP secret is a credential and must not outlive the erased identity. The
+    service is shared with staff tooling and is intentionally unchanged, so the
+    request surface owns this extra deletion.
+    """
+
+    def post(self, request):
+        try:
+            with transaction.atomic():
+                erase_account(
+                    request.user,
+                    actor=request.user,
+                    reason=_erasure_reason(request),
+                )
+                TOTPDevice.objects.filter(user_id=request.user.pk).delete()
+        except AccountAlreadyErased:
+            return Response(
+                {"error": _ERASURE_REFUSED}, status=status.HTTP_409_CONFLICT
+            )
+        except UnsafeErasureReason:
+            return Response(
+                {"error": _ERASURE_REFUSED}, status=status.HTTP_400_BAD_REQUEST
+            )
+        return Response({"message": "Account erased."})
+
+
+def _export_order(order):
+    # Only the customer-facing reference and the caller's own rows: no Order
+    # pk, no gateway references, no staff actor/decider ids. Money stays a
+    # decimal string instead of a binary float.
+    return {
+        "order_number": order.order_number,
+        "status": order.status,
+        "payment_status": order.payment_status,
+        "fulfilment_status": order.fulfilment_status,
+        "full_name": order.full_name,
+        "phone": order.phone,
+        "address": order.address,
+        "city": order.city,
+        "state": order.state,
+        "pincode": order.pincode,
+        "currency": order.currency,
+        "discount_amount": str(order.discount_amount),
+        "shipping_amount": str(order.shipping_amount),
+        "total_amount": str(order.total_amount),
+        "created_at": order.created_at.isoformat(),
+        "items": [
+            {
+                "product_name": item.product_name,
+                "sku": item.sku,
+                "variant_name": item.variant_name,
+                "price": str(item.price),
+                "quantity": item.quantity,
+                "subtotal": str(item.subtotal),
+                "currency": item.currency,
+            }
+            for item in order.items.all()
+        ],
+        "refunds": [
+            {
+                "amount": str(refund.amount),
+                "kind": refund.kind,
+                "status": refund.status,
+                "created_at": refund.created_at.isoformat(),
+            }
+            for refund in order.refunds.all()
+        ],
+        "returns": [
+            {
+                "status": return_request.status,
+                "reason_code": return_request.reason_code,
+                "created_at": return_request.created_at.isoformat(),
+            }
+            for return_request in order.return_requests.all()
+        ],
+    }
+
+
+class AccountExportView(_SelfServiceAccountView):
+    """GET /api/accounts/account/export/ — the CALLER's own data only.
+
+    ``request.user`` scopes every query (profile, addresses, orders); no path
+    or query value can select another account's rows. The projection carries
+    no password hash, TOTP secret, token, staff flag or group membership, and
+    no other user's rows. ``auth``-throttled at 10/min like the rest of the
+    account API. Orders are read through the reverse relation, so this module
+    gains no accounts-to-orders import edge.
+    """
+
+    def get(self, request):
+        user = request.user
+        orders = user.orders.prefetch_related(
+            "items", "refunds", "return_requests"
+        ).order_by("-created_at", "-id")
+        return Response(
+            {
+                # After erasure these are the tombstone values; the old
+                # identity is never re-read from anywhere.
+                "profile": {
+                    "username": user.username,
+                    "email": user.email,
+                    "first_name": user.first_name,
+                    "last_name": user.last_name,
+                    "date_joined": user.date_joined.isoformat(),
+                },
+                "addresses": AddressSerializer(user.addresses.all(), many=True).data,
+                "orders": [_export_order(order) for order in orders],
+            }
+        )
 
 
 class LoginView(TokenObtainPairView):
@@ -279,6 +443,37 @@ def _lock_presented_refresh(raw):
         OutstandingToken.objects.select_for_update().filter(jti=jti).first()
 
 
+def _record_throttled_refusal(request, view):
+    """Write one bounded AUTH_THROTTLED row for an auth-scope 429.
+
+    The caller is unauthenticated, so the row holds a fixed reason and the
+    scope only -- no token, credential, username, email, or IP -- and never
+    AUTH_LOGIN_FAILED: a throttle refusal is not a credential failure and must
+    not inflate that metric. The throttle's own cache key names the actor, so
+    ``cache.add`` bounds the write to ONE row per actor key per window; the sink
+    is best-effort, because a failed write must neither change the 429 nor turn
+    it into a 5xx. task: T-20261119-011
+    """
+    try:
+        # The only caller is RefreshView, whose throttle_scope is always set.
+        scope = view.throttle_scope
+        throttle = ScopedRateThrottle()
+        throttle.scope = scope
+        actor_key = throttle.get_cache_key(request, view)
+        if actor_key is None:
+            return
+        _, window = throttle.parse_rate(throttle.get_rate())
+        if not cache.add(f"audit_{actor_key}", 1, window):
+            return
+        AuditEvent.record(
+            AuditEvent.EventType.AUTH_THROTTLED,
+            detail={"reason": "throttled", "scope": scope},
+        )
+    except Exception:
+        # The log line names no request value either: the 429 is the response.
+        logger.exception("Throttled auth refusal audit write failed")
+
+
 class RefreshView(TokenRefreshView):
     """JWT refresh behind the 'auth' throttle scope.
 
@@ -313,6 +508,13 @@ class RefreshView(TokenRefreshView):
         if response.status_code == 401:
             response = _clear_refresh_cookie(response)
         return response
+
+    def throttled(self, request, wait):
+        # AUD-026: the refusal is a durable, bounded fact even though it is not
+        # a verdict on the token. The audit sink cannot replace the 429.
+        # task: T-20261119-011
+        _record_throttled_refusal(request, self)
+        super().throttled(request, wait)
 
 
 class LogoutView(APIView):
@@ -399,6 +601,10 @@ def _send_verification_email(user):
 CHALLENGE_SALT = "accounts.access-challenge"
 CHALLENGE_VALUE = "accounts-access"
 CHALLENGE_REFUSAL = "Access challenge required."
+# A valid challenge earns the truthful boolean; the message stays constant so
+# the two outcomes differ in that value only, never in shape or length.
+_PROBE_MESSAGE = "Username availability checked."
+_PROBE_REPLAY_PREFIX = "accounts.username-probe.challenge"
 
 
 def _enforce_access_challenge(request):
@@ -428,6 +634,55 @@ def _enforce_access_challenge(request):
         raise PermissionDenied(CHALLENGE_REFUSAL)
     if payload != CHALLENGE_VALUE:
         raise PermissionDenied(CHALLENGE_REFUSAL)
+
+
+def _probe_challenge_ttl():
+    # A zero window disables the age check, not the single-use record, so the
+    # replay key must outlive the token instead of expiring with it.
+    max_age = settings.ACCOUNT_CHALLENGE_MAX_AGE
+    return max_age if max_age > 0 else None
+
+
+def _enforce_probe_challenge(request):
+    """Fail-closed challenge gate for the username probe.
+
+    Registration keeps the optional gate so a zero-config deployment can still
+    sign users up; the probe has no safe zero-config mode, so an unset secret
+    refuses every call instead of restoring the public oracle. A token admitted
+    here is single-use for the probe: the replay record is scoped to this
+    endpoint so the same token may still be spent on another endpoint that
+    shares the signed domain.
+    """
+    if not settings.ACCOUNT_CHALLENGE_SECRET:
+        raise PermissionDenied(CHALLENGE_REFUSAL)
+    _enforce_access_challenge(request)
+    token = request.query_params.get("challenge")
+    if token is None and isinstance(request.data, dict):
+        token = request.data.get("challenge")
+    digest = hashlib.sha256(token.encode()).hexdigest()
+    if cache.add(f"{_PROBE_REPLAY_PREFIX}.{digest}", 1, timeout=_probe_challenge_ttl()):
+        return
+    raise PermissionDenied(CHALLENGE_REFUSAL)
+
+
+class _UsernameProbeHardThrottle(SimpleRateThrottle):
+    """Tighter per-IP cap on top of the view's ``username-probe`` scope.
+
+    Challenge issuance lives outside this service (the owner-side edge gate
+    mints the signed token), so minting cannot be throttled here; 3/min bounds
+    the oracle's volume even when a caller holds a generous mint budget. The
+    scoped 5/min default still applies, so the effective probe budget is the
+    tighter 3/min.
+    """
+
+    scope = "username-probe-hard"
+    rate = "3/min"
+
+    def get_cache_key(self, request, view):
+        return self.cache_format % {
+            "scope": self.scope,
+            "ident": self.get_ident(request),
+        }
 
 
 @api_view(["POST"])
@@ -488,15 +743,18 @@ def register(request):
 # Public: availability is asked before the account exists.
 @permission_classes([AllowAny])
 @throttle_scope("username-probe")
+@throttle_classes([ScopedRateThrottle, _UsernameProbeHardThrottle])
 def username_available(request):
-    """The public username-existence oracle.
+    """The username probe behind a server-issued challenge. task: T-20261119-008
 
-    The scope throttles GET too (ScopedRateThrottle has no safe-method
-    exemption), because without a rate limit the endpoint enables cheap username
-    enumeration. The signed-challenge hook refuses every probe once configured;
-    with the zero-config default it stays open but bounded by design.
+    The route stays public because the caller has no account yet, but only a
+    fresh, unspent token earns the truthful boolean. The message and keys stay
+    constant on both outcomes, so the body differs in that value only. A
+    missing, foreign, stale or replayed token is refused identically, and an
+    unset secret fails closed. The 'username-probe' scope (5/min) plus a hard
+    3/min layer bound volume while issuance lives outside this service.
     """
-    _enforce_access_challenge(request)
+    _enforce_probe_challenge(request)
     username = request.query_params.get("username", "").strip()
 
     if len(username) < 3:
@@ -504,15 +762,9 @@ def username_available(request):
             {"available": False, "message": "Username must be at least 3 characters."}
         )
 
+    # One lookup feeds both answers; neither side short-circuits the work.
     exists = User.objects.filter(username__iexact=username).exists()
-    return Response(
-        {
-            "available": not exists,
-            "message": "Username is available."
-            if not exists
-            else "This username is already taken.",
-        }
-    )
+    return Response({"available": not exists, "message": _PROBE_MESSAGE})
 
 
 # Token-carrying account mutations (no mail): the 'auth' budget and the entropy

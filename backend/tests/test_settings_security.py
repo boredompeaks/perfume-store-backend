@@ -1,4 +1,5 @@
 import os
+import re
 import subprocess
 import sys
 import tempfile
@@ -963,13 +964,40 @@ class TransportHardeningTests(SimpleTestCase):
             ),
         )
         self.assertEqual(res.returncode, 0, res.stderr)
-        self.assertIn("HSTS 0", res.stdout)
+        self.assertIn("HSTS 31536000", res.stdout)
         self.assertIn("SUBD False", res.stdout)
         self.assertIn("PRELOAD False", res.stdout)
         self.assertIn("REDIRECT False", res.stdout)
         self.assertIn("PROXYHDR None", res.stdout)
         self.assertIn("SESSIONSEC True", res.stdout)
         self.assertIn("CSRFSEC True", res.stdout)
+
+    def test_non_debug_hsts_default_is_one_year(self):
+        res = run_settings_import(
+            {**self._BOOT_ENV, "SECURE_SSL_REDIRECT": "true"},
+            snippet=(
+                "import config.settings as s; print('DEBUG', s.DEBUG); print('HSTS', s.SECURE_HSTS_SECONDS); print('SUBD', s.SECURE_HSTS_INCLUDE_SUBDOMAINS); print('PRELOAD', s.SECURE_HSTS_PRELOAD); print('REDIRECT', s.SECURE_SSL_REDIRECT)"
+            ),
+        )
+        self.assertEqual(res.returncode, 0, res.stderr)
+        self.assertIn("DEBUG False", res.stdout)
+        hsts = re.search(r"HSTS (\d+)", res.stdout)
+        self.assertIsNotNone(hsts, res.stdout)
+        self.assertGreaterEqual(int(hsts.group(1)), 31536000)
+        self.assertIn("SUBD False", res.stdout)
+        self.assertIn("PRELOAD False", res.stdout)
+        self.assertIn("REDIRECT True", res.stdout)
+        # A plain-HTTP development boot keeps HSTS off: the browser must not pin
+        # a scheme the dev server cannot serve.
+        dev = run_settings_import(
+            {"DJANGO_DEBUG": "true"},
+            snippet=(
+                "import config.settings as s; print('HSTS', s.SECURE_HSTS_SECONDS); print('REDIRECT', s.SECURE_SSL_REDIRECT)"
+            ),
+        )
+        self.assertEqual(dev.returncode, 0, dev.stderr)
+        self.assertIn("HSTS 0", dev.stdout)
+        self.assertIn("REDIRECT False", dev.stdout)
 
     def test_env_flags_flip_the_hsts_and_redirect_settings(self):
         res = run_settings_import(
@@ -1147,7 +1175,7 @@ class TransportHardeningTests(SimpleTestCase):
 
     def test_malformed_hsts_seconds_falls_back_to_zero(self):
         res = run_settings_import(
-            {**self._BOOT_ENV, "SECURE_HSTS_SECONDS": "one-year"},
+            {**_DEV_ENV, "SECURE_HSTS_SECONDS": "one-year"},
             snippet=(
                 "import config.settings as s; print('HSTS', s.SECURE_HSTS_SECONDS)"
             ),
@@ -1169,7 +1197,7 @@ class TransportHardeningTests(SimpleTestCase):
         leaked = {
             "SESSION_COOKIE_SECURE": "false",
             "CSRF_COOKIE_SECURE": "false",
-            "SECURE_HSTS_SECONDS": "31536000",
+            "SECURE_HSTS_SECONDS": "0",
         }
         for name, value in leaked.items():
             os.environ[name] = value
@@ -1187,7 +1215,7 @@ class TransportHardeningTests(SimpleTestCase):
             for name in leaked:
                 del os.environ[name]
         self.assertEqual(res.returncode, 0, res.stderr)
-        self.assertIn("HSTS 0", res.stdout)
+        self.assertIn("HSTS 31536000", res.stdout)
         self.assertIn("SESSIONSEC True", res.stdout)
         self.assertIn("CSRFSEC True", res.stdout)
 

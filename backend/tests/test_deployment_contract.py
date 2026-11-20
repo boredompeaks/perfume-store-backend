@@ -63,8 +63,35 @@ NON_DEBUG_REQUIRED_KEYS = (
 
 # PRISTINE-13d2a: the fixed at-rest Fernet key every non-debug boot must carry
 # (urlsafe base64 of 32 "A" bytes), never a deployment's key. Spread into the
-# env dicts below so each boot shape keeps the key without growing a helper.
+# shared production boot env below so every boot shape keeps the key.
 TOTP_ENV = {"TOTP_ENCRYPTION_KEY": "QUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUE="}
+
+# task: T-20261119-003 - inert placeholders for the two alerting channels the
+# production guard requires. Shared by every production-shaped boot contract so
+# the literals cannot drift; no event is sent and no mail is delivered.
+INERT_ALERTING_ENV = {
+    "SENTRY_DSN": "https://public@o0.ingest.example.invalid/0",
+    "ALERT_RECIPIENTS": "ops@example.test",
+}
+
+
+def production_boot_env(workdir, database_name="runtime.sqlite3", **overrides):
+    """Production-shaped boot env shared by the compose and TLS contracts."""
+    env = {
+        "DJANGO_SECRET_KEY": "x" * 50,
+        "DJANGO_DEBUG": "false",
+        "DJANGO_ENV": "production",
+        "DJANGO_ALLOWED_HOSTS": "shop.example.test",
+        "CSRF_TRUSTED_ORIGINS": "https://shop.example.test",
+        "DATABASE_URL": "sqlite:///" + (Path(workdir) / database_name).as_posix(),
+        "DJANGO_MEDIA_ROOT": workdir,
+        "DJANGO_STATIC_ROOT": workdir,
+        **INERT_ALERTING_ENV,
+        **TOTP_ENV,
+    }
+    env.update(overrides)
+    return env
+
 
 # Run inside the container's own interpreter and settings, so this is the
 # gunicorn load path (the image CMD hands it exactly this module) followed by
@@ -653,17 +680,7 @@ class TlsHardeningDeployContractTests(SimpleTestCase):
     def test_the_healthcheck_still_passes_under_the_hardening_it_enables(self):
         # A naive loopback probe trips SECURE_SSL_REDIRECT (301 to https) and the host guard (400), so it must present the deployment's host and forwarded scheme.
         with tempfile.TemporaryDirectory() as workdir:
-            env = {
-                "DJANGO_SECRET_KEY": "x" * 50,
-                "DJANGO_ENV": "production",
-                "DJANGO_ALLOWED_HOSTS": "shop.example.test",
-                "CSRF_TRUSTED_ORIGINS": "https://shop.example.test",
-                "DATABASE_URL": "sqlite:///"
-                + (Path(workdir) / "hardened.sqlite3").as_posix(),
-                "DJANGO_MEDIA_ROOT": workdir,
-                "DJANGO_STATIC_ROOT": workdir,
-                **TOTP_ENV,
-            }
+            env = production_boot_env(workdir, "hardened.sqlite3")
             for key in self.HARDENING_KEYS:
                 env[key] = self.compose_default(key)
             migrated = manage("migrate", "--noinput", env=env)
@@ -711,21 +728,24 @@ class ComposeRuntimeEnvContractTests(SimpleTestCase):
 
     def test_the_compose_env_contract_boots_the_app_and_serves_health(self):
         with tempfile.TemporaryDirectory() as workdir:
-            env = {
-                "DJANGO_SECRET_KEY": "x" * 50,
-                "DJANGO_DEBUG": "false",
-                "DJANGO_ENV": "production",
-                "DJANGO_ALLOWED_HOSTS": "shop.example.test",
-                "CSRF_TRUSTED_ORIGINS": "https://shop.example.test",
-                "DATABASE_URL": "sqlite:///"
-                + (Path(workdir) / "runtime.sqlite3").as_posix(),
-                "DJANGO_MEDIA_ROOT": workdir,
-                "DJANGO_STATIC_ROOT": workdir,
-                **TOTP_ENV,
-            }
+            env = production_boot_env(workdir)
             migrated = manage("migrate", "--noinput", env=env)
             self.assertEqual(migrated.returncode, 0, migrated.stdout + migrated.stderr)
             res = run_backend([sys.executable, "-c", RUNTIME_BOOT_SNIPPET], env)
         self.assertEqual(res.returncode, 0, res.stdout + res.stderr)
         self.assertIn("WSGI WSGIHandler", res.stdout)
         self.assertIn("HEALTH 200", res.stdout)
+
+    def test_the_compose_env_contract_refuses_a_boot_without_the_alerting_channels(
+        self,
+    ):
+        with tempfile.TemporaryDirectory() as workdir:
+            # Empty is "unset" for both the settings read and the recipient
+            # parser, and keeps a developer's own SENTRY_DSN out of the boot.
+            env = production_boot_env(workdir, SENTRY_DSN="", ALERT_RECIPIENTS="")
+            refused = manage("migrate", "--noinput", env=env)
+        output = refused.stdout + refused.stderr
+        self.assertNotEqual(refused.returncode, 0, output)
+        self.assertIn("SystemCheckError", output)
+        self.assertIn("ops.E001", output)
+        self.assertIn("ops.E002", output)
