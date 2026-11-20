@@ -914,21 +914,30 @@ class AccessChallengeTests(ApiTestCase):
         self.make_user("probe-taken")
         throttled_bodies = []
         with override_settings(ACCOUNT_CHALLENGE_SECRET=self.SECRET):
-            for username, ages in (
-                ("probe-taken", (1, 2, 3, 4)),
-                ("probe-free-name", (5, 6, 7, 8)),
-            ):
-                cache.clear()
-                allowed = [
-                    self._probe(username, challenge=self._mint(age=age))
-                    for age in ages[:3]
-                ]
-                throttled = self._probe(username, challenge=self._mint(age=ages[3]))
-                self.assertEqual(
-                    [res.status_code for res in allowed], [200, 200, 200], allowed
-                )
-                self.assertEqual(throttled.status_code, 429, throttled.data)
-                throttled_bodies.append(throttled.content)
+            # Freeze the clock the mints read: `_mint(age=N)` stamps whole
+            # seconds, so three back-to-back mints are only distinct while
+            # each stays inside one wall-clock second. A second boundary
+            # between two mints (reachable under CI-postgres request latency,
+            # not under the sqlite certification runs) floors two stamps to
+            # the same value, mints one token twice, and the replay guard
+            # rightly refuses it — a timing artifact of the pin, not of the
+            # cap. A frozen base makes the stamps differ by construction.
+            with mock.patch("time.time", return_value=time.time()):
+                for username, ages in (
+                    ("probe-taken", (1, 2, 3, 4)),
+                    ("probe-free-name", (5, 6, 7, 8)),
+                ):
+                    cache.clear()
+                    allowed = [
+                        self._probe(username, challenge=self._mint(age=age))
+                        for age in ages[:3]
+                    ]
+                    throttled = self._probe(username, challenge=self._mint(age=ages[3]))
+                    self.assertEqual(
+                        [res.status_code for res in allowed], [200, 200, 200], allowed
+                    )
+                    self.assertEqual(throttled.status_code, 429, throttled.data)
+                    throttled_bodies.append(throttled.content)
         self.assertEqual(throttled_bodies[0], throttled_bodies[1])
 
     def test_probe_runs_the_same_lookup_for_existing_and_free(self):
