@@ -3,7 +3,7 @@
 # Multi-stage so the runtime image carries installed packages only, no build
 # residue. All configuration is environment-driven; no secret is baked in.
 
-FROM python:3.14-slim AS builder
+FROM python:3.15-slim@sha256:08a4c22c92b79ec821a7ad49768480039ee5b7accac3955228e75366e30abc8e AS builder
 
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1
@@ -20,7 +20,7 @@ COPY requirements.txt requirements.lock ./
 RUN pip install --no-cache-dir --upgrade pip \
     && pip install --no-cache-dir --prefix=/install -r requirements.txt
 
-FROM python:3.14-slim
+FROM python:3.15-slim@sha256:08a4c22c92b79ec821a7ad49768480039ee5b7accac3955228e75366e30abc8e
 
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1
