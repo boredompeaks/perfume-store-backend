@@ -33,7 +33,7 @@ jobs:
       # The live-Redis THROTTLE-CACHE pins skip when REDIS_URL is undeclared,
       # so declaring it runs the same 0-skip suite shape PostgreSQL certifies.
       redis:
-        image: redis:7-alpine
+        image: redis:7-alpine@sha256:7f7d30b7fdd09467bac58198a1f166dd69789d348d4fe859cccb20e0cf287fbe
         ports:
           - 6379:6379
         options: >-

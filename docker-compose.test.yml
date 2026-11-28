@@ -5,7 +5,7 @@ name: perfume-tmpfs-test
 # named volume. PostgreSQL and test caches exist only for this project run.
 services:
   db:
-    image: postgres:17-alpine
+    image: postgres:17-alpine@sha256:f9cf3e1f0066f0eb0c48707d864f0ac5941e9ff454a072077d97a4d278d07d73
     profiles: [tmpfs]
     environment:
       POSTGRES_USER: test

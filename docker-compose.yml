@@ -23,7 +23,7 @@ x-database-url: &database-url "${DATABASE_URL:-postgres://${POSTGRES_USER:-perfu
 
 services:
   db:
-    image: postgres:17-alpine
+    image: postgres:17-alpine@sha256:f9cf3e1f0066f0eb0c48707d864f0ac5941e9ff454a072077d97a4d278d07d73
     restart: unless-stopped
     environment:
       POSTGRES_USER: ${POSTGRES_USER:-perfume}
@@ -145,7 +145,7 @@ services:
   # redis client in requirements.lock (8.1.0): "float the minor, pin the
   # major", as CI does, since the version-sensitive behaviour is in the client.
   redis:
-    image: redis:8-alpine
+    image: redis:8-alpine@sha256:5af80107c1eeecb484a2269b80a26d12bfa6521787da4663bd9f19f60a163483
     restart: unless-stopped
     healthcheck:
       # Non-zero while the server refuses commands; release.sh's `up --wait`
