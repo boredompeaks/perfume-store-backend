@@ -44,18 +44,18 @@
 # rather than floating: each one is a version-sensitive decision, and the reason
 # is written next to it. Dropping a pin here and letting the compiler choose
 # would make those decisions silently.
-Django==6.1.1
+Django==6.1.3
 # P1-5 (2026-10-24): 3.18.2 over 3.18.1. The patch release is the fixed version
 # for the three HIGH advisories the dependency gate reports against 3.18.1
 # (CVE-2026-114136/114137/114138); it stays inside the same 3.18 line, so no
 # serializer, view or exception behaviour changes.
-djangorestframework==3.18.2
+djangorestframework==3.18.3
 djangorestframework-simplejwt==5.5.1
 django-cors-headers==4.9.0
 # SPEC-20-9: scannable MFA enrollment QR from the otpauth:// provisioning
 # URI (common/qr.py). Pure Python, no runtime dependencies, emits SVG
 # without an image library.
-segno==1.6.1
+segno==1.6.6
 # PRISTINE-13d1: TOTP secrets need encryption at rest; Fernet in `cryptography` is the primitive (not imported yet).
 cryptography==50.0.2
 razorpay==2.0.1
@@ -63,13 +63,13 @@ razorpay==2.0.1
 # at first connection, so without this the documented postgres DATABASE_URL
 # crashes the moment prod takes its first query. [binary] ships prebuilt
 # libpq wheels (no compiler needed in the image).
-psycopg[binary]==3.3.6
+psycopg[binary]==3.3.9
 # SPEC-22-04 [R-22.13]: error tracking, imported ONLY when SENTRY_DSN is set
 # (config/settings.py _init_error_tracking). Without a DSN the package is
 # never imported, so the app boots and behaves exactly as it did before it
 # was added - which is also why the test suite never needs it: the SDK init
 # is stubbed. Official SDK, pinned like everything else here.
-sentry-sdk==2.71.0
+sentry-sdk==2.77.0
 # WSGI server for config.wsgi (the Dockerfile CMD); Django's dev server is
 # not a production server.
 gunicorn==26.2.0
@@ -82,7 +82,7 @@ gunicorn==26.2.0
 # click-* chain and its re-exports, prompt_toolkit, python-dateutil, six,
 # tzlocal, wcwidth) is what CI installs, and a floating celery resolves a
 # different one each time it runs.
-celery==5.6.3
+celery==5.7.0
 # The Redis protocol client, pinned as a DIRECT dependency rather than left
 # implicit in celery's extras, for the same reason the broker URL is
 # env-driven rather than hardcoded: config.settings hands it to celery as the
@@ -90,11 +90,11 @@ celery==5.6.3
 # import path for the worker to boot at all. The default broker being Redis is
 # not a constraint - a deployment pointing CELERY_BROKER_URL elsewhere installs
 # that broker's own client.
-redis==8.1.0
+redis==8.2.0
 # Serves STATIC_ROOT from the app process, so DEBUG=false deployments still
 # ship admin CSS/JS without a separate web server or object store.
-whitenoise==6.11.0
-python-dotenv==1.2.3
+whitenoise==6.12.0
+python-dotenv==1.2.4
 # TIER1-S3-MEDIA: the storage backend behind the DJANGO_MEDIA_BACKEND seam
 # (SPEC-2-04 [V-13]) - Cloudflare R2 preferred, AWS S3 the alternative, ONE
 # implementation: django-storages' S3Storage, which is S3-compatible and
@@ -113,34 +113,34 @@ django-storages[s3]==1.14.6
 # app only exercises Pillow through ImageField validation (no direct Image
 # manipulation), and the suite's upload pins cover that path.
 Pillow==13.0.0
-coverage==7.16.1
+coverage==7.17.5
 # GATE-1 (2026-10-04): ruff is both the linter and the FORMATTER OF RECORD
 # for this tree (config: backend/pyproject.toml; gate: the `lint` job in
 # .github/workflows/backend-tests.yml). Pinned like everything else above
 # because formatter output is version-sensitive -- the pin is what makes a
 # local run and a CI run agree byte for byte, and dropping it would let the
 # gate silently start reformatting on whatever ruff is current.
-ruff==0.16.10
+ruff==0.17.6
 # TIER-2 item 3: pre-commit, the runner for .pre-commit-config.yaml (ruff +
 # trailing-whitespace + check-yaml, all on pinned revs). A DEVELOPMENT tool,
 # not a runtime one, but it is pinned here for the same reason ruff is: the
 # hooks' behaviour is version-sensitive, and an unpinned runner is how a
 # commit passes locally and fails in CI. It resolves into requirements.lock like
 # every other pin, so the CI step installs it from the same resolved set.
-pre-commit==4.6.2
+pre-commit==4.7.0
 # TIER-2 item 4: mypy, scoped by [tool.mypy] in backend/pyproject.toml to
 # common/ and orders/state.py. Pinned like everything else here: a type
 # checker's findings are version-sensitive in exactly the way a formatter's
 # are, and a floating pin would let the gate start reporting on whatever mypy
 # happens to be current.
-mypy==2.4.0
+mypy==2.4.1
 # TIER-2 cycle 2 (BUG-5): pip-tools, which PROVIDES the `pip-compile` that
 # generates requirements.lock. Pinned here for the same reason everything else
 # on this list is: the lock is the file CI installs from, so the tool that
 # writes it is part of the dependency contract -- an unpinned generator resolves
 # a different transitive set every time it is run, which is the exact failure
 # mode the lock exists to prevent, reintroduced one level up.
-pip-tools==7.6.1
+pip-tools==7.7.0
 # MUT-1: mutmut, the automated mutation runner behind
 # .github/workflows/mutation-weekly.yml. Weekly and workflow_dispatch only --
 # it never runs on a pull_request, so it cannot gate one.
